@@ -15,6 +15,7 @@ def load_model(argv):
     login()
     model = AutoModelForCausalLM.from_pretrained(model_name, device_map='auto')
     tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_size = 'left'
     return model, tokenizer
 
@@ -28,11 +29,11 @@ def test_model(model, tokenizer, dataset_fname, results_fname, samples=1000, bat
             print(f'processing {i}/{samples}')
             batched_prompts = prompts[i:i + batch_size]   
             input_ids = tokenizer(batched_prompts, return_tensors="pt", padding=True, truncation=True).to(model.device)
-            outputs = model.generate(**input_ids, max_length=512, pad_token_id=tokenizer.pad_token_id)
-            responses = tokenizer.batch_decode(outputs.sequences, skip_special_tokens=True)
+            outputs = model.generate(**input_ids, max_length=16, pad_token_id=tokenizer.pad_token_id)
+            responses = tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
             for k, resp in enumerate(responses):
-                results.append({'response': resp, 'answer': dataset[i + k]})
+                results.append({'response': resp, 'answer': dataset[batched_prompts[k]]})
 
     with open(results_fname, 'w') as f:
         json.dump(results, f, indent=4)
