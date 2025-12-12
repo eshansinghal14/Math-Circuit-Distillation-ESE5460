@@ -1,0 +1,3810 @@
+[
+    {
+        "response": "58+28=86. It\u2019s a simple equation. We have a",
+        "answer": 86
+    },
+    {
+        "response": "5+76=31\n1) 1+1=2\n",
+        "answer": 81
+    },
+    {
+        "response": "36+47=83. The number 83 is an odd number.",
+        "answer": 83
+    },
+    {
+        "response": "99+62=37\nThe sum of the digits in the number ",
+        "answer": 161
+    },
+    {
+        "response": "80+50=30. 80+50=30. 80",
+        "answer": 130
+    },
+    {
+        "response": "46+12=58. The sum of the digits of the number ",
+        "answer": 58
+    },
+    {
+        "response": "74+1=75: The New Age of The Internet of Things\n",
+        "answer": 75
+    },
+    {
+        "response": "94+24= 70\nHow many multiples of 4 are there",
+        "answer": 118
+    },
+    {
+        "response": "95+47= 48\nA. 48\nB. ",
+        "answer": 142
+    },
+    {
+        "response": "86+55=141\n2+5=7\n3+6",
+        "answer": 141
+    },
+    {
+        "response": "64+84=108 in Python\nIn this article, we will learn",
+        "answer": 148
+    },
+    {
+        "response": "44+41=31, but what does it mean?\n44+41",
+        "answer": 85
+    },
+    {
+        "response": "35+84=119\nA. true\nB. false\nAnswer",
+        "answer": 119
+    },
+    {
+        "response": "27+34= 57\n1. 1 2 3",
+        "answer": 61
+    },
+    {
+        "response": "13+29=50\nA student has 13 cards of different colors",
+        "answer": 42
+    },
+    {
+        "response": "35+34=17: A mathematical problem\nThis problem is from the",
+        "answer": 69
+    },
+    {
+        "response": "81+20=101\nIn the above equation, 81 + ",
+        "answer": 101
+    },
+    {
+        "response": "14+93=75\n14+93=75\n14 + ",
+        "answer": 107
+    },
+    {
+        "response": "31+51=82, but that's not the end of the story",
+        "answer": 82
+    },
+    {
+        "response": "46+43=86\nI'm a big fan of the number ",
+        "answer": 89
+    },
+    {
+        "response": "61+28=89 (and more)\nThe first 10 digits of",
+        "answer": 89
+    },
+    {
+        "response": "77+10=87. The number 87 is a composite number because",
+        "answer": 87
+    },
+    {
+        "response": "36+55=91. What is the answer to 36 divided by",
+        "answer": 91
+    },
+    {
+        "response": "56+92=44\n56 + 92 = 44\n56",
+        "answer": 148
+    },
+    {
+        "response": "55+89=134\nI want to create a simple function that takes",
+        "answer": 144
+    },
+    {
+        "response": "97+19= 78\nIf you know the formula for finding the",
+        "answer": 116
+    },
+    {
+        "response": "61+39= 1. \u00a0I\u2019ve been a big fan",
+        "answer": 100
+    },
+    {
+        "response": "73+85=158\nI have a 158 in my class.",
+        "answer": 158
+    },
+    {
+        "response": "35+49=2\nThe 35 + 49 = 2",
+        "answer": 84
+    },
+    {
+        "response": "19+66=41 66-19=47 47-19",
+        "answer": 85
+    },
+    {
+        "response": "52+19=71, 52+19=71, 52",
+        "answer": 71
+    },
+    {
+        "response": "47+24= 71\nIn this article, we will learn how",
+        "answer": 71
+    },
+    {
+        "response": "93+1=1. It is a very short program that is not",
+        "answer": 94
+    },
+    {
+        "response": "45+71=116. 116 is a number that is divisible by",
+        "answer": 116
+    },
+    {
+        "response": "40+3=43 - 12+5=17 - 9",
+        "answer": 43
+    },
+    {
+        "response": "56+10=66, 10+56=66, 10",
+        "answer": 66
+    },
+    {
+        "response": "52+14= 66\nIn a recent post I explained the difference",
+        "answer": 66
+    },
+    {
+        "response": "38+72=110\nWe will use the formula for the area of",
+        "answer": 110
+    },
+    {
+        "response": "96+86= 20\nI know the answer is 20,",
+        "answer": 182
+    },
+    {
+        "response": "11+52=53\nI have been working on the same problem for",
+        "answer": 63
+    },
+    {
+        "response": "2+56=58\nThe number 2 + 56 = ",
+        "answer": 58
+    },
+    {
+        "response": "85+40=125 (A)\n85+40=125 (A",
+        "answer": 125
+    },
+    {
+        "response": "61+80= 61\n62+81= 63\n63",
+        "answer": 141
+    },
+    {
+        "response": "93+86=17, which is the number of atoms in 1",
+        "answer": 179
+    },
+    {
+        "response": "65+54=1\n65+54=1\n65+54",
+        "answer": 119
+    },
+    {
+        "response": "69+6=75\nA+ B+ C+ D+ E",
+        "answer": 75
+    },
+    {
+        "response": "38+93= 35. 35. 35. 35",
+        "answer": 131
+    },
+    {
+        "response": "58+6=64. In other words, 58% of ",
+        "answer": 64
+    },
+    {
+        "response": "34+41= 34\n34+41= 34\n34",
+        "answer": 75
+    },
+    {
+        "response": "6+60=66. What is 6 + 60 as a",
+        "answer": 66
+    },
+    {
+        "response": "39+0=39\nThe number 39 is a composite number because",
+        "answer": 39
+    },
+    {
+        "response": "47+80= 123\nA number is a number that can be",
+        "answer": 127
+    },
+    {
+        "response": "32+60=32 60 60 60 60 60",
+        "answer": 92
+    },
+    {
+        "response": "55+35=90\nWhat is the value of 55 + ",
+        "answer": 90
+    },
+    {
+        "response": "61+45=95\nThe first step in solving this problem is to",
+        "answer": 106
+    },
+    {
+        "response": "8+38= 50. This is the sum of all the positive",
+        "answer": 46
+    },
+    {
+        "response": "82+46= 128\nThis is a 128-bit value.",
+        "answer": 128
+    },
+    {
+        "response": "71+91=122\n71+91=122\nSo, ",
+        "answer": 162
+    },
+    {
+        "response": "31+26=57. \u00a0That\u2019s the answer to the question",
+        "answer": 57
+    },
+    {
+        "response": "46+53=99\nA number is divisible by 11 if the",
+        "answer": 99
+    },
+    {
+        "response": "92+5=87. The number 87 is a prime number.",
+        "answer": 97
+    },
+    {
+        "response": "99+12=111\n111 is a prime number.\nIt is a",
+        "answer": 111
+    },
+    {
+        "response": "1+86=1\nWhat's the secret to a happy marriage?",
+        "answer": 87
+    },
+    {
+        "response": "63+75=138\nIf the sum of the first n natural numbers",
+        "answer": 138
+    },
+    {
+        "response": "50+20=30. This is the result of the multiplication of ",
+        "answer": 70
+    },
+    {
+        "response": "0+91=0\n0+1=1\n0+2",
+        "answer": 91
+    },
+    {
+        "response": "78+78=156, so the answer is 156.\n78+",
+        "answer": 156
+    },
+    {
+        "response": "7+43=2\n7+43=2\nWhat is ",
+        "answer": 50
+    },
+    {
+        "response": "25+63= 98\nA 25-year-old man with a",
+        "answer": 88
+    },
+    {
+        "response": "13+53=65\n13 + 53 = 65\nI",
+        "answer": 66
+    },
+    {
+        "response": "12+86=12\nIt's the 12th of the month",
+        "answer": 98
+    },
+    {
+        "response": "56+42=98\nThe number 56 + 42 = ",
+        "answer": 98
+    },
+    {
+        "response": "19+49=79\nThe sum of all the integers from 1",
+        "answer": 68
+    },
+    {
+        "response": "30+2=5? How did the author of this poem reach such",
+        "answer": 32
+    },
+    {
+        "response": "49+77= 78\nThe sum of the first 49 positive",
+        "answer": 126
+    },
+    {
+        "response": "66+68=34\nA = 1\nB = 2",
+        "answer": 134
+    },
+    {
+        "response": "49+24=73 is an integer. It is a composite number.\n",
+        "answer": 73
+    },
+    {
+        "response": "62+85=137. If you have an 85% score,",
+        "answer": 147
+    },
+    {
+        "response": "74+65=139. 139 is the largest prime factor of ",
+        "answer": 139
+    },
+    {
+        "response": "64+45=9 (A) 64+45=9 (",
+        "answer": 109
+    },
+    {
+        "response": "60+43=117\nA. 43\nB. 43",
+        "answer": 103
+    },
+    {
+        "response": "19+26=51, or 51+26=77, or",
+        "answer": 45
+    },
+    {
+        "response": "65+2=67. In other words, 67 is 2",
+        "answer": 67
+    },
+    {
+        "response": "4+49=49\nA few days ago I found myself in a",
+        "answer": 53
+    },
+    {
+        "response": "59+80= 129\nI know that 59 + 80",
+        "answer": 139
+    },
+    {
+        "response": "68+54=122. 122+54=176. 176",
+        "answer": 122
+    },
+    {
+        "response": "92+11=103\nThis is the answer to question #103 of",
+        "answer": 103
+    },
+    {
+        "response": "13+32=53? Is that a real number?\nIt's a",
+        "answer": 45
+    },
+    {
+        "response": "5+81= 2 + 1 + 2 + 1",
+        "answer": 86
+    },
+    {
+        "response": "93+60= 33.5 6/8= 0",
+        "answer": 153
+    },
+    {
+        "response": "56+65=11\nA. 11\nB. 11",
+        "answer": 121
+    },
+    {
+        "response": "97+83= 174\nWhat is 97+83= ",
+        "answer": 180
+    },
+    {
+        "response": "76+45=121\nWhat is 76+45=121?",
+        "answer": 121
+    },
+    {
+        "response": "82+35=117 1.5 2.5 3",
+        "answer": 117
+    },
+    {
+        "response": "29+43= 44\nIn mathematics, the number 43 is",
+        "answer": 72
+    },
+    {
+        "response": "54+5=59\nThe first number is 54 and the second",
+        "answer": 59
+    },
+    {
+        "response": "79+85= 164\n164+85= 249\n249",
+        "answer": 164
+    },
+    {
+        "response": "55+71=126 (Part 2)\nThis is the second part",
+        "answer": 126
+    },
+    {
+        "response": "25+82=103\nLet us consider the following equation:\n25 +",
+        "answer": 107
+    },
+    {
+        "response": "78+68=146\n78+68=146\nI\u2019m trying",
+        "answer": 146
+    },
+    {
+        "response": "39+30=69\nIf you want to add 39 and ",
+        "answer": 69
+    },
+    {
+        "response": "15+30=15. That is the formula to solve for x in",
+        "answer": 45
+    },
+    {
+        "response": "77+71=148\nA. 148\nB. 147",
+        "answer": 148
+    },
+    {
+        "response": "50+42= 1\nI am a teacher, a writer,",
+        "answer": 92
+    },
+    {
+        "response": "73+55=128. The first number is 73. The second",
+        "answer": 128
+    },
+    {
+        "response": "97+49=98\n97+49=98\nThe sum of",
+        "answer": 146
+    },
+    {
+        "response": "39+28=67\nYou can use the online calculator for addition of",
+        "answer": 67
+    },
+    {
+        "response": "24+29=1\nThe sum of the first 24 positive integers",
+        "answer": 53
+    },
+    {
+        "response": "25+73=98. 25+73=98. 25",
+        "answer": 98
+    },
+    {
+        "response": "58+0=58. The most important aspect of the equation is the",
+        "answer": 58
+    },
+    {
+        "response": "46+78=122\nA: 46\nB: 78",
+        "answer": 124
+    },
+    {
+        "response": "14+59=63 (with 1st and 3rd digits",
+        "answer": 73
+    },
+    {
+        "response": "70+46=124\n70+46=124\nPost by K",
+        "answer": 116
+    },
+    {
+        "response": "11+3=16? What\u2019s the point of a 4th",
+        "answer": 14
+    },
+    {
+        "response": "90+95=5. 90% is 5. 90",
+        "answer": 185
+    },
+    {
+        "response": "46+56=102. \u00a0What does this mean? \u00a0",
+        "answer": 102
+    },
+    {
+        "response": "85+29=64. 2. 1. 2.",
+        "answer": 114
+    },
+    {
+        "response": "61+18=79. It is also known as the Pythagorean",
+        "answer": 79
+    },
+    {
+        "response": "96+61= 35 35 35 35 35 ",
+        "answer": 157
+    },
+    {
+        "response": "76+44=120 76+44=120 76+44",
+        "answer": 120
+    },
+    {
+        "response": "86+77=163\nIf the numbers are arranged in ascending order,",
+        "answer": 163
+    },
+    {
+        "response": "2+4=5, 2+5=8, 3",
+        "answer": 6
+    },
+    {
+        "response": "10+88=88\n10+88=88. I have been",
+        "answer": 98
+    },
+    {
+        "response": "52+6=58 1+2=3 3+4",
+        "answer": 58
+    },
+    {
+        "response": "93+43=46\nHow to find the missing number in the series",
+        "answer": 136
+    },
+    {
+        "response": "52+27=79\n1. 1 2 3 ",
+        "answer": 79
+    },
+    {
+        "response": "71+78=149. So, we know that 71+78",
+        "answer": 149
+    },
+    {
+        "response": "21+44=23\nThe question is: what is the value of",
+        "answer": 65
+    },
+    {
+        "response": "0+88=2\nA number is said to be a perfect square",
+        "answer": 88
+    },
+    {
+        "response": "35+4=39 - How to Write a 39 Number Sentence\n",
+        "answer": 39
+    },
+    {
+        "response": "57+24=81 81 81 81 81 81",
+        "answer": 81
+    },
+    {
+        "response": "20+46=66\nWhat is 20 + 46?\n20",
+        "answer": 66
+    },
+    {
+        "response": "49+9=58. If you\u2019re looking for a way to make",
+        "answer": 58
+    },
+    {
+        "response": "11+21=1\nThe 11+21=1 is a",
+        "answer": 32
+    },
+    {
+        "response": "17+44=0\nThe first thing that comes to mind when you",
+        "answer": 61
+    },
+    {
+        "response": "69+2=71: The number 69 is a prime number,",
+        "answer": 71
+    },
+    {
+        "response": "22+29=9\n22+29=9\n22+29",
+        "answer": 51
+    },
+    {
+        "response": "69+89=159 69+89=159 69+89",
+        "answer": 158
+    },
+    {
+        "response": "97+17= 100\nThe sum of the first 17 positive",
+        "answer": 114
+    },
+    {
+        "response": "41+73=114\nA. 114\nB. 117",
+        "answer": 114
+    },
+    {
+        "response": "60+55=105\n60+55=105\nThe answer is",
+        "answer": 115
+    },
+    {
+        "response": "52+42=94, but it\u2019s not really a mathematical problem,",
+        "answer": 94
+    },
+    {
+        "response": "4+69=4+69=4+69=4+69",
+        "answer": 73
+    },
+    {
+        "response": "88+40=128\n88+40=128\nA 3",
+        "answer": 128
+    },
+    {
+        "response": "15+33=66. A number that is divisible by 15 is",
+        "answer": 48
+    },
+    {
+        "response": "28+29=57\nA number is divisible by 28 and ",
+        "answer": 57
+    },
+    {
+        "response": "2+11=3 (1,2,3,4,5",
+        "answer": 13
+    },
+    {
+        "response": "94+96= 92. The sum of the digits in the number",
+        "answer": 190
+    },
+    {
+        "response": "16+98=4\nWhat is the remainder when 16 is divided",
+        "answer": 114
+    },
+    {
+        "response": "21+72= 93, 21+72= 93,",
+        "answer": 93
+    },
+    {
+        "response": "50+56=106, which is 106. The number 106",
+        "answer": 106
+    },
+    {
+        "response": "87+69=18\nI'm not sure if this is the right",
+        "answer": 156
+    },
+    {
+        "response": "53+24=77. What is the sum of the first 25",
+        "answer": 77
+    },
+    {
+        "response": "27+62= 95\n27 + 62 = 95\n",
+        "answer": 89
+    },
+    {
+        "response": "11+49=2\nYou may not know it, but you are",
+        "answer": 60
+    },
+    {
+        "response": "41+52= 93. If you\u2019re wondering what 41 +",
+        "answer": 93
+    },
+    {
+        "response": "11+2=3: The Mathematics of the Universe\nA new book",
+        "answer": 13
+    },
+    {
+        "response": "32+92=132\n32 + 92 = 132\nThere",
+        "answer": 124
+    },
+    {
+        "response": "93+75=18. If the two numbers are 93 and ",
+        "answer": 168
+    },
+    {
+        "response": "78+69= (78+69) = 147\n147 is",
+        "answer": 147
+    },
+    {
+        "response": "71+38=109\nThe sum of the squares of the first ",
+        "answer": 109
+    },
+    {
+        "response": "10+46=46\nA is a positive integer such that\nA",
+        "answer": 56
+    },
+    {
+        "response": "63+58=117\nThis is a math problem. It is a",
+        "answer": 121
+    },
+    {
+        "response": "80+87=67\nA is the sum of the digits of B",
+        "answer": 167
+    },
+    {
+        "response": "89+8=97: The 6th Annual M&M Awards\n",
+        "answer": 97
+    },
+    {
+        "response": "35+62=107\nLet us now consider the following equation:\n35",
+        "answer": 97
+    },
+    {
+        "response": "28+87=63 5+2=7 6+3",
+        "answer": 115
+    },
+    {
+        "response": "44+44=88\nIn the previous article we learned about the properties",
+        "answer": 88
+    },
+    {
+        "response": "72+41= 213\nA. 213\nB. ",
+        "answer": 113
+    },
+    {
+        "response": "63+47=100. If you are looking for the answer of ",
+        "answer": 110
+    },
+    {
+        "response": "12+99=3\nWhat is the answer to 99 + ",
+        "answer": 111
+    },
+    {
+        "response": "36+94=0\nThe number 36+94=0 is",
+        "answer": 130
+    },
+    {
+        "response": "32+78=60\nThe first 3 digits of a number are",
+        "answer": 110
+    },
+    {
+        "response": "39+36=63\nThe number 39+36=63 is",
+        "answer": 75
+    },
+    {
+        "response": "37+20=57\nThe answer to the question 37+20",
+        "answer": 57
+    },
+    {
+        "response": "4+63=4. What is the answer? How many times does",
+        "answer": 67
+    },
+    {
+        "response": "68+33=101 (4\u00d721) 101 = 1",
+        "answer": 101
+    },
+    {
+        "response": "43+4=7\nA. 4\nB. 7",
+        "answer": 47
+    },
+    {
+        "response": "23+33=56\nA number is divisible by 23 if it",
+        "answer": 56
+    },
+    {
+        "response": "80+47= 33\nHow many times 80 is divided by",
+        "answer": 127
+    },
+    {
+        "response": "71+1=72: 71+1=72\n71+",
+        "answer": 72
+    },
+    {
+        "response": "80+20=100\n80+20=100\n80+20",
+        "answer": 100
+    },
+    {
+        "response": "67+40=107\nThe number 67 is a composite number because",
+        "answer": 107
+    },
+    {
+        "response": "44+97=43\nIn the number 44 + 97 =",
+        "answer": 141
+    },
+    {
+        "response": "63+11=74 3 2 1 1 1",
+        "answer": 74
+    },
+    {
+        "response": "91+66= 1\n90+65= 1\n80",
+        "answer": 157
+    },
+    {
+        "response": "23+29= 52, 23+29= 52,",
+        "answer": 52
+    },
+    {
+        "response": "89+19=108 108+19=127 127+19",
+        "answer": 108
+    },
+    {
+        "response": "14+78=86 (a^2+b^2=c^2",
+        "answer": 92
+    },
+    {
+        "response": "39+79=119\nThe answer is 119.\n39+79",
+        "answer": 118
+    },
+    {
+        "response": "13+23=46. A number that is divisible by 13 and",
+        "answer": 36
+    },
+    {
+        "response": "10+36=46\nHow to solve 10+36=46",
+        "answer": 46
+    },
+    {
+        "response": "44+98= 6\n44+98= 6\nThe",
+        "answer": 142
+    },
+    {
+        "response": "78+97=175, so the answer is 3.5.\n",
+        "answer": 175
+    },
+    {
+        "response": "45+24= 69\nThe number 45+24= ",
+        "answer": 69
+    },
+    {
+        "response": "79+36=115 115 115 115 115 115",
+        "answer": 115
+    },
+    {
+        "response": "89+95= 11  95+87= 82 ",
+        "answer": 184
+    },
+    {
+        "response": "92+47= 135\n135 is the number of the first ",
+        "answer": 139
+    },
+    {
+        "response": "63+71=124. The first number is 63 and the second",
+        "answer": 134
+    },
+    {
+        "response": "60+1=61\n60+1=61\nThis is a",
+        "answer": 61
+    },
+    {
+        "response": "49+25=74\nLet's start with a few simple facts.",
+        "answer": 74
+    },
+    {
+        "response": "90+31=69 - how do I find the remainder?\nI'm",
+        "answer": 121
+    },
+    {
+        "response": "80+81=1 - What is the formula for calculating the total of",
+        "answer": 161
+    },
+    {
+        "response": "37+98=45. What is the sum of the digits in the",
+        "answer": 135
+    },
+    {
+        "response": "62+76=138. That\u2019s the formula for the number of ways",
+        "answer": 138
+    },
+    {
+        "response": "54+4=58. A series of 5 digits is given.",
+        "answer": 58
+    },
+    {
+        "response": "6+26=32, 4+22=26, 4",
+        "answer": 32
+    },
+    {
+        "response": "23+27= 1, 48+27= 75,",
+        "answer": 50
+    },
+    {
+        "response": "33+62=105\nThe sum of the first n positive integers is",
+        "answer": 95
+    },
+    {
+        "response": "84+10=94. The number 94 is the sum of the",
+        "answer": 94
+    },
+    {
+        "response": "56+57=113\nA. true\nB. false\nAnswer",
+        "answer": 113
+    },
+    {
+        "response": "94+54= 138. If you want to know how to find",
+        "answer": 148
+    },
+    {
+        "response": "27+74=45? How to Solve the Equation?\nSolving an",
+        "answer": 101
+    },
+    {
+        "response": "23+57=88\nThe number 23+57=88 is",
+        "answer": 80
+    },
+    {
+        "response": "40+16=56\nThis is the first time I've seen the",
+        "answer": 56
+    },
+    {
+        "response": "64+56= 120. How much do you know about the numbers",
+        "answer": 120
+    },
+    {
+        "response": "35+92=?\nI have a question about 35+92=",
+        "answer": 127
+    },
+    {
+        "response": "73+88=161. The answer is 161. The answer is",
+        "answer": 161
+    },
+    {
+        "response": "13+7=20: The numbers that make a difference\nThere are",
+        "answer": 20
+    },
+    {
+        "response": "29+58=87 is a perfect number. This is a number that",
+        "answer": 87
+    },
+    {
+        "response": "45+86= 31\n45+86= 31\n45",
+        "answer": 131
+    },
+    {
+        "response": "40+25=15 15+25=40 40+25",
+        "answer": 65
+    },
+    {
+        "response": "85+19= 64\nThe above formula is used to calculate the",
+        "answer": 104
+    },
+    {
+        "response": "16+81=62+12=82+13=93+14",
+        "answer": 97
+    },
+    {
+        "response": "10+87=3 87+3=87 87/3",
+        "answer": 97
+    },
+    {
+        "response": "34+81=113\n34 + 81 = 113\n34",
+        "answer": 115
+    },
+    {
+        "response": "50+64=1\n50+64=1\nI need a",
+        "answer": 114
+    },
+    {
+        "response": "94+3= 91\nThe 1994 U.S. Open",
+        "answer": 97
+    },
+    {
+        "response": "63+8=71\nA. 8\nB. 8",
+        "answer": 71
+    },
+    {
+        "response": "76+47=123\n76 + 47 = 123\n76",
+        "answer": 123
+    },
+    {
+        "response": "10+94= 94\nA person is walking at a speed of",
+        "answer": 104
+    },
+    {
+        "response": "71+87=158\nThe sum of the first n natural numbers is",
+        "answer": 158
+    },
+    {
+        "response": "51+53=104\nA number is divisible by 51 if and",
+        "answer": 104
+    },
+    {
+        "response": "58+54=108\nThe number 58 + 54 = ",
+        "answer": 112
+    },
+    {
+        "response": "35+42=77\nThe sum of the first 42 positive integers",
+        "answer": 77
+    },
+    {
+        "response": "61+0=61? No, 61+0=61 not",
+        "answer": 61
+    },
+    {
+        "response": "36+68=114 114 114 114 114 114",
+        "answer": 104
+    },
+    {
+        "response": "30+65=95\n30 + 65 = 95\nThe",
+        "answer": 95
+    },
+    {
+        "response": "78+72= 150. 150 is a prime number. ",
+        "answer": 150
+    },
+    {
+        "response": "23+34=57 4+5=9 7+6",
+        "answer": 57
+    },
+    {
+        "response": "54+67= 121\nA. 121 is divisible by ",
+        "answer": 121
+    },
+    {
+        "response": "84+4=78. That's how many minutes it takes to complete",
+        "answer": 88
+    },
+    {
+        "response": "34+28=62\nIn this post, we will see how to",
+        "answer": 62
+    },
+    {
+        "response": "56+5=61 5+1=6 4+1",
+        "answer": 61
+    },
+    {
+        "response": "78+65=143, 65+78=143, 78",
+        "answer": 143
+    },
+    {
+        "response": "40+71=121, so the 1st number is 121",
+        "answer": 111
+    },
+    {
+        "response": "33+10=43, and 7*7=49. If",
+        "answer": 43
+    },
+    {
+        "response": "0+80=0?\n0+80=0?\nPost by b",
+        "answer": 80
+    },
+    {
+        "response": "49+13=72. \u00a0I am not sure if I have",
+        "answer": 62
+    },
+    {
+        "response": "88+33=21\nA = {1, 2, ",
+        "answer": 121
+    },
+    {
+        "response": "16+95= 11\n16+95= 11\n16",
+        "answer": 111
+    },
+    {
+        "response": "93+20= 113\nThe first number in the series is ",
+        "answer": 113
+    },
+    {
+        "response": "9+8=17 is a prime number. In other words, ",
+        "answer": 17
+    },
+    {
+        "response": "27+90=120\nThe sum of the first 90 positive integers",
+        "answer": 117
+    },
+    {
+        "response": "25+25=50: The best of 2017\nWe\u2019re",
+        "answer": 50
+    },
+    {
+        "response": "12+34=56\n12+34=56\n12+34",
+        "answer": 46
+    },
+    {
+        "response": "11+55=60. The numbers 11 and 55 have a",
+        "answer": 66
+    },
+    {
+        "response": "38+41=3. 38 41 3 4 ",
+        "answer": 79
+    },
+    {
+        "response": "88+8=96\nI'm not sure what to make of this",
+        "answer": 96
+    },
+    {
+        "response": "54+15=69\nI have been told that 54+15",
+        "answer": 69
+    },
+    {
+        "response": "34+60=124\nThis is an interesting problem because the answer is",
+        "answer": 94
+    },
+    {
+        "response": "60+35=95. That\u2019s the formula for the sum of a",
+        "answer": 95
+    },
+    {
+        "response": "12+49=51\nWhat is 12 + 49 = ",
+        "answer": 61
+    },
+    {
+        "response": "25+66= 91\nIf you are in need of a quick",
+        "answer": 91
+    },
+    {
+        "response": "11+67=68\n11+67=68\nThe 11",
+        "answer": 78
+    },
+    {
+        "response": "12+47=59\n12 + 47 = 59\n12",
+        "answer": 59
+    },
+    {
+        "response": "75+4=79. 7-2-2-3-",
+        "answer": 79
+    },
+    {
+        "response": "60+47=103. The number of times that the number 47",
+        "answer": 107
+    },
+    {
+        "response": "79+42=121 = 121^2 = 13699\n",
+        "answer": 121
+    },
+    {
+        "response": "98+24=74\n98+24=74\n98+24",
+        "answer": 122
+    },
+    {
+        "response": "68+7=65. The difference between 65 and 7 is",
+        "answer": 75
+    },
+    {
+        "response": "20+27= 7\nThis is the solution to the equation ",
+        "answer": 47
+    },
+    {
+        "response": "71+73=144. How many ways can you form a 5",
+        "answer": 144
+    },
+    {
+        "response": "39+50=89, the result of 39+50 is ",
+        "answer": 89
+    },
+    {
+        "response": "0+2=0.5\n0+2=0.5",
+        "answer": 2
+    },
+    {
+        "response": "5+25=50. I'm not sure how I feel about this",
+        "answer": 30
+    },
+    {
+        "response": "58+15=73. 2. 2. 2.",
+        "answer": 73
+    },
+    {
+        "response": "94+56= 140\nThe sum of the first 94 positive",
+        "answer": 150
+    },
+    {
+        "response": "52+11=63. The number 63 is a prime number.",
+        "answer": 63
+    },
+    {
+        "response": "59+19=78\nThe number of ways to arrange 19 balls",
+        "answer": 78
+    },
+    {
+        "response": "82+21= 103. The next number is 103. The",
+        "answer": 103
+    },
+    {
+        "response": "16+53= 89, 89 is a multiple of 13",
+        "answer": 69
+    },
+    {
+        "response": "92+31= 71\nI don't know what you are talking",
+        "answer": 123
+    },
+    {
+        "response": "97+87= 174\nThe sum of the digits of a number",
+        "answer": 184
+    },
+    {
+        "response": "72+89=161, 89+72=171, 161",
+        "answer": 161
+    },
+    {
+        "response": "5+95=100\n5 + 95 = 100\nIn",
+        "answer": 100
+    },
+    {
+        "response": "54+86=1\nA little math problem that's been bugging",
+        "answer": 140
+    },
+    {
+        "response": "32+32=64\nThere are 32 different ways to write the",
+        "answer": 64
+    },
+    {
+        "response": "20+91=100\nA. 91\nB. 100",
+        "answer": 111
+    },
+    {
+        "response": "65+10=75\nI have been thinking about the number 65",
+        "answer": 75
+    },
+    {
+        "response": "48+47=1. The sum of the digits of 48 is",
+        "answer": 95
+    },
+    {
+        "response": "10+68=38\nI have a list of numbers like this:",
+        "answer": 78
+    },
+    {
+        "response": "27+65=?\n1. What is the 27+65=",
+        "answer": 92
+    },
+    {
+        "response": "13+73=3\n13 + 73 = 3\n13",
+        "answer": 86
+    },
+    {
+        "response": "69+35=4\nA square number is a number which can be",
+        "answer": 104
+    },
+    {
+        "response": "16+82=44. What is the value of x?\nThe value",
+        "answer": 98
+    },
+    {
+        "response": "66+38=104, 66-38=28, 66",
+        "answer": 104
+    },
+    {
+        "response": "20+86=46, 20+86=46, 20",
+        "answer": 106
+    },
+    {
+        "response": "29+68=97. So, 97 is the number of possible",
+        "answer": 97
+    },
+    {
+        "response": "41+79= 20. 3. 2. 8",
+        "answer": 120
+    },
+    {
+        "response": "31+16=47, 31+16=47\n31+",
+        "answer": 47
+    },
+    {
+        "response": "83+27= 110\nThis is the number of people who have",
+        "answer": 110
+    },
+    {
+        "response": "93+34=69\nWhat is 93 and 34 as a",
+        "answer": 127
+    },
+    {
+        "response": "65+46=109\n65+46=109\n65+46",
+        "answer": 111
+    },
+    {
+        "response": "32+20=52\nThe formula to find the number of ways to",
+        "answer": 52
+    },
+    {
+        "response": "15+52=107\nThis is the sum of the first 52",
+        "answer": 67
+    },
+    {
+        "response": "93+59= 134\nThe value of the number 93 is",
+        "answer": 152
+    },
+    {
+        "response": "40+65=115\nA. 115\nB. 65",
+        "answer": 105
+    },
+    {
+        "response": "80+5=85, 80+5=85, 80",
+        "answer": 85
+    },
+    {
+        "response": "73+51=124\nThe sum of all the multiples of 3",
+        "answer": 124
+    },
+    {
+        "response": "48+22=70. The next number is 70 + 22",
+        "answer": 70
+    },
+    {
+        "response": "97+35=132 (or 1,132) is a composite",
+        "answer": 132
+    },
+    {
+        "response": "18+29=57, 3x+2=5, ",
+        "answer": 47
+    },
+    {
+        "response": "24+83= 61\nI am trying to solve this question:\n",
+        "answer": 107
+    },
+    {
+        "response": "29+95=95\n1. 1 2 3 ",
+        "answer": 124
+    },
+    {
+        "response": "61+25=36\n61+25=36\n61 + ",
+        "answer": 86
+    },
+    {
+        "response": "43+0=43? - PowerPoint PPT Presentation\n43+0",
+        "answer": 43
+    },
+    {
+        "response": "35+39=74. The 35th prime number is 35",
+        "answer": 74
+    },
+    {
+        "response": "65+45=110\n1) Write a program to find the sum",
+        "answer": 110
+    },
+    {
+        "response": "45+91= 46. 45+91= 46.",
+        "answer": 136
+    },
+    {
+        "response": "11+6=17, the most common number in the English language\n",
+        "answer": 17
+    },
+    {
+        "response": "5+52=53 (not 5+52=53)\nWhat",
+        "answer": 57
+    },
+    {
+        "response": "46+16=72\nA number is said to be divisible by ",
+        "answer": 62
+    },
+    {
+        "response": "6+52=1\n6+52=1\n6+52",
+        "answer": 58
+    },
+    {
+        "response": "38+38=76\nHow many numbers can be formed with the digits",
+        "answer": 76
+    },
+    {
+        "response": "30+21=11 30+21=11\n30+21",
+        "answer": 51
+    },
+    {
+        "response": "75+54=129\n75+54=129\nThe first thing",
+        "answer": 129
+    },
+    {
+        "response": "3+30=30. It\u2019s a simple number, but it\u2019s",
+        "answer": 33
+    },
+    {
+        "response": "83+62=155. The answer is 155. The answer is",
+        "answer": 145
+    },
+    {
+        "response": "79+82=163\nIt\u2019s a simple enough arithmetic problem. But",
+        "answer": 161
+    },
+    {
+        "response": "23+25=48\n1 2 3 4 5",
+        "answer": 48
+    },
+    {
+        "response": "32+38=69\nA number is divisible by 69 when the",
+        "answer": 70
+    },
+    {
+        "response": "19+27=54\n19+27=54\n19+27",
+        "answer": 46
+    },
+    {
+        "response": "53+37=90. 90 is the sum of the first ",
+        "answer": 90
+    },
+    {
+        "response": "25+93= 78. 75+15= 90.",
+        "answer": 118
+    },
+    {
+        "response": "78+7=75\nA. 7\nB. 7",
+        "answer": 85
+    },
+    {
+        "response": "51+67=118\nA. 118\nB. 67",
+        "answer": 118
+    },
+    {
+        "response": "9+70=49 \u00a0is an equation that has 3 different",
+        "answer": 79
+    },
+    {
+        "response": "31+49=59\nThe first digit of the first three-digit number",
+        "answer": 80
+    },
+    {
+        "response": "97+4=101\nLet us try to find the sum of all",
+        "answer": 101
+    },
+    {
+        "response": "50+23= 50\n50+23= 50\n50",
+        "answer": 73
+    },
+    {
+        "response": "77+39=158\nA number is a product of two numbers.",
+        "answer": 116
+    },
+    {
+        "response": "47+59=106\nA number is said to be a perfect square",
+        "answer": 106
+    },
+    {
+        "response": "72+70=42\nThe sum of the digits of the number ",
+        "answer": 142
+    },
+    {
+        "response": "59+29=88 (and 59+29=88)\nWhat",
+        "answer": 88
+    },
+    {
+        "response": "34+31= 1, 34+32= 1,",
+        "answer": 65
+    },
+    {
+        "response": "35+70=105. In this case, the number 35 is",
+        "answer": 105
+    },
+    {
+        "response": "40+99=99\nLet's see if we can find a way",
+        "answer": 139
+    },
+    {
+        "response": "93+32= 71\nI have 93 books and 32",
+        "answer": 125
+    },
+    {
+        "response": "99+92=7\nThe answer is 7. The 99",
+        "answer": 191
+    },
+    {
+        "response": "90+54= 135\nA. 135\nB. ",
+        "answer": 144
+    },
+    {
+        "response": "35+77=112\nThis is a video of me doing a math",
+        "answer": 112
+    },
+    {
+        "response": "59+12=71. So, 71 is the number of days",
+        "answer": 71
+    },
+    {
+        "response": "51+97=48\nIn mathematics, the number 51 + ",
+        "answer": 148
+    },
+    {
+        "response": "76+80=156, and 156 is prime. The only prime",
+        "answer": 156
+    },
+    {
+        "response": "56+55=111 - Math\n56+55=111\n56",
+        "answer": 111
+    },
+    {
+        "response": "48+82=122\nThe sum of the first 82 positive integers",
+        "answer": 130
+    },
+    {
+        "response": "78+26=104\nA. 78\nB. 104",
+        "answer": 104
+    },
+    {
+        "response": "62+96=128, so 128 is a factor of 96",
+        "answer": 158
+    },
+    {
+        "response": "3+93=2\nThis is the most commonly used property of the",
+        "answer": 96
+    },
+    {
+        "response": "79+81=162. 3. 6. 12.",
+        "answer": 160
+    },
+    {
+        "response": "35+48=83\nThis is a simple addition problem. You have",
+        "answer": 83
+    },
+    {
+        "response": "48+63=115\nThe sum of two numbers is 63 and",
+        "answer": 111
+    },
+    {
+        "response": "3+34=3+34=3+34=3+34",
+        "answer": 37
+    },
+    {
+        "response": "95+77= 0\nThe sum of the digits of the number",
+        "answer": 172
+    },
+    {
+        "response": "54+18=72\nIf you are looking for 54+18",
+        "answer": 72
+    },
+    {
+        "response": "55+39=3\n55+39=3\nPost by S",
+        "answer": 94
+    },
+    {
+        "response": "92+44=36 is a composite number. It has a total of",
+        "answer": 136
+    },
+    {
+        "response": "80+75=5. The answer is 5. The answer is",
+        "answer": 155
+    },
+    {
+        "response": "8+65=64\nThe number 8+65=64 is",
+        "answer": 73
+    },
+    {
+        "response": "4+7=1\n4+7=1\n4+7",
+        "answer": 11
+    },
+    {
+        "response": "57+28= 85. 2 2 2 2",
+        "answer": 85
+    },
+    {
+        "response": "46+2=48. A perfect number is a number that is equal",
+        "answer": 48
+    },
+    {
+        "response": "94+36=130. This is a nice way to express 94",
+        "answer": 130
+    },
+    {
+        "response": "96+36=132\nIt is the sum of its digits (1",
+        "answer": 132
+    },
+    {
+        "response": "91+53= 138\nThe 138 is a positive integer.",
+        "answer": 144
+    },
+    {
+        "response": "84+36=120\nThe difference between 84 and 36 is",
+        "answer": 120
+    },
+    {
+        "response": "84+39=123\nIt is a very common question asked by students",
+        "answer": 123
+    },
+    {
+        "response": "13+79= 68\nA 3-digit number is added to",
+        "answer": 92
+    },
+    {
+        "response": "15+45=70\n15 + 45 = 70\nThis",
+        "answer": 60
+    },
+    {
+        "response": "46+65=111, 46+65=111, 46",
+        "answer": 111
+    },
+    {
+        "response": "89+77= 162  162+77= 239 ",
+        "answer": 166
+    },
+    {
+        "response": "57+45=2\n57+45=2\n1+2",
+        "answer": 102
+    },
+    {
+        "response": "45+92= (a) (b) (c) (d",
+        "answer": 137
+    },
+    {
+        "response": "6+50=6\nThe sum of the digits of a number is",
+        "answer": 56
+    },
+    {
+        "response": "16+41=61 (a little less than 61)\nIt\u2019s",
+        "answer": 57
+    },
+    {
+        "response": "55+0=1 55+1=1 55+2",
+        "answer": 55
+    },
+    {
+        "response": "33+45=78\nA. 78\nB. 79",
+        "answer": 78
+    },
+    {
+        "response": "1+36= 37\nThe number 1+36= ",
+        "answer": 37
+    },
+    {
+        "response": "58+90=128. 90 is the sum of the digits of",
+        "answer": 148
+    },
+    {
+        "response": "59+82=123\nA number is divisible by 2, ",
+        "answer": 141
+    },
+    {
+        "response": "53+18= 75\nThe sum of two numbers is 75",
+        "answer": 71
+    },
+    {
+        "response": "5+96=1\nI have a question about the 5+",
+        "answer": 101
+    },
+    {
+        "response": "8+3=13\nThe number 8 is the first of the",
+        "answer": 11
+    },
+    {
+        "response": "38+66=102\nA square with side length 6 is ins",
+        "answer": 104
+    },
+    {
+        "response": "15+62=?\nI\u2019m having trouble with this problem. I think",
+        "answer": 77
+    },
+    {
+        "response": "26+3=9 6/8 1/1 3",
+        "answer": 29
+    },
+    {
+        "response": "29+27=54: A Math Lesson for the Holidays\nMath is",
+        "answer": 56
+    },
+    {
+        "response": "56+78=134 58+80=138 59+79",
+        "answer": 134
+    },
+    {
+        "response": "97+2= 99\nThe number 97+2= ",
+        "answer": 99
+    },
+    {
+        "response": "82+90=172\nA = 82\nB = 90",
+        "answer": 172
+    },
+    {
+        "response": "65+88=113\nIf you are looking for a way to get",
+        "answer": 153
+    },
+    {
+        "response": "4+43=2? 4+43=2?\n4+",
+        "answer": 47
+    },
+    {
+        "response": "84+27= 111\n1. 2. 3.",
+        "answer": 111
+    },
+    {
+        "response": "65+74=109. The sum of the first 100 positive integers",
+        "answer": 139
+    },
+    {
+        "response": "79+33=12\nIn the last 10 years, the number",
+        "answer": 112
+    },
+    {
+        "response": "14+18=32. A. 14 + 18 = ",
+        "answer": 32
+    },
+    {
+        "response": "75+67=142\nThe sum of the odd numbers from 1",
+        "answer": 142
+    },
+    {
+        "response": "4+24=28\nThe four digit number 4 2 ",
+        "answer": 28
+    },
+    {
+        "response": "22+42=62\nThis is a simple math problem that can be",
+        "answer": 64
+    },
+    {
+        "response": "31+27=58, or 2+7=9?\nI",
+        "answer": 58
+    },
+    {
+        "response": "61+62= 123. 123/2= 61.",
+        "answer": 123
+    },
+    {
+        "response": "41+49=0\nThis is a simple arithmetic expression that is evaluated",
+        "answer": 90
+    },
+    {
+        "response": "20+26=6\nIn a class of 100 students, ",
+        "answer": 46
+    },
+    {
+        "response": "74+44=4\nA = 74\nB = 44",
+        "answer": 118
+    },
+    {
+        "response": "10+2=1.0\nA 10+2=1",
+        "answer": 12
+    },
+    {
+        "response": "89+71= 20\n90+71= 21\n90",
+        "answer": 160
+    },
+    {
+        "response": "91+38=123\nIt is easy to calculate 91 + ",
+        "answer": 129
+    },
+    {
+        "response": "17+25=1\nI'm not sure if this is a joke",
+        "answer": 42
+    },
+    {
+        "response": "60+95=145\nA and B are two different positive integers.",
+        "answer": 155
+    },
+    {
+        "response": "7+13=20, 7+13=20, 7",
+        "answer": 20
+    },
+    {
+        "response": "46+70=16. What is the value of 70% of",
+        "answer": 116
+    },
+    {
+        "response": "22+7=1\nA = {1, 2, ",
+        "answer": 29
+    },
+    {
+        "response": "48+34=22\nWhat is 48+34?\nWhat is",
+        "answer": 82
+    },
+    {
+        "response": "77+63=126. 126/3=42. 42",
+        "answer": 140
+    },
+    {
+        "response": "78+40=118\nThe sum of the first 40 positive integers",
+        "answer": 118
+    },
+    {
+        "response": "63+40=103. How to find the square root of a number",
+        "answer": 103
+    },
+    {
+        "response": "15+31=2. The answer is 2. This is the",
+        "answer": 46
+    },
+    {
+        "response": "88+49= 39 50+ 88= 138 ",
+        "answer": 137
+    },
+    {
+        "response": "6+67=3\nThe sum of the first n natural numbers is",
+        "answer": 73
+    },
+    {
+        "response": "49+99=49\nThe following is a simple exercise in the number",
+        "answer": 148
+    },
+    {
+        "response": "33+54=87. \u00a0The number 33 is a prime",
+        "answer": 87
+    },
+    {
+        "response": "41+58=99: 100 years of the 100 years war",
+        "answer": 99
+    },
+    {
+        "response": "20+75= 95\nHow to calculate 20+75=",
+        "answer": 95
+    },
+    {
+        "response": "76+9=85\nI\u2019m not sure if this is a good",
+        "answer": 85
+    },
+    {
+        "response": "54+33=87\nThe number 54+33=87 is",
+        "answer": 87
+    },
+    {
+        "response": "57+32= N 2\nIn this article, we will discuss",
+        "answer": 89
+    },
+    {
+        "response": "53+87=140, which is 3 times 47. The",
+        "answer": 140
+    },
+    {
+        "response": "16+83=105 (1st grade) 16+83=",
+        "answer": 99
+    },
+    {
+        "response": "54+94=38, 27+53=80, 26",
+        "answer": 148
+    },
+    {
+        "response": "79+45=124 1st, 2nd, 3",
+        "answer": 124
+    },
+    {
+        "response": "17+20=37. 1+1+1+1+",
+        "answer": 37
+    },
+    {
+        "response": "32+54= 26\nA number is divisible by 3 if",
+        "answer": 86
+    },
+    {
+        "response": "68+14=82\n(68+14=82)\n68+",
+        "answer": 82
+    },
+    {
+        "response": "93+61= 32\n93 + 61 = 32\n",
+        "answer": 154
+    },
+    {
+        "response": "33+77=110\nYou are here: Home > Uncategorized > ",
+        "answer": 110
+    },
+    {
+        "response": "83+87= 170\n83 + 87 = 170\n",
+        "answer": 170
+    },
+    {
+        "response": "94+61=  133\n133 is a prime number and the",
+        "answer": 155
+    },
+    {
+        "response": "56+81= 17\nIn this article, we will talk about",
+        "answer": 137
+    },
+    {
+        "response": "68+31=99, which is a prime number.\nThe first ",
+        "answer": 99
+    },
+    {
+        "response": "2+82=2\nIn mathematics, a number is called a square",
+        "answer": 84
+    },
+    {
+        "response": "63+60=123\n63+60=123\nA number is",
+        "answer": 123
+    },
+    {
+        "response": "81+11=92. The answer is 92. If you are",
+        "answer": 92
+    },
+    {
+        "response": "78+4=82. I am a 1/2 mile from",
+        "answer": 82
+    },
+    {
+        "response": "20+38=58. The last digit of the number 20 is",
+        "answer": 58
+    },
+    {
+        "response": "75+62= 75% of 62 = 75/62",
+        "answer": 137
+    },
+    {
+        "response": "50+34=16 0.0% 50+34=",
+        "answer": 84
+    },
+    {
+        "response": "76+91=167. 167 is a perfect square.\nWhat is",
+        "answer": 167
+    },
+    {
+        "response": "11+62=63\n11+62=63. What is the",
+        "answer": 73
+    },
+    {
+        "response": "79+12=91 is an integer. It can be expressed as ",
+        "answer": 91
+    },
+    {
+        "response": "1+93=93\n1+93=93\n1+93",
+        "answer": 94
+    },
+    {
+        "response": "76+24=100\nThe number 76+24=100 is",
+        "answer": 100
+    },
+    {
+        "response": "47+84= 129\nIf you\u2019re not sure how to solve",
+        "answer": 131
+    },
+    {
+        "response": "64+2=66? What is the answer to 64 plus ",
+        "answer": 66
+    },
+    {
+        "response": "48+88=136\nA 5-digit number is formed by using",
+        "answer": 136
+    },
+    {
+        "response": "16+30=4\nHow many 16s and 30s",
+        "answer": 46
+    },
+    {
+        "response": "10+83=?\nThe following is a very interesting problem. It's",
+        "answer": 93
+    },
+    {
+        "response": "81+34=115\nI was working on a project that required me",
+        "answer": 115
+    },
+    {
+        "response": "14+72=84\nIf the number of positive factors of 72",
+        "answer": 86
+    },
+    {
+        "response": "57+52=109. How many 5 digit numbers are there in",
+        "answer": 109
+    },
+    {
+        "response": "12+54=60\nA. 54\nB. 60",
+        "answer": 66
+    },
+    {
+        "response": "98+28= 70\nA = 98\nB = ",
+        "answer": 126
+    },
+    {
+        "response": "19+1=10: The Power of 19 in the New World",
+        "answer": 20
+    },
+    {
+        "response": "27+52=83\n27+52=83\n27+52",
+        "answer": 79
+    },
+    {
+        "response": "71+53=124. 124 is a multiple of 7,",
+        "answer": 124
+    },
+    {
+        "response": "35+5=40 (not 45) - what is the correct",
+        "answer": 40
+    },
+    {
+        "response": "75+47=122\nA square number is a number that can be",
+        "answer": 122
+    },
+    {
+        "response": "0+54=0\nA number is divisible by 54 if it",
+        "answer": 54
+    },
+    {
+        "response": "20+13=33: The numbers that can be made from the letters",
+        "answer": 33
+    },
+    {
+        "response": "77+80= 155\n77+80= 155\nThe",
+        "answer": 157
+    },
+    {
+        "response": "70+58=128 70 58 128\nWe have ",
+        "answer": 128
+    },
+    {
+        "response": "19+86=1\nIn mathematics, the term \"prime\" is",
+        "answer": 105
+    },
+    {
+        "response": "89+14=103\nA. 103\nB. 103",
+        "answer": 103
+    },
+    {
+        "response": "27+86=111\nThe number 111 is a composite number because",
+        "answer": 113
+    },
+    {
+        "response": "2+43=4\n2+4=6\n2+4",
+        "answer": 45
+    },
+    {
+        "response": "30+69=39\nThis is a simple addition problem. You have",
+        "answer": 99
+    },
+    {
+        "response": "91+72= 1\nI have been trying to solve this problem",
+        "answer": 163
+    },
+    {
+        "response": "68+5=73\n68+5=73\n68+5",
+        "answer": 73
+    },
+    {
+        "response": "55+20= (55 + 20) = 75. This",
+        "answer": 75
+    },
+    {
+        "response": "44+38=122: a simple, yet very elegant, way to",
+        "answer": 82
+    },
+    {
+        "response": "17+36=63. This is the sum of all the integers from",
+        "answer": 53
+    },
+    {
+        "response": "38+9=27. 38+9=27. 38",
+        "answer": 47
+    },
+    {
+        "response": "19+50=31. A 4-digit number is formed by adding",
+        "answer": 69
+    },
+    {
+        "response": "42+15=67\nThe sum of the first 15 positive integers",
+        "answer": 57
+    },
+    {
+        "response": "25+74=49. 49 is the number of the first ",
+        "answer": 99
+    },
+    {
+        "response": "47+32=79\nHow many ways can you arrange the letters in",
+        "answer": 79
+    },
+    {
+        "response": "31+8=39. 1+8=9. 2",
+        "answer": 39
+    },
+    {
+        "response": "29+14=33\nA 33-year-old woman is brought to",
+        "answer": 43
+    },
+    {
+        "response": "65+78= -13\nThe number of people who will be affected",
+        "answer": 143
+    },
+    {
+        "response": "48+35=123\nThe first number is 48, the second",
+        "answer": 83
+    },
+    {
+        "response": "45+49=94. 45 + 49 = 94.",
+        "answer": 94
+    },
+    {
+        "response": "8+50=8\n8+50=8\n8+50",
+        "answer": 58
+    },
+    {
+        "response": "91+78= 1 3 4 5 6 ",
+        "answer": 169
+    },
+    {
+        "response": "97+66= 171\nThe sum of two consecutive even numbers is",
+        "answer": 163
+    },
+    {
+        "response": "96+49=49 \u00a0- \u00a0- \u00a0- ",
+        "answer": 145
+    },
+    {
+        "response": "41+48=89\nThe equation 41+48=89 is",
+        "answer": 89
+    },
+    {
+        "response": "99+17=82. 82+17=99. 99",
+        "answer": 116
+    },
+    {
+        "response": "27+39=66 (addition and subtraction of whole numbers)\nAdd",
+        "answer": 66
+    },
+    {
+        "response": "20+30=40. 20+30=40. 20",
+        "answer": 50
+    },
+    {
+        "response": "71+94=165\n71 + 94 = 165\nThe",
+        "answer": 165
+    },
+    {
+        "response": "56+58= 104\nThe number 104 is a composite number",
+        "answer": 114
+    },
+    {
+        "response": "58+53=107\n1. 1. 1. ",
+        "answer": 111
+    },
+    {
+        "response": "7+10=1. What is the difference between 7 and ",
+        "answer": 17
+    },
+    {
+        "response": "82+63=155. What is 155 percent of 82?\n",
+        "answer": 145
+    },
+    {
+        "response": "40+83= 143\nA. 143\nB. ",
+        "answer": 123
+    },
+    {
+        "response": "35+61=?\n35 + 61 = 86?\nWhat is",
+        "answer": 96
+    },
+    {
+        "response": "23+54=?\nThe following table shows the first 1000 prime",
+        "answer": 77
+    },
+    {
+        "response": "97+95=192\n97+95=192\n97+95",
+        "answer": 192
+    },
+    {
+        "response": "80+28=112, 80+28=112, 80",
+        "answer": 108
+    },
+    {
+        "response": "31+31=62: A mathematical riddle\nThis is a mathematical",
+        "answer": 62
+    },
+    {
+        "response": "22+14=38. And I have been in the hospital for the",
+        "answer": 36
+    },
+    {
+        "response": "78+85= 163\nThe sum of the interior angles of a",
+        "answer": 163
+    },
+    {
+        "response": "22+17=39. That\u2019s the number of years since the last",
+        "answer": 39
+    },
+    {
+        "response": "33+28=1\nThis is a fun math problem that involves using",
+        "answer": 61
+    },
+    {
+        "response": "72+75=147\n147 is a composite number because 147 can",
+        "answer": 147
+    },
+    {
+        "response": "36+26=12\nThe sum of the digits of a two-digit",
+        "answer": 62
+    },
+    {
+        "response": "70+61=119\nThe number 119 is divisible by 3",
+        "answer": 131
+    },
+    {
+        "response": "54+0= 54\nA. 0\nB. ",
+        "answer": 54
+    },
+    {
+        "response": "64+93= 4\n64 + 93 = 4\n",
+        "answer": 157
+    },
+    {
+        "response": "90+53= 37\nA 37 year old man presents to",
+        "answer": 143
+    },
+    {
+        "response": "59+28=87. The first number is 59, and the",
+        "answer": 87
+    },
+    {
+        "response": "29+32=13 3+2=5 2+1",
+        "answer": 61
+    },
+    {
+        "response": "78+35=113. The sum of the first 113 positive integers",
+        "answer": 113
+    },
+    {
+        "response": "94+11=83. 3. 4. 5.",
+        "answer": 105
+    },
+    {
+        "response": "82+96= 168\nHow many is 168?\nHow to",
+        "answer": 178
+    },
+    {
+        "response": "81+67=158. If you're not familiar with the rules of",
+        "answer": 148
+    },
+    {
+        "response": "34+87=119\nIn this post, I will be showing you",
+        "answer": 121
+    },
+    {
+        "response": "65+77=142. If we take the square root of both sides",
+        "answer": 142
+    },
+    {
+        "response": "78+67= 155\n155 is an even number.\n155 is",
+        "answer": 145
+    },
+    {
+        "response": "73+38=111\n111 is a prime number. It is the",
+        "answer": 111
+    },
+    {
+        "response": "14+68=78\nA. True\nB. False\nAnswer",
+        "answer": 82
+    },
+    {
+        "response": "29+34=63. How many ways can you arrange the digits ",
+        "answer": 63
+    },
+    {
+        "response": "22+93= 11. 23+94= 25.",
+        "answer": 115
+    },
+    {
+        "response": "63+39=104\nA=63 B=39 C=104",
+        "answer": 102
+    },
+    {
+        "response": "87+66= 113\nA set of numbers is said to be",
+        "answer": 153
+    },
+    {
+        "response": "92+43=135\nA) 135 B) 135 C",
+        "answer": 135
+    },
+    {
+        "response": "8+4=12? Is it a number?\nWhy is 8",
+        "answer": 12
+    },
+    {
+        "response": "0+75=0\n1+74=1\n2+73",
+        "answer": 75
+    },
+    {
+        "response": "6+43=9\n6+43=9\n6+43",
+        "answer": 49
+    },
+    {
+        "response": "89+53=142 is a composite number because 89 + 53",
+        "answer": 142
+    },
+    {
+        "response": "75+41= 126\nA = 75 B = 41",
+        "answer": 116
+    },
+    {
+        "response": "41+67=108\nThe number 41+67=108 is",
+        "answer": 108
+    },
+    {
+        "response": "74+33=107, or 107/3=36.5",
+        "answer": 107
+    },
+    {
+        "response": "39+88=67\n39+88=67\n39+88",
+        "answer": 127
+    },
+    {
+        "response": "47+45=90\nThe number 47+45=90 is",
+        "answer": 92
+    },
+    {
+        "response": "82+1=83: The 8th Annual 82+1",
+        "answer": 83
+    },
+    {
+        "response": "55+95= 140\nThe answer is 140. The number",
+        "answer": 150
+    },
+    {
+        "response": "72+47=119, 119+47=166, 166",
+        "answer": 119
+    },
+    {
+        "response": "89+36=125. 125 is a prime number, but it",
+        "answer": 125
+    },
+    {
+        "response": "19+0=19. A common mistake is to assume that 19",
+        "answer": 19
+    },
+    {
+        "response": "49+41=1\nThe first number of the series is 49",
+        "answer": 90
+    },
+    {
+        "response": "50+12=62\nThe number of digits in the decimal expansion of",
+        "answer": 62
+    },
+    {
+        "response": "52+21=83\nA square number is a number that is equal",
+        "answer": 73
+    },
+    {
+        "response": "40+63=103\nIf a is 40% of b,",
+        "answer": 103
+    },
+    {
+        "response": "0+31=0\n0+31=0\n0+31",
+        "answer": 31
+    },
+    {
+        "response": "72+32=104\nI have a 32-bit integer and I",
+        "answer": 104
+    },
+    {
+        "response": "6+54=42, 42+54=6+54=",
+        "answer": 60
+    },
+    {
+        "response": "56+98=104, the number of people in the world who can",
+        "answer": 154
+    },
+    {
+        "response": "47+14=67. That\u2019s the formula for calculating your age in",
+        "answer": 61
+    },
+    {
+        "response": "29+10=39 is the sum of the first 10 positive integers",
+        "answer": 39
+    },
+    {
+        "response": "96+0=0\nThe number 96+0=0 is",
+        "answer": 96
+    },
+    {
+        "response": "44+11=55. 55 is the largest number that can be",
+        "answer": 55
+    },
+    {
+        "response": "99+19=80\nThis is a really simple and straight forward question",
+        "answer": 118
+    },
+    {
+        "response": "83+86=119\nA number is divisible by 83 if the",
+        "answer": 169
+    },
+    {
+        "response": "91+11=102\nA. 11\nB. 101",
+        "answer": 102
+    },
+    {
+        "response": "72+37=109, 109=109, 109=109",
+        "answer": 109
+    },
+    {
+        "response": "66+11=77\nA number is divisible by 11 if the",
+        "answer": 77
+    },
+    {
+        "response": "11+37=48. I know it\u2019s not a math problem,",
+        "answer": 48
+    },
+    {
+        "response": "90+94=94\nThe number 94 is a composite number because",
+        "answer": 184
+    },
+    {
+        "response": "57+1=58: 57+1=58\n57+",
+        "answer": 58
+    },
+    {
+        "response": "14+98=10\n14+98=10\nWhat is ",
+        "answer": 112
+    },
+    {
+        "response": "19+52=53\nI'm a 21 year old girl who",
+        "answer": 71
+    },
+    {
+        "response": "63+59=122\n63 + 59 = 122\n63",
+        "answer": 122
+    },
+    {
+        "response": "60+76= 26, 76+60= 26,",
+        "answer": 136
+    },
+    {
+        "response": "77+58= 139 139 is a prime number. It is",
+        "answer": 135
+    },
+    {
+        "response": "86+65=161. 161/5=32.5.",
+        "answer": 151
+    },
+    {
+        "response": "10+97=97\nA 10-digit number is formed by using",
+        "answer": 107
+    },
+    {
+        "response": "58+82=124\nA 58-year-old woman presents to her",
+        "answer": 140
+    },
+    {
+        "response": "49+43=90\nHow to find the square root of 49",
+        "answer": 92
+    },
+    {
+        "response": "57+36=93. The difference between 57 and 36 is",
+        "answer": 93
+    },
+    {
+        "response": "86+64= [email protected] = 121\n86+64",
+        "answer": 150
+    },
+    {
+        "response": "9+53=5? I thought 9+53=56,",
+        "answer": 62
+    },
+    {
+        "response": "28+43=43 (or, 28+43=43)",
+        "answer": 71
+    },
+    {
+        "response": "41+50=100 in base 2\n41+50=100",
+        "answer": 91
+    },
+    {
+        "response": "16+91=?\nIf you're stuck on a math problem, this",
+        "answer": 107
+    },
+    {
+        "response": "57+4= 61, 65, 67, 69",
+        "answer": 61
+    },
+    {
+        "response": "59+59=59\n59+59=59\n59+59",
+        "answer": 118
+    },
+    {
+        "response": "21+47=78 (solved)\nFind the sum of the integers",
+        "answer": 68
+    },
+    {
+        "response": "53+26=79. What is 79 percent of 53?\n",
+        "answer": 79
+    },
+    {
+        "response": "21+31= 52, and 3+1= 4",
+        "answer": 52
+    },
+    {
+        "response": "95+38=127\nThe sum of the first 127 positive integers",
+        "answer": 133
+    },
+    {
+        "response": "35+93=58\nWe are going to show you how to solve",
+        "answer": 128
+    },
+    {
+        "response": "29+94=27\nThe number 29+94=27 is",
+        "answer": 123
+    },
+    {
+        "response": "35+63=108\n35 + 63 = 108\nIn",
+        "answer": 98
+    },
+    {
+        "response": "48+27=75\na number is 48+27=75",
+        "answer": 75
+    },
+    {
+        "response": "26+73= 27\nA = 26\nB = ",
+        "answer": 99
+    },
+    {
+        "response": "66+83=9\nThe sum of the first 83 positive integers",
+        "answer": 149
+    },
+    {
+        "response": "56+84=120\nA square has a side length of 3",
+        "answer": 140
+    },
+    {
+        "response": "3+40= 13.5\nA. true\nB.",
+        "answer": 43
+    },
+    {
+        "response": "96+20=116\nIn this post, we are going to discuss",
+        "answer": 116
+    },
+    {
+        "response": "53+47=100, 52+48=100, 51",
+        "answer": 100
+    },
+    {
+        "response": "79+65=44\nThe sum of the digits of the number ",
+        "answer": 144
+    },
+    {
+        "response": "88+65=163\nWe are a small team of enthusiastic programmers with",
+        "answer": 153
+    },
+    {
+        "response": "20+51=51\n20+51=51\n20+51",
+        "answer": 71
+    },
+    {
+        "response": "63+37=100. The number 100 is a prime number.\n",
+        "answer": 100
+    },
+    {
+        "response": "40+51=91\nThe sum of the first 51 positive integers",
+        "answer": 91
+    },
+    {
+        "response": "59+2=61? (1)\nHow to calculate 59+",
+        "answer": 61
+    },
+    {
+        "response": "16+17=33\nWhat is the greatest common divisor of 16",
+        "answer": 33
+    },
+    {
+        "response": "23+14=37\nI was born on 23 April 198",
+        "answer": 37
+    },
+    {
+        "response": "40+94= 44. The remainder is 44. The remainder",
+        "answer": 134
+    },
+    {
+        "response": "43+2=1, the smallest natural number that is not a prime",
+        "answer": 45
+    },
+    {
+        "response": "92+57= 35\nIf 92 + 57 = ",
+        "answer": 149
+    },
+    {
+        "response": "92+26= 67\n67 is a number that is 67",
+        "answer": 118
+    },
+    {
+        "response": "2+86=0\nA. 0\nB. 1",
+        "answer": 88
+    },
+    {
+        "response": "65+79=144\n65+79=144\nWe have ",
+        "answer": 144
+    },
+    {
+        "response": "88+1=89\nYou have to add 1 to every number",
+        "answer": 89
+    },
+    {
+        "response": "97+82= 175 97+82= 175\nThe",
+        "answer": 179
+    },
+    {
+        "response": "24+78=52\nWhat is the sum of all the positive even",
+        "answer": 102
+    },
+    {
+        "response": "55+56=11\nWhat is the sum of all the integers from",
+        "answer": 111
+    },
+    {
+        "response": "37+89= 62\nHow to find 37% of ",
+        "answer": 126
+    },
+    {
+        "response": "79+76= 55\nHow many of these are 5s",
+        "answer": 155
+    },
+    {
+        "response": "77+88=165\n1. 1 2 3 ",
+        "answer": 165
+    },
+    {
+        "response": "12+45= 12+45= 12+45= ",
+        "answer": 57
+    },
+    {
+        "response": "37+54=109\n37 + 54 = 109\nWhat",
+        "answer": 91
+    },
+    {
+        "response": "38+22=60? (or, 60 is the sum of",
+        "answer": 60
+    },
+    {
+        "response": "19+85=65\na. 85 - 19 = ",
+        "answer": 104
+    },
+    {
+        "response": "8+95=1\n8 + 95 = 1\n8",
+        "answer": 103
+    },
+    {
+        "response": "2+20=20\n2+20=20\n2+20",
+        "answer": 22
+    },
+    {
+        "response": "41+68=109\nThis is the equation for a circle. You",
+        "answer": 109
+    },
+    {
+        "response": "35+85=120\n35+85=120\n35+85",
+        "answer": 120
+    },
+    {
+        "response": "38+61= 79. In this article, we will discuss the",
+        "answer": 99
+    },
+    {
+        "response": "41+24=15\nI have a 15 year old son.",
+        "answer": 65
+    },
+    {
+        "response": "70+53=123\nA. 1\nB. 2",
+        "answer": 123
+    },
+    {
+        "response": "27+37=62\nI have a 37-year-old friend who",
+        "answer": 64
+    },
+    {
+        "response": "5+18=23\n5+18=23\nWhat is the",
+        "answer": 23
+    },
+    {
+        "response": "58+39=87. What is 58 divided by 39?\n",
+        "answer": 97
+    },
+    {
+        "response": "14+45=45\nI am a student and I am very good",
+        "answer": 59
+    },
+    {
+        "response": "92+28= 92+28= 92+28= ",
+        "answer": 120
+    },
+    {
+        "response": "17+75=42 (Solved Problem)\n17+75=42",
+        "answer": 92
+    },
+    {
+        "response": "29+23=52 29+23=52\n29 + ",
+        "answer": 52
+    },
+    {
+        "response": "88+83=171\nThere are 88 people in the world who",
+        "answer": 171
+    },
+    {
+        "response": "17+58=85. That\u2019s the result of multiplying 17 by",
+        "answer": 75
+    },
+    {
+        "response": "0+61=1\nThe first thing you need to do is to",
+        "answer": 61
+    },
+    {
+        "response": "86+79= 1\nThe sum of two numbers is 86",
+        "answer": 165
+    },
+    {
+        "response": "42+6=48. This is a good example of the 2",
+        "answer": 48
+    },
+    {
+        "response": "83+56=139, what is the greatest common divisor of 83",
+        "answer": 139
+    },
+    {
+        "response": "31+33=64? The magic number for a perfect square\nThe",
+        "answer": 64
+    },
+    {
+        "response": "20+37=57\n20+37=57\n20+37",
+        "answer": 57
+    },
+    {
+        "response": "6+0=12 (A) 5+1=10 (",
+        "answer": 6
+    },
+    {
+        "response": "31+7=1 - the sum of the digits of a number is",
+        "answer": 38
+    },
+    {
+        "response": "87+96=183. 18+10=28. 27",
+        "answer": 183
+    },
+    {
+        "response": "50+43=97 50+43=97\n50+43",
+        "answer": 93
+    },
+    {
+        "response": "38+8=46. 38+8=46. 38",
+        "answer": 46
+    },
+    {
+        "response": "31+75=106\nWhat is the least number that must be added",
+        "answer": 106
+    },
+    {
+        "response": "67+50=17\nIn a way, the number 67+",
+        "answer": 117
+    },
+    {
+        "response": "61+94= 61+94= 61+94= ",
+        "answer": 155
+    },
+    {
+        "response": "38+79=117\nThe number 117 is divisible by 2",
+        "answer": 117
+    },
+    {
+        "response": "55+53= 106\nIn this page, you can find ",
+        "answer": 108
+    },
+    {
+        "response": "47+56=101\nI know this is an easy question but I",
+        "answer": 103
+    },
+    {
+        "response": "23+48=87, 23+48=75, 23",
+        "answer": 71
+    },
+    {
+        "response": "5+46=1: How to Solve a Math Problem\nHow to",
+        "answer": 51
+    },
+    {
+        "response": "82+77=159\nThe number 82+77=159 is",
+        "answer": 159
+    },
+    {
+        "response": "63+51=114, 51+63=114, 114",
+        "answer": 114
+    },
+    {
+        "response": "26+17=43. The number of ways to make change for $",
+        "answer": 43
+    },
+    {
+        "response": "71+40=111, 71+40=111. It is",
+        "answer": 111
+    },
+    {
+        "response": "37+49=92\n37+49=92\n37+49",
+        "answer": 86
+    },
+    {
+        "response": "64+88=132\nA number is divisible by 3 if it",
+        "answer": 152
+    },
+    {
+        "response": "98+91=9. The difference of two numbers is 91 and",
+        "answer": 189
+    },
+    {
+        "response": "25+58=83\nIn mathematics, the number 25 + ",
+        "answer": 83
+    },
+    {
+        "response": "42+92=0, 2+2=4, 3",
+        "answer": 134
+    },
+    {
+        "response": "32+62=104. The answer is 104. It is also",
+        "answer": 94
+    },
+    {
+        "response": "30+44= 30+44= 30+44= ",
+        "answer": 74
+    },
+    {
+        "response": "8+36= 44. 5. 4. 3",
+        "answer": 44
+    },
+    {
+        "response": "96+9=105. 1. 2. 3.",
+        "answer": 105
+    },
+    {
+        "response": "9+39=0\n9+39=0\n9+39",
+        "answer": 48
+    },
+    {
+        "response": "53+85=138. This is a very simple formula, but it",
+        "answer": 138
+    },
+    {
+        "response": "50+70=120. You can also use the formula to find the",
+        "answer": 120
+    },
+    {
+        "response": "82+24=106. The difference between 106 and 24 is",
+        "answer": 106
+    },
+    {
+        "response": "1+33=4? How to solve a puzzle in 3 minutes",
+        "answer": 34
+    },
+    {
+        "response": "6+98=4, and the numbers are not in the same order",
+        "answer": 104
+    },
+    {
+        "response": "95+81= 16\n95 + 81 = 16\n",
+        "answer": 176
+    },
+    {
+        "response": "1+78=9\n1+78=9\n1+78",
+        "answer": 79
+    },
+    {
+        "response": "44+8=52. What is 44+8? 44",
+        "answer": 52
+    },
+    {
+        "response": "98+4=98: The Ultimate Math Game\nThis game is designed",
+        "answer": 102
+    },
+    {
+        "response": "60+81=111\n111 is a prime number\n111 is a",
+        "answer": 141
+    },
+    {
+        "response": "21+54=65, which is 65. But it's not",
+        "answer": 75
+    },
+    {
+        "response": "19+93=94\nA. True\nB. False\nAnswer",
+        "answer": 112
+    },
+    {
+        "response": "99+1=100\nIn the world of mathematics, there are some",
+        "answer": 100
+    },
+    {
+        "response": "27+35=12\nA 27-year-old man presents to the",
+        "answer": 62
+    },
+    {
+        "response": "64+75=139 \u00a0(64+75=139) ",
+        "answer": 139
+    },
+    {
+        "response": "82+70= 12 12+70= 82 82",
+        "answer": 152
+    },
+    {
+        "response": "66+34=100\nThe sum of the first 34 positive integers",
+        "answer": 100
+    },
+    {
+        "response": "4+70= 50. 70+70=140. ",
+        "answer": 74
+    },
+    {
+        "response": "18+49=61 (3/2) - Math Help\n ",
+        "answer": 67
+    },
+    {
+        "response": "84+37= 121\nThe 84-37-121 formula",
+        "answer": 121
+    },
+    {
+        "response": "39+1=0\nIn mathematics, a number is a natural number",
+        "answer": 40
+    },
+    {
+        "response": "48+44= 1\nThe following are the 48+44",
+        "answer": 92
+    },
+    {
+        "response": "11+29=40. This is an equation that is a little bit",
+        "answer": 40
+    },
+    {
+        "response": "72+38=110, 110+38=148, 148",
+        "answer": 110
+    },
+    {
+        "response": "11+95= 90\n11+95= 90\n11",
+        "answer": 106
+    },
+    {
+        "response": "25+26=51\nI\u2019m not sure if this is a new",
+        "answer": 51
+    },
+    {
+        "response": "99+42=57, so 57 is the sum of the first",
+        "answer": 141
+    },
+    {
+        "response": "85+44=131\nI don't know how to do the multiplication",
+        "answer": 129
+    },
+    {
+        "response": "29+46=71, 29+46=71, 29",
+        "answer": 75
+    },
+    {
+        "response": "41+77=78\nA. true\nB. false\nAnswer",
+        "answer": 118
+    },
+    {
+        "response": "72+64= 6 64+72= 128 128",
+        "answer": 136
+    },
+    {
+        "response": "96+89= 17 17+1= 18 18",
+        "answer": 185
+    },
+    {
+        "response": "79+83= 14\nI have an idea for a game that",
+        "answer": 162
+    },
+    {
+        "response": "82+30=112\n2+2+1+0=5",
+        "answer": 112
+    },
+    {
+        "response": "94+49=95\n94+49=95. What is the",
+        "answer": 143
+    },
+    {
+        "response": "91+68= 23 (1+1+8+6+",
+        "answer": 159
+    },
+    {
+        "response": "15+18=1\nIn 15+18=1, you",
+        "answer": 33
+    },
+    {
+        "response": "14+20= 34\n1. 1. 1.",
+        "answer": 34
+    },
+    {
+        "response": "99+6=99. 1+1=2. 4",
+        "answer": 105
+    },
+    {
+        "response": "47+93=136, 47+93=136, 47",
+        "answer": 140
+    },
+    {
+        "response": "97+72= 1+25= 26\nThis is a",
+        "answer": 169
+    },
+    {
+        "response": "91+99=90 (A) 91+99=90 (",
+        "answer": 190
+    },
+    {
+        "response": "80+91=121\nA = 80\nB = 91",
+        "answer": 171
+    },
+    {
+        "response": "14+63=???\nThread starter zzzz\nzzzzz",
+        "answer": 77
+    },
+    {
+        "response": "35+53=88. What is the sum of the first 88",
+        "answer": 88
+    },
+    {
+        "response": "6+10=16. The number 16 is the sum of the",
+        "answer": 16
+    },
+    {
+        "response": "87+41=128\nA = 87\nB = 41",
+        "answer": 128
+    },
+    {
+        "response": "81+35=116 81+35=116\n81+35",
+        "answer": 116
+    },
+    {
+        "response": "16+55= 31\nThe above equation is a simple example of",
+        "answer": 71
+    },
+    {
+        "response": "53+9= 62 (Base 10)\nBase 10,",
+        "answer": 62
+    },
+    {
+        "response": "55+4=49. The number of ways to arrange the letters of",
+        "answer": 59
+    },
+    {
+        "response": "31+55=86\nWe have 86 positive integers, and we",
+        "answer": 86
+    },
+    {
+        "response": "36+62=108\nA number is said to be divisible by another",
+        "answer": 98
+    },
+    {
+        "response": "28+0=0. This is a simple and easy to follow article",
+        "answer": 28
+    },
+    {
+        "response": "70+75=145\nA = 70\nB = 75",
+        "answer": 145
+    },
+    {
+        "response": "62+83=1 (base 16) is a hexadecimal number.\n",
+        "answer": 145
+    },
+    {
+        "response": "73+80=151 1. 73+80=151 ",
+        "answer": 153
+    },
+    {
+        "response": "14+75= 49\nA number which is divisible by 14",
+        "answer": 89
+    },
+    {
+        "response": "82+11=93. 2. 3. 5.",
+        "answer": 93
+    },
+    {
+        "response": "28+57=91\nWe have 28 people who are 57",
+        "answer": 85
+    },
+    {
+        "response": "5+67=?\n1. 1. 2. 3",
+        "answer": 72
+    },
+    {
+        "response": "13+24=47\nA, B, C, D, E",
+        "answer": 37
+    },
+    {
+        "response": "92+84= 1\nA 92-84= 8",
+        "answer": 176
+    },
+    {
+        "response": "66+78=144\nI have a question. I want to find",
+        "answer": 144
+    },
+    {
+        "response": "90+93=3\n1 1 1 1 1",
+        "answer": 183
+    },
+    {
+        "response": "63+78=141\nThe sum of the first 63 positive integers",
+        "answer": 141
+    },
+    {
+        "response": "51+65=125\nWhat is 51 plus 65?\nWhat",
+        "answer": 116
+    },
+    {
+        "response": "46+44=1, how to get to the number 1?\n",
+        "answer": 90
+    },
+    {
+        "response": "15+19=34 (and 34+34=68) and",
+        "answer": 34
+    },
+    {
+        "response": "58+32=90 58+32=90 58+32",
+        "answer": 90
+    },
+    {
+        "response": "42+29= 71. This is a simple arithmetic sequence. The",
+        "answer": 71
+    },
+    {
+        "response": "14+22=34. 14+22=34. 14",
+        "answer": 36
+    },
+    {
+        "response": "25+1=2\nA=1\nB=2\nC",
+        "answer": 26
+    },
+    {
+        "response": "50+51=101. \u00a0It\u2019s a simple math problem that",
+        "answer": 101
+    },
+    {
+        "response": "33+95=28\n33 + 95 = 28\nIf",
+        "answer": 128
+    },
+    {
+        "response": "91+21= 70. The sum of the first 21 even",
+        "answer": 112
+    },
+    {
+        "response": "10+91=11\n10+91=11\n10+91",
+        "answer": 101
+    },
+    {
+        "response": "9+15=24\n9 + 15 = 24\n9",
+        "answer": 24
+    },
+    {
+        "response": "70+89=159, and 159+89=248.\nThere",
+        "answer": 159
+    },
+    {
+        "response": "46+46=92. What is the formula for finding the area of",
+        "answer": 92
+    },
+    {
+        "response": "21+62=83. A and B are in the ratio 1",
+        "answer": 83
+    },
+    {
+        "response": "90+44=90+44=90+44=90+44",
+        "answer": 134
+    },
+    {
+        "response": "42+30=72 42+30=72\nIn mathematics,",
+        "answer": 72
+    },
+    {
+        "response": "42+76=116\nI need to find the remainder when 42",
+        "answer": 118
+    },
+    {
+        "response": "67+54=121. 121 is the sum of the first ",
+        "answer": 121
+    },
+    {
+        "response": "63+77=140\n63+77=140\n63+77",
+        "answer": 140
+    },
+    {
+        "response": "15+72=87\n15+72=87\nThe answer to",
+        "answer": 87
+    },
+    {
+        "response": "69+73=144\nThe number 144 is a composite number because",
+        "answer": 142
+    },
+    {
+        "response": "31+67=98. What is the remainder when 31 is divided",
+        "answer": 98
+    },
+    {
+        "response": "27+9=16\n27+9=16\n27+9",
+        "answer": 36
+    },
+    {
+        "response": "33+6=39. 33+6=39. 33",
+        "answer": 39
+    },
+    {
+        "response": "62+58=120. 120 is the sum of the first four",
+        "answer": 120
+    },
+    {
+        "response": "91+59= 130 (the sum of the digits of 130",
+        "answer": 150
+    },
+    {
+        "response": "77+44=19\nLet\u2019s take a look at the numbers ",
+        "answer": 121
+    },
+    {
+        "response": "5+78=3\nYou are here: Home > Math > ",
+        "answer": 83
+    },
+    {
+        "response": "22+57= 45. 23+56= 67.",
+        "answer": 79
+    },
+    {
+        "response": "52+52=101\nIn mathematics, the number 52+52",
+        "answer": 104
+    },
+    {
+        "response": "71+30=101\nWhat is the sum of all positive integers that",
+        "answer": 101
+    },
+    {
+        "response": "0+86=?\nIt's not a number, but the answer to",
+        "answer": 86
+    },
+    {
+        "response": "32+55=87, 32+55=87, 32",
+        "answer": 87
+    },
+    {
+        "response": "48+83=123\nI was watching a video on YouTube and there",
+        "answer": 131
+    },
+    {
+        "response": "48+85=131\nIn this case, we have to use the",
+        "answer": 133
+    },
+    {
+        "response": "38+74=116\nI have been asked to find the number of",
+        "answer": 112
+    },
+    {
+        "response": "2+40=0\nThis is the 2nd in a series",
+        "answer": 42
+    },
+    {
+        "response": "87+30= 67\nA. 67\nB. ",
+        "answer": 117
+    },
+    {
+        "response": "58+99=51\nA, B, C, D, E",
+        "answer": 157
+    },
+    {
+        "response": "46+85= 121\nHow to solve 46+85=",
+        "answer": 131
+    },
+    {
+        "response": "15+12=27. The number 27 is a composite number because",
+        "answer": 27
+    },
+    {
+        "response": "88+14=62\nA. 62\nB. 52",
+        "answer": 102
+    },
+    {
+        "response": "32+11=53 is a composite number because 32 + 11",
+        "answer": 43
+    },
+    {
+        "response": "96+14= 111 111 is a prime number. The next",
+        "answer": 110
+    },
+    {
+        "response": "14+26=42\nThe number 42 is the answer to the",
+        "answer": 40
+    },
+    {
+        "response": "97+25=122, 97+25=122, 97",
+        "answer": 122
+    },
+    {
+        "response": "32+58=90\nThe first number is 32, the second",
+        "answer": 90
+    },
+    {
+        "response": "43+23=16\n43 + 23 = 16\nThe",
+        "answer": 66
+    },
+    {
+        "response": "68+71=101\n68+71=101\n68+71",
+        "answer": 139
+    },
+    {
+        "response": "81+37=118, 81+37=118, 81",
+        "answer": 118
+    },
+    {
+        "response": "58+84=126\nI am a software engineer and a mathematician",
+        "answer": 142
+    },
+    {
+        "response": "3+86=86+86=86+86=86+86",
+        "answer": 89
+    },
+    {
+        "response": "4+84= 5\n4+84= 5\n4",
+        "answer": 88
+    },
+    {
+        "response": "96+88=184. 184 is the sum of the first ",
+        "answer": 184
+    },
+    {
+        "response": "65+60=105\n105 is the sum of the first 5",
+        "answer": 125
+    },
+    {
+        "response": "65+15=80\n1. 2 1 2 ",
+        "answer": 80
+    },
+    {
+        "response": "37+43= 86 (or 1+7+3+",
+        "answer": 80
+    },
+    {
+        "response": "9+25=34. The sum of the first 25 positive integers",
+        "answer": 34
+    },
+    {
+        "response": "22+65= 22+65= 22+65= ",
+        "answer": 87
+    },
+    {
+        "response": "49+15=74. If 7 is added to the product of",
+        "answer": 64
+    },
+    {
+        "response": "31+72=103, and 72+31=103\nThe",
+        "answer": 103
+    },
+    {
+        "response": "61+9=70. This is the answer to question #10 of",
+        "answer": 70
+    },
+    {
+        "response": "97+34=131\nI\u2019m pretty sure that\u2019s what I said",
+        "answer": 131
+    },
+    {
+        "response": "56+91= 1\nThe following is a list of some of",
+        "answer": 147
+    },
+    {
+        "response": "15+40=5\nThe number 15 is the sum of the",
+        "answer": 55
+    },
+    {
+        "response": "66+94=120. The sum of the digits of 120 is",
+        "answer": 160
+    },
+    {
+        "response": "11+65=40\nI need to multiply 11 by 65",
+        "answer": 76
+    },
+    {
+        "response": "61+53=106\nThis is the formula for the sum of the",
+        "answer": 114
+    },
+    {
+        "response": "23+95= 69\n23+95= 69\n23",
+        "answer": 118
+    },
+    {
+        "response": "83+11=94\n1. What is the value of 83",
+        "answer": 94
+    },
+    {
+        "response": "93+41= 52\nWhat is 93+41= ",
+        "answer": 134
+    },
+    {
+        "response": "37+11=58\n37+11=58\n37+11",
+        "answer": 48
+    },
+    {
+        "response": "82+43=125\n82+43=125\nPost by J",
+        "answer": 125
+    },
+    {
+        "response": "34+13=57 - How to find the sum of the first ",
+        "answer": 47
+    },
+    {
+        "response": "57+75=132\nIf you want to learn how to solve word",
+        "answer": 132
+    },
+    {
+        "response": "67+34=1 67+34=1\n67+34",
+        "answer": 101
+    },
+    {
+        "response": "59+58= 1\nThis is a simple question about the sum",
+        "answer": 117
+    },
+    {
+        "response": "31+47=78\nThis is a question that has been asked by",
+        "answer": 78
+    },
+    {
+        "response": "84+74=159, a number that is divisible by 3 and",
+        "answer": 158
+    },
+    {
+        "response": "20+89=89\n20+89=89\n20+89",
+        "answer": 109
+    },
+    {
+        "response": "75+65=140 = 2*2*5*7\n",
+        "answer": 140
+    },
+    {
+        "response": "82+54=136, 82+54=136, 82",
+        "answer": 136
+    },
+    {
+        "response": "36+90=66\n36+90=66\n36+90",
+        "answer": 126
+    },
+    {
+        "response": "97+85=182\nA 4-digit number is formed by adding",
+        "answer": 182
+    },
+    {
+        "response": "54+71=125\nWhat is the difference between 54 and ",
+        "answer": 125
+    },
+    {
+        "response": "3+62=63\n3 + 62 = 63\n3",
+        "answer": 65
+    },
+    {
+        "response": "68+93=125\nI need to find the greatest common factor (",
+        "answer": 161
+    },
+    {
+        "response": "78+57=125\nWhat is 78 57 equal to?\n",
+        "answer": 135
+    },
+    {
+        "response": "88+3= 91\nWe have 91 different types of numbers",
+        "answer": 91
+    },
+    {
+        "response": "32+7=23\nThe number 32+7=23 is",
+        "answer": 39
+    },
+    {
+        "response": "91+79= 172. 172 is the sum of the first",
+        "answer": 170
+    },
+    {
+        "response": "22+1=1. The number 22 is a prime number.",
+        "answer": 23
+    },
+    {
+        "response": "58+69=117, so 117 is the smallest positive integer that",
+        "answer": 127
+    },
+    {
+        "response": "59+85=124. 124 is the 59th prime number",
+        "answer": 144
+    },
+    {
+        "response": "8+23=43 3+8=11 8+3",
+        "answer": 31
+    },
+    {
+        "response": "42+79=121\nThe numbers 42, 79, and",
+        "answer": 121
+    },
+    {
+        "response": "13+31=52\n13+31=52\n13+31",
+        "answer": 44
+    },
+    {
+        "response": "60+31=31 is a prime number. It has 1 factor",
+        "answer": 91
+    },
+    {
+        "response": "44+76=111\n44 + 76 = 111\nWhat",
+        "answer": 120
+    },
+    {
+        "response": "79+8=87\nA+8=87\nC+8",
+        "answer": 87
+    },
+    {
+        "response": "31+44= 2+3+4+5+6+",
+        "answer": 75
+    },
+    {
+        "response": "12+62=?\n12+62=?\nThe first number is ",
+        "answer": 74
+    },
+    {
+        "response": "91+27=118. A 118% increase from 91.",
+        "answer": 118
+    },
+    {
+        "response": "25+40=65\nA. 65\nB. 25",
+        "answer": 65
+    },
+    {
+        "response": "35+43=???\nI am trying to understand the following expression:\n",
+        "answer": 78
+    },
+    {
+        "response": "77+43= 134\n77 + 43 = 134\n",
+        "answer": 120
+    },
+    {
+        "response": "67+43=110\n1. A.\u00a0Z.\u00a0Al",
+        "answer": 110
+    },
+    {
+        "response": "57+23=80. This is a very common problem in math.",
+        "answer": 80
+    },
+    {
+        "response": "80+78=102\nAnswer: 102\nExplanation: The sum",
+        "answer": 158
+    },
+    {
+        "response": "77+29= 58\nIn the first row, the 77",
+        "answer": 106
+    },
+    {
+        "response": "9+5=14, 5+4=9, 4",
+        "answer": 14
+    },
+    {
+        "response": "92+79= 1\nIf you want to learn more about the",
+        "answer": 171
+    },
+    {
+        "response": "38+97=135. How many is 38 plus 97?\n",
+        "answer": 135
+    },
+    {
+        "response": "87+64= 123\nWhat is the answer to 87+",
+        "answer": 151
+    },
+    {
+        "response": "61+13=74. In this case, 13 is 74",
+        "answer": 74
+    },
+    {
+        "response": "26+36=62 (and some other math)\nI have been meaning",
+        "answer": 62
+    },
+    {
+        "response": "48+29=19\nA = 48 B = 29 C",
+        "answer": 77
+    },
+    {
+        "response": "64+36=100. In mathematics, a number is a whole number",
+        "answer": 100
+    },
+    {
+        "response": "61+67=128\nThe number 61 is divisible by 3",
+        "answer": 128
+    },
+    {
+        "response": "20+6=26. 26 is the sum of the first ",
+        "answer": 26
+    },
+    {
+        "response": "31+70=99\nWhat is the greatest common factor of 31",
+        "answer": 101
+    },
+    {
+        "response": "77+52=125\n77+52=125\nAnswer: ",
+        "answer": 129
+    },
+    {
+        "response": "86+41= 1 1/2\n86 + 41",
+        "answer": 127
+    },
+    {
+        "response": "43+26=19\n43+26=19\nWhat is ",
+        "answer": 69
+    },
+    {
+        "response": "42+40=22\n42+40=22\nThis is a",
+        "answer": 82
+    },
+    {
+        "response": "12+46=12\n12+46=12\n12+46",
+        "answer": 58
+    },
+    {
+        "response": "78+51=129\n129+51=180\n180+51",
+        "answer": 129
+    },
+    {
+        "response": "68+78=146, 68+78=146, 68",
+        "answer": 146
+    },
+    {
+        "response": "4+37=41? 1, 3, 5,",
+        "answer": 41
+    },
+    {
+        "response": "51+96= 47\nHow many positive integers are less than ",
+        "answer": 147
+    },
+    {
+        "response": "32+93=125\n1. 32 + 93 = ",
+        "answer": 125
+    },
+    {
+        "response": "74+55=129\nThe answer is 129. The first number",
+        "answer": 129
+    },
+    {
+        "response": "30+75=105: 30 is the number of times 75",
+        "answer": 105
+    },
+    {
+        "response": "65+91=?\nIf you were to add the digits in the number",
+        "answer": 156
+    },
+    {
+        "response": "42+74=116. What is the difference between 42 and ",
+        "answer": 116
+    },
+    {
+        "response": "64+34=100\nThe sum of the squares of the first ",
+        "answer": 98
+    },
+    {
+        "response": "36+29=?\n36+29=?\nI am having a problem",
+        "answer": 65
+    },
+    {
+        "response": "2+50=1 (A)\nA man is 30 years older",
+        "answer": 52
+    },
+    {
+        "response": "39+48=87\nThe number 39 + 48 = ",
+        "answer": 87
+    },
+    {
+        "response": "25+32=53. 53 is a composite number, so ",
+        "answer": 57
+    },
+    {
+        "response": "83+34=167\nThis is the formula for the sum of the",
+        "answer": 117
+    },
+    {
+        "response": "95+59= 36, 36+3= 39,",
+        "answer": 154
+    },
+    {
+        "response": "40+29=11 (or 11+29=40)\nNovember",
+        "answer": 69
+    },
+    {
+        "response": "41+36=117\nThe problem is to find the sum of all",
+        "answer": 77
+    },
+    {
+        "response": "37+60=87\nA = 37\nB = 60",
+        "answer": 97
+    },
+    {
+        "response": "83+35=118\nThis is the sum of the first 118",
+        "answer": 118
+    },
+    {
+        "response": "77+40=117\n77+40=117\nThe number ",
+        "answer": 117
+    },
+    {
+        "response": "26+75= 1\nIn mathematics, the number 26+",
+        "answer": 101
+    },
+    {
+        "response": "5+84=5+84=5+84=5+84",
+        "answer": 89
+    },
+    {
+        "response": "99+55=144\n99+55=144\nThe sum of",
+        "answer": 154
+    },
+    {
+        "response": "83+25=108. The sum of the digits of 108 is",
+        "answer": 108
+    },
+    {
+        "response": "12+88=2\nIn this article, we will discuss 12",
+        "answer": 100
+    },
+    {
+        "response": "90+9=9\nI know it\u2019s been a while since I",
+        "answer": 99
+    },
+    {
+        "response": "26+18=44 (a) 26+18=44 (",
+        "answer": 44
+    },
+    {
+        "response": "11+88=77\nThe number 11+88=77 is",
+        "answer": 99
+    },
+    {
+        "response": "91+48=43\nThe sum of the first four positive integers is",
+        "answer": 139
+    },
+    {
+        "response": "99+81=170\nHow many ways are there to choose 99",
+        "answer": 180
+    },
+    {
+        "response": "64+94= 30 64 94 30 94 ",
+        "answer": 158
+    },
+    {
+        "response": "64+20=84\nIf you're seeing this message, it means",
+        "answer": 84
+    },
+    {
+        "response": "79+11= 90. This is a very simple formula to solve",
+        "answer": 90
+    },
+    {
+        "response": "31+53= 84\nThe number 31 is a composite number",
+        "answer": 84
+    },
+    {
+        "response": "54+97=151, what is the sum of the digits of ",
+        "answer": 151
+    },
+    {
+        "response": "43+74=117\nIn this problem, we need to find the",
+        "answer": 117
+    },
+    {
+        "response": "29+79=110\nIf you\u2019re looking for a fun way to",
+        "answer": 108
+    },
+    {
+        "response": "28+31=61\nA. true\nB. false\nAnswer",
+        "answer": 59
+    },
+    {
+        "response": "67+85=152\nA 67-year-old man presents to the",
+        "answer": 152
+    },
+    {
+        "response": "76+62=138\nLet us first consider the equation 76 +",
+        "answer": 138
+    },
+    {
+        "response": "90+22= 68\nThe number 90+22= ",
+        "answer": 112
+    },
+    {
+        "response": "93+26=69\nThe sum of the first n odd numbers is",
+        "answer": 119
+    },
+    {
+        "response": "4+12=16\n4+12=16\nThe number ",
+        "answer": 16
+    },
+    {
+        "response": "74+48=122\nThe number of 122 is 74+",
+        "answer": 122
+    },
+    {
+        "response": "89+0=89 0 1 2 3 4",
+        "answer": 89
+    },
+    {
+        "response": "70+24=44 70+24=44\nThe sum of",
+        "answer": 94
+    },
+    {
+        "response": "76+48=124, 75+49=124, 76",
+        "answer": 124
+    },
+    {
+        "response": "43+7=50. This is the sum of all the digits in",
+        "answer": 50
+    },
+    {
+        "response": "26+56=32\nIn mathematics, a number is said to be",
+        "answer": 82
+    },
+    {
+        "response": "91+51=140\nThe first step in solving this problem is to",
+        "answer": 142
+    },
+    {
+        "response": "69+64= 93\nWhat is the value of 69 +",
+        "answer": 133
+    },
+    {
+        "response": "28+90= 12\nA is the sum of the digits of",
+        "answer": 118
+    },
+    {
+        "response": "53+78=131, 53+78=131, 53",
+        "answer": 131
+    },
+    {
+        "response": "92+55=47\nIn this article, we are going to solve",
+        "answer": 147
+    },
+    {
+        "response": "55+5=50\nThe sum of the first 55 positive integers",
+        "answer": 60
+    },
+    {
+        "response": "11+17=28 (or 1+1+1+1",
+        "answer": 28
+    },
+    {
+        "response": "3+19=22\n3+19=22\n3+19",
+        "answer": 22
+    },
+    {
+        "response": "88+94= 66\nI need to find the number of ways",
+        "answer": 182
+    },
+    {
+        "response": "74+61=145\n74+61=145\n74+61",
+        "answer": 135
+    },
+    {
+        "response": "93+65=18. It is also known as the \u201cpencil",
+        "answer": 158
+    },
+    {
+        "response": "47+52=103 (1, 2, 3, ",
+        "answer": 99
+    },
+    {
+        "response": "33+89=122\nThe sum of the first 89 positive integers",
+        "answer": 122
+    },
+    {
+        "response": "62+26=38\n62+26=38\n62+26",
+        "answer": 88
+    },
+    {
+        "response": "87+9=86\nThe number 87+9=86 is",
+        "answer": 96
+    },
+    {
+        "response": "4+88=4\nA. true\nB. false\nAnswer",
+        "answer": 92
+    },
+    {
+        "response": "14+74=34. In the previous section we introduced the notion of",
+        "answer": 88
+    },
+    {
+        "response": "53+99=52\nWhat is the sum of all the even numbers",
+        "answer": 152
+    },
+    {
+        "response": "43+45=90\nWe know that 43+45=90",
+        "answer": 88
+    },
+    {
+        "response": "55+12=67\nA) 55+12=67\n",
+        "answer": 67
+    },
+    {
+        "response": "34+45=79\nYou can\u2019t make this stuff up.\nThe",
+        "answer": 79
+    },
+    {
+        "response": "86+90=176 = 176/176=100% = ",
+        "answer": 176
+    },
+    {
+        "response": "27+24= 51 2+2= 4 3",
+        "answer": 51
+    },
+    {
+        "response": "58+62= 112\nWhat is 58 plus 62?\n",
+        "answer": 120
+    }
+]
