@@ -1,6 +1,7 @@
 import random
 import json
 import re
+from constants import HF_TOKEN 
 
 def load_model(argv):
     if len(argv) > 1:
@@ -12,7 +13,7 @@ def load_model(argv):
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from huggingface_hub import login
 
-    login()
+    login(HF_TOKEN)
     model = AutoModelForCausalLM.from_pretrained(model_name, device_map='auto')
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.pad_token = tokenizer.eos_token
@@ -67,4 +68,4 @@ def gen_2d_add_dataset(dataset_fname, samples):
     dataset = {prompt: answer for prompt, answer in selected}
 
     with open(dataset_fname, 'w') as f:
-        json.dump(dataset, f, indent=4)
+        json.dump(dataset, f, indent=4)    
