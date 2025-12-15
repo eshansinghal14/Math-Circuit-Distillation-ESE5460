@@ -5,11 +5,14 @@ from torch import nn
 from torch.nn import functional as F
 
 from transformers import AutoConfig
+from huggingface_hub import login
+
 import boto3
-from constants import BUCKET_NAME
+from constants import BUCKET_NAME, HF_TOKEN
 
 s3 = boto3.client('s3')
 
+login(HF_TOKEN)
 llama_1b = 'meta-llama/Llama-3.2-1B'
 llama_8b = 'meta-llama/Meta-Llama-3-8B'
 
@@ -69,11 +72,13 @@ class ActivationsEncoder(nn.Module):
     def __init__(self, model, input_dim, embedding_dim, output_dim, num_layers=4, num_heads=4, max_seq_len=9):
         super().__init__()
 
-        self.input_proj = nn.Sequential(
-            nn.Linear(input_dim, embedding_dim),
-            nn.ReLU(),
-            nn.Linear(embedding_dim, embedding_dim),
-        )
+        # self.input_proj = nn.Sequential(
+        #     nn.Linear(input_dim, config[model].intermediate_size),
+        #     nn.ReLU(),
+        #     nn.Linear(config[model].intermediate_size, embedding_dim),
+        # )
+        print('expected input dim: ', input_dim)
+        self.input_proj = nn.Linear(input_dim, embedding_dim)
 
         self.max_seq_len = max_seq_len
         num_term_ids = 5
@@ -89,6 +94,7 @@ class ActivationsEncoder(nn.Module):
         self.output_proj = nn.Linear(embedding_dim, output_dim)
 
     def forward(self, activations, term_encoding):
+        print(activations.shape)
         x = self.input_proj(activations)
         _, seq_len, _ = x.shape
 
@@ -295,7 +301,7 @@ def train_circuit_discovery(
 
     # Align by suffix so batches correspond across models
     def suffix_map(keys):
-        return {k.split("/", 2)[-1]: k for k in keys}
+        return {k.split("/")[-1]: k for k in keys}
 
     map_1b = suffix_map(keys_1b)
     map_8b = suffix_map(keys_8b)
@@ -315,7 +321,21 @@ def train_circuit_discovery(
             # Wrap around to the beginning if we run past the end
             epoch_suffixes = shared_suffixes[start:] + shared_suffixes[: end - len(shared_suffixes)]
 
-        stats = {"loss": [], "class_usage_entropy": [], "frac_1b": [], "frac_8b": [], "class_entropy": []}
+        # We will process each file separately (to keep memory usage manageable),
+        # but accumulate all outputs and compute a single loss over the combined
+        # mini-batch of files in this epoch chunk.
+        all_hard_class_probs = []
+        all_masked_1b = []
+        all_masked_8b = []
+        all_mask_1b = []
+        all_mask_8b = []
+
+        frac_1b_list = []
+        frac_8b_list = []
+        class_ent_list = []
+
+        model.train()
+        optimizer.zero_grad()
 
         for suffix in epoch_suffixes:
             key_1b = map_1b[suffix]
@@ -343,9 +363,6 @@ def train_circuit_discovery(
 
             op1, op2, res, term_encoding = parse_equation(prompts, device=device)
 
-            model.train()
-            optimizer.zero_grad()
-
             outputs = model(op1, op2, res, activations_1b, activations_8b, term_encoding)
 
             hard_class_probs = outputs["hard_class_probs"]
@@ -354,35 +371,48 @@ def train_circuit_discovery(
             mask_1b = outputs["mask_1b"]
             mask_8b = outputs["mask_8b"]
 
-            loss_dict = criterion(hard_class_probs, masked_1b, masked_8b, mask_1b, mask_8b)
-            loss = loss_dict["loss"]
-            loss.backward()
-            optimizer.step()
+            all_hard_class_probs.append(hard_class_probs)
+            all_masked_1b.append(masked_1b)
+            all_mask_1b.append(mask_1b)
+            all_masked_8b.append(masked_8b)
+            all_mask_8b.append(mask_8b)
 
             with torch.no_grad():
-                class_freq = hard_class_probs.float().mean(dim=0)
-                class_freq = torch.clamp(class_freq, 1e-8, 1.0)
-                class_usage_entropy = - (class_freq * class_freq.log()).sum().item()
-                frac_1b = float(outputs["frac_activated_1b"])
-                frac_8b = float(outputs["frac_activated_8b"])
-                class_ent = float(outputs["class_entropy"])
+                frac_1b_list.append(float(outputs["frac_activated_1b"]))
+                frac_8b_list.append(float(outputs["frac_activated_8b"]))
+                class_ent_list.append(float(outputs["class_entropy"]))
 
-            stats["loss"].append(loss.item())
-            stats["class_usage_entropy"].append(class_usage_entropy)
-            stats["frac_1b"].append(frac_1b)
-            stats["frac_8b"].append(frac_8b)
-            stats["class_entropy"].append(class_ent)
+        # If no valid batches were accumulated (e.g. due to prompt mismatch), skip epoch
+        if not all_hard_class_probs:
+            continue
 
-        def avg(key):
-            return float(sum(stats[key]) / len(stats[key])) if stats[key] else float("nan")
+        hard_class_probs = torch.cat(all_hard_class_probs, dim=0)
+        masked_1b = torch.cat(all_masked_1b, dim=0)
+        masked_8b = torch.cat(all_masked_8b, dim=0)
+        mask_1b = torch.cat(all_mask_1b, dim=0)
+        mask_8b = torch.cat(all_mask_8b, dim=0)
+
+        loss_dict = criterion(hard_class_probs, masked_1b, masked_8b, mask_1b, mask_8b)
+        loss = loss_dict["loss"]
+        loss.backward()
+        optimizer.step()
+
+        with torch.no_grad():
+            class_freq = hard_class_probs.float().mean(dim=0)
+            class_freq = torch.clamp(class_freq, 1e-8, 1.0)
+            class_usage_entropy = - (class_freq * class_freq.log()).sum().item()
+
+            frac_1b = sum(frac_1b_list) / len(frac_1b_list) if frac_1b_list else float("nan")
+            frac_8b = sum(frac_8b_list) / len(frac_8b_list) if frac_8b_list else float("nan")
+            class_ent = sum(class_ent_list) / len(class_ent_list) if class_ent_list else float("nan")
 
         epoch_metrics = {
             "epoch": epoch + 1,
-            "loss": avg("loss"),
-            "class_usage_entropy": avg("class_usage_entropy"),
-            "frac_activated_1b": avg("frac_1b"),
-            "frac_activated_8b": avg("frac_8b"),
-            "class_entropy": avg("class_entropy"),
+            "loss": float(loss.item()),
+            "class_usage_entropy": float(class_usage_entropy),
+            "frac_activated_1b": float(frac_1b),
+            "frac_activated_8b": float(frac_8b),
+            "class_entropy": float(class_ent),
         }
 
         print(
