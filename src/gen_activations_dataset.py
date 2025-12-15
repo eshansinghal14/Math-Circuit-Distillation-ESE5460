@@ -4,13 +4,13 @@ from collections import deque
 import torch
 import boto3
 from utils import load_model, parse_answer
+from constants import BUCKET_NAME
 
 model, tokenizer = load_model(sys.argv)
 model_name = sys.argv[1]
 model.eval()
 
 s3 = boto3.client('s3')
-BUCKET_NAME = 'math-circuit-distillation-ese5460'
 
 with open('../datasets/2d_add_all.json', 'r') as f:
     dataset = json.load(f)
