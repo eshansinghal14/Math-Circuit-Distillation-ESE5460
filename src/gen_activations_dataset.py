@@ -15,7 +15,7 @@ s3 = boto3.client('s3')
 with open('../datasets/2d_add_all.json', 'r') as f:
     dataset = json.load(f)
 
-with open('../datasets/2d_add_test.json', 'r') as f:
+with open(f'../results/{model_name}/2d_add_all.json', 'r') as f:
     test_dataset = json.load(f)
 
 inputs = []
