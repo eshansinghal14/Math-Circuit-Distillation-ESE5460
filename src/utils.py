@@ -2,6 +2,7 @@ import random
 import json
 import re
 from constants import HF_TOKEN 
+import torch
 
 def load_model(argv):
     if len(argv) > 1:
@@ -27,7 +28,6 @@ def test_model(model, tokenizer, dataset_fname, results_fname, batch_size=50):
     prompts = list(dataset.keys())
     results = []
     for i in range(0, len(prompts), batch_size):
-        import torch
         with torch.no_grad():
             print(f'processing {i}/{len(prompts)}')
             batched_prompts = prompts[i:i + batch_size]   
@@ -62,6 +62,7 @@ def gen_2d_add_dataset(dataset_fname, samples):
 
     if samples is None or samples >= len(all_pairs):
         selected = all_pairs
+        random.shuffle(selected)
     else:
         selected = random.sample(all_pairs, samples)
 
