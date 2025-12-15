@@ -19,19 +19,19 @@ def load_model(argv):
     tokenizer.padding_size = 'left'
     return model, tokenizer
 
-def test_model(model, tokenizer, dataset_fname, results_fname, samples=1000, batch_size=50):
+def test_model(model, tokenizer, dataset_fname, results_fname, batch_size=50):
     model.eval()
     with open(dataset_fname, 'r') as f:
         dataset = json.load(f)
     prompts = list(dataset.keys())
     results = []
-    for i in range(0, samples, batch_size):
+    for i in range(0, len(prompts), batch_size):
         import torch
         with torch.no_grad():
-            print(f'processing {i}/{samples}')
+            print(f'processing {i}/{len(prompts)}')
             batched_prompts = prompts[i:i + batch_size]   
-            input_ids = tokenizer(batched_prompts, return_tensors="pt", do_sample=False, padding=True, truncation=True).to(model.device)
-            outputs = model.generate(**input_ids, max_new_tokens=5, pad_token_id=tokenizer.pad_token_id)
+            input_ids = tokenizer(batched_prompts, return_tensors="pt", padding=True, truncation=True).to(model.device)
+            outputs = model.generate(**input_ids, max_new_tokens=5, do_sample=False, pad_token_id=tokenizer.pad_token_id)
             responses = tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
             for k, resp in enumerate(responses):
