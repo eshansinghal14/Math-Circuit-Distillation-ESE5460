@@ -44,7 +44,7 @@ def make_hook(layer_idx):
 
 # Register hooks
 for i, layer in enumerate(model.model.layers):
-    h = layer.mlp.register_forward_hook(make_hook(i))
+    h = layer.mlp.up_proj.register_forward_hook(make_hook(i))
     handles.append(h)
 
 # Iterate through prompts in batches and run deterministic generation,
@@ -65,7 +65,7 @@ with torch.no_grad():
         batch_activations = {}
         for layer_idx, chunks in layer_activations.items():
             batch_activations[layer_idx] = torch.cat(chunks, dim=0)
-
+        
         activations = {
             'prompts': inputs[i: i + min(batch_size, len(inputs) - i)],
             'activations': batch_activations,
