@@ -2,11 +2,15 @@ import json
 import sys
 from collections import deque
 import torch
+import boto3
 from utils import load_model, parse_answer
 
 model, tokenizer = load_model(sys.argv)
 model_name = sys.argv[1]
 model.eval()
+
+s3 = boto3.client('s3')
+BUCKET_NAME = 'math-circuit-distillation-ese5460'
 
 with open('../datasets/2d_add_all.json', 'r') as f:
     dataset = json.load(f)
@@ -66,7 +70,8 @@ with torch.no_grad():
             'prompts': inputs[i: i + min(batch_size, len(inputs) - i)],
             'activations': batch_activations,
         }
-        torch.save(activations, f'../mlp_activations/{model_name}/{i//batch_size}.pt')
+        torch.save(activations, '/tmp/activations.pt')
+        s3.upload_file('/tmp/activations.pt', BUCKET_NAME, f'mlp_activations/{model_name}/{i}_{len(inputs)}.pt')
 
 # Remove hooks
 for h in handles:
