@@ -161,8 +161,7 @@ class CircuitDiscoveryModel(nn.Module):
 
         with torch.no_grad():
             soft_class_probs = F.gumbel_softmax(logits, tau=self.tau, hard=False, dim=-1)
-            # Reuse CircuitLoss binary_entropy implementation for class entropy metric
-            class_entropy = CircuitLoss().binary_entropy(soft_class_probs)
+            class_entropy = -(soft_class_probs * torch.log(soft_class_probs)).sum(dim=-1).mean()
             frac_activated_1b = torch.sum(mask_1b) / torch.numel(mask_1b)
             frac_activated_8b = torch.sum(mask_8b) / torch.numel(mask_8b)
 
@@ -250,42 +249,6 @@ def _stack_layer_activations(batch_activations):
     tensors = [batch_activations[i] for i in layers]
     return torch.cat(tensors, dim=-1)
 
-
-def _load_s3_activation_batches(model_name, prefix_root="mlp_activations"):
-    """Yield activation batches (prompts, activations_dict) from S3 for a given model.
-
-    Each object was saved by gen_activations_dataset.py as a torch file with keys:
-        'prompts': List[str]
-        'activations': Dict[int, Tensor[batch, seq_len, hidden]]
-    """
-
-    prefix = f"{prefix_root}/{model_name}/"
-    continuation_token = None
-
-    while True:
-        if continuation_token is None:
-            resp = s3.list_objects_v2(Bucket=BUCKET_NAME, Prefix=prefix)
-        else:
-            resp = s3.list_objects_v2(
-                Bucket=BUCKET_NAME,
-                Prefix=prefix,
-                ContinuationToken=continuation_token,
-            )
-
-        for obj in resp.get("Contents", []):
-            key = obj["Key"]
-            # Download to memory and load with torch
-            buf = torch.tensor([])  # placeholder to ensure torch is imported
-            local_path = "/tmp/activations_tmp.pt"
-            s3.download_file(BUCKET_NAME, key, local_path)
-            batch = torch.load(local_path, map_location="cpu")
-            yield key, batch["prompts"], batch["activations"]
-
-        if not resp.get("IsTruncated"):
-            break
-        continuation_token = resp.get("NextContinuationToken")
-
-
 def train_circuit_discovery(
     k_classes,
     epochs=1,
@@ -343,8 +306,14 @@ def train_circuit_discovery(
     files_per_epoch = 5  # one epoch = 5 files ≈ 250 samples
 
     for epoch in range(epochs):
-        # Use the first files_per_epoch batches deterministically for each epoch
-        epoch_suffixes = shared_suffixes[:files_per_epoch]
+        # Walk through the list in contiguous blocks of files_per_epoch, wrapping if needed
+        start = (epoch * files_per_epoch) % len(shared_suffixes)
+        end = start + files_per_epoch
+        if end <= len(shared_suffixes):
+            epoch_suffixes = shared_suffixes[start:end]
+        else:
+            # Wrap around to the beginning if we run past the end
+            epoch_suffixes = shared_suffixes[start:] + shared_suffixes[: end - len(shared_suffixes)]
 
         stats = {"loss": [], "class_usage_entropy": [], "frac_1b": [], "frac_8b": [], "class_entropy": []}
 
