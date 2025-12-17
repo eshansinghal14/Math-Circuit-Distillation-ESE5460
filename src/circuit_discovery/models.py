@@ -260,6 +260,7 @@ class CircuitLoss(nn.Module):
         return total_loss, sim_loss, kl_bernoulli_loss, entropy_loss, mask_cossim
 
     def forward(self, hard_class_probs, masked_activations_1b, masked_activations_8b, mask_1b, mask_8b, class_masks_1b, class_masks_8b):
+        assert torch.isfinite(class_masks_1b).all(), "class_masks_1b non-finite"
         loss_1b, sim_loss_1b, kl_bernoulli_loss_1b, entropy_loss_1b, mask_cossim_1b = self.combined_loss(hard_class_probs, masked_activations_1b, mask_1b, class_masks_1b)
         loss_8b, sim_loss_8b, kl_bernoulli_loss_8b, entropy_loss_8b, mask_cossim_8b = self.combined_loss(hard_class_probs, masked_activations_8b, mask_8b, class_masks_8b)
         total_loss = loss_1b + loss_8b
