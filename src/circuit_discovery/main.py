@@ -12,12 +12,13 @@ from .utils import (
     log_epoch_metrics,
 )
 from .models import CircuitDiscoveryModel, CircuitLoss, _mean_pairwise_mask_cossim
-from ..utils import list_keys, suffix_map
+from utils import list_keys, suffix_map, load_model_checkpoint
 
 
 def train_circuit_discovery(
     k_classes,
     epochs=1,
+    resume_model=None,
     lr=1e-3,
     device=None,
     cache_dir=None,
@@ -25,11 +26,15 @@ def train_circuit_discovery(
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    model = CircuitDiscoveryModel(k_classes=k_classes).to(device)
-    criterion = CircuitLoss().to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    if resume_model is None:
+        model = CircuitDiscoveryModel(k_classes=k_classes).to(device)
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        metrics_log = []
+        start_epoch = 0
+    else:
+        model, optimizer, metrics_log, start_epoch = load_model_checkpoint(resume_model, k_classes, lr)
 
-    metrics_log = []
+    criterion = CircuitLoss().to(device)
 
     keys_1b = list_keys(llama_1b)
     keys_8b = list_keys(llama_8b)
@@ -42,7 +47,7 @@ def train_circuit_discovery(
 
     files_per_epoch = 5
 
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, epochs):
         start = (epoch * files_per_epoch) % len(shared_suffixes)
         end = start + files_per_epoch
         if end <= len(shared_suffixes):
@@ -130,6 +135,12 @@ def train_circuit_discovery(
         masked_8b = torch.cat(all_masked_8b, dim=0)
         mask_1b = torch.cat(all_mask_1b, dim=0)
         mask_8b = torch.cat(all_mask_8b, dim=0)
+
+        assert torch.isfinite(mask_1b).all(), "mask_1b non-finite"
+        assert torch.isfinite(mask_8b).all(), "mask_8b non-finite"
+        assert torch.isfinite(masked_1b).all(), "masked_1b non-finite"
+        assert torch.isfinite(masked_8b).all(), "masked_8b non-finite"
+        assert torch.isfinite(hard_class_probs).all(), "hard_class_probs non-finite"
 
         loss_dict = criterion(
             hard_class_probs,

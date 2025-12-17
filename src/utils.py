@@ -1,8 +1,12 @@
 import random
 import json
 import re
-from constants import HF_TOKEN 
 import torch
+import boto3
+import io
+
+from circuit_discovery.models import CircuitDiscoveryModel
+from constants import HF_TOKEN, BUCKET_NAME
 
 s3 = boto3.client("s3")
 
@@ -92,13 +96,17 @@ def list_keys(model_name):
 def suffix_map(keys):
     return {k.split("/")[-1]: k for k in keys}
 
-def load_custom_model(model_name):
+def load_model_checkpoint(model_name, k_classes, lr):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     obj = s3.get_object(Bucket=BUCKET_NAME, Key=f"circuit-discovery/{model_name}")
     bytestream = io.BytesIO(obj["Body"].read())
 
     checkpoint = torch.load(bytestream, map_location=device)
 
-    model = CircuitDiscoveryModel(k_classes=8).to(device)
+    model = CircuitDiscoveryModel(k_classes=k_classes).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
-    return model
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+    return model, optimizer, checkpoint["metrics_log"], checkpoint["epoch"]
