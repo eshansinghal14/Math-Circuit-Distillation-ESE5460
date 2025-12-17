@@ -5,8 +5,8 @@ import torch
 import boto3
 import io
 
-from circuit_discovery.models import CircuitDiscoveryModel
 from constants import HF_TOKEN, BUCKET_NAME
+from transformers.utils import logging as hf_logging
 
 s3 = boto3.client("s3")
 
@@ -18,6 +18,7 @@ def get_model_name(argv):
         exit()
 
 def load_model(argv):
+    hf_logging.set_verbosity_error()
     model_name = get_model_name(argv)
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -30,7 +31,7 @@ def load_model(argv):
     tokenizer.padding_size = 'left'
     return model, tokenizer
 
-def test_model(model, tokenizer, dataset_fname, results_fname, batch_size=50):
+def test_model(model, tokenizer, dataset_fname, results_fname, batch_size=50, max_new_tokens=5, log=True):
     model.eval()
     with open(dataset_fname, 'r') as f:
         dataset = json.load(f)
@@ -38,10 +39,11 @@ def test_model(model, tokenizer, dataset_fname, results_fname, batch_size=50):
     results = []
     for i in range(0, len(prompts), batch_size):
         with torch.no_grad():
-            print(f'processing {i}/{len(prompts)}')
-            batched_prompts = prompts[i:i + batch_size]   
+            if log:
+                print(f'processing {i}/{len(prompts)}')
+            batched_prompts = prompts[i:min(i + batch_size, len(prompts))]   
             input_ids = tokenizer(batched_prompts, return_tensors="pt", padding=True, truncation=True).to(model.device)
-            outputs = model.generate(**input_ids, max_new_tokens=5, do_sample=False, pad_token_id=tokenizer.pad_token_id)
+            outputs = model.generate(**input_ids, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tokenizer.pad_token_id)
             responses = tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
             for k, resp in enumerate(responses):
@@ -49,6 +51,8 @@ def test_model(model, tokenizer, dataset_fname, results_fname, batch_size=50):
 
     with open(results_fname, 'w') as f:
         json.dump(results, f, indent=4)
+
+    return results
 
 def parse_answer(resp):
     match = re.search(r'=\s*(\d+)', resp)
@@ -64,9 +68,10 @@ def eval_model(results_fname):
             correct += 1
 
     print('Accuracy: ', correct / len(results))
+    return correct / len(results)
 
 # samples=None means all 2-digit addition pairs are added; otherwise sample without replacement
-def gen_2d_add_dataset(dataset_fname, samples):
+def gen_2d_add_dataset(dataset_fname, samples, tokenizer):
     all_pairs = [(f'{num1}+{num2}=', num1 + num2) for num1 in range(100) for num2 in range(100)]
 
     if samples is None or samples >= len(all_pairs):
@@ -75,10 +80,21 @@ def gen_2d_add_dataset(dataset_fname, samples):
     else:
         selected = random.sample(all_pairs, samples)
 
-    dataset = {prompt: answer for prompt, answer in selected}
+    dataset = []
+    for prompt, answer in selected:
+        q_str = prompt
+        a_str = str(answer)
+        ids = tokenizer.encode(q_str + a_str, add_special_tokens=False)
+        dataset.append(
+            {
+                "q_str": q_str,
+                "a_str": a_str,
+                "ids": ids,
+            }
+        )
 
     with open(dataset_fname, 'w') as f:
-        json.dump(dataset, f, indent=4)  
+        json.dump(dataset, f, indent=4)
 
 def list_keys(model_name):
     prefix = f"mlp_activations/{model_name}/"
@@ -100,6 +116,9 @@ def suffix_map(keys):
     return {k.split("/")[-1]: k for k in keys}
 
 def load_model_checkpoint(model_name, k_classes, lr):
+    # Import lazily to avoid circular import at module load time
+    from circuit_discovery.models import CircuitDiscoveryModel
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     obj = s3.get_object(Bucket=BUCKET_NAME, Key=f"circuit-discovery/{model_name}")
     bytestream = io.BytesIO(obj["Body"].read())
