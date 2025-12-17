@@ -202,7 +202,8 @@ def train_circuit_discovery(
 
         metrics_log.append(epoch_metrics)
 
-        results_dir = os.path.join(os.path.dirname(__file__), "..", "results", "circuit-discovery")
+        # Save metrics.json at repo_root/results/circuit-discovery
+        results_dir = os.path.join(os.path.dirname(__file__), "..", "..", "results", "circuit-discovery")
         os.makedirs(results_dir, exist_ok=True)
         metrics_path = os.path.join(results_dir, "metrics.json")
         with open(metrics_path, "w") as f:
