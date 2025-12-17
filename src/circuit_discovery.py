@@ -228,8 +228,8 @@ class CircuitLoss(nn.Module):
         return total_loss, sim_loss, sparsity_loss
 
     def forward(self, hard_class_probs, masked_activations_1b, masked_activations_8b, mask_1b, mask_8b):
-        loss_1b, sim_loss_1b, sparsity_loss_1b = combined_loss(hard_class_probs, masked_activations_1b, mask_1b)
-        loss_8b, sim_loss_8b, sparsity_loss_8b = combined_loss(hard_class_probs, masked_activations_8b, mask_8b)
+        loss_1b, sim_loss_1b, sparsity_loss_1b = self.combined_loss(hard_class_probs, masked_activations_1b, mask_1b)
+        loss_8b, sim_loss_8b, sparsity_loss_8b = self.combined_loss(hard_class_probs, masked_activations_8b, mask_8b)
         total_loss = loss_1b + loss_8b
 
         return {
