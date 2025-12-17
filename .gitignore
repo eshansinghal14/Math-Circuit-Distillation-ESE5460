@@ -1,3 +1,8 @@
-.venv src__pycache__
+.venv
+venv/
+src/__pycache__/
+__pycache__/
+*.pyc
 esinghal.pem
 src/constants.py
+checkpoints/
