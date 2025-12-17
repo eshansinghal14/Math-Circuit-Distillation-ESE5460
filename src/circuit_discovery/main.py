@@ -12,6 +12,7 @@ from .utils import (
     log_epoch_metrics,
 )
 from .models import CircuitDiscoveryModel, CircuitLoss, _mean_pairwise_mask_cossim
+from ..utils import list_keys, suffix_map
 
 
 def train_circuit_discovery(
@@ -19,7 +20,6 @@ def train_circuit_discovery(
     epochs=1,
     lr=1e-3,
     device=None,
-    prefix_root="mlp_activations",
     cache_dir=None,
 ):
     if device is None:
@@ -31,27 +31,8 @@ def train_circuit_discovery(
 
     metrics_log = []
 
-    def list_keys(model_name):
-        prefix = f"{prefix_root}/{model_name}/"
-        keys = []
-        token = None
-        while True:
-            kwargs = {"Bucket": BUCKET_NAME, "Prefix": prefix}
-            if token is not None:
-                kwargs["ContinuationToken"] = token
-            resp = s3.list_objects_v2(**kwargs)
-            for obj in resp.get("Contents", []):
-                keys.append(obj["Key"])
-            if not resp.get("IsTruncated"):
-                break
-            token = resp.get("NextContinuationToken")
-        return keys
-
     keys_1b = list_keys(llama_1b)
     keys_8b = list_keys(llama_8b)
-
-    def suffix_map(keys):
-        return {k.split("/")[-1]: k for k in keys}
 
     map_1b = suffix_map(keys_1b)
     map_8b = suffix_map(keys_8b)

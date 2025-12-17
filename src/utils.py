@@ -4,6 +4,8 @@ import re
 from constants import HF_TOKEN 
 import torch
 
+s3 = boto3.client("s3")
+
 def load_model(argv):
     if len(argv) > 1:
         model_name = argv[1]
@@ -69,4 +71,34 @@ def gen_2d_add_dataset(dataset_fname, samples):
     dataset = {prompt: answer for prompt, answer in selected}
 
     with open(dataset_fname, 'w') as f:
-        json.dump(dataset, f, indent=4)    
+        json.dump(dataset, f, indent=4)  
+
+def list_keys(model_name):
+    prefix = f"mlp_activations/{model_name}/"
+    keys = []
+    token = None
+    while True:
+        kwargs = {"Bucket": BUCKET_NAME, "Prefix": prefix}
+        if token is not None:
+            kwargs["ContinuationToken"] = token
+        resp = s3.list_objects_v2(**kwargs)
+        for obj in resp.get("Contents", []):
+            keys.append(obj["Key"])
+        if not resp.get("IsTruncated"):
+            break
+        token = resp.get("NextContinuationToken")
+    return keys  
+
+def suffix_map(keys):
+    return {k.split("/")[-1]: k for k in keys}
+
+def load_custom_model(model_name):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    obj = s3.get_object(Bucket=BUCKET_NAME, Key=f"circuit-discovery/{model_name}")
+    bytestream = io.BytesIO(obj["Body"].read())
+
+    checkpoint = torch.load(bytestream, map_location=device)
+
+    model = CircuitDiscoveryModel(k_classes=8).to(device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    return model
