@@ -435,8 +435,7 @@ def train_circuit_discovery(
 
 
 if __name__ == "__main__":
-    # Example: train with 4 subclasses
-    train_circuit_discovery(k_classes=10, epochs=1000)
+    train_circuit_discovery(k_classes=8, epochs=20000)
 
 
 

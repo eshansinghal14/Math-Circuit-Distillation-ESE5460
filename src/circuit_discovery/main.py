@@ -1,0 +1,237 @@
+import os
+import json
+import torch
+
+from .utils import (
+    s3,
+    BUCKET_NAME,
+    llama_1b,
+    llama_8b,
+    parse_equation,
+    _stack_layer_activations,
+)
+from .models import CircuitDiscoveryModel, CircuitLoss, _mean_pairwise_mask_cossim
+
+
+def train_circuit_discovery(
+    k_classes,
+    epochs=1,
+    lr=1e-3,
+    device=None,
+    prefix_root="mlp_activations",
+    cache_dir=None,
+):
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    model = CircuitDiscoveryModel(k_classes=k_classes).to(device)
+    criterion = CircuitLoss().to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+    metrics_log = []
+
+    def list_keys(model_name):
+        prefix = f"{prefix_root}/{model_name}/"
+        keys = []
+        token = None
+        while True:
+            kwargs = {"Bucket": BUCKET_NAME, "Prefix": prefix}
+            if token is not None:
+                kwargs["ContinuationToken"] = token
+            resp = s3.list_objects_v2(**kwargs)
+            for obj in resp.get("Contents", []):
+                keys.append(obj["Key"])
+            if not resp.get("IsTruncated"):
+                break
+            token = resp.get("NextContinuationToken")
+        return keys
+
+    keys_1b = list_keys(llama_1b)
+    keys_8b = list_keys(llama_8b)
+
+    def suffix_map(keys):
+        return {k.split("/")[-1]: k for k in keys}
+
+    map_1b = suffix_map(keys_1b)
+    map_8b = suffix_map(keys_8b)
+    shared_suffixes = list(set(map_1b.keys()) & set(map_8b.keys()))
+    if not shared_suffixes:
+        raise ValueError("No overlapping activation batches found for 1B and 8B models in S3.")
+
+    files_per_epoch = 5
+
+    for epoch in range(epochs):
+        start = (epoch * files_per_epoch) % len(shared_suffixes)
+        end = start + files_per_epoch
+        if end <= len(shared_suffixes):
+            epoch_suffixes = shared_suffixes[start:end]
+        else:
+            epoch_suffixes = shared_suffixes[start:] + shared_suffixes[: end - len(shared_suffixes)]
+
+        all_hard_class_probs = []
+        all_masked_1b = []
+        all_masked_8b = []
+        all_mask_1b = []
+        all_mask_8b = []
+
+        # Per-epoch metric accumulators
+        frac_1b_list = []
+        frac_8b_list = []
+        class_ent_list = []
+
+        model.train()
+        optimizer.zero_grad()
+
+        if cache_dir is None:
+            if os.path.exists("/opt/dlami/nvme"):
+                cache_dir_resolved = "/opt/dlami/nvme/circuit_discovery_cache"
+            else:
+                cache_dir_resolved = "/mnt/circuit_discovery_cache"
+        else:
+            cache_dir_resolved = cache_dir
+
+        os.makedirs(cache_dir_resolved, exist_ok=True)
+
+        for suffix in epoch_suffixes:
+            key_1b = map_1b[suffix]
+            key_8b = map_8b[suffix]
+
+            local_1b = os.path.join(cache_dir_resolved, f"1b_{suffix}")
+            local_8b = os.path.join(cache_dir_resolved, f"8b_{suffix}")
+
+            if not os.path.exists(local_1b):
+                s3.download_file(BUCKET_NAME, key_1b, local_1b)
+            if not os.path.exists(local_8b):
+                s3.download_file(BUCKET_NAME, key_8b, local_8b)
+
+            batch_1b = torch.load(local_1b, map_location="cpu")
+            batch_8b = torch.load(local_8b, map_location="cpu")
+
+            prompts_1b, activations_dict_1b = batch_1b["prompts"], batch_1b["activations"]
+            prompts_8b, activations_dict_8b = batch_8b["prompts"], batch_8b["activations"]
+
+            if prompts_1b != prompts_8b:
+                continue
+
+            prompts = prompts_1b
+
+            activations_1b = _stack_layer_activations(activations_dict_1b).to(device)
+            activations_8b = _stack_layer_activations(activations_dict_8b).to(device)
+
+            op1, op2, res, term_encoding = parse_equation(prompts, device=device)
+
+            outputs = model(op1, op2, res, activations_1b, activations_8b, term_encoding)
+
+            hard_class_probs = outputs["hard_class_probs"]
+            masked_1b = outputs["masked_activations_1b"]
+            masked_8b = outputs["masked_activations_8b"]
+            mask_1b = outputs["mask_1b"]
+            mask_8b = outputs["mask_8b"]
+
+            all_hard_class_probs.append(hard_class_probs)
+            all_masked_1b.append(masked_1b)
+            all_mask_1b.append(mask_1b)
+            all_masked_8b.append(masked_8b)
+            all_mask_8b.append(mask_8b)
+
+            # Per-file metrics that do not affect gradients
+            with torch.no_grad():
+                frac_1b_list.append(float((mask_1b > 0.95).float().mean()))
+                frac_8b_list.append(float((mask_8b > 0.95).float().mean()))
+                class_ent_list.append(float(outputs["class_entropy"]))
+
+        if not all_hard_class_probs:
+            continue
+
+        hard_class_probs = torch.cat(all_hard_class_probs, dim=0)
+        masked_1b = torch.cat(all_masked_1b, dim=0)
+        masked_8b = torch.cat(all_masked_8b, dim=0)
+        mask_1b = torch.cat(all_mask_1b, dim=0)
+        mask_8b = torch.cat(all_mask_8b, dim=0)
+
+        loss_dict = criterion(hard_class_probs, masked_1b, masked_8b, mask_1b, mask_8b)
+        loss = loss_dict["loss"]
+        loss.backward()
+        optimizer.step()
+
+        with torch.no_grad():
+            class_usage_entropy = float(loss_dict["class_usage_entropy"])
+
+            frac_1b = sum(frac_1b_list) / len(frac_1b_list) if frac_1b_list else float("nan")
+            frac_8b = sum(frac_8b_list) / len(frac_8b_list) if frac_8b_list else float("nan")
+            class_ent = sum(class_ent_list) / len(class_ent_list) if class_ent_list else float("nan")
+
+            sim_loss_1b = float(loss_dict["sim_1b"])
+            sim_loss_8b = float(loss_dict["sim_8b"])
+            kl_bernoulli_1b = float(loss_dict["kl_bernoulli_1b"])
+            kl_bernoulli_8b = float(loss_dict["kl_bernoulli_8b"])
+
+            # Binary sparsity metric: mean binary entropy over mask entries
+            sparsity_1b = float(criterion.binary_entropy(mask_1b.detach()))
+            sparsity_8b = float(criterion.binary_entropy(mask_8b.detach()))
+
+            # Mask cosine similarity across classes
+            mean_mask_cossim_1b = float(_mean_pairwise_mask_cossim(model.neuron_masks_1b.masks.detach()))
+            mean_mask_cossim_8b = float(_mean_pairwise_mask_cossim(model.neuron_masks_8b.masks.detach()))
+
+        epoch_metrics = {
+            "epoch": epoch + 1,
+            "loss": float(loss.item()),
+            "sim_loss_1b": float(sim_loss_1b),
+            "sim_loss_8b": float(sim_loss_8b),
+            "class_usage_entropy": float(class_usage_entropy),
+            "frac_activated_1b": float(frac_1b),
+            "frac_activated_8b": float(frac_8b),
+            "class_entropy": float(class_ent),
+            "sparsity_1b": float(sparsity_1b),
+            "sparsity_8b": float(sparsity_8b),
+            "kl_bernoulli_1b": float(kl_bernoulli_1b),
+            "kl_bernoulli_8b": float(kl_bernoulli_8b),
+            "mean_mask_cossim_1b": float(mean_mask_cossim_1b),
+            "mean_mask_cossim_8b": float(mean_mask_cossim_8b),
+        }
+
+        print(
+            f"Epoch {epoch+1}/{epochs} - "
+            f"loss: {epoch_metrics['loss']:.4f} - "
+            f"sim_loss_1b: {epoch_metrics['sim_loss_1b']:.4f} - "
+            f"sim_loss_8b: {epoch_metrics['sim_loss_8b']:.4f} - "
+            f"class_usage_entropy: {epoch_metrics['class_usage_entropy']:.4f} - "
+            f"frac_activated_1b: {epoch_metrics['frac_activated_1b']:.4f} - "
+            f"frac_activated_8b: {epoch_metrics['frac_activated_8b']:.4f} - "
+            f"class_entropy: {epoch_metrics['class_entropy']:.4f} - "
+            f"sparsity_1b: {epoch_metrics['sparsity_1b']:.4f} - "
+            f"sparsity_8b: {epoch_metrics['sparsity_8b']:.4f} - "
+            f"kl_bernoulli_1b: {epoch_metrics['kl_bernoulli_1b']:.4f} - "
+            f"kl_bernoulli_8b: {epoch_metrics['kl_bernoulli_8b']:.4f} - "
+            f"mean_mask_cossim_1b: {epoch_metrics['mean_mask_cossim_1b']:.4f} - "
+            f"mean_mask_cossim_8b: {epoch_metrics['mean_mask_cossim_8b']:.4f} - "
+        )
+
+        metrics_log.append(epoch_metrics)
+
+        results_dir = os.path.join(os.path.dirname(__file__), "..", "results", "circuit-discovery")
+        os.makedirs(results_dir, exist_ok=True)
+        metrics_path = os.path.join(results_dir, "metrics.json")
+        with open(metrics_path, "w") as f:
+            json.dump(metrics_log, f, indent=4)
+
+        if (epoch + 1) % 1000 == 0:
+            if os.path.exists("/opt/dlami/nvme"):
+                ckpt_root = "/opt/dlami/nvme/circuit_discovery_checkpoints"
+            else:
+                ckpt_root = os.path.join(results_dir, "checkpoints")
+
+            os.makedirs(ckpt_root, exist_ok=True)
+            ckpt_path = os.path.join(ckpt_root, f"epoch_{epoch+1}.pt")
+            torch.save(
+                {
+                    "epoch": epoch + 1,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "metrics_log": metrics_log,
+                },
+                ckpt_path,
+            )
+
+            s3.upload_file(ckpt_path, BUCKET_NAME, f"circuit-discovery/model_{epoch+1}")
