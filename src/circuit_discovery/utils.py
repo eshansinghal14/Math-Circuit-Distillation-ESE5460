@@ -58,3 +58,13 @@ def _stack_layer_activations(batch_activations):
     layers = sorted(batch_activations.keys())
     tensors = [batch_activations[i] for i in layers]
     return torch.cat(tensors, dim=-1)
+
+
+def log_epoch_metrics(epoch_metrics):
+    parts = []
+    for key, value in epoch_metrics.items():
+        if isinstance(value, (int, float)):
+            parts.append(f"{key}: {value:.4f}")
+        else:
+            parts.append(f"{key}: {value}")
+    print(" - ".join(parts))

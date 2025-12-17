@@ -9,6 +9,7 @@ from .utils import (
     llama_8b,
     parse_equation,
     _stack_layer_activations,
+    log_epoch_metrics,
 )
 from .models import CircuitDiscoveryModel, CircuitLoss, _mean_pairwise_mask_cossim
 
@@ -136,8 +137,8 @@ def train_circuit_discovery(
 
             # Per-file metrics that do not affect gradients
             with torch.no_grad():
-                frac_1b_list.append(float((mask_1b > 0.95).float().mean()))
-                frac_8b_list.append(float((mask_8b > 0.95).float().mean()))
+                frac_1b_list.append(float((mask_1b > 0.99).float().mean()))
+                frac_8b_list.append(float((mask_8b > 0.99).float().mean()))
                 class_ent_list.append(float(outputs["class_entropy"]))
 
         if not all_hard_class_probs:
@@ -149,7 +150,15 @@ def train_circuit_discovery(
         mask_1b = torch.cat(all_mask_1b, dim=0)
         mask_8b = torch.cat(all_mask_8b, dim=0)
 
-        loss_dict = criterion(hard_class_probs, masked_1b, masked_8b, mask_1b, mask_8b)
+        loss_dict = criterion(
+            hard_class_probs,
+            masked_1b,
+            masked_8b,
+            mask_1b,
+            mask_8b,
+            model.neuron_masks_1b.class_masks(),
+            model.neuron_masks_8b.class_masks(),
+        )
         loss = loss_dict["loss"]
         loss.backward()
         optimizer.step()
@@ -165,14 +174,12 @@ def train_circuit_discovery(
             sim_loss_8b = float(loss_dict["sim_8b"])
             kl_bernoulli_1b = float(loss_dict["kl_bernoulli_1b"])
             kl_bernoulli_8b = float(loss_dict["kl_bernoulli_8b"])
+            mask_cossim_1b_loss = float(loss_dict["mask_cossim_1b"])
+            mask_cossim_8b_loss = float(loss_dict["mask_cossim_8b"])
 
             # Binary sparsity metric: mean binary entropy over mask entries
             sparsity_1b = float(criterion.binary_entropy(mask_1b.detach()))
             sparsity_8b = float(criterion.binary_entropy(mask_8b.detach()))
-
-            # Mask cosine similarity across classes
-            mean_mask_cossim_1b = float(_mean_pairwise_mask_cossim(model.neuron_masks_1b.masks.detach()))
-            mean_mask_cossim_8b = float(_mean_pairwise_mask_cossim(model.neuron_masks_8b.masks.detach()))
 
         epoch_metrics = {
             "epoch": epoch + 1,
@@ -187,26 +194,11 @@ def train_circuit_discovery(
             "sparsity_8b": float(sparsity_8b),
             "kl_bernoulli_1b": float(kl_bernoulli_1b),
             "kl_bernoulli_8b": float(kl_bernoulli_8b),
-            "mean_mask_cossim_1b": float(mean_mask_cossim_1b),
-            "mean_mask_cossim_8b": float(mean_mask_cossim_8b),
+            "mask_cossim_1b_loss": float(mask_cossim_1b_loss),
+            "mask_cossim_8b_loss": float(mask_cossim_8b_loss),
         }
 
-        print(
-            f"Epoch {epoch+1}/{epochs} - "
-            f"loss: {epoch_metrics['loss']:.4f} - "
-            f"sim_loss_1b: {epoch_metrics['sim_loss_1b']:.4f} - "
-            f"sim_loss_8b: {epoch_metrics['sim_loss_8b']:.4f} - "
-            f"class_usage_entropy: {epoch_metrics['class_usage_entropy']:.4f} - "
-            f"frac_activated_1b: {epoch_metrics['frac_activated_1b']:.4f} - "
-            f"frac_activated_8b: {epoch_metrics['frac_activated_8b']:.4f} - "
-            f"class_entropy: {epoch_metrics['class_entropy']:.4f} - "
-            f"sparsity_1b: {epoch_metrics['sparsity_1b']:.4f} - "
-            f"sparsity_8b: {epoch_metrics['sparsity_8b']:.4f} - "
-            f"kl_bernoulli_1b: {epoch_metrics['kl_bernoulli_1b']:.4f} - "
-            f"kl_bernoulli_8b: {epoch_metrics['kl_bernoulli_8b']:.4f} - "
-            f"mean_mask_cossim_1b: {epoch_metrics['mean_mask_cossim_1b']:.4f} - "
-            f"mean_mask_cossim_8b: {epoch_metrics['mean_mask_cossim_8b']:.4f} - "
-        )
+        log_epoch_metrics(epoch_metrics)
 
         metrics_log.append(epoch_metrics)
 

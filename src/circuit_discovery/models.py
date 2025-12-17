@@ -83,15 +83,32 @@ class NeuronMask(nn.Module):
     def __init__(self, k_classes, activations_dim):
         super().__init__()
 
-        self.masks = nn.Parameter(torch.randn(k_classes, activations_dim))
+        # Small network that maps a class index to a mask over activations.
+        hidden_dim = 4
+        self.k_classes = k_classes
+        self.class_embedding = nn.Embedding(k_classes, hidden_dim)
+        self.output_layer = nn.Linear(hidden_dim, activations_dim)
 
     def forward(self, class_probs, activations):
-        selected_mask = class_probs @ self.masks  # [batch, activations_dim]
+        # Convert class probabilities to class indices and generate a mask
+        class_ids = class_probs.argmax(dim=-1)  # [batch]
+        hidden = self.class_embedding(class_ids)  # [batch, hidden_dim]
+        hidden = F.relu(hidden)
+        selected_mask = self.output_layer(hidden)  # [batch, activations_dim]
         sigmoid_mask = torch.sigmoid(selected_mask)
         sigmoid_mask_expanded = sigmoid_mask.unsqueeze(1)
 
         masked_activations = activations * sigmoid_mask_expanded
         return masked_activations, sigmoid_mask
+
+    def class_masks(self):
+        """Return class-wise masks for all classes as a matrix [k_classes, activations_dim]."""
+        device = self.class_embedding.weight.device
+        class_ids = torch.arange(self.k_classes, device=device)
+        hidden = self.class_embedding(class_ids)
+        hidden = F.relu(hidden)
+        masks = self.output_layer(hidden)
+        return torch.sigmoid(masks)
 
 
 class CircuitDiscoveryModel(nn.Module):
@@ -137,14 +154,33 @@ class CircuitDiscoveryModel(nn.Module):
         }
 
 
+def _mean_pairwise_mask_cossim(masks, eps=1e-8):
+    if masks.dim() != 2:
+        return masks.new_tensor(0.0)
+
+    num_classes = masks.size(0)
+    if num_classes < 2:
+        return masks.new_tensor(0.0)
+
+    norm_masks = F.normalize(masks, p=2, dim=-1, eps=eps)
+    sim_mat = norm_masks @ norm_masks.t()
+
+    triu_indices = torch.triu_indices(num_classes, num_classes, offset=1, device=masks.device)
+    pair_sims = sim_mat[triu_indices[0], triu_indices[1]]
+    if pair_sims.numel() == 0:
+        return masks.new_tensor(0.0)
+
+    return pair_sims.mean()
+
+
 class CircuitLoss(nn.Module):
-    def __init__(self, lambda_sim=1.0, lambda_sparsity=1e-0, lambda_usage=1e-2, lambda_fraction=1e2, lambda_kl=1e-1, eps=1e-8):
+    def __init__(self, lambda_sim=1.0, lambda_sparsity=1e-0, lambda_usage=1e-1, lambda_kl=1e-1, lambda_mask_cossim=1e-1, eps=1e-8):
         super().__init__()
         self.lambda_sim = lambda_sim
-        # self.lambda_sparsity = lambda_sparsity
+        self.lambda_sparsity = lambda_sparsity
         self.lambda_usage = lambda_usage
-        # self.lambda_fraction = lambda_fraction
         self.lambda_kl = lambda_kl
+        self.lambda_mask_cossim = lambda_mask_cossim
         self.eps = eps
 
     def classwise_pairwise_cossim(self, activations, hard_class_probs):
@@ -190,24 +226,42 @@ class CircuitLoss(nn.Module):
         class_usage_entropy = -(class_freq * class_freq.log()).sum()
         return class_usage_entropy
 
-    def active_fraction(self, mask, threshold=0.95):
-        return (mask > threshold).float().mean()
-
     def bernoulli_kl_to_prior(self, p, pi=0.10, eps=1e-8):
+        """KL on the global fraction of active neurons.
+
+        We interpret the mean of p as the effective activation probability q and
+        compare Bern(q) to a Bernoulli prior with probability pi. This
+        encourages the overall fraction of active neurons to be close to pi,
+        while allowing individual entries to be near 0 or 1.
+        """
         p = torch.clamp(p, eps, 1.0 - eps)
+        # Global mean activation probability q in (0,1)
+        q = p.mean()
+        q = torch.clamp(q, eps, 1.0 - eps)
+
         pi = torch.clamp(torch.tensor(pi, device=p.device, dtype=p.dtype), eps, 1.0 - eps)
-        kl = p * (p / pi).log() + (1 - p) * ((1 - p) / (1 - pi)).log()
-        return kl.mean()
+        kl = q * (q / pi).log() + (1 - q) * ((1 - q) / (1 - pi)).log()
+        return kl
 
-    def combined_loss(self, hard_class_probs, masked_activations, mask):
+    def combined_loss(self, hard_class_probs, masked_activations, mask, class_masks):
         sim_loss = - self.classwise_pairwise_cossim(masked_activations, hard_class_probs)
+        mask_cossim = _mean_pairwise_mask_cossim(class_masks)
+        # KL on overall fraction of active neurons
         kl_bernoulli_loss = self.bernoulli_kl_to_prior(mask)
-        total_loss = self.lambda_sim * sim_loss + self.lambda_kl * kl_bernoulli_loss
-        return total_loss, sim_loss, kl_bernoulli_loss
+        # Binary entropy sparsity on individual mask entries
+        entropy_loss = self.binary_entropy(mask)
 
-    def forward(self, hard_class_probs, masked_activations_1b, masked_activations_8b, mask_1b, mask_8b):
-        loss_1b, sim_loss_1b, kl_bernoulli_loss_1b = self.combined_loss(hard_class_probs, masked_activations_1b, mask_1b)
-        loss_8b, sim_loss_8b, kl_bernoulli_loss_8b = self.combined_loss(hard_class_probs, masked_activations_8b, mask_8b)
+        total_loss = (
+            self.lambda_sim * sim_loss
+            + self.lambda_mask_cossim * mask_cossim
+            + self.lambda_kl * kl_bernoulli_loss
+            + self.lambda_sparsity * entropy_loss
+        )
+        return total_loss, sim_loss, kl_bernoulli_loss, entropy_loss, mask_cossim
+
+    def forward(self, hard_class_probs, masked_activations_1b, masked_activations_8b, mask_1b, mask_8b, class_masks_1b, class_masks_8b):
+        loss_1b, sim_loss_1b, kl_bernoulli_loss_1b, entropy_loss_1b, mask_cossim_1b = self.combined_loss(hard_class_probs, masked_activations_1b, mask_1b, class_masks_1b)
+        loss_8b, sim_loss_8b, kl_bernoulli_loss_8b, entropy_loss_8b, mask_cossim_8b = self.combined_loss(hard_class_probs, masked_activations_8b, mask_8b, class_masks_8b)
         total_loss = loss_1b + loss_8b
 
         class_usage_entropy = self.class_usage_entropy(hard_class_probs)
@@ -219,24 +273,9 @@ class CircuitLoss(nn.Module):
             "sim_8b": sim_loss_8b.detach(),
             "kl_bernoulli_1b": kl_bernoulli_loss_1b.detach(),
             "kl_bernoulli_8b": kl_bernoulli_loss_8b.detach(),
+            "entropy_1b": entropy_loss_1b.detach(),
+            "entropy_8b": entropy_loss_8b.detach(),
             "class_usage_entropy": class_usage_entropy.detach(),
+            "mask_cossim_1b": mask_cossim_1b.detach(),
+            "mask_cossim_8b": mask_cossim_8b.detach(),
         }
-
-
-def _mean_pairwise_mask_cossim(masks, eps=1e-8):
-    if masks.dim() != 2:
-        return masks.new_tensor(0.0)
-
-    num_classes = masks.size(0)
-    if num_classes < 2:
-        return masks.new_tensor(0.0)
-
-    norm_masks = F.normalize(masks, p=2, dim=-1, eps=eps)
-    sim_mat = norm_masks @ norm_masks.t()
-
-    triu_indices = torch.triu_indices(num_classes, num_classes, offset=1, device=masks.device)
-    pair_sims = sim_mat[triu_indices[0], triu_indices[1]]
-    if pair_sims.numel() == 0:
-        return masks.new_tensor(0.0)
-
-    return pair_sims.mean()
