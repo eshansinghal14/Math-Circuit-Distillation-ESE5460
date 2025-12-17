@@ -10,12 +10,15 @@ from constants import HF_TOKEN, BUCKET_NAME
 
 s3 = boto3.client("s3")
 
-def load_model(argv):
+def get_model_name(argv):
     if len(argv) > 1:
-        model_name = argv[1]
+        return argv[1]
     else:
         print('Please provide model name')
         exit()
+
+def load_model(argv):
+    model_name = get_model_name(argv)
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from huggingface_hub import login
@@ -110,3 +113,11 @@ def load_model_checkpoint(model_name, k_classes, lr):
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
     return model, optimizer, checkpoint["metrics_log"], checkpoint["epoch"]
+
+def _stack_layer_activations(batch_activations):
+    if not batch_activations:
+        raise ValueError("batch_activations is empty")
+
+    layers = sorted(batch_activations.keys())
+    tensors = [batch_activations[i] for i in layers]
+    return torch.cat(tensors, dim=-1)

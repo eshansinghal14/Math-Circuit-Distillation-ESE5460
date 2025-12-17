@@ -128,13 +128,17 @@ class CircuitDiscoveryModel(nn.Module):
         self.neuron_masks_1b = NeuronMask(k_classes, num_activations_1b)
         self.neuron_masks_8b = NeuronMask(k_classes, num_activations_8b)
 
-    def forward(self, op1, op2, res, activations_1b, activations_8b, term_encoding):
+    def classify_problem(self, op1, op2, res):
         problem_encoding = self.problem_encoder(op1, op2, res)
         # activations_1b_encoding = self.activations_1b_encoder(activations_1b, term_encoding)
         # activations_8b_encoding = self.activations_8b_encoder(activations_8b, term_encoding)
 
         # combined_encoding = torch.cat((problem_encoding, activations_1b_encoding, activations_8b_encoding), dim=-1)
         logits = self.classifier(problem_encoding)
+        return logits
+
+    def forward(self, op1, op2, res, activations_1b, activations_8b, term_encoding):
+        logits = self.classify_problem(op1, op2, res)
         hard_class_probs = F.gumbel_softmax(logits, tau=self.tau, hard=True, dim=-1)
 
         masked_activations_1b, mask_1b = self.neuron_masks_1b(hard_class_probs, activations_1b)

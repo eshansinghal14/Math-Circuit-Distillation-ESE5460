@@ -71,9 +71,9 @@ def train_circuit_discovery(
 
         if cache_dir is None:
             if os.path.exists("/opt/dlami/nvme"):
-                cache_dir_resolved = "/opt/dlami/nvme/circuit_discovery_cache"
+                cache_dir_resolved = "/opt/dlami/nvme/activations_cache"
             else:
-                cache_dir_resolved = "/mnt/circuit_discovery_cache"
+                cache_dir_resolved = "/mnt/activations_cache"
         else:
             cache_dir_resolved = cache_dir
 
@@ -123,8 +123,8 @@ def train_circuit_discovery(
 
             # Per-file metrics that do not affect gradients
             with torch.no_grad():
-                frac_1b_list.append(float((mask_1b > 0.99).float().mean()))
-                frac_8b_list.append(float((mask_8b > 0.99).float().mean()))
+                frac_1b_list.append(float((mask_1b > (1 - 1e-3)).float().mean()))
+                frac_8b_list.append(float((mask_8b > (1 - 1e-3)).float().mean()))
                 class_ent_list.append(float(outputs["class_entropy"]))
 
         if not all_hard_class_probs:
@@ -201,7 +201,7 @@ def train_circuit_discovery(
         with open(metrics_path, "w") as f:
             json.dump(metrics_log, f, indent=4)
 
-        if (epoch + 1) % 1000 == 0:
+        if (epoch + 1) % 500 == 0:
             if os.path.exists("/opt/dlami/nvme"):
                 ckpt_root = "/opt/dlami/nvme/circuit_discovery_checkpoints"
             else:
