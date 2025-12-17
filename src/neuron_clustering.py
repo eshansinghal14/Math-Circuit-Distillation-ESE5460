@@ -4,11 +4,11 @@ import torch
 import boto3
 import os
 import sys
+import shutil
 
 import torch.nn.functional as F
 
 from constants import BUCKET_NAME
-from circuit_discovery.models import CircuitDiscoveryModel
 from utils import (
     load_model_checkpoint,
     get_model_name,
@@ -45,151 +45,126 @@ active_neuron_indices = neuron_masks.any(dim=0)
 print("Active neurons ratio:", torch.mean(torch.mean(neuron_masks.float(), dim=1)).item())
 
 
-def pairwise_cossim(active_neurons, eps=1e-8):
-    """Mean pairwise cosine similarity between examples.
+def _has_free_space(path, min_bytes=1024 * 1024 * 100):  # default: 100MB
+    root = path
+    if not os.path.isdir(root):
+        root = os.path.dirname(root) or "."
+    total, used, free = shutil.disk_usage(root)
+    return free >= min_bytes
 
-    active_neurons: [N, D_active]
+
+def _kmeans_cosine(x, k, num_iters=20):
+    """Balanced cosine k-means with k-means++ init and (near) equal-size clusters.
+
+    x: [N, D] on device, assumed float.
+    Returns cluster_ids: [N] and centroids: [k, D].
     """
 
-    if active_neurons.dim() != 2:
-        active_neurons = active_neurons.view(active_neurons.size(0), -1)
+    N, D = x.shape
+    if k > N:
+        raise ValueError("k cannot be larger than number of points")
 
-    N = active_neurons.size(0)
-    if N < 2:
-        return active_neurons.new_tensor(0.0)
+    # Normalize data for cosine
+    x = F.normalize(x, p=2, dim=-1, eps=1e-8)
 
-    norm_acts = F.normalize(active_neurons, p=2, dim=-1, eps=eps)  # [N, D]
-    sim_mat = norm_acts @ norm_acts.t()  # [N, N]
+    # k-means++ init
+    indices = []
+    first = torch.randint(0, N, (1,), device=x.device)
+    indices.append(first.item())
+    for _ in range(1, k):
+        centers = x[torch.tensor(indices, device=x.device)]  # [m, D]
+        sim = x @ centers.t()  # [N, m]
+        closest_sim, _ = sim.max(dim=1)
+        dist = 1 - closest_sim.clamp(-1, 1)
+        probs = dist / dist.sum()
+        next_idx = torch.multinomial(probs, 1)
+        indices.append(next_idx.item())
 
-    idx = torch.triu_indices(N, N, offset=1, device=active_neurons.device)
-    pair_sims = sim_mat[idx[0], idx[1]]
-    if pair_sims.numel() == 0:
-        return active_neurons.new_tensor(0.0)
+    centroids = x[torch.tensor(indices, device=x.device)]  # [k, D]
 
-    return pair_sims.mean()
+    # Balanced capacities: distribute remainder as +1 to the first few clusters
+    base_cap = N // k
+    remainder = N % k
+    capacities = torch.full((k,), base_cap, device=x.device, dtype=torch.long)
+    if remainder > 0:
+        capacities[:remainder] += 1
 
+    prev_cluster_ids = None
+    prev_loss = None
+    loss = None
 
-def corr_distance_sanity_check():
-    # List all activation files for the chosen model
-    keys = list_keys(model_name)
-    key_map = suffix_map(keys)
+    for _ in range(num_iters):
+        # Compute cosine distances to current centroids
+        sim = x @ centroids.t()  # [N, k]
+        dists = 1.0 - sim.clamp(-1.0, 1.0)  # [N, k]
 
-    all_sims = []
-    suffixes = list(key_map.keys())
-    suffixes = suffixes[:30]
-    batch_size = 5
+        # Balanced assignment: each cluster j can take at most capacities[j] points
+        # Strategy: for each point, consider clusters in order of increasing distance,
+        # and assign in "rounds" while respecting capacities, using vectorized masks.
+        cluster_ids = torch.full((N,), -1, device=x.device, dtype=torch.long)
+        remaining_cap = capacities.clone()
 
-    for i in range(0, len(suffixes), batch_size):
-        print(f'processing batch {i}/{len(suffixes)}')
-        batch_suffixes = suffixes[i : i + batch_size]
+        # Sort clusters per point by distance once (vectorized)
+        _, sorted_clusters = torch.sort(dists, dim=1)  # [N, k]
 
-        for suffix in batch_suffixes:
-            key = key_map[suffix]
-            if model_name == "meta-llama/Llama-3.2-1B":
-                local = os.path.join(cache_dir_resolved, f"1b_{suffix}")
+        for rank in range(k):
+            # Points still unassigned at this rank
+            unassigned = cluster_ids.eq(-1)
+            if not unassigned.any():
+                break
+
+            cand_clusters = sorted_clusters[unassigned, rank]  # [N_unassigned]
+            unassigned_idx = unassigned.nonzero(as_tuple=False).squeeze(1)
+
+            # For each cluster j, take up to remaining_cap[j] of the candidates that want j
+            for j in range(k):
+                if remaining_cap[j] <= 0:
+                    continue
+
+                want_j_mask = cand_clusters.eq(j)
+                if not want_j_mask.any():
+                    continue
+
+                cand_indices = unassigned_idx[want_j_mask]
+                take = min(remaining_cap[j].item(), cand_indices.numel())
+                if take <= 0:
+                    continue
+
+                chosen = cand_indices[:take]
+                cluster_ids[chosen] = j
+                remaining_cap[j] -= take
+
+        if (cluster_ids == -1).any():
+            raise RuntimeError("Balanced k-means assignment failed: some points unassigned")
+
+        if prev_cluster_ids is not None and torch.equal(cluster_ids, prev_cluster_ids):
+            break
+
+        point_sim = sim[torch.arange(N, device=x.device), cluster_ids]
+        point_dists = 1.0 - point_sim.clamp(-1.0, 1.0)
+        loss = point_dists.mean().item()
+
+        if prev_loss is not None and loss is not None:
+            if abs(loss - prev_loss) < 1e-6:
+                break
+
+        prev_cluster_ids = cluster_ids.clone()
+        prev_loss = loss
+
+        # Update centroids with balanced assignments
+        new_centroids = torch.zeros_like(centroids)
+        for j in range(k):
+            mask = cluster_ids == j
+            if mask.any():
+                new_centroids[j] = x[mask].mean(dim=0)
             else:
-                local = os.path.join(cache_dir_resolved, f"8b_{suffix}")
-            if not os.path.exists(local):
-                s3.download_file(BUCKET_NAME, key, local)
+                # Reinitialize empty cluster to random point
+                rand_idx = torch.randint(0, N, (1,), device=x.device)
+                new_centroids[j] = x[rand_idx]
 
-            batch = torch.load(local, map_location="cpu")
-            prompts, activations_dict = batch["prompts"], batch["activations"]
-            activations = _stack_layer_activations(activations_dict).to(device)
+        centroids = F.normalize(new_centroids, p=2, dim=-1, eps=1e-8)
 
-            # activations: [N, D] (N ~ 50)
-            op1, op2, res, term_encoding = parse_equation(prompts, device=device)
-            classifier_logits = model.classify_problem(op1, op2, res)
-            subclass = torch.argmax(classifier_logits, dim=-1)  # [N]
-
-            mean_activations = torch.mean(activations, dim=1)
-            masked_activations = mean_activations * neuron_masks[subclass]
-
-            # Restrict to neurons that are active for at least one class overall
-            active_neurons = masked_activations[:, active_neuron_indices]
-            sim = pairwise_cossim(active_neurons)
-            all_sims.append(sim.item())
-
-    if all_sims:
-        mean_sim = sum(all_sims) / len(all_sims)
-        print("Mean pairwise cosine similarity over all files:", mean_sim)
-    else:
-        print("No activation files found for", model_name)
-
-
-def _collect_neuron_features(batch_size=5, save_path=None):
-    """Collect per-neuron feature vectors from masked activations over many files.
-
-    Returns:
-        features: [D_active, F] tensor, where D_active is # active neurons,
-                  F is # feature dims (here: number of files used).
-    """
-
-    keys = list_keys(model_name)
-    key_map = suffix_map(keys)
-
-    suffixes = list(key_map.keys())
-
-    # D_active = number of globally active neurons
-    D_active = int(active_neuron_indices.sum().item())
-    if D_active == 0:
-        raise ValueError("No active neurons found to cluster")
-
-    # We'll build per-file mean activation for each active neuron
-    # features: [D_active, num_files]
-    features = torch.zeros(D_active, len(suffixes), device=device)
-
-    file_idx = 0
-    for i in range(0, len(suffixes), batch_size):
-        print(f'processing batch {i}/{len(suffixes)}')
-        batch_suffixes = suffixes[i : i + batch_size]
-
-        for suffix in batch_suffixes:
-            key = key_map[suffix]
-            if model_name == "meta-llama/Llama-3.2-1B":
-                local = os.path.join(cache_dir_resolved, f"1b_{suffix}")
-            else:
-                local = os.path.join(cache_dir_resolved, f"8b_{suffix}")
-
-            if not os.path.exists(local):
-                s3.download_file(BUCKET_NAME, key, local)
-
-            batch = torch.load(local, map_location="cpu")
-            prompts, activations_dict = batch["prompts"], batch["activations"]
-            activations = _stack_layer_activations(activations_dict).to(device)
-
-            # activations: [N, D]
-            op1, op2, res, term_encoding = parse_equation(prompts, device=device)
-            classifier_logits = model.classify_problem(op1, op2, res)
-            subclass = torch.argmax(classifier_logits, dim=-1)  # [N]
-
-            # Apply class-dependent mask: [N, D]
-            mean_activations = torch.mean(activations, dim=1)
-            masked_activations = mean_activations * neuron_masks[subclass]
-
-            # Restrict to globally active neurons: [N, D_active]
-            active_neurons = masked_activations[:, active_neuron_indices]
-
-            # Aggregate across samples: mean activation per neuron for this file
-            # result: [D_active]
-            file_feature = active_neurons.mean(dim=0)
-            features[:, file_idx] = file_feature
-            file_idx += 1
-
-    # Trim to the number of actually-filled columns
-    features = features[:, :file_idx]
-
-    if save_path is not None:
-        torch.save(
-            {
-                "model_name": model_name,
-                "features": features.detach().cpu(),
-                "active_neuron_indices": active_neuron_indices.detach().cpu(),
-            },
-            save_path,
-        )
-        print(f"Saved neuron features to {save_path}")
-
-    return features
+    return cluster_ids, centroids, loss
 
 
 def _collect_neuron_features_per_subclass(batch_size=5, save_path=None):
@@ -219,6 +194,7 @@ def _collect_neuron_features_per_subclass(batch_size=5, save_path=None):
     features_lists = {c: [] for c in indices_per_subclass.keys()}
 
     for i in range(0, len(suffixes), batch_size):
+        print(f'processing batch {i}/{len(suffixes)}')
         batch_suffixes = suffixes[i : i + batch_size]
 
         for suffix in batch_suffixes:
@@ -228,10 +204,18 @@ def _collect_neuron_features_per_subclass(batch_size=5, save_path=None):
             else:
                 local = os.path.join(cache_dir_resolved, f"8b_{suffix}")
 
-            if not os.path.exists(local):
-                s3.download_file(BUCKET_NAME, key, local)
-
-            batch = torch.load(local, map_location="cpu")
+            if os.path.exists(local):
+                batch = torch.load(local, map_location="cpu")
+            else:
+                if _has_free_space(local, min_bytes=1024 ** 3):
+                    # Enough space: download and cache to disk
+                    s3.download_file(BUCKET_NAME, key, local)
+                    batch = torch.load(local, map_location="cpu")
+                else:
+                    # Not enough space: stream directly from S3 without caching
+                    obj = s3.get_object(Bucket=BUCKET_NAME, Key=key)
+                    bytestream = io.BytesIO(obj["Body"].read())
+                    batch = torch.load(bytestream, map_location="cpu")
             prompts, activations_dict = batch["prompts"], batch["activations"]
             activations = _stack_layer_activations(activations_dict).to(device)
 
@@ -273,81 +257,6 @@ def _collect_neuron_features_per_subclass(batch_size=5, save_path=None):
     return features_per_subclass, indices_per_subclass
 
 
-def _kmeans_cosine(x, k, num_iters=20):
-    """Cosine k-means with k-means++ init.
-
-    x: [N, D] on device, assumed float.
-    Returns cluster_ids: [N] and centroids: [k, D].
-    """
-
-    N, D = x.shape
-    if k > N:
-        raise ValueError("k cannot be larger than number of points")
-
-    # Normalize data for cosine
-    x = F.normalize(x, p=2, dim=-1, eps=1e-8)
-
-    # k-means++ init
-    indices = []
-    # First center uniform
-    first = torch.randint(0, N, (1,), device=x.device)
-    indices.append(first.item())
-
-    for _ in range(1, k):
-        centers = x[torch.tensor(indices, device=x.device)]  # [m, D]
-        # Distances: 1 - cosine similarity to nearest center
-        sim = x @ centers.t()  # [N, m]
-        closest_sim, _ = sim.max(dim=1)
-        dist = 1 - closest_sim.clamp(-1, 1)
-        probs = dist / dist.sum()
-        next_idx = torch.multinomial(probs, 1)
-        indices.append(next_idx.item())
-
-    centroids = x[torch.tensor(indices, device=x.device)]  # [k, D]
-
-    prev_cluster_ids = None
-    prev_loss = None
-    loss = None
-
-    for it in range(num_iters):  # num_iters now acts as a max-iterations cap
-        # Assign step
-        sim = x @ centroids.t()  # [N, k]
-        cluster_ids = sim.argmax(dim=1)
-
-        # Early stop if assignments have not changed
-        if prev_cluster_ids is not None and torch.equal(cluster_ids, prev_cluster_ids):
-            break
-
-        # k-means-style cosine loss: mean distance to assigned centroids
-        # sim: [N, k], cluster_ids: [N]
-        point_sim = sim[torch.arange(N, device=x.device), cluster_ids]
-        dists = 1.0 - point_sim.clamp(-1.0, 1.0)  # cosine distance in [0, 2]
-        loss = dists.mean().item()
-
-        # Optional additional convergence check on objective value
-        if prev_loss is not None and loss is not None:
-            if abs(loss - prev_loss) < 1e-6:
-                break
-
-        prev_cluster_ids = cluster_ids.clone()
-        prev_loss = loss
-
-        # Update step
-        new_centroids = torch.zeros_like(centroids)
-        for j in range(k):
-            mask = cluster_ids == j
-            if mask.any():
-                new_centroids[j] = x[mask].mean(dim=0)
-            else:
-                # Reinitialize empty cluster to random point
-                rand_idx = torch.randint(0, N, (1,), device=x.device)
-                new_centroids[j] = x[rand_idx]
-
-        centroids = F.normalize(new_centroids, p=2, dim=-1, eps=1e-8)
-
-    return cluster_ids, centroids, loss
-
-
 def run_neuron_kmeans(k, subclass: int, batch_size=5, num_iters=100, log=True,
                       subclass_features_path=f"../results/neuron-clustering/{model_name}/subclass_features.pt"):
     """Cluster neurons for a specific subclass into k groups using cosine k-means.
@@ -384,7 +293,8 @@ def run_neuron_kmeans(k, subclass: int, batch_size=5, num_iters=100, log=True,
         else:
             cluster_to_indices[j] = torch.empty(0, dtype=subclass_indices.dtype)
 
-    clusters_path = os.path.join(results_dir, f"subclass_{subclass}_clusters_k{k}.pt")
+    clusters_path = os.path.join(results_dir, f"subclass_{subclass}_clusters/k{k}.pt")
+    os.makedirs(results_dir, exist_ok=True)
     torch.save(
         {
             "model_name": model_name,
@@ -417,6 +327,7 @@ if __name__ == "__main__":
     k_gs_testing = {}
     for subclass in range(8):
         print(f"Processing subclass {subclass}")
+        k_gs_testing[subclass] = {}
         for k in range(1, 20):
             _, _, loss = run_neuron_kmeans(k, subclass=subclass, log=False)
             k_gs_testing[subclass][k] = loss

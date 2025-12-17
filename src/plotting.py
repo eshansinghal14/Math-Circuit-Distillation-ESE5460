@@ -13,21 +13,23 @@ def plot_k_vs_loss(model_name: str):
     with open(json_path, "r") as f:
         k_gs_testing = json.load(f)
 
-    # Keys are strings when loaded from JSON
-    ks = sorted(int(k) for k in k_gs_testing.keys())
-    losses = [k_gs_testing[str(k)] for k in ks]
-
-    plt.figure(figsize=(6, 4))
-    plt.plot(ks, losses, marker="o")
-    plt.xlabel("k (number of clusters)")
-    plt.ylabel("Mean cosine distance to centroids (loss)")
-    plt.title(f"k-means loss vs k for {model_name}")
-    plt.grid(True, alpha=0.3)
-
-    out_path = os.path.join(base_dir, "k_vs_loss.png")
     os.makedirs(base_dir, exist_ok=True)
-    plt.savefig(out_path, bbox_inches="tight")
-    print(f"Saved plot to {out_path}")
+
+    for subclass_str, k_dict in k_gs_testing.items():
+        ks = sorted(int(k) for k in k_dict.keys())
+        losses = [k_dict[str(k)] for k in ks]
+
+        plt.figure(figsize=(6, 4))
+        plt.plot(ks, losses, marker="o")
+        plt.xlabel("k (number of clusters)")
+        plt.ylabel("Mean cosine distance to centroids (loss)")
+        plt.title(f"k-means loss vs k for {model_name}, subclass {subclass_str}")
+        plt.grid(True, alpha=0.3)
+
+        out_path = os.path.join(base_dir, f"k_vs_loss_subclass_{subclass_str}.png")
+        plt.savefig(out_path, bbox_inches="tight")
+        plt.close()
+        print(f"Saved plot to {out_path}")
 
 
 def main():

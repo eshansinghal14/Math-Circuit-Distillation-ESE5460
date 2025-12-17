@@ -15,18 +15,10 @@ s3 = boto3.client('s3')
 with open('../datasets/2d_add_all.json', 'r') as f:
     dataset = json.load(f)
 
-with open(f'../results/{model_name}/2d_add_all.json', 'r') as f:
-    test_dataset = json.load(f)
-
-inputs = []
-prompts = list(dataset.keys())
-answers = list(dataset.values())
-for i, prompt in enumerate(prompts):
-    ans = str(answers[i])
-    for j in range(1, len(ans) + 1):
-        inputs.append(prompt + ans[:j])
-
-input_ids = tokenizer(inputs, return_tensors="pt", padding=True, truncation=True).input_ids.to(model.device)
+ids = []
+for record in dataset:
+    ids.append(record['ids'])
+ids = torch.tensor(ids).to(model.device)
 
 # Prepare containers for activations: layer_idx -> list of [batch, hidden]
 layer_activations = {}
@@ -51,10 +43,10 @@ for i, layer in enumerate(model.model.layers):
 # saving each batch's activations to a separate file
 batch_size = 50
 with torch.no_grad():
-    for i in range(0, len(inputs), batch_size):
-        batch_inputs = input_ids[i: i + min(batch_size, len(inputs) - i)]
+    for i in range(0, ids.shape[0], batch_size):
+        batch_inputs = ids[i: i + min(batch_size, ids.shape[0] - i)]
 
-        print(f'processing batch {i}/{len(inputs)}')
+        print(f'processing batch {i}/{ids.shape[0]}')
 
         layer_activations = {}
 
@@ -67,11 +59,11 @@ with torch.no_grad():
             batch_activations[layer_idx] = torch.cat(chunks, dim=0)
         
         activations = {
-            'prompts': inputs[i: i + min(batch_size, len(inputs) - i)],
+            'ids': ids[i: i + min(batch_size, ids.shape[0] - i)],
             'activations': batch_activations,
         }
         torch.save(activations, '/tmp/activations.pt')
-        s3.upload_file('/tmp/activations.pt', BUCKET_NAME, f'mlp_activations/{model_name}/{i}_{len(inputs)}.pt')
+        s3.upload_file('/tmp/activations.pt', BUCKET_NAME, f'mlp_activations/{model_name}/{i}_{ids.shape[0]}.pt')
 
 # Remove hooks
 for h in handles:
