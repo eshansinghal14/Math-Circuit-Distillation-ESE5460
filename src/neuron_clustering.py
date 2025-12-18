@@ -231,7 +231,7 @@ def _collect_neuron_features_per_subclass(batch_size=5, save_path=None):
             activations = _stack_layer_activations(activations_dict).to(device)
 
             # activations: [N, D]
-            op1, op2, res, term_encoding = parse_equation(prompts, device=device)
+            op1, op2, res = parse_equation(prompts, device=device)
             classifier_logits = model.classify_problem(op1, op2, res)
             hard = F.gumbel_softmax(classifier_logits, tau=model.tau, dim=-1, hard=True)  # [N, k], float one-hot
             subclass = hard.argmax(dim=-1)  # [N], long

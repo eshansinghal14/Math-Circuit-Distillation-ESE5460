@@ -17,9 +17,8 @@ def get_model_name(argv):
         print('Please provide model name')
         exit()
 
-def load_model(argv):
+def load_model(model_name):
     hf_logging.set_verbosity_error()
-    model_name = get_model_name(argv)
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from huggingface_hub import login
@@ -31,11 +30,13 @@ def load_model(argv):
     tokenizer.padding_size = 'left'
     return model, tokenizer
 
-def test_model(model, tokenizer, dataset_fname, results_fname, batch_size=50, max_new_tokens=10, log=True):
+def test_model(model, tokenizer, dataset_fname, results_fname, batch_size=50, max_new_tokens=5, log=True):
     model.eval()
     with open(dataset_fname, 'r') as f:
         dataset = json.load(f)
-    prompts = list(dataset.keys())
+    prompts = []
+    for s in dataset:
+        prompts.append(s['q_str'])
     results = []
     for i in range(0, len(prompts), batch_size):
         with torch.no_grad():
@@ -47,7 +48,7 @@ def test_model(model, tokenizer, dataset_fname, results_fname, batch_size=50, ma
             responses = tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
             for k, resp in enumerate(responses):
-                results.append({'response': resp, 'answer': dataset[batched_prompts[k]]})
+                results.append({'response': resp, 'answer': dataset[i + k]['a_str']})
 
     with open(results_fname, 'w') as f:
         json.dump(results, f, indent=4)
@@ -64,7 +65,7 @@ def eval_model(results_fname):
 
     correct = 0
     for res in results:
-        if parse_answer(res['response']) == res['answer']:
+        if parse_answer(res['response']) == int(res['answer']):
             correct += 1
 
     print('Accuracy: ', correct / len(results))
@@ -73,6 +74,31 @@ def eval_model(results_fname):
 # samples=None means all 2-digit addition pairs are added; otherwise sample without replacement
 def gen_2d_add_dataset(dataset_fname, samples, tokenizer):
     all_pairs = [(f'{num1}+{num2}=', num1 + num2) for num1 in range(100) for num2 in range(100)]
+
+    if samples is None or samples >= len(all_pairs):
+        selected = all_pairs
+        random.shuffle(selected)
+    else:
+        selected = random.sample(all_pairs, samples)
+
+    dataset = []
+    for prompt, answer in selected:
+        q_str = prompt
+        a_str = str(answer)
+        ids = tokenizer.encode(q_str + a_str, add_special_tokens=False)
+        dataset.append(
+            {
+                "q_str": q_str,
+                "a_str": a_str,
+                "ids": ids,
+            }
+        )
+
+    with open(dataset_fname, 'w') as f:
+        json.dump(dataset, f, indent=4)
+
+def gen_3d_add_dataset(dataset_fname, samples, tokenizer):
+    all_pairs = [(f'{num1}+{num2}=', num1 + num2) for num1 in range(1000) for num2 in range(1000)]
 
     if samples is None or samples >= len(all_pairs):
         selected = all_pairs
