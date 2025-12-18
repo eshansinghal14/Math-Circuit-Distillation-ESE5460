@@ -2,10 +2,6 @@ import json
 import torch
 import os
 import sys
-import copy
-
-import torch.nn.functional as F
-from transformers import AutoTokenizer
 
 from utils import (
     load_model_checkpoint,
@@ -22,10 +18,9 @@ checkpoint_name = "model_2000"
 circuit_model, _, _, _ = load_model_checkpoint(checkpoint_name, k_classes=8, lr=1e-3)
 circuit_model.eval()
 
-if model_name == "meta-llama/Llama-3.2-1B":
-    class_clusters = [6] * 8
-else:
-    class_clusters = [6] * 8
+CLASSIFIED_PROBLEMS_PATH = os.path.join("..", "results", "circuit-discovery", "classified_problems.json")
+
+class_clusters = [6] * 8
 
 
 def classify_problems(batch_size=256):
@@ -60,23 +55,26 @@ def classify_problems(batch_size=256):
 
     results_dir = os.path.join("..", "results", "circuit-discovery")
     os.makedirs(results_dir, exist_ok=True)
-    out_path = os.path.join(results_dir, "classified_problems.json")
-    with open(out_path, "w") as f:
+    with open(CLASSIFIED_PROBLEMS_PATH, "w") as f:
         json.dump(class_to_problems, f, indent=2)
 
-    print(f"Saved classified problems to {out_path}")
+    print(f"Saved classified problems to {CLASSIFIED_PROBLEMS_PATH}")
     for key in class_to_problems:
         print(key, len(class_to_problems[key]))
     
     return class_to_problems
-
-
-def ablation(class_to_problems):
+def ablation(class_to_problems=None):
     results_dir = os.path.join("..", "results", f"circuit-discovery/{model_name}")
     os.makedirs(results_dir, exist_ok=True)
 
     out_path = os.path.join(results_dir, "ablation_performance.json")
     buffer_results_path = os.path.join(results_dir, "ablation_results_buffer.json")
+
+    if class_to_problems is None:
+        if not os.path.exists(CLASSIFIED_PROBLEMS_PATH):
+            raise FileNotFoundError(f"classified_problems.json not found at {CLASSIFIED_PROBLEMS_PATH}. Run classify_problems() first.")
+        with open(CLASSIFIED_PROBLEMS_PATH, "r") as f:
+            class_to_problems = json.load(f)
 
     ablation_results = {}
 
@@ -177,10 +175,6 @@ def ablation(class_to_problems):
 
     print(f"Saved ablation performance to {out_path}")
     return ablation_results
-
-
-
-
 def apply_ablation(model, neuron_indices):
     """Return a copy of `model` with the specified MLP neurons ablated.
 
@@ -258,7 +252,12 @@ def apply_ablation(model, neuron_indices):
 
 
 if __name__ == "__main__":
-    class_to_problems = classify_problems()
+    if os.path.exists(CLASSIFIED_PROBLEMS_PATH):
+        with open(CLASSIFIED_PROBLEMS_PATH, "r") as f:
+            class_to_problems = json.load(f)
+        print(f"Loaded classified problems from {CLASSIFIED_PROBLEMS_PATH}")
+    else:
+        class_to_problems = classify_problems()
 
     # Free circuit_model before loading large teacher models for ablation to avoid OOM.
     del circuit_model
