@@ -24,7 +24,11 @@ def load_model(model_name):
     from huggingface_hub import login
 
     login(HF_TOKEN)
-    model = AutoModelForCausalLM.from_pretrained(model_name, device_map='auto')
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=torch.float16 if torch.cuda.is_available() else None,
+    ).to(device)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_size = 'left'
