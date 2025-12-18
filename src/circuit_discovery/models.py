@@ -21,7 +21,7 @@ class ProblemEncoder(nn.Module):
 
 
 class ActivationsEncoder(nn.Module):
-    def __init__(self, model, input_dim, embedding_dim, output_dim, num_layers=4, num_heads=4, max_seq_len=9):
+    def __init__(self, model, input_dim, embedding_dim, output_dim, num_layers=4, num_heads=4, max_seq_len=5):
         super().__init__()
 
         self.input_proj = nn.Linear(input_dim, embedding_dim)
@@ -137,7 +137,7 @@ class CircuitDiscoveryModel(nn.Module):
         logits = self.classifier(problem_encoding)
         return logits
 
-    def forward(self, op1, op2, res, activations_1b, activations_8b, term_encoding):
+    def forward(self, op1, op2, res, activations_1b, activations_8b):
         logits = self.classify_problem(op1, op2, res)
         hard_class_probs = F.gumbel_softmax(logits, tau=self.tau, hard=True, dim=-1)
 

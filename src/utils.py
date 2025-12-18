@@ -31,7 +31,7 @@ def load_model(argv):
     tokenizer.padding_size = 'left'
     return model, tokenizer
 
-def test_model(model, tokenizer, dataset_fname, results_fname, batch_size=50, max_new_tokens=5, log=True):
+def test_model(model, tokenizer, dataset_fname, results_fname, batch_size=50, max_new_tokens=10, log=True):
     model.eval()
     with open(dataset_fname, 'r') as f:
         dataset = json.load(f)
