@@ -37,18 +37,11 @@ def parse_equation(probs, device=None):
         op2_list.append(int(op2_str))
         res_list.append(int(res_str))
 
-        term_encoding = [0] * len(op1_str) + [1] + [2] * len(op2_str) + [3] + [4] * len(res_str)
-        term_encodings.append(torch.tensor(term_encoding, dtype=torch.long, device=device))
-
     op1 = torch.tensor(op1_list, dtype=torch.long, device=device)
     op2 = torch.tensor(op2_list, dtype=torch.long, device=device)
     res = torch.tensor(res_list, dtype=torch.long, device=device)
 
-    term_encoding_padded = nn.utils.rnn.pad_sequence(
-        term_encodings, batch_first=True, padding_value=0
-    )
-
-    return op1, op2, res, term_encoding_padded
+    return op1, op2, res
 
 
 def _stack_layer_activations(batch_activations):
