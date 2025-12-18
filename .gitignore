@@ -6,3 +6,9 @@ __pycache__/
 esinghal.pem
 src/constants.py
 checkpoints/
+latex/paper.aux
+latex/paper.log
+latex/paper.out
+latex/paper.fls
+latex/paper.fdb_latexmk
+latex/paper.synctex.gz
