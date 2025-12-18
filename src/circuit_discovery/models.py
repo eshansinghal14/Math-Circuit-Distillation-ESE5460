@@ -178,7 +178,7 @@ def _mean_pairwise_mask_cossim(masks, eps=1e-8):
 
 
 class CircuitLoss(nn.Module):
-    def __init__(self, lambda_sim=1.0, lambda_sparsity=1e-0, lambda_usage=1e-1, lambda_kl=1e-1, lambda_mask_cossim=1e-1, eps=1e-8):
+    def __init__(self, lambda_sim=1.0, lambda_sparsity=5e-0, lambda_usage=1, lambda_kl=1e-1, lambda_mask_cossim=5, eps=1e-8):
         super().__init__()
         self.lambda_sim = lambda_sim
         self.lambda_sparsity = lambda_sparsity
