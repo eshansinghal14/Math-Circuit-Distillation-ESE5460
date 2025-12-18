@@ -17,7 +17,7 @@ from utils import (
 from circuit_discovery.utils import parse_equation
 
 model_name = get_model_name(sys.argv)
-base_model, tokenizer = load_model(model_name)
+_, tokenizer = load_model(model_name)
 checkpoint_name = "model_2000"
 circuit_model, _, _, _ = load_model_checkpoint(checkpoint_name, k_classes=8, lr=1e-3)
 circuit_model.eval()
@@ -114,9 +114,17 @@ def ablation(class_to_problems):
         with open(subclass_dataset_path, "w") as f:
             json.dump(dataset, f, indent=2)
 
-        # Baseline accuracy: load a fresh teacher model, evaluate, then free it.
+        # Baseline accuracy: load a fresh model, evaluate, then free it.
         baseline_model, _ = load_model(model_name)
-        _ = test_model(baseline_model, tokenizer, subclass_dataset_path, buffer_results_path, log=False)
+        _ = test_model(
+            baseline_model,
+            tokenizer,
+            subclass_dataset_path,
+            buffer_results_path,
+            batch_size=4,
+            max_new_tokens=1,
+            log=False,
+        )
         baseline_acc = eval_model(buffer_results_path)
         print(f"Subclass {subclass}: baseline accuracy = {baseline_acc:.4f}")
         del baseline_model
@@ -140,11 +148,19 @@ def ablation(class_to_problems):
         }
 
         for cluster_id, neuron_indices in cluster_to_indices.items():
-            # For each cluster, load a fresh teacher, ablate in-place, evaluate, then free.
+            # For each cluster, load a fresh model, ablate in-place, evaluate, then free.
             ablated_model, _ = load_model(model_name)
             apply_ablation(ablated_model, neuron_indices)
 
-            _ = test_model(ablated_model, tokenizer, subclass_dataset_path, buffer_results_path, log=False)
+            _ = test_model(
+                ablated_model,
+                tokenizer,
+                subclass_dataset_path,
+                buffer_results_path,
+                batch_size=4,
+                max_new_tokens=1,
+                log=False,
+            )
             acc = eval_model(buffer_results_path)
             print(f"  Cluster {cluster_id}: accuracy = {acc:.4f}")
 
@@ -243,4 +259,10 @@ def apply_ablation(model, neuron_indices):
 
 if __name__ == "__main__":
     class_to_problems = classify_problems()
+
+    # Free circuit_model before loading large teacher models for ablation to avoid OOM.
+    del circuit_model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     ablation(class_to_problems)
