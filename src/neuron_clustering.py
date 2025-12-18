@@ -7,6 +7,7 @@ import sys
 import shutil
 
 import torch.nn.functional as F
+from transformers import AutoTokenizer
 
 from constants import BUCKET_NAME
 from utils import (
@@ -29,9 +30,11 @@ else:
 os.makedirs(cache_dir_resolved, exist_ok=True)
 
 model_name = get_model_name(sys.argv)
-checkpoint_name = "model_2000"
+checkpoint_name = "model_5000"
 model, _, _, _ = load_model_checkpoint(checkpoint_name, k_classes=8, lr=1e-3)
 model.eval()
+
+tokenizer = AutoTokenizer.from_pretrained(model_name)
 
 threshold = 1e-3
 if model_name == "meta-llama/Llama-3.2-1B":
@@ -216,13 +219,22 @@ def _collect_neuron_features_per_subclass(batch_size=5, save_path=None):
                     obj = s3.get_object(Bucket=BUCKET_NAME, Key=key)
                     bytestream = io.BytesIO(obj["Body"].read())
                     batch = torch.load(bytestream, map_location="cpu")
-            prompts, activations_dict = batch["prompts"], batch["activations"]
+
+            ids, activations_dict = batch["ids"], batch["activations"]
+
+            if isinstance(ids, torch.Tensor):
+                input_id_list = ids.tolist()
+            else:
+                input_id_list = ids
+
+            prompts = tokenizer.batch_decode(input_id_list, skip_special_tokens=True)
             activations = _stack_layer_activations(activations_dict).to(device)
 
             # activations: [N, D]
             op1, op2, res, term_encoding = parse_equation(prompts, device=device)
             classifier_logits = model.classify_problem(op1, op2, res)
-            subclass = torch.argmax(classifier_logits, dim=-1)  # [N]
+            hard = F.gumbel_softmax(classifier_logits, tau=model.tau, dim=-1, hard=True)  # [N, k], float one-hot
+            subclass = hard.argmax(dim=-1)  # [N], long
 
             mean_activations = activations.mean(dim=1)  # [N, D]
 
@@ -277,6 +289,7 @@ def run_neuron_kmeans(k, subclass: int, batch_size=5, num_iters=100, log=True,
         features_per_subclass, indices_per_subclass = _collect_neuron_features_per_subclass(
             batch_size=batch_size, save_path=subclass_features_path
         )
+
     if subclass not in features_per_subclass:
         raise ValueError(f"No features found for subclass {subclass}")
 
@@ -323,15 +336,19 @@ if __name__ == "__main__":
     # corr_distance_sanity_check()
 
     # run_neuron_kmeans(k=8, subclass=0)
+    for i in range(8):
+        print(neuron_masks[i].count_nonzero().item())
+    # print("Subclass 3 has active neurons:", neuron_masks[3].any().item())
     
     k_gs_testing = {}
     for subclass in range(8):
-        print(f"Processing subclass {subclass}")
-        k_gs_testing[subclass] = {}
-        for k in range(1, 20):
-            _, _, loss = run_neuron_kmeans(k, subclass=subclass, log=False)
-            k_gs_testing[subclass][k] = loss
-            print(f"Subclass {subclass}, k={k}, loss={loss}")
+        if neuron_masks[subclass].any().item():
+            print(f"Processing subclass {subclass}")
+            k_gs_testing[subclass] = {}
+            for k in range(1, 20):
+                _, _, loss = run_neuron_kmeans(k, subclass=subclass, log=False)
+                k_gs_testing[subclass][k] = loss
+                print(f"Subclass {subclass}, k={k}, loss={loss}")
         
     results_dir = os.path.join("..", "results", "neuron-clustering", model_name)
     os.makedirs(results_dir, exist_ok=True)

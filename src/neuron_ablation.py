@@ -1,37 +1,32 @@
-import io
 import json
 import torch
-import boto3
 import os
 import sys
-import shutil
 import copy
 
 import torch.nn.functional as F
+from transformers import AutoTokenizer
 
-from constants import BUCKET_NAME
 from utils import (
     load_model_checkpoint,
     load_model,
     get_model_name,
-    _stack_layer_activations,
-    list_keys,
-    suffix_map,
     test_model,
     eval_model,
 )
 from circuit_discovery.utils import parse_equation
 
 model_name = get_model_name(sys.argv)
+tokenizer = AutoTokenizer.from_pretrained(model_name)
 base_model, tokenizer = load_model(sys.argv)
 checkpoint_name = "model_2000"
 circuit_model, _, _, _ = load_model_checkpoint(checkpoint_name, k_classes=8, lr=1e-3)
 circuit_model.eval()
 
 if model_name == "meta-llama/Llama-3.2-1B":
-    class_clusters = [8] * 8
+    class_clusters = [3] * 8
 else:
-    class_clusters = [8] * 8
+    class_clusters = [3] * 8
 
 
 def classify_problems(batch_size=256):
@@ -41,29 +36,28 @@ def classify_problems(batch_size=256):
     with open(dataset_path, "r") as f:
         dataset = json.load(f)
 
-    inputs = []
-    prompts = list(dataset.keys())
-    answers = list(dataset.values())
-    for i, prompt in enumerate(prompts):
-        ans = str(answers[i])
-        for j in range(1, len(ans) + 1):
-            inputs.append(prompt + ans[:j])
+    ids = []
+    for record in dataset:
+        ids.append(record['ids'])
+    ids = torch.tensor(ids).to(device)
+    prompts = tokenizer.batch_decode(ids, skip_special_tokens=True)
 
     class_to_problems = {}
 
-    for i in range(0, len(inputs), batch_size):
-        batch_prompts = inputs[i : i + batch_size]
+    for i in range(0, len(prompts), batch_size):
+        batch_prompts = prompts[i : i + batch_size]
+        batch_ids = ids[i : i + batch_size]
 
         op1, op2, res, term_encoding = parse_equation(batch_prompts, device=device)
         with torch.no_grad():
             logits = circuit_model.classify_problem(op1, op2, res)
             subclass = torch.argmax(logits, dim=-1)  # [batch]
 
-        for prob, cls in zip(batch_prompts, subclass.tolist()):
+        for prob, cls, id in zip(batch_prompts, subclass.tolist(), batch_ids.tolist()):
             key = str(cls)
             if key not in class_to_problems:
                 class_to_problems[key] = []
-            class_to_problems[key].append(prob)
+            class_to_problems[key].append((prob, id))
 
     results_dir = os.path.join("..", "results", "circuit-discovery")
     os.makedirs(results_dir, exist_ok=True)
@@ -82,8 +76,8 @@ def ablation(class_to_problems):
     results_dir = os.path.join("..", "results", "circuit-discovery")
     os.makedirs(results_dir, exist_ok=True)
 
-    buffer_results_path = os.path.join(results_dir, "ablation_results_buffer.json")
     out_path = os.path.join(results_dir, "ablation_performance.json")
+    buffer_results_path = os.path.join(results_dir, "ablation_results_buffer.json")
 
     ablation_results = {}
 
@@ -94,31 +88,36 @@ def ablation(class_to_problems):
         if not problems:
             continue
 
-        subclass_dataset_path = os.path.join(
-            results_dir, f"class_{subclass_str}_dataset.json"
-        )
+        # Build a subclass-specific dataset JSON based on problem strings
+        subclass_dataset_path = os.path.join(results_dir, f"class_{subclass_str}_dataset.json")
 
         dataset = {}
-        for s in problems:
-            if len(s) < 2:
+        for problem_str, _ in problems:
+            if "=" not in problem_str:
                 continue
-            prefix = s[:-1]
-            last = s[-1]
-            if not last.isdigit():
+            lhs, rhs = problem_str.split("=", 1)
+            ans_str = rhs.strip()
+            if not ans_str.isdigit():
                 continue
-            dataset[prefix] = int(last)
+            prompt = lhs + "="
+            dataset[prompt] = int(ans_str)
 
         with open(subclass_dataset_path, "w") as f:
             json.dump(dataset, f, indent=2)
 
-        baseline_results = test_model(
-            base_model, tokenizer, subclass_dataset_path, buffer_results_path, log=False
-        )
+        # Baseline accuracy using the original test_model/eval_model pipeline
+        _ = test_model(base_model, tokenizer, subclass_dataset_path, buffer_results_path, log=False)
         baseline_acc = eval_model(buffer_results_path)
+        print(f"Subclass {subclass}: baseline accuracy = {baseline_acc:.4f}")
 
         k = class_clusters[subclass]
         clusters_dir = os.path.join("..", "results", "neuron-clustering", model_name)
         clusters_path = os.path.join(clusters_dir, f"subclass_{subclass}_clusters/k{k}.pt")
+
+        if not os.path.exists(clusters_path):
+            print(f"  Skipping subclass {subclass}: missing cluster file {clusters_path}")
+            continue
+
         ckpt = torch.load(clusters_path, map_location="cpu")
         cluster_to_indices = ckpt["cluster_to_indices"]
 
@@ -133,12 +132,11 @@ def ablation(class_to_problems):
             with torch.no_grad():
                 base_gate = base_model.model.layers[0].mlp.gate_proj.weight
                 abl_gate = ablated_model.model.layers[0].mlp.gate_proj.weight
-                print("Δ layer0 gate_proj L2:", (base_gate - abl_gate).norm().item())
 
-            _ = test_model(
-                ablated_model, tokenizer, subclass_dataset_path, buffer_results_path, max_new_tokens=2, log=False
-            )
+            # Accuracy of ablated model on the same subclass dataset
+            _ = test_model(ablated_model, tokenizer, subclass_dataset_path, buffer_results_path, log=False)
             acc = eval_model(buffer_results_path)
+            print(f"  Cluster {cluster_id}: accuracy = {acc:.4f}")
 
             subclass_result["clusters"][str(cluster_id)] = acc
 
