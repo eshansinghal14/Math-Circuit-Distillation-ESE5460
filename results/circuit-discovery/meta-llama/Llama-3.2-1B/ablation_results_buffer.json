@@ -1,0 +1,550 @@
+[
+    {
+        "response": "46+24=70\nThe sum of",
+        "answer": 70
+    },
+    {
+        "response": "46+67=113\nThe sum of",
+        "answer": 113
+    },
+    {
+        "response": "90+89=179\n90+89",
+        "answer": 179
+    },
+    {
+        "response": "82+74=156\nThe sum of",
+        "answer": 156
+    },
+    {
+        "response": "62+94=156\n62+94",
+        "answer": 156
+    },
+    {
+        "response": "89+81=170\nThe sum of",
+        "answer": 170
+    },
+    {
+        "response": "64+15=79\nThe number ",
+        "answer": 79
+    },
+    {
+        "response": "26+53=79\n26+53",
+        "answer": 79
+    },
+    {
+        "response": "15+64=79\n15+64",
+        "answer": 79
+    },
+    {
+        "response": "98+81=179\n179 is a",
+        "answer": 179
+    },
+    {
+        "response": "89+18=107\n107-18",
+        "answer": 107
+    },
+    {
+        "response": "97+10=107\nThe number ",
+        "answer": 107
+    },
+    {
+        "response": "73+34=107\nThe sum of",
+        "answer": 107
+    },
+    {
+        "response": "6+73=79\n6+73",
+        "answer": 79
+    },
+    {
+        "response": "30+31=61\nThe 30",
+        "answer": 61
+    },
+    {
+        "response": "83+96=179\n179-96",
+        "answer": 179
+    },
+    {
+        "response": "99+76=175\n99+76",
+        "answer": 175
+    },
+    {
+        "response": "89+79=168\nThe sum of",
+        "answer": 168
+    },
+    {
+        "response": "99+8=101\nThe 99",
+        "answer": 107
+    },
+    {
+        "response": "66+90=156\nThe sum of",
+        "answer": 156
+    },
+    {
+        "response": "60+1=61\nThe 60",
+        "answer": 61
+    },
+    {
+        "response": "46+33=79\nThe sum of",
+        "answer": 79
+    },
+    {
+        "response": "81+98=179\n179 is a",
+        "answer": 179
+    },
+    {
+        "response": "30+23=53: The Story of",
+        "answer": 53
+    },
+    {
+        "response": "89+90=179\nThe sum of",
+        "answer": 179
+    },
+    {
+        "response": "97+82=179\nThe sum of",
+        "answer": 179
+    },
+    {
+        "response": "46+98=144\nThe sum of",
+        "answer": 144
+    },
+    {
+        "response": "89+70=159. 159 is",
+        "answer": 159
+    },
+    {
+        "response": "70+70=140\nThe 70",
+        "answer": 140
+    },
+    {
+        "response": "26+67=93\n26+67",
+        "answer": 93
+    },
+    {
+        "response": "88+91=179\n179 is a",
+        "answer": 179
+    },
+    {
+        "response": "38+70=108\nThe sum of",
+        "answer": 108
+    },
+    {
+        "response": "85+22=107. 107 is",
+        "answer": 107
+    },
+    {
+        "response": "84+95=179\n179-95",
+        "answer": 179
+    },
+    {
+        "response": "89+62=151\nThe sum of",
+        "answer": 151
+    },
+    {
+        "response": "38+69=107\nThe sum of",
+        "answer": 107
+    },
+    {
+        "response": "74+33=107\nThe sum of",
+        "answer": 107
+    },
+    {
+        "response": "37+70=107\n37+70",
+        "answer": 107
+    },
+    {
+        "response": "26+81=107\nThe sum of",
+        "answer": 107
+    },
+    {
+        "response": "80+99=179\nThe sum of",
+        "answer": 179
+    },
+    {
+        "response": "89+19=108. 108 is",
+        "answer": 108
+    },
+    {
+        "response": "93+14=107\nThe sum of",
+        "answer": 107
+    },
+    {
+        "response": "26+14=40\nThe 26",
+        "answer": 40
+    },
+    {
+        "response": "46+38=84\nThe sum of",
+        "answer": 84
+    },
+    {
+        "response": "46+61=107\nThe sum of",
+        "answer": 107
+    },
+    {
+        "response": "89+38=127\nThe number ",
+        "answer": 127
+    },
+    {
+        "response": "61+79=140\n61+79",
+        "answer": 140
+    },
+    {
+        "response": "0+70=71\n0+70",
+        "answer": 70
+    },
+    {
+        "response": "23+38=61\nThe 23",
+        "answer": 61
+    },
+    {
+        "response": "45+62=107\nThe sum of",
+        "answer": 107
+    },
+    {
+        "response": "6+55=61\n6+55",
+        "answer": 61
+    },
+    {
+        "response": "46+90=136\nThe sum of",
+        "answer": 136
+    },
+    {
+        "response": "28+79=107\n28+79",
+        "answer": 107
+    },
+    {
+        "response": "47+32=79\nThe sum of",
+        "answer": 79
+    },
+    {
+        "response": "86+70=156\nThe sum of",
+        "answer": 156
+    },
+    {
+        "response": "21+32=53\n21+32",
+        "answer": 53
+    },
+    {
+        "response": "46+17=63\nThe number ",
+        "answer": 63
+    },
+    {
+        "response": "26+37=63\nThe 26",
+        "answer": 63
+    },
+    {
+        "response": "79+77=156\nThe sum of",
+        "answer": 156
+    },
+    {
+        "response": "75+81=156\n156 is a",
+        "answer": 156
+    },
+    {
+        "response": "54+53=107\nThe sum of",
+        "answer": 107
+    },
+    {
+        "response": "26+44=70\nThe number ",
+        "answer": 70
+    },
+    {
+        "response": "28+25=53\nThe number ",
+        "answer": 53
+    },
+    {
+        "response": "62+82=144\nThe number ",
+        "answer": 144
+    },
+    {
+        "response": "89+97=186\nThe sum of",
+        "answer": 186
+    },
+    {
+        "response": "14+93=107\n14+93",
+        "answer": 107
+    },
+    {
+        "response": "61+46=107\n61+46",
+        "answer": 107
+    },
+    {
+        "response": "59+97=156\nThe sum of",
+        "answer": 156
+    },
+    {
+        "response": "89+67=156\nThe sum of",
+        "answer": 156
+    },
+    {
+        "response": "63+44=107\nThe sum of",
+        "answer": 107
+    },
+    {
+        "response": "89+86=75\nThe sum of",
+        "answer": 175
+    },
+    {
+        "response": "66+41=107\nThe sum of",
+        "answer": 107
+    },
+    {
+        "response": "46+76=122\nThe sum of",
+        "answer": 122
+    },
+    {
+        "response": "11+96=107\n11+96",
+        "answer": 107
+    },
+    {
+        "response": "93+86=179\n179-86",
+        "answer": 179
+    },
+    {
+        "response": "89+94=183\nThe sum of",
+        "answer": 183
+    },
+    {
+        "response": "89+33=122\nThe sum of",
+        "answer": 122
+    },
+    {
+        "response": "92+15=107\n92+15",
+        "answer": 107
+    },
+    {
+        "response": "40+21=61\nThe sum of",
+        "answer": 61
+    },
+    {
+        "response": "85+94=179\n179 is a",
+        "answer": 179
+    },
+    {
+        "response": "31+76=107\nThe sum of",
+        "answer": 107
+    },
+    {
+        "response": "27+34=61\nThe number ",
+        "answer": 61
+    },
+    {
+        "response": "89+95=184\n184+95",
+        "answer": 184
+    },
+    {
+        "response": "28+33=61\nThe 28",
+        "answer": 61
+    },
+    {
+        "response": "34+27=61\nThe sum of",
+        "answer": 61
+    },
+    {
+        "response": "89+91=180\nThe sum of",
+        "answer": 180
+    },
+    {
+        "response": "99+80=179\nThe number ",
+        "answer": 179
+    },
+    {
+        "response": "81+75=156\nThe sum of",
+        "answer": 156
+    },
+    {
+        "response": "33+74=107\n33+74",
+        "answer": 107
+    },
+    {
+        "response": "9+70=79\n9+70",
+        "answer": 79
+    },
+    {
+        "response": "73+6=79\nThe number ",
+        "answer": 79
+    },
+    {
+        "response": "39+68=107\nThe sum of",
+        "answer": 107
+    },
+    {
+        "response": "43+64=107\nThe sum of",
+        "answer": 107
+    },
+    {
+        "response": "30+77=107\n30+77",
+        "answer": 107
+    },
+    {
+        "response": "68+83=151\nThe sum of",
+        "answer": 151
+    },
+    {
+        "response": "61+95=156\n61+95",
+        "answer": 156
+    },
+    {
+        "response": "46+94=140\nThe sum of",
+        "answer": 140
+    },
+    {
+        "response": "46+62=108\nThe sum of",
+        "answer": 108
+    },
+    {
+        "response": "70+37=107\nThe number ",
+        "answer": 107
+    },
+    {
+        "response": "23+84=107\nThe sum of",
+        "answer": 107
+    },
+    {
+        "response": "47+60=107\nThe sum of",
+        "answer": 107
+    },
+    {
+        "response": "39+22=61\nThe sum of",
+        "answer": 61
+    },
+    {
+        "response": "80+76=156\nThe sum of",
+        "answer": 156
+    },
+    {
+        "response": "77+79=156\nThe sum of",
+        "answer": 156
+    },
+    {
+        "response": "63+81=144\n63+81",
+        "answer": 144
+    },
+    {
+        "response": "74+70=144\nThe sum of",
+        "answer": 144
+    },
+    {
+        "response": "82+97=179\n179-97",
+        "answer": 179
+    },
+    {
+        "response": "69+82=151\nThe sum of",
+        "answer": 151
+    },
+    {
+        "response": "46+15=61\nThe sum of",
+        "answer": 61
+    },
+    {
+        "response": "90+17=107\n107-17",
+        "answer": 107
+    },
+    {
+        "response": "73+67=140\nThe sum of",
+        "answer": 140
+    },
+    {
+        "response": "77+30=107\nThe sum of",
+        "answer": 107
+    },
+    {
+        "response": "46+81=127\nThe sum of",
+        "answer": 127
+    },
+    {
+        "response": "89+80=169\nThe sum of",
+        "answer": 169
+    },
+    {
+        "response": "18+89=107\n18+89",
+        "answer": 107
+    },
+    {
+        "response": "86+93=179\n179+93",
+        "answer": 179
+    },
+    {
+        "response": "52+55=107\nThe sum of",
+        "answer": 107
+    },
+    {
+        "response": "26+35=61\nThe 26",
+        "answer": 61
+    },
+    {
+        "response": "89+55=144\nThe number ",
+        "answer": 144
+    },
+    {
+        "response": "80+27=107\n107-27",
+        "answer": 107
+    },
+    {
+        "response": "66+70=136\nThe sum of",
+        "answer": 136
+    },
+    {
+        "response": "99+70=169\n99+70",
+        "answer": 169
+    },
+    {
+        "response": "83+73=156\n156 is a",
+        "answer": 156
+    },
+    {
+        "response": "53+8=61\nThe sum of",
+        "answer": 61
+    },
+    {
+        "response": "25+15=40: The 25",
+        "answer": 40
+    },
+    {
+        "response": "13+94=107\n13+94",
+        "answer": 107
+    },
+    {
+        "response": "96+60=156\nThe sum of",
+        "answer": 156
+    },
+    {
+        "response": "85+90=175\nThe sum of",
+        "answer": 175
+    },
+    {
+        "response": "40+67=107\nThe sum of",
+        "answer": 107
+    },
+    {
+        "response": "85+71=156\n156 is a",
+        "answer": 156
+    },
+    {
+        "response": "26+27=28\nThe 26",
+        "answer": 53
+    },
+    {
+        "response": "85+33=118\nThe number ",
+        "answer": 118
+    },
+    {
+        "response": "89+74=163\nThe sum of",
+        "answer": 163
+    },
+    {
+        "response": "47+14=61\nThe sum of",
+        "answer": 61
+    },
+    {
+        "response": "25+82=107\nThe sum of",
+        "answer": 107
+    },
+    {
+        "response": "45+16=61\nThe sum of",
+        "answer": 61
+    },
+    {
+        "response": "15+38=53\n15+38",
+        "answer": 53
+    }
+]
