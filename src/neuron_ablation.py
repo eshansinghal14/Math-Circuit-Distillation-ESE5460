@@ -17,16 +17,15 @@ from utils import (
 from circuit_discovery.utils import parse_equation
 
 model_name = get_model_name(sys.argv)
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-base_model, tokenizer = load_model(sys.argv)
+base_model, tokenizer = load_model(model_name)
 checkpoint_name = "model_2000"
 circuit_model, _, _, _ = load_model_checkpoint(checkpoint_name, k_classes=8, lr=1e-3)
 circuit_model.eval()
 
 if model_name == "meta-llama/Llama-3.2-1B":
-    class_clusters = [3] * 8
+    class_clusters = [6] * 8
 else:
-    class_clusters = [3] * 8
+    class_clusters = [6] * 8
 
 
 def classify_problems(batch_size=256):
@@ -48,7 +47,7 @@ def classify_problems(batch_size=256):
         batch_prompts = prompts[i : i + batch_size]
         batch_ids = ids[i : i + batch_size]
 
-        op1, op2, res, term_encoding = parse_equation(batch_prompts, device=device)
+        op1, op2, res = parse_equation(batch_prompts, device=device)
         with torch.no_grad():
             logits = circuit_model.classify_problem(op1, op2, res)
             subclass = torch.argmax(logits, dim=-1)  # [batch]
@@ -73,7 +72,7 @@ def classify_problems(batch_size=256):
 
 
 def ablation(class_to_problems):
-    results_dir = os.path.join("..", "results", "circuit-discovery")
+    results_dir = os.path.join("..", "results", f"circuit-discovery/{model_name}")
     os.makedirs(results_dir, exist_ok=True)
 
     out_path = os.path.join(results_dir, "ablation_performance.json")
@@ -91,7 +90,9 @@ def ablation(class_to_problems):
         # Build a subclass-specific dataset JSON based on problem strings
         subclass_dataset_path = os.path.join(results_dir, f"class_{subclass_str}_dataset.json")
 
-        dataset = {}
+        # Match the format of datasets/2d_add_all.json: a list of records
+        # with fields q_str, a_str, and ids.
+        dataset = []
         for problem_str, _ in problems:
             if "=" not in problem_str:
                 continue
@@ -99,16 +100,28 @@ def ablation(class_to_problems):
             ans_str = rhs.strip()
             if not ans_str.isdigit():
                 continue
-            prompt = lhs + "="
-            dataset[prompt] = int(ans_str)
+
+            q_str = lhs + "="
+            a_str = ans_str
+            ids = tokenizer.encode(q_str + a_str, add_special_tokens=False)
+
+            dataset.append({
+                "q_str": q_str,
+                "a_str": a_str,
+                "ids": ids,
+            })
 
         with open(subclass_dataset_path, "w") as f:
             json.dump(dataset, f, indent=2)
 
-        # Baseline accuracy using the original test_model/eval_model pipeline
-        _ = test_model(base_model, tokenizer, subclass_dataset_path, buffer_results_path, log=False)
+        # Baseline accuracy: load a fresh teacher model, evaluate, then free it.
+        baseline_model, _ = load_model(model_name)
+        _ = test_model(baseline_model, tokenizer, subclass_dataset_path, buffer_results_path, log=False)
         baseline_acc = eval_model(buffer_results_path)
         print(f"Subclass {subclass}: baseline accuracy = {baseline_acc:.4f}")
+        del baseline_model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         k = class_clusters[subclass]
         clusters_dir = os.path.join("..", "results", "neuron-clustering", model_name)
@@ -127,16 +140,17 @@ def ablation(class_to_problems):
         }
 
         for cluster_id, neuron_indices in cluster_to_indices.items():
-            ablated_model = apply_ablation(base_model, neuron_indices)
+            # For each cluster, load a fresh teacher, ablate in-place, evaluate, then free.
+            ablated_model, _ = load_model(model_name)
+            apply_ablation(ablated_model, neuron_indices)
 
-            with torch.no_grad():
-                base_gate = base_model.model.layers[0].mlp.gate_proj.weight
-                abl_gate = ablated_model.model.layers[0].mlp.gate_proj.weight
-
-            # Accuracy of ablated model on the same subclass dataset
             _ = test_model(ablated_model, tokenizer, subclass_dataset_path, buffer_results_path, log=False)
             acc = eval_model(buffer_results_path)
             print(f"  Cluster {cluster_id}: accuracy = {acc:.4f}")
+
+            del ablated_model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
             subclass_result["clusters"][str(cluster_id)] = acc
 
@@ -147,6 +161,8 @@ def ablation(class_to_problems):
 
     print(f"Saved ablation performance to {out_path}")
     return ablation_results
+
+
 
 
 def apply_ablation(model, neuron_indices):
@@ -168,14 +184,11 @@ def apply_ablation(model, neuron_indices):
     intermediate_size = cfg.intermediate_size
     num_layers = cfg.num_hidden_layers
 
-    # Create a fresh copy so we don't mutate the shared base_model
-    ablated_model = copy.deepcopy(model)
+    # For LLaMA-like models, transformer blocks are in model.model.layers
+    if not hasattr(model, "model") or not hasattr(model.model, "layers"):
+        return model
 
-    # For LLaMA-like models, transformer blocks are in ablated_model.model.layers
-    if not hasattr(ablated_model, "model") or not hasattr(ablated_model.model, "layers"):
-        return ablated_model
-
-    layers = ablated_model.model.layers
+    layers = model.model.layers
 
     if isinstance(neuron_indices, torch.Tensor):
         idx_list = neuron_indices.view(-1).tolist()
@@ -225,7 +238,7 @@ def apply_ablation(model, neuron_indices):
                 if 0 <= neuron_id < down.weight.shape[1]:
                     down.weight[:, neuron_id].zero_()
 
-    return ablated_model
+    return model
 
 
 if __name__ == "__main__":
