@@ -28,6 +28,8 @@ def train_circuit_discovery(
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    tokenizer = AutoTokenizer.from_pretrained(llama_1b)
+
     if resume_model is None:
         model = CircuitDiscoveryModel(k_classes=k_classes).to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -207,7 +209,7 @@ def train_circuit_discovery(
         with open(metrics_path, "w") as f:
             json.dump(metrics_log, f, indent=4)
 
-        if (epoch + 1) % 100 == 0:
+        if (epoch + 1) % 500 == 0:
             if os.path.exists("/opt/dlami/nvme"):
                 ckpt_root = "/opt/dlami/nvme/circuit_discovery_checkpoints"
             else:

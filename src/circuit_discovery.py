@@ -12,4 +12,4 @@ from circuit_discovery import (  # noqa: F401
 
 
 if __name__ == "__main__":
-    train_circuit_discovery(k_classes=8, epochs=20000, resume_model='model_2000')
+    train_circuit_discovery(k_classes=8, epochs=20000, resume_model='model_3500')
