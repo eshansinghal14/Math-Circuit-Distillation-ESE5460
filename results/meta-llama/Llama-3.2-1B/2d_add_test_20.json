@@ -1,0 +1,4002 @@
+[
+    {
+        "response": "18+47=73\n18",
+        "answer": 65
+    },
+    {
+        "response": "53+39= 82\n",
+        "answer": 92
+    },
+    {
+        "response": "54+89=143\nThe",
+        "answer": 143
+    },
+    {
+        "response": "63+31= 2\n",
+        "answer": 94
+    },
+    {
+        "response": "81+79=160\n81",
+        "answer": 160
+    },
+    {
+        "response": "39+22=61\nThe",
+        "answer": 61
+    },
+    {
+        "response": "64+80=144\nThe",
+        "answer": 144
+    },
+    {
+        "response": "29+6=35. The",
+        "answer": 35
+    },
+    {
+        "response": "8+87= 71\n",
+        "answer": 95
+    },
+    {
+        "response": "63+47=100\nThe",
+        "answer": 110
+    },
+    {
+        "response": "12+35=57\n12",
+        "answer": 47
+    },
+    {
+        "response": "99+66=33\nA",
+        "answer": 165
+    },
+    {
+        "response": "94+37= 67\n",
+        "answer": 131
+    },
+    {
+        "response": "74+8=82. ",
+        "answer": 82
+    },
+    {
+        "response": "14+36=60\n14",
+        "answer": 50
+    },
+    {
+        "response": "59+81= 120\n",
+        "answer": 140
+    },
+    {
+        "response": "64+46= 10\n",
+        "answer": 110
+    },
+    {
+        "response": "95+15=110\nThe",
+        "answer": 110
+    },
+    {
+        "response": "38+73=115\nThe",
+        "answer": 111
+    },
+    {
+        "response": "17+5=22. The",
+        "answer": 22
+    },
+    {
+        "response": "6+78= 6+",
+        "answer": 84
+    },
+    {
+        "response": "87+70=17\nThe",
+        "answer": 157
+    },
+    {
+        "response": "47+90= 47\n",
+        "answer": 137
+    },
+    {
+        "response": "38+51=89\nThe",
+        "answer": 89
+    },
+    {
+        "response": "75+61= 136\n",
+        "answer": 136
+    },
+    {
+        "response": "22+67= 49\n",
+        "answer": 89
+    },
+    {
+        "response": "76+19= 57\n",
+        "answer": 95
+    },
+    {
+        "response": "47+75=122\nA",
+        "answer": 122
+    },
+    {
+        "response": "12+34=56\n12",
+        "answer": 46
+    },
+    {
+        "response": "52+52=104\nThe",
+        "answer": 104
+    },
+    {
+        "response": "62+0=62. ",
+        "answer": 62
+    },
+    {
+        "response": "29+65=34\nThe",
+        "answer": 94
+    },
+    {
+        "response": "26+94= 70\n",
+        "answer": 120
+    },
+    {
+        "response": "33+69= 33+",
+        "answer": 102
+    },
+    {
+        "response": "30+59=89\nThe",
+        "answer": 89
+    },
+    {
+        "response": "65+44= 19\n",
+        "answer": 109
+    },
+    {
+        "response": "3+72= 3+",
+        "answer": 75
+    },
+    {
+        "response": "90+85=15\nThe",
+        "answer": 175
+    },
+    {
+        "response": "4+50=54\n4",
+        "answer": 54
+    },
+    {
+        "response": "71+0=71. ",
+        "answer": 71
+    },
+    {
+        "response": "61+22=83. ",
+        "answer": 83
+    },
+    {
+        "response": "67+97=124\nA",
+        "answer": 164
+    },
+    {
+        "response": "42+22=64\nThe",
+        "answer": 64
+    },
+    {
+        "response": "52+83=125\nThe",
+        "answer": 135
+    },
+    {
+        "response": "36+60=96\nThe",
+        "answer": 96
+    },
+    {
+        "response": "45+36=81\nThe",
+        "answer": 81
+    },
+    {
+        "response": "33+55=88\nThe",
+        "answer": 88
+    },
+    {
+        "response": "18+75= 51\n",
+        "answer": 93
+    },
+    {
+        "response": "20+16=36\n20",
+        "answer": 36
+    },
+    {
+        "response": "58+35=93\nThe",
+        "answer": 93
+    },
+    {
+        "response": "42+85=127\nThe",
+        "answer": 127
+    },
+    {
+        "response": "29+25=54\nThe",
+        "answer": 54
+    },
+    {
+        "response": "61+89=130\n61",
+        "answer": 150
+    },
+    {
+        "response": "79+61= 120\n",
+        "answer": 140
+    },
+    {
+        "response": "6+47=53\n6",
+        "answer": 53
+    },
+    {
+        "response": "60+26=36\nA",
+        "answer": 86
+    },
+    {
+        "response": "16+55=71\n16",
+        "answer": 71
+    },
+    {
+        "response": "54+61=115\nThe",
+        "answer": 115
+    },
+    {
+        "response": "5+93= 93\n",
+        "answer": 98
+    },
+    {
+        "response": "41+6=47\nThe",
+        "answer": 47
+    },
+    {
+        "response": "46+68=114\nThe",
+        "answer": 114
+    },
+    {
+        "response": "63+65=128\nThe",
+        "answer": 128
+    },
+    {
+        "response": "26+10=36. The",
+        "answer": 36
+    },
+    {
+        "response": "67+95=172\nThe",
+        "answer": 162
+    },
+    {
+        "response": "9+45=45\n9",
+        "answer": 54
+    },
+    {
+        "response": "80+30=110\nThe",
+        "answer": 110
+    },
+    {
+        "response": "90+43= 47\n",
+        "answer": 133
+    },
+    {
+        "response": "40+3=43\nThe",
+        "answer": 43
+    },
+    {
+        "response": "0+58=58\n0",
+        "answer": 58
+    },
+    {
+        "response": "48+91= 41\n",
+        "answer": 139
+    },
+    {
+        "response": "47+88= 131\n",
+        "answer": 135
+    },
+    {
+        "response": "31+86=1\nThe",
+        "answer": 117
+    },
+    {
+        "response": "70+48=122\nA",
+        "answer": 118
+    },
+    {
+        "response": "35+6=41. The",
+        "answer": 41
+    },
+    {
+        "response": "36+8=44. The",
+        "answer": 44
+    },
+    {
+        "response": "85+1=86: The",
+        "answer": 86
+    },
+    {
+        "response": "80+16=56\nA",
+        "answer": 96
+    },
+    {
+        "response": "3+24=27\n3",
+        "answer": 27
+    },
+    {
+        "response": "25+87=62\nThe",
+        "answer": 112
+    },
+    {
+        "response": "40+43=83\nThe",
+        "answer": 83
+    },
+    {
+        "response": "31+67=98\nThe",
+        "answer": 98
+    },
+    {
+        "response": "98+81=19\n98",
+        "answer": 179
+    },
+    {
+        "response": "38+38=76\nThe",
+        "answer": 76
+    },
+    {
+        "response": "71+95=166\nThe",
+        "answer": 166
+    },
+    {
+        "response": "30+34=64\nThe",
+        "answer": 64
+    },
+    {
+        "response": "57+13=70\nA",
+        "answer": 70
+    },
+    {
+        "response": "20+13=33. The",
+        "answer": 33
+    },
+    {
+        "response": "58+13=71\nThe",
+        "answer": 71
+    },
+    {
+        "response": "92+10=102\nThe",
+        "answer": 102
+    },
+    {
+        "response": "95+81= 1\n",
+        "answer": 176
+    },
+    {
+        "response": "13+34=57\n13",
+        "answer": 47
+    },
+    {
+        "response": "99+44= 45\n",
+        "answer": 143
+    },
+    {
+        "response": "43+55=98\nThe",
+        "answer": 98
+    },
+    {
+        "response": "35+20=55. ",
+        "answer": 55
+    },
+    {
+        "response": "47+49=1\nThe",
+        "answer": 96
+    },
+    {
+        "response": "81+13=94. ",
+        "answer": 94
+    },
+    {
+        "response": "54+93= 39\n",
+        "answer": 147
+    },
+    {
+        "response": "65+22=87. ",
+        "answer": 87
+    },
+    {
+        "response": "40+16=56\nA",
+        "answer": 56
+    },
+    {
+        "response": "46+47=93\nThe",
+        "answer": 93
+    },
+    {
+        "response": "10+44=44\n10",
+        "answer": 54
+    },
+    {
+        "response": "48+62= 110\n",
+        "answer": 110
+    },
+    {
+        "response": "13+50=63\n13",
+        "answer": 63
+    },
+    {
+        "response": "18+15=33. The",
+        "answer": 33
+    },
+    {
+        "response": "43+28=71\nThe",
+        "answer": 71
+    },
+    {
+        "response": "88+6=94. ",
+        "answer": 94
+    },
+    {
+        "response": "87+75=162\nThe",
+        "answer": 162
+    },
+    {
+        "response": "28+89=121\nThe",
+        "answer": 117
+    },
+    {
+        "response": "33+78=111\nThe",
+        "answer": 111
+    },
+    {
+        "response": "62+77=139\n62",
+        "answer": 139
+    },
+    {
+        "response": "22+23=45\nThe",
+        "answer": 45
+    },
+    {
+        "response": "99+18=81\nThe",
+        "answer": 117
+    },
+    {
+        "response": "9+23=42\n9",
+        "answer": 32
+    },
+    {
+        "response": "83+53=136\nThe",
+        "answer": 136
+    },
+    {
+        "response": "85+4=89. ",
+        "answer": 89
+    },
+    {
+        "response": "50+24=24\n50",
+        "answer": 74
+    },
+    {
+        "response": "45+9=54. The",
+        "answer": 54
+    },
+    {
+        "response": "52+8=60\nThe",
+        "answer": 60
+    },
+    {
+        "response": "26+22=48. The",
+        "answer": 48
+    },
+    {
+        "response": "2+65= 2+",
+        "answer": 67
+    },
+    {
+        "response": "86+43=129\nThe",
+        "answer": 129
+    },
+    {
+        "response": "11+39=50\n11",
+        "answer": 50
+    },
+    {
+        "response": "6+99=99\n6",
+        "answer": 105
+    },
+    {
+        "response": "30+53=83\nThe",
+        "answer": 83
+    },
+    {
+        "response": "13+93= 90\n",
+        "answer": 106
+    },
+    {
+        "response": "34+75=109\nThe",
+        "answer": 109
+    },
+    {
+        "response": "9+9=18: The",
+        "answer": 18
+    },
+    {
+        "response": "36+78=114\nThe",
+        "answer": 114
+    },
+    {
+        "response": "31+87=68\nThe",
+        "answer": 118
+    },
+    {
+        "response": "62+50=12\n62",
+        "answer": 112
+    },
+    {
+        "response": "62+55=117\nThe",
+        "answer": 117
+    },
+    {
+        "response": "89+14=103\nThe",
+        "answer": 103
+    },
+    {
+        "response": "56+20=76\n56",
+        "answer": 76
+    },
+    {
+        "response": "96+80= 16\n",
+        "answer": 176
+    },
+    {
+        "response": "33+58=91\nThe",
+        "answer": 91
+    },
+    {
+        "response": "28+48=76\nThe",
+        "answer": 76
+    },
+    {
+        "response": "70+9=59\n70",
+        "answer": 79
+    },
+    {
+        "response": "88+16=104\nThe",
+        "answer": 104
+    },
+    {
+        "response": "11+83= 64\n",
+        "answer": 94
+    },
+    {
+        "response": "2+81=?\nI have",
+        "answer": 83
+    },
+    {
+        "response": "18+3=9. The",
+        "answer": 21
+    },
+    {
+        "response": "91+43= 48\n",
+        "answer": 134
+    },
+    {
+        "response": "91+10=101\n101",
+        "answer": 101
+    },
+    {
+        "response": "63+21= 34\n",
+        "answer": 84
+    },
+    {
+        "response": "2+73= 75\n",
+        "answer": 75
+    },
+    {
+        "response": "1+54=1\n1",
+        "answer": 55
+    },
+    {
+        "response": "57+81= 128\n",
+        "answer": 138
+    },
+    {
+        "response": "38+16=54\nThe",
+        "answer": 54
+    },
+    {
+        "response": "66+67=133\nThe",
+        "answer": 133
+    },
+    {
+        "response": "91+83= 168\n",
+        "answer": 174
+    },
+    {
+        "response": "22+97= 97\n",
+        "answer": 119
+    },
+    {
+        "response": "10+48=48\n10",
+        "answer": 58
+    },
+    {
+        "response": "23+47=80\nThe",
+        "answer": 70
+    },
+    {
+        "response": "46+44= 90\n",
+        "answer": 90
+    },
+    {
+        "response": "69+20=89\n69",
+        "answer": 89
+    },
+    {
+        "response": "10+35=45\n10",
+        "answer": 45
+    },
+    {
+        "response": "75+1=76: The",
+        "answer": 76
+    },
+    {
+        "response": "23+4=27\n23",
+        "answer": 27
+    },
+    {
+        "response": "28+77= 53\n",
+        "answer": 105
+    },
+    {
+        "response": "38+82=122\nThe",
+        "answer": 120
+    },
+    {
+        "response": "79+8=87\nThe",
+        "answer": 87
+    },
+    {
+        "response": "59+30=89\n59",
+        "answer": 89
+    },
+    {
+        "response": "11+76= 11\n",
+        "answer": 87
+    },
+    {
+        "response": "58+84=126\nThe",
+        "answer": 142
+    },
+    {
+        "response": "64+96=120\nA",
+        "answer": 160
+    },
+    {
+        "response": "55+44=1\n55",
+        "answer": 99
+    },
+    {
+        "response": "22+90=110\n22",
+        "answer": 112
+    },
+    {
+        "response": "41+8=49. ",
+        "answer": 49
+    },
+    {
+        "response": "61+21= 42\n",
+        "answer": 82
+    },
+    {
+        "response": "30+87=117\nThe",
+        "answer": 117
+    },
+    {
+        "response": "82+58= 140\n",
+        "answer": 140
+    },
+    {
+        "response": "54+45=99\nThe",
+        "answer": 99
+    },
+    {
+        "response": "7+33=44\n7",
+        "answer": 40
+    },
+    {
+        "response": "98+72= 26\n",
+        "answer": 170
+    },
+    {
+        "response": "19+55=55\n19",
+        "answer": 74
+    },
+    {
+        "response": "64+94=128\n64",
+        "answer": 158
+    },
+    {
+        "response": "66+66=132\nThe",
+        "answer": 132
+    },
+    {
+        "response": "45+11=56. The",
+        "answer": 56
+    },
+    {
+        "response": "37+8=55. The",
+        "answer": 45
+    },
+    {
+        "response": "65+0=65\n65",
+        "answer": 65
+    },
+    {
+        "response": "91+7= 7+",
+        "answer": 98
+    },
+    {
+        "response": "50+23=73\nA",
+        "answer": 73
+    },
+    {
+        "response": "61+24=85\nThe",
+        "answer": 85
+    },
+    {
+        "response": "44+91= 44\n",
+        "answer": 135
+    },
+    {
+        "response": "37+60=97\nThe",
+        "answer": 97
+    },
+    {
+        "response": "7+12= 19\n",
+        "answer": 19
+    },
+    {
+        "response": "18+20=38. The",
+        "answer": 38
+    },
+    {
+        "response": "31+76= 31+",
+        "answer": 107
+    },
+    {
+        "response": "64+7= 64\n",
+        "answer": 71
+    },
+    {
+        "response": "86+86=172\nThe",
+        "answer": 172
+    },
+    {
+        "response": "42+74=116\nThe",
+        "answer": 116
+    },
+    {
+        "response": "59+2=61\nThe",
+        "answer": 61
+    },
+    {
+        "response": "49+54=103\nThe",
+        "answer": 103
+    },
+    {
+        "response": "86+87=173\nThe",
+        "answer": 173
+    },
+    {
+        "response": "98+58= 140\n",
+        "answer": 156
+    },
+    {
+        "response": "56+22=78\nThe",
+        "answer": 78
+    },
+    {
+        "response": "69+35=104\nThe",
+        "answer": 104
+    },
+    {
+        "response": "33+3=66. The",
+        "answer": 36
+    },
+    {
+        "response": "55+93=38\nA",
+        "answer": 148
+    },
+    {
+        "response": "19+88= 69\n",
+        "answer": 107
+    },
+    {
+        "response": "42+83=125\nThe",
+        "answer": 125
+    },
+    {
+        "response": "7+27=34\n7",
+        "answer": 34
+    },
+    {
+        "response": "47+93= 46\n",
+        "answer": 140
+    },
+    {
+        "response": "65+78=143\n65",
+        "answer": 143
+    },
+    {
+        "response": "28+32=64\nThe",
+        "answer": 60
+    },
+    {
+        "response": "6+8=14. ",
+        "answer": 14
+    },
+    {
+        "response": "30+27=3\nThe",
+        "answer": 57
+    },
+    {
+        "response": "68+88=156\nThe",
+        "answer": 156
+    },
+    {
+        "response": "44+54=98\nThe",
+        "answer": 98
+    },
+    {
+        "response": "48+26=74\nThe",
+        "answer": 74
+    },
+    {
+        "response": "62+90=132\nThe",
+        "answer": 152
+    },
+    {
+        "response": "34+17=51\n34",
+        "answer": 51
+    },
+    {
+        "response": "86+64= 1\n",
+        "answer": 150
+    },
+    {
+        "response": "92+51= 141\n",
+        "answer": 143
+    },
+    {
+        "response": "48+18=66\nThe",
+        "answer": 66
+    },
+    {
+        "response": "44+64=108\nThe",
+        "answer": 108
+    },
+    {
+        "response": "50+21=31\nThe",
+        "answer": 71
+    },
+    {
+        "response": "34+60=34\n34",
+        "answer": 94
+    },
+    {
+        "response": "44+83=127\nThe",
+        "answer": 127
+    },
+    {
+        "response": "5+45=50\n5",
+        "answer": 50
+    },
+    {
+        "response": "22+89= 61\n",
+        "answer": 111
+    },
+    {
+        "response": "78+79= 1\n",
+        "answer": 157
+    },
+    {
+        "response": "48+55=103\nThe",
+        "answer": 103
+    },
+    {
+        "response": "72+31=103\nThe",
+        "answer": 103
+    },
+    {
+        "response": "2+35= 37\n",
+        "answer": 37
+    },
+    {
+        "response": "1+59=60\n1",
+        "answer": 60
+    },
+    {
+        "response": "55+30=25\n55",
+        "answer": 85
+    },
+    {
+        "response": "62+13=75\nA",
+        "answer": 75
+    },
+    {
+        "response": "73+40=113\nThe",
+        "answer": 113
+    },
+    {
+        "response": "71+21=92\nThe",
+        "answer": 92
+    },
+    {
+        "response": "37+50=87\nThe",
+        "answer": 87
+    },
+    {
+        "response": "72+77=149\nThe",
+        "answer": 149
+    },
+    {
+        "response": "82+73=155\nThe",
+        "answer": 155
+    },
+    {
+        "response": "43+50=91\nThe",
+        "answer": 93
+    },
+    {
+        "response": "68+5=73\nA",
+        "answer": 73
+    },
+    {
+        "response": "21+27=48\nThe",
+        "answer": 48
+    },
+    {
+        "response": "41+77=118\n41",
+        "answer": 118
+    },
+    {
+        "response": "56+9=65\nThe",
+        "answer": 65
+    },
+    {
+        "response": "64+13=77\nA",
+        "answer": 77
+    },
+    {
+        "response": "49+33= 49\n",
+        "answer": 82
+    },
+    {
+        "response": "10+86=10\n10",
+        "answer": 96
+    },
+    {
+        "response": "62+68=130\nThe",
+        "answer": 130
+    },
+    {
+        "response": "5+51=52\n5",
+        "answer": 56
+    },
+    {
+        "response": "25+97=122\n25",
+        "answer": 122
+    },
+    {
+        "response": "3+30=3\n3",
+        "answer": 33
+    },
+    {
+        "response": "18+65=89\n18",
+        "answer": 83
+    },
+    {
+        "response": "94+4= 90\n",
+        "answer": 98
+    },
+    {
+        "response": "24+29= 55\n",
+        "answer": 53
+    },
+    {
+        "response": "69+73=144\nThe",
+        "answer": 142
+    },
+    {
+        "response": "84+58=142\nThe",
+        "answer": 142
+    },
+    {
+        "response": "84+87=171\nThe",
+        "answer": 171
+    },
+    {
+        "response": "79+96= 1\n",
+        "answer": 175
+    },
+    {
+        "response": "15+4=19. The",
+        "answer": 19
+    },
+    {
+        "response": "17+74=47\n17",
+        "answer": 91
+    },
+    {
+        "response": "50+30=20\n50",
+        "answer": 80
+    },
+    {
+        "response": "84+27= 111\n",
+        "answer": 111
+    },
+    {
+        "response": "45+75=120\n45",
+        "answer": 120
+    },
+    {
+        "response": "56+16=72\nThe",
+        "answer": 72
+    },
+    {
+        "response": "35+24=59\nThe",
+        "answer": 59
+    },
+    {
+        "response": "52+41= 1\n",
+        "answer": 93
+    },
+    {
+        "response": "27+30=3\n27",
+        "answer": 57
+    },
+    {
+        "response": "52+60=112\nThe",
+        "answer": 112
+    },
+    {
+        "response": "63+52=115\nThe",
+        "answer": 115
+    },
+    {
+        "response": "62+5=67\nThe",
+        "answer": 67
+    },
+    {
+        "response": "98+54= 44\n",
+        "answer": 152
+    },
+    {
+        "response": "29+94= 29\n",
+        "answer": 123
+    },
+    {
+        "response": "48+61=111\nThe",
+        "answer": 109
+    },
+    {
+        "response": "88+24=112\nThe",
+        "answer": 112
+    },
+    {
+        "response": "92+93= 1\n",
+        "answer": 185
+    },
+    {
+        "response": "12+91=12\n12",
+        "answer": 103
+    },
+    {
+        "response": "5+89= 94\n",
+        "answer": 94
+    },
+    {
+        "response": "98+33= 65\n",
+        "answer": 131
+    },
+    {
+        "response": "82+69= 13\n",
+        "answer": 151
+    },
+    {
+        "response": "81+36=117\nThe",
+        "answer": 117
+    },
+    {
+        "response": "4+1=5: The",
+        "answer": 5
+    },
+    {
+        "response": "82+67=159\nThe",
+        "answer": 149
+    },
+    {
+        "response": "59+4=53\nThe",
+        "answer": 63
+    },
+    {
+        "response": "49+42=91\nThe",
+        "answer": 91
+    },
+    {
+        "response": "74+61= 135\n",
+        "answer": 135
+    },
+    {
+        "response": "73+13=86. ",
+        "answer": 86
+    },
+    {
+        "response": "79+22=101\nThe",
+        "answer": 101
+    },
+    {
+        "response": "29+4=3\nThe",
+        "answer": 33
+    },
+    {
+        "response": "4+49=1\n4",
+        "answer": 53
+    },
+    {
+        "response": "90+44=44\n90",
+        "answer": 134
+    },
+    {
+        "response": "63+96= 129\n",
+        "answer": 159
+    },
+    {
+        "response": "35+69=104\n35",
+        "answer": 104
+    },
+    {
+        "response": "20+59=79\n20",
+        "answer": 79
+    },
+    {
+        "response": "70+1=71: The",
+        "answer": 71
+    },
+    {
+        "response": "32+92= 32\n",
+        "answer": 124
+    },
+    {
+        "response": "19+20=1\nThe",
+        "answer": 39
+    },
+    {
+        "response": "75+27= 75\n",
+        "answer": 102
+    },
+    {
+        "response": "54+86= 30\n",
+        "answer": 140
+    },
+    {
+        "response": "64+61= 125\n",
+        "answer": 125
+    },
+    {
+        "response": "79+54= 123\n",
+        "answer": 133
+    },
+    {
+        "response": "94+71= 25\n",
+        "answer": 165
+    },
+    {
+        "response": "92+99=1\nThe",
+        "answer": 191
+    },
+    {
+        "response": "18+68=46\n18",
+        "answer": 86
+    },
+    {
+        "response": "80+25=55\nA",
+        "answer": 105
+    },
+    {
+        "response": "88+91= 13\n",
+        "answer": 179
+    },
+    {
+        "response": "75+71=146\nThe",
+        "answer": 146
+    },
+    {
+        "response": "88+30=118\nThe",
+        "answer": 118
+    },
+    {
+        "response": "5+67=72\n5",
+        "answer": 72
+    },
+    {
+        "response": "38+14=62\nThe",
+        "answer": 52
+    },
+    {
+        "response": "87+36=123\nThe",
+        "answer": 123
+    },
+    {
+        "response": "20+83=83\n20",
+        "answer": 103
+    },
+    {
+        "response": "21+49=1\n21",
+        "answer": 70
+    },
+    {
+        "response": "7+56=63\n7",
+        "answer": 63
+    },
+    {
+        "response": "33+75=108\nThe",
+        "answer": 108
+    },
+    {
+        "response": "15+96=1\n15",
+        "answer": 111
+    },
+    {
+        "response": "98+4=92\n98",
+        "answer": 102
+    },
+    {
+        "response": "46+86= 1\n",
+        "answer": 132
+    },
+    {
+        "response": "67+34=101\nThe",
+        "answer": 101
+    },
+    {
+        "response": "87+94= 67\n",
+        "answer": 181
+    },
+    {
+        "response": "18+98=100\n18",
+        "answer": 116
+    },
+    {
+        "response": "91+93= 2\n",
+        "answer": 184
+    },
+    {
+        "response": "55+11=66. ",
+        "answer": 66
+    },
+    {
+        "response": "94+28= 122\n",
+        "answer": 122
+    },
+    {
+        "response": "7+5=12. The",
+        "answer": 12
+    },
+    {
+        "response": "4+3=7: The",
+        "answer": 7
+    },
+    {
+        "response": "27+8=35. The",
+        "answer": 35
+    },
+    {
+        "response": "92+36= 68\n",
+        "answer": 128
+    },
+    {
+        "response": "68+11=79. ",
+        "answer": 79
+    },
+    {
+        "response": "59+5=64\nThe",
+        "answer": 64
+    },
+    {
+        "response": "24+60=84\nThe",
+        "answer": 84
+    },
+    {
+        "response": "18+93=75\n18",
+        "answer": 111
+    },
+    {
+        "response": "56+4=60\nThe",
+        "answer": 60
+    },
+    {
+        "response": "38+47=85\nThe",
+        "answer": 85
+    },
+    {
+        "response": "56+77=123\nA",
+        "answer": 133
+    },
+    {
+        "response": "29+84= 29\n",
+        "answer": 113
+    },
+    {
+        "response": "0+83=83\n0",
+        "answer": 83
+    },
+    {
+        "response": "57+96=143\nThe",
+        "answer": 153
+    },
+    {
+        "response": "14+73=47\n14",
+        "answer": 87
+    },
+    {
+        "response": "60+61=1\n60",
+        "answer": 121
+    },
+    {
+        "response": "66+2=68. ",
+        "answer": 68
+    },
+    {
+        "response": "82+56=138\nThe",
+        "answer": 138
+    },
+    {
+        "response": "15+35=50\n15",
+        "answer": 50
+    },
+    {
+        "response": "13+1=2: The",
+        "answer": 14
+    },
+    {
+        "response": "48+86= 32\n",
+        "answer": 134
+    },
+    {
+        "response": "8+7=14. The",
+        "answer": 15
+    },
+    {
+        "response": "26+11=37. The",
+        "answer": 37
+    },
+    {
+        "response": "33+52=85\nThe",
+        "answer": 85
+    },
+    {
+        "response": "6+39=45\n6",
+        "answer": 45
+    },
+    {
+        "response": "42+55=97\nThe",
+        "answer": 97
+    },
+    {
+        "response": "72+72=144\nThe",
+        "answer": 144
+    },
+    {
+        "response": "45+77=122\nThe",
+        "answer": 122
+    },
+    {
+        "response": "67+91= 68\n",
+        "answer": 158
+    },
+    {
+        "response": "83+29= 112\n",
+        "answer": 112
+    },
+    {
+        "response": "56+53=107\nA",
+        "answer": 109
+    },
+    {
+        "response": "40+97=137\nA",
+        "answer": 137
+    },
+    {
+        "response": "62+89= 131\n",
+        "answer": 151
+    },
+    {
+        "response": "10+21=31\nThe",
+        "answer": 31
+    },
+    {
+        "response": "20+25=45\n20",
+        "answer": 45
+    },
+    {
+        "response": "50+39=1\nThe",
+        "answer": 89
+    },
+    {
+        "response": "39+20=59\n39",
+        "answer": 59
+    },
+    {
+        "response": "99+96=3\nThe",
+        "answer": 195
+    },
+    {
+        "response": "17+26=51\n17",
+        "answer": 43
+    },
+    {
+        "response": "80+42= 38\n",
+        "answer": 122
+    },
+    {
+        "response": "70+35=105\n70",
+        "answer": 105
+    },
+    {
+        "response": "1+24=1\n1",
+        "answer": 25
+    },
+    {
+        "response": "73+19=92\nThe",
+        "answer": 92
+    },
+    {
+        "response": "77+92= 0\n",
+        "answer": 169
+    },
+    {
+        "response": "88+62= 226\n",
+        "answer": 150
+    },
+    {
+        "response": "52+24=76\nThe",
+        "answer": 76
+    },
+    {
+        "response": "72+29= 101\n",
+        "answer": 101
+    },
+    {
+        "response": "96+85= 21\n",
+        "answer": 181
+    },
+    {
+        "response": "83+30=113\nThe",
+        "answer": 113
+    },
+    {
+        "response": "7+66=33\n7",
+        "answer": 73
+    },
+    {
+        "response": "96+36=132\nThe",
+        "answer": 132
+    },
+    {
+        "response": "33+45=78\nThe",
+        "answer": 78
+    },
+    {
+        "response": "59+40=99\nThe",
+        "answer": 99
+    },
+    {
+        "response": "50+31=1\nThe",
+        "answer": 81
+    },
+    {
+        "response": "33+33=66\nThe",
+        "answer": 66
+    },
+    {
+        "response": "7+99=100\nThe",
+        "answer": 106
+    },
+    {
+        "response": "45+58=103\nThe",
+        "answer": 103
+    },
+    {
+        "response": "21+42=63\n21",
+        "answer": 63
+    },
+    {
+        "response": "37+41=82\nThe",
+        "answer": 78
+    },
+    {
+        "response": "11+61=62\n11",
+        "answer": 72
+    },
+    {
+        "response": "36+6=42. The",
+        "answer": 42
+    },
+    {
+        "response": "25+16=41\nThe",
+        "answer": 41
+    },
+    {
+        "response": "3+75= 75\n",
+        "answer": 78
+    },
+    {
+        "response": "9+96=96\n9",
+        "answer": 105
+    },
+    {
+        "response": "75+37=112\nA",
+        "answer": 112
+    },
+    {
+        "response": "52+11=63. The",
+        "answer": 63
+    },
+    {
+        "response": "16+62= 38\n",
+        "answer": 78
+    },
+    {
+        "response": "65+10=75\n65",
+        "answer": 75
+    },
+    {
+        "response": "66+37=103\nThe",
+        "answer": 103
+    },
+    {
+        "response": "28+82=162\nThe",
+        "answer": 110
+    },
+    {
+        "response": "0+56=0\n0",
+        "answer": 56
+    },
+    {
+        "response": "75+42=117\nA",
+        "answer": 117
+    },
+    {
+        "response": "96+75= 21\n",
+        "answer": 171
+    },
+    {
+        "response": "26+3=9. The",
+        "answer": 29
+    },
+    {
+        "response": "63+27=90\nThe",
+        "answer": 90
+    },
+    {
+        "response": "50+70=120\nA",
+        "answer": 120
+    },
+    {
+        "response": "38+65= 1\n",
+        "answer": 103
+    },
+    {
+        "response": "44+6=50\nThe",
+        "answer": 50
+    },
+    {
+        "response": "0+42=42\n0",
+        "answer": 42
+    },
+    {
+        "response": "79+82=163\nThe",
+        "answer": 161
+    },
+    {
+        "response": "57+32=89\nA",
+        "answer": 89
+    },
+    {
+        "response": "47+56=103\nThe",
+        "answer": 103
+    },
+    {
+        "response": "51+14=65\nThe",
+        "answer": 65
+    },
+    {
+        "response": "61+32=93\nThe",
+        "answer": 93
+    },
+    {
+        "response": "99+20=79\n99",
+        "answer": 119
+    },
+    {
+        "response": "87+44= 43\n",
+        "answer": 131
+    },
+    {
+        "response": "11+51=52\n11",
+        "answer": 62
+    },
+    {
+        "response": "89+71= 160\n",
+        "answer": 160
+    },
+    {
+        "response": "82+99=121\nA",
+        "answer": 181
+    },
+    {
+        "response": "57+12=69. ",
+        "answer": 69
+    },
+    {
+        "response": "73+93=166\nThe",
+        "answer": 166
+    },
+    {
+        "response": "9+84= 9\n",
+        "answer": 93
+    },
+    {
+        "response": "65+98=133\n65",
+        "answer": 163
+    },
+    {
+        "response": "19+74= 45\n",
+        "answer": 93
+    },
+    {
+        "response": "27+54=27\n27",
+        "answer": 81
+    },
+    {
+        "response": "69+45=114\nThe",
+        "answer": 114
+    },
+    {
+        "response": "7+63=63\n7",
+        "answer": 70
+    },
+    {
+        "response": "72+71=143\nThe",
+        "answer": 143
+    },
+    {
+        "response": "71+94= 125\n",
+        "answer": 165
+    },
+    {
+        "response": "49+31=1\nThe",
+        "answer": 80
+    },
+    {
+        "response": "8+99=101\nThe",
+        "answer": 107
+    },
+    {
+        "response": "74+17=91\nA",
+        "answer": 91
+    },
+    {
+        "response": "90+63= 27\n",
+        "answer": 153
+    },
+    {
+        "response": "3+84= 3+",
+        "answer": 87
+    },
+    {
+        "response": "9+46=4\n9",
+        "answer": 55
+    },
+    {
+        "response": "86+20=106\n86",
+        "answer": 106
+    },
+    {
+        "response": "21+19=40. The",
+        "answer": 40
+    },
+    {
+        "response": "62+56=118\n62",
+        "answer": 118
+    },
+    {
+        "response": "90+36= 54\n",
+        "answer": 126
+    },
+    {
+        "response": "59+13=72\nThe",
+        "answer": 72
+    },
+    {
+        "response": "8+43=43\n8",
+        "answer": 51
+    },
+    {
+        "response": "80+83= 103\n",
+        "answer": 163
+    },
+    {
+        "response": "69+3=72\nThe",
+        "answer": 72
+    },
+    {
+        "response": "8+57= 8+",
+        "answer": 65
+    },
+    {
+        "response": "75+19= 54\n",
+        "answer": 94
+    },
+    {
+        "response": "44+79=125\nThe",
+        "answer": 123
+    },
+    {
+        "response": "84+45=129\nThe",
+        "answer": 129
+    },
+    {
+        "response": "42+70=112\nThe",
+        "answer": 112
+    },
+    {
+        "response": "69+16=85\nThe",
+        "answer": 85
+    },
+    {
+        "response": "65+35=100\n65",
+        "answer": 100
+    },
+    {
+        "response": "0+17=17\n0",
+        "answer": 17
+    },
+    {
+        "response": "90+69=21\n90",
+        "answer": 159
+    },
+    {
+        "response": "75+59=124\nA",
+        "answer": 134
+    },
+    {
+        "response": "73+31=104\nThe",
+        "answer": 104
+    },
+    {
+        "response": "98+31= 67\n",
+        "answer": 129
+    },
+    {
+        "response": "12+7=23\nThe",
+        "answer": 19
+    },
+    {
+        "response": "38+72=110\nThe",
+        "answer": 110
+    },
+    {
+        "response": "64+89= 125\n",
+        "answer": 153
+    },
+    {
+        "response": "82+28=110\nThe",
+        "answer": 110
+    },
+    {
+        "response": "93+42= 1\n",
+        "answer": 135
+    },
+    {
+        "response": "14+70=14\n14",
+        "answer": 84
+    },
+    {
+        "response": "18+11=29. The",
+        "answer": 29
+    },
+    {
+        "response": "22+98=2\n22",
+        "answer": 120
+    },
+    {
+        "response": "98+86=23\n98",
+        "answer": 184
+    },
+    {
+        "response": "55+25=80. ",
+        "answer": 80
+    },
+    {
+        "response": "51+11=62. The",
+        "answer": 62
+    },
+    {
+        "response": "29+0=1\nThe",
+        "answer": 29
+    },
+    {
+        "response": "39+45=84\nThe",
+        "answer": 84
+    },
+    {
+        "response": "67+26=93\nThe",
+        "answer": 93
+    },
+    {
+        "response": "47+3=50\nThe",
+        "answer": 50
+    },
+    {
+        "response": "38+25=63\nThe",
+        "answer": 63
+    },
+    {
+        "response": "50+49=1\nThe",
+        "answer": 99
+    },
+    {
+        "response": "74+46=120\nThe",
+        "answer": 120
+    },
+    {
+        "response": "73+67=140\nThe",
+        "answer": 140
+    },
+    {
+        "response": "91+14=105\nThe",
+        "answer": 105
+    },
+    {
+        "response": "72+88=160\nThe",
+        "answer": 160
+    },
+    {
+        "response": "15+32=53\nThe",
+        "answer": 47
+    },
+    {
+        "response": "96+6=102\nThe",
+        "answer": 102
+    },
+    {
+        "response": "14+67= 43\n",
+        "answer": 81
+    },
+    {
+        "response": "17+63=?\nI have",
+        "answer": 80
+    },
+    {
+        "response": "84+19=103\nThe",
+        "answer": 103
+    },
+    {
+        "response": "73+78=151\nThe",
+        "answer": 151
+    },
+    {
+        "response": "25+51=76\n25",
+        "answer": 76
+    },
+    {
+        "response": "80+76= 4\n",
+        "answer": 156
+    },
+    {
+        "response": "33+34=67\nThe",
+        "answer": 67
+    },
+    {
+        "response": "4+55=59\n4",
+        "answer": 59
+    },
+    {
+        "response": "26+14=40. The",
+        "answer": 40
+    },
+    {
+        "response": "74+94=168\n74",
+        "answer": 168
+    },
+    {
+        "response": "71+89=160\nThe",
+        "answer": 160
+    },
+    {
+        "response": "33+26=59\nThe",
+        "answer": 59
+    },
+    {
+        "response": "33+50=83\nThe",
+        "answer": 83
+    },
+    {
+        "response": "99+46=43\nA",
+        "answer": 145
+    },
+    {
+        "response": "89+86= 15\n",
+        "answer": 175
+    },
+    {
+        "response": "46+31=77\nThe",
+        "answer": 77
+    },
+    {
+        "response": "50+1=1: The",
+        "answer": 51
+    },
+    {
+        "response": "13+29=52\n13",
+        "answer": 42
+    },
+    {
+        "response": "75+43=122\nA",
+        "answer": 118
+    },
+    {
+        "response": "31+61=62\nThe",
+        "answer": 92
+    },
+    {
+        "response": "97+72= 1\n",
+        "answer": 169
+    },
+    {
+        "response": "40+81=121\nThe",
+        "answer": 121
+    },
+    {
+        "response": "52+27=79\nThe",
+        "answer": 79
+    },
+    {
+        "response": "22+88= 66\n",
+        "answer": 110
+    },
+    {
+        "response": "68+82= 150\n",
+        "answer": 150
+    },
+    {
+        "response": "61+10=71\n61",
+        "answer": 71
+    },
+    {
+        "response": "23+48=81\nThe",
+        "answer": 71
+    },
+    {
+        "response": "17+66=33\n17",
+        "answer": 83
+    },
+    {
+        "response": "70+27=43\n70",
+        "answer": 97
+    },
+    {
+        "response": "6+22=38. The",
+        "answer": 28
+    },
+    {
+        "response": "76+94=170\n76",
+        "answer": 170
+    },
+    {
+        "response": "96+70= 26\n",
+        "answer": 166
+    },
+    {
+        "response": "45+98= 43\n",
+        "answer": 143
+    },
+    {
+        "response": "95+16=71\nA",
+        "answer": 111
+    },
+    {
+        "response": "46+22=68\nThe",
+        "answer": 68
+    },
+    {
+        "response": "6+34=34\n6",
+        "answer": 40
+    },
+    {
+        "response": "1+41=42\n1",
+        "answer": 42
+    },
+    {
+        "response": "4+95=4.5",
+        "answer": 99
+    },
+    {
+        "response": "72+94=166\nThe",
+        "answer": 166
+    },
+    {
+        "response": "57+2=59. ",
+        "answer": 59
+    },
+    {
+        "response": "63+79=142\nThe",
+        "answer": 142
+    },
+    {
+        "response": "89+0=89. ",
+        "answer": 89
+    },
+    {
+        "response": "75+35=110\nThe",
+        "answer": 110
+    },
+    {
+        "response": "34+52=86\nThe",
+        "answer": 86
+    },
+    {
+        "response": "99+28=71\nA",
+        "answer": 127
+    },
+    {
+        "response": "27+19=48\n27",
+        "answer": 46
+    },
+    {
+        "response": "39+37=74\nThe",
+        "answer": 76
+    },
+    {
+        "response": "6+90=6\n6",
+        "answer": 96
+    },
+    {
+        "response": "44+96=40\n44",
+        "answer": 140
+    },
+    {
+        "response": "8+84= 8+",
+        "answer": 92
+    },
+    {
+        "response": "96+88= 18\n",
+        "answer": 184
+    },
+    {
+        "response": "59+52=111\nThe",
+        "answer": 111
+    },
+    {
+        "response": "50+77=127\nA",
+        "answer": 127
+    },
+    {
+        "response": "28+19=47\nThe",
+        "answer": 47
+    },
+    {
+        "response": "8+37=53\n8",
+        "answer": 45
+    },
+    {
+        "response": "22+40=22\n22",
+        "answer": 62
+    },
+    {
+        "response": "53+65=118\nA",
+        "answer": 118
+    },
+    {
+        "response": "65+5=70\n65",
+        "answer": 70
+    },
+    {
+        "response": "46+33=79\nThe",
+        "answer": 79
+    },
+    {
+        "response": "88+41=129\nThe",
+        "answer": 129
+    },
+    {
+        "response": "18+66=42\n18",
+        "answer": 84
+    },
+    {
+        "response": "0+55=55\n0",
+        "answer": 55
+    },
+    {
+        "response": "38+15=63\nThe",
+        "answer": 53
+    },
+    {
+        "response": "1+29=30\n1",
+        "answer": 30
+    },
+    {
+        "response": "36+16=52\nThe",
+        "answer": 52
+    },
+    {
+        "response": "63+9=72\n63",
+        "answer": 72
+    },
+    {
+        "response": "5+31=1\n5",
+        "answer": 36
+    },
+    {
+        "response": "49+25=74\nThe",
+        "answer": 74
+    },
+    {
+        "response": "20+23=43\nThe",
+        "answer": 43
+    },
+    {
+        "response": "67+13=80. ",
+        "answer": 80
+    },
+    {
+        "response": "85+77=162\nThe",
+        "answer": 162
+    },
+    {
+        "response": "11+98=99\nThe",
+        "answer": 109
+    },
+    {
+        "response": "59+56=115\nThe",
+        "answer": 115
+    },
+    {
+        "response": "69+1=70: The",
+        "answer": 70
+    },
+    {
+        "response": "72+18=90\nThe",
+        "answer": 90
+    },
+    {
+        "response": "76+73=149\nThe",
+        "answer": 149
+    },
+    {
+        "response": "91+56= 136\n",
+        "answer": 147
+    },
+    {
+        "response": "3+87= 87\n",
+        "answer": 90
+    },
+    {
+        "response": "38+52=90\nThe",
+        "answer": 90
+    },
+    {
+        "response": "7+92= 7+",
+        "answer": 99
+    },
+    {
+        "response": "7+42= 49\n",
+        "answer": 49
+    },
+    {
+        "response": "14+23=37\n14",
+        "answer": 37
+    },
+    {
+        "response": "4+16=20\n4",
+        "answer": 20
+    },
+    {
+        "response": "58+81= 121\n",
+        "answer": 139
+    },
+    {
+        "response": "6+43=43\n6",
+        "answer": 49
+    },
+    {
+        "response": "50+38=82\nThe",
+        "answer": 88
+    },
+    {
+        "response": "71+29=100\nThe",
+        "answer": 100
+    },
+    {
+        "response": "7+81= 7+",
+        "answer": 88
+    },
+    {
+        "response": "56+5=61\nThe",
+        "answer": 61
+    },
+    {
+        "response": "11+30=1\nThe",
+        "answer": 41
+    },
+    {
+        "response": "93+27= 66\n",
+        "answer": 120
+    },
+    {
+        "response": "79+18=97\nThe",
+        "answer": 97
+    },
+    {
+        "response": "63+72=135\nThe",
+        "answer": 135
+    },
+    {
+        "response": "15+20=35. ",
+        "answer": 35
+    },
+    {
+        "response": "6+73= 73\n",
+        "answer": 79
+    },
+    {
+        "response": "80+90=110\nA",
+        "answer": 170
+    },
+    {
+        "response": "25+69=44\n25",
+        "answer": 94
+    },
+    {
+        "response": "98+73= 25\n",
+        "answer": 171
+    },
+    {
+        "response": "3+31=1\n3",
+        "answer": 34
+    },
+    {
+        "response": "97+67= 170\n",
+        "answer": 164
+    },
+    {
+        "response": "27+73= 27+",
+        "answer": 100
+    },
+    {
+        "response": "52+28=80\nThe",
+        "answer": 80
+    },
+    {
+        "response": "48+59=107\nThe",
+        "answer": 107
+    },
+    {
+        "response": "11+71=42\n11",
+        "answer": 82
+    },
+    {
+        "response": "4+17=21\n4",
+        "answer": 21
+    },
+    {
+        "response": "31+99=1\nThe",
+        "answer": 130
+    },
+    {
+        "response": "18+9=27. The",
+        "answer": 27
+    },
+    {
+        "response": "0+45=0\n0",
+        "answer": 45
+    },
+    {
+        "response": "48+89=141\nThe",
+        "answer": 137
+    },
+    {
+        "response": "62+22=84. ",
+        "answer": 84
+    },
+    {
+        "response": "55+95=140\nA",
+        "answer": 150
+    },
+    {
+        "response": "50+96=46\nA",
+        "answer": 146
+    },
+    {
+        "response": "79+1=80: The",
+        "answer": 80
+    },
+    {
+        "response": "71+47=118\nThe",
+        "answer": 118
+    },
+    {
+        "response": "71+14=85\nThe",
+        "answer": 85
+    },
+    {
+        "response": "39+54= 39+",
+        "answer": 93
+    },
+    {
+        "response": "65+94=129\n65",
+        "answer": 159
+    },
+    {
+        "response": "45+6=51. The",
+        "answer": 51
+    },
+    {
+        "response": "82+52= 134\n",
+        "answer": 134
+    },
+    {
+        "response": "55+33=88\n55",
+        "answer": 88
+    },
+    {
+        "response": "2+41=3\n2",
+        "answer": 43
+    },
+    {
+        "response": "74+37=111\nThe",
+        "answer": 111
+    },
+    {
+        "response": "27+79= 52\n",
+        "answer": 106
+    },
+    {
+        "response": "98+41= 57\n",
+        "answer": 139
+    },
+    {
+        "response": "51+23= 74\n",
+        "answer": 74
+    },
+    {
+        "response": "15+61= 61\n",
+        "answer": 76
+    },
+    {
+        "response": "86+97=173\nThe",
+        "answer": 183
+    },
+    {
+        "response": "10+7=13. The",
+        "answer": 17
+    },
+    {
+        "response": "1+46=1\n1",
+        "answer": 47
+    },
+    {
+        "response": "52+90=142\nThe",
+        "answer": 142
+    },
+    {
+        "response": "54+48=102\n54",
+        "answer": 102
+    },
+    {
+        "response": "94+18= 76\n",
+        "answer": 112
+    },
+    {
+        "response": "75+82=157\nThe",
+        "answer": 157
+    },
+    {
+        "response": "93+80= 1\n",
+        "answer": 173
+    },
+    {
+        "response": "69+86= 155\n",
+        "answer": 155
+    },
+    {
+        "response": "53+92= 45\n",
+        "answer": 145
+    },
+    {
+        "response": "63+33=96\nThe",
+        "answer": 96
+    },
+    {
+        "response": "6+75= 81\n",
+        "answer": 81
+    },
+    {
+        "response": "47+71= 118\n",
+        "answer": 118
+    },
+    {
+        "response": "44+15=69\nThe",
+        "answer": 59
+    },
+    {
+        "response": "49+4=3\nThe",
+        "answer": 53
+    },
+    {
+        "response": "49+3=52\nThe",
+        "answer": 52
+    },
+    {
+        "response": "50+5=55\nA",
+        "answer": 55
+    },
+    {
+        "response": "75+89=164\n75",
+        "answer": 164
+    },
+    {
+        "response": "30+6=36. The",
+        "answer": 36
+    },
+    {
+        "response": "18+6=24. ",
+        "answer": 24
+    },
+    {
+        "response": "58+77= 131\n",
+        "answer": 135
+    },
+    {
+        "response": "36+49= 1\n",
+        "answer": 85
+    },
+    {
+        "response": "27+45=72\n27",
+        "answer": 72
+    },
+    {
+        "response": "45+91=45\n45",
+        "answer": 136
+    },
+    {
+        "response": "77+50=127\nThe",
+        "answer": 127
+    },
+    {
+        "response": "34+22=56\n34",
+        "answer": 56
+    },
+    {
+        "response": "41+52=93\nThe",
+        "answer": 93
+    },
+    {
+        "response": "63+38=101\nThe",
+        "answer": 101
+    },
+    {
+        "response": "36+10=46\nThe",
+        "answer": 46
+    },
+    {
+        "response": "48+94=46\nA",
+        "answer": 142
+    },
+    {
+        "response": "80+55= 35\n",
+        "answer": 135
+    },
+    {
+        "response": "15+33=48\n15",
+        "answer": 48
+    },
+    {
+        "response": "14+42= 56\n",
+        "answer": 56
+    },
+    {
+        "response": "79+83=164\nThe",
+        "answer": 162
+    },
+    {
+        "response": "48+15=73\nThe",
+        "answer": 63
+    },
+    {
+        "response": "88+27= 65\n",
+        "answer": 115
+    },
+    {
+        "response": "75+46= 29\n",
+        "answer": 121
+    },
+    {
+        "response": "88+51=39\nA",
+        "answer": 139
+    },
+    {
+        "response": "79+64= 15\n",
+        "answer": 143
+    },
+    {
+        "response": "74+27=101\nThe",
+        "answer": 101
+    },
+    {
+        "response": "36+52=88\nThe",
+        "answer": 88
+    },
+    {
+        "response": "97+23= 74\n",
+        "answer": 120
+    },
+    {
+        "response": "63+51=114\nThe",
+        "answer": 114
+    },
+    {
+        "response": "29+64=?\nI have",
+        "answer": 93
+    },
+    {
+        "response": "98+82= 16\n",
+        "answer": 180
+    },
+    {
+        "response": "10+98=98\n10",
+        "answer": 108
+    },
+    {
+        "response": "86+54= 141\n",
+        "answer": 140
+    },
+    {
+        "response": "16+49=1\n16",
+        "answer": 65
+    },
+    {
+        "response": "22+6=28. The",
+        "answer": 28
+    },
+    {
+        "response": "47+98= 51\n",
+        "answer": 145
+    },
+    {
+        "response": "91+76= 1\n",
+        "answer": 167
+    },
+    {
+        "response": "4+22= 26\n",
+        "answer": 26
+    },
+    {
+        "response": "91+60= 131\n",
+        "answer": 151
+    },
+    {
+        "response": "21+98=1\n21",
+        "answer": 119
+    },
+    {
+        "response": "86+27= 113\n",
+        "answer": 113
+    },
+    {
+        "response": "27+70= 27+",
+        "answer": 97
+    },
+    {
+        "response": "32+11=53. The",
+        "answer": 43
+    },
+    {
+        "response": "7+50=7\n7",
+        "answer": 57
+    },
+    {
+        "response": "30+22=52\nThe",
+        "answer": 52
+    },
+    {
+        "response": "99+12=99\n99",
+        "answer": 111
+    },
+    {
+        "response": "77+90= 167\n",
+        "answer": 167
+    },
+    {
+        "response": "46+62=108\nThe",
+        "answer": 108
+    },
+    {
+        "response": "21+87=68\n21",
+        "answer": 108
+    },
+    {
+        "response": "32+96=128\n32",
+        "answer": 128
+    },
+    {
+        "response": "5+97=2\n5",
+        "answer": 102
+    },
+    {
+        "response": "58+31=89\nThe",
+        "answer": 89
+    },
+    {
+        "response": "51+18= 29\n",
+        "answer": 69
+    },
+    {
+        "response": "90+89= 1\n",
+        "answer": 179
+    },
+    {
+        "response": "66+27=93\nThe",
+        "answer": 93
+    },
+    {
+        "response": "38+67=105\nThe",
+        "answer": 105
+    },
+    {
+        "response": "87+91=172\nThe",
+        "answer": 178
+    },
+    {
+        "response": "34+71=105\n34",
+        "answer": 105
+    },
+    {
+        "response": "44+81= 44+",
+        "answer": 125
+    },
+    {
+        "response": "96+98=2\nThe",
+        "answer": 194
+    },
+    {
+        "response": "41+24=65\nThe",
+        "answer": 65
+    },
+    {
+        "response": "97+75= 22\n",
+        "answer": 172
+    },
+    {
+        "response": "77+46= 31\n",
+        "answer": 123
+    },
+    {
+        "response": "20+40=20\n20",
+        "answer": 60
+    },
+    {
+        "response": "53+87=130\nA",
+        "answer": 140
+    },
+    {
+        "response": "76+81=157\nThe",
+        "answer": 157
+    },
+    {
+        "response": "56+61= 107\n",
+        "answer": 117
+    },
+    {
+        "response": "61+58= 119\n",
+        "answer": 119
+    },
+    {
+        "response": "51+76=127\nThe",
+        "answer": 127
+    },
+    {
+        "response": "33+12=45\nThe",
+        "answer": 45
+    },
+    {
+        "response": "32+81= 61\n",
+        "answer": 113
+    },
+    {
+        "response": "76+15=91\nA",
+        "answer": 91
+    },
+    {
+        "response": "34+97= 97\n",
+        "answer": 131
+    },
+    {
+        "response": "69+92= 123\n",
+        "answer": 161
+    },
+    {
+        "response": "80+33= 57\n",
+        "answer": 113
+    },
+    {
+        "response": "18+96=72\n18",
+        "answer": 114
+    },
+    {
+        "response": "62+63=125\nThe",
+        "answer": 125
+    },
+    {
+        "response": "17+47=74\n17",
+        "answer": 64
+    },
+    {
+        "response": "13+12=25. The",
+        "answer": 25
+    },
+    {
+        "response": "51+95=46\nThe",
+        "answer": 146
+    },
+    {
+        "response": "41+74= 25\n",
+        "answer": 115
+    },
+    {
+        "response": "12+21=33\n12",
+        "answer": 33
+    },
+    {
+        "response": "42+13=55\nThe",
+        "answer": 55
+    },
+    {
+        "response": "9+21=30\n9",
+        "answer": 30
+    },
+    {
+        "response": "38+92= 92\n",
+        "answer": 130
+    },
+    {
+        "response": "80+11=91. ",
+        "answer": 91
+    },
+    {
+        "response": "84+22=106\nThe",
+        "answer": 106
+    },
+    {
+        "response": "2+96=2\n2",
+        "answer": 98
+    },
+    {
+        "response": "17+75= 52\n",
+        "answer": 92
+    },
+    {
+        "response": "34+37=71\nThe",
+        "answer": 71
+    },
+    {
+        "response": "93+41= \u00a0=",
+        "answer": 134
+    },
+    {
+        "response": "0+23=23\n0",
+        "answer": 23
+    },
+    {
+        "response": "21+8=29. What",
+        "answer": 29
+    },
+    {
+        "response": "76+96=172\nThe",
+        "answer": 172
+    },
+    {
+        "response": "56+97=143\nA",
+        "answer": 153
+    },
+    {
+        "response": "79+87=166\nThe",
+        "answer": 166
+    },
+    {
+        "response": "29+53=83\nThe",
+        "answer": 82
+    },
+    {
+        "response": "35+63=108\nThe",
+        "answer": 98
+    },
+    {
+        "response": "78+98=176\nThe",
+        "answer": 176
+    },
+    {
+        "response": "32+18=50\nThe",
+        "answer": 50
+    },
+    {
+        "response": "60+6=66\nA",
+        "answer": 66
+    },
+    {
+        "response": "5+49=1\n5",
+        "answer": 54
+    },
+    {
+        "response": "75+84=159\n75",
+        "answer": 159
+    },
+    {
+        "response": "88+1=89. ",
+        "answer": 89
+    },
+    {
+        "response": "13+75= 50\n",
+        "answer": 88
+    },
+    {
+        "response": "74+22=96\nThe",
+        "answer": 96
+    },
+    {
+        "response": "65+71=46\n65",
+        "answer": 136
+    },
+    {
+        "response": "43+65= 68\n",
+        "answer": 108
+    },
+    {
+        "response": "84+61= 125\n",
+        "answer": 145
+    },
+    {
+        "response": "10+85=85\n10",
+        "answer": 95
+    },
+    {
+        "response": "34+43=77\nThe",
+        "answer": 77
+    },
+    {
+        "response": "58+23=81\nThe",
+        "answer": 81
+    },
+    {
+        "response": "38+17=55\nThe",
+        "answer": 55
+    },
+    {
+        "response": "33+37=70\nThe",
+        "answer": 70
+    },
+    {
+        "response": "20+42=72\n20",
+        "answer": 62
+    },
+    {
+        "response": "34+26=60\nThe",
+        "answer": 60
+    },
+    {
+        "response": "41+21=62\nThe",
+        "answer": 62
+    },
+    {
+        "response": "82+95=177\nThe",
+        "answer": 177
+    },
+    {
+        "response": "74+35=109\nThe",
+        "answer": 109
+    },
+    {
+        "response": "67+24=91\nA",
+        "answer": 91
+    },
+    {
+        "response": "40+2=2\nThe",
+        "answer": 42
+    },
+    {
+        "response": "56+44= 1\n",
+        "answer": 100
+    },
+    {
+        "response": "24+16=40. ",
+        "answer": 40
+    },
+    {
+        "response": "8+6=14. The",
+        "answer": 14
+    },
+    {
+        "response": "30+36=66\nThe",
+        "answer": 66
+    },
+    {
+        "response": "3+52=53\n3",
+        "answer": 55
+    },
+    {
+        "response": "25+1=26: The",
+        "answer": 26
+    },
+    {
+        "response": "63+45=108\n63",
+        "answer": 108
+    },
+    {
+        "response": "87+22=109\nThe",
+        "answer": 109
+    },
+    {
+        "response": "6+48=54\n6",
+        "answer": 54
+    },
+    {
+        "response": "79+59=128\nThe",
+        "answer": 138
+    },
+    {
+        "response": "0+79=79\n0",
+        "answer": 79
+    },
+    {
+        "response": "36+21=57\nThe",
+        "answer": 57
+    },
+    {
+        "response": "86+96=182\nThe",
+        "answer": 182
+    },
+    {
+        "response": "85+81= 1\n",
+        "answer": 166
+    },
+    {
+        "response": "41+3=44. The",
+        "answer": 44
+    },
+    {
+        "response": "30+95=125\nThe",
+        "answer": 125
+    },
+    {
+        "response": "85+7=92\nThe",
+        "answer": 92
+    },
+    {
+        "response": "93+69= 24\n",
+        "answer": 162
+    },
+    {
+        "response": "42+18=60\nThe",
+        "answer": 60
+    },
+    {
+        "response": "17+65=40\n17",
+        "answer": 82
+    },
+    {
+        "response": "39+19=58\n39",
+        "answer": 58
+    },
+    {
+        "response": "37+71=108\n37",
+        "answer": 108
+    },
+    {
+        "response": "98+68= 30\n",
+        "answer": 166
+    },
+    {
+        "response": "68+97=125\nA",
+        "answer": 165
+    },
+    {
+        "response": "51+78=129\nThe",
+        "answer": 129
+    },
+    {
+        "response": "30+54=54\n30",
+        "answer": 84
+    },
+    {
+        "response": "1+16=17\n1",
+        "answer": 17
+    },
+    {
+        "response": "67+30=97\nThe",
+        "answer": 97
+    },
+    {
+        "response": "63+37=100\nThe",
+        "answer": 100
+    },
+    {
+        "response": "50+55=105\nThe",
+        "answer": 105
+    },
+    {
+        "response": "86+55=141\nThe",
+        "answer": 141
+    },
+    {
+        "response": "23+26=49\nThe",
+        "answer": 49
+    },
+    {
+        "response": "27+58=85\n27",
+        "answer": 85
+    },
+    {
+        "response": "41+25=66\nThe",
+        "answer": 66
+    },
+    {
+        "response": "89+42= 131\n",
+        "answer": 131
+    },
+    {
+        "response": "51+31=1\nThe",
+        "answer": 82
+    },
+    {
+        "response": "84+91=175\nThe",
+        "answer": 175
+    },
+    {
+        "response": "80+36= 0\n",
+        "answer": 116
+    },
+    {
+        "response": "71+71=142\nThe",
+        "answer": 142
+    },
+    {
+        "response": "70+23=43\nA",
+        "answer": 93
+    },
+    {
+        "response": "88+99=1\nThe",
+        "answer": 187
+    },
+    {
+        "response": "21+55=86\n21",
+        "answer": 76
+    },
+    {
+        "response": "23+18=45\n23",
+        "answer": 41
+    },
+    {
+        "response": "25+43=68\nThe",
+        "answer": 68
+    },
+    {
+        "response": "31+94= 31\n",
+        "answer": 125
+    },
+    {
+        "response": "76+4=80. ",
+        "answer": 80
+    },
+    {
+        "response": "97+57= 140\n",
+        "answer": 154
+    },
+    {
+        "response": "21+70= 41\n",
+        "answer": 91
+    },
+    {
+        "response": "20+53=73\n20",
+        "answer": 73
+    },
+    {
+        "response": "31+75= 56\n",
+        "answer": 106
+    },
+    {
+        "response": "12+48=60\n12",
+        "answer": 60
+    },
+    {
+        "response": "16+92= 92\n",
+        "answer": 108
+    },
+    {
+        "response": "14+41= 61\n",
+        "answer": 55
+    },
+    {
+        "response": "74+0=74\nThe",
+        "answer": 74
+    },
+    {
+        "response": "80+99=19\nA",
+        "answer": 179
+    },
+    {
+        "response": "83+9= 72\n",
+        "answer": 92
+    },
+    {
+        "response": "50+42=92\nA",
+        "answer": 92
+    },
+    {
+        "response": "90+11= 79\n",
+        "answer": 101
+    },
+    {
+        "response": "56+38=88\nThe",
+        "answer": 94
+    },
+    {
+        "response": "67+68=1\nThe",
+        "answer": 135
+    },
+    {
+        "response": "3+23= 26\n",
+        "answer": 26
+    },
+    {
+        "response": "24+64=48\nThe",
+        "answer": 88
+    },
+    {
+        "response": "93+53=46\nThe",
+        "answer": 146
+    },
+    {
+        "response": "94+84= 170\n",
+        "answer": 178
+    },
+    {
+        "response": "35+99=99\nThe",
+        "answer": 134
+    },
+    {
+        "response": "13+46=46\n13",
+        "answer": 59
+    },
+    {
+        "response": "9+47= 46\n",
+        "answer": 56
+    },
+    {
+        "response": "41+65= 26\n",
+        "answer": 106
+    },
+    {
+        "response": "61+43= 104\n",
+        "answer": 104
+    },
+    {
+        "response": "17+72= 49\n",
+        "answer": 89
+    },
+    {
+        "response": "12+90=12\n12",
+        "answer": 102
+    },
+    {
+        "response": "68+49=1\nThe",
+        "answer": 117
+    },
+    {
+        "response": "66+47=113\nThe",
+        "answer": 113
+    },
+    {
+        "response": "85+36= 111\n",
+        "answer": 121
+    },
+    {
+        "response": "70+13=83\nA",
+        "answer": 83
+    },
+    {
+        "response": "7+35=42. The",
+        "answer": 42
+    },
+    {
+        "response": "69+22=91\nThe",
+        "answer": 91
+    },
+    {
+        "response": "99+7=2\n99",
+        "answer": 106
+    },
+    {
+        "response": "37+42=79\nThe",
+        "answer": 79
+    },
+    {
+        "response": "50+45=5\n50",
+        "answer": 95
+    },
+    {
+        "response": "92+28= 120\n",
+        "answer": 120
+    },
+    {
+        "response": "99+84=15\n99",
+        "answer": 183
+    },
+    {
+        "response": "48+13=61\nThe",
+        "answer": 61
+    },
+    {
+        "response": "85+54= 139\n",
+        "answer": 139
+    },
+    {
+        "response": "57+52=109\nThe",
+        "answer": 109
+    },
+    {
+        "response": "26+86=1\nThe",
+        "answer": 112
+    },
+    {
+        "response": "19+43= 22\n",
+        "answer": 62
+    },
+    {
+        "response": "20+69=39\n20",
+        "answer": 89
+    },
+    {
+        "response": "46+43=89\nThe",
+        "answer": 89
+    },
+    {
+        "response": "66+55=121\nThe",
+        "answer": 121
+    },
+    {
+        "response": "8+16=32\n8",
+        "answer": 24
+    },
+    {
+        "response": "47+32=79\nThe",
+        "answer": 79
+    },
+    {
+        "response": "16+70=46\n16",
+        "answer": 86
+    },
+    {
+        "response": "57+4=61\nThe",
+        "answer": 61
+    },
+    {
+        "response": "35+92= 35\n",
+        "answer": 127
+    },
+    {
+        "response": "4+88=4\n4",
+        "answer": 92
+    },
+    {
+        "response": "64+3=67\nA",
+        "answer": 67
+    },
+    {
+        "response": "36+56=92\nThe",
+        "answer": 92
+    },
+    {
+        "response": "49+32=1\nThe",
+        "answer": 81
+    },
+    {
+        "response": "52+14=66\nThe",
+        "answer": 66
+    },
+    {
+        "response": "58+27=85\nThe",
+        "answer": 85
+    },
+    {
+        "response": "13+38=59\n13",
+        "answer": 51
+    },
+    {
+        "response": "4+42= 4+",
+        "answer": 46
+    },
+    {
+        "response": "93+89=174\nThe",
+        "answer": 182
+    },
+    {
+        "response": "24+0=24\n24",
+        "answer": 24
+    },
+    {
+        "response": "2+14=16\n2",
+        "answer": 16
+    },
+    {
+        "response": "59+25=84\nThe",
+        "answer": 84
+    },
+    {
+        "response": "37+75=112\nThe",
+        "answer": 112
+    },
+    {
+        "response": "82+66=158\nThe",
+        "answer": 148
+    },
+    {
+        "response": "72+6=78. ",
+        "answer": 78
+    },
+    {
+        "response": "86+62= 18\n",
+        "answer": 148
+    },
+    {
+        "response": "71+68=139\nThe",
+        "answer": 139
+    },
+    {
+        "response": "55+57=112\nThe",
+        "answer": 112
+    },
+    {
+        "response": "57+98= 141\n",
+        "answer": 155
+    },
+    {
+        "response": "21+7=8\n21",
+        "answer": 28
+    },
+    {
+        "response": "49+49=1\nThe",
+        "answer": 98
+    },
+    {
+        "response": "40+55=95\nA",
+        "answer": 95
+    },
+    {
+        "response": "40+45=85\nThe",
+        "answer": 85
+    },
+    {
+        "response": "92+1=93. ",
+        "answer": 93
+    },
+    {
+        "response": "69+4=73\nThe",
+        "answer": 73
+    },
+    {
+        "response": "65+18= 37\n",
+        "answer": 83
+    },
+    {
+        "response": "24+31=1\nThe",
+        "answer": 55
+    },
+    {
+        "response": "18+77= 99\n",
+        "answer": 95
+    },
+    {
+        "response": "17+50=71\n17",
+        "answer": 67
+    },
+    {
+        "response": "73+17=90\nThe",
+        "answer": 90
+    },
+    {
+        "response": "43+25=68\nThe",
+        "answer": 68
+    },
+    {
+        "response": "86+4=90. ",
+        "answer": 90
+    },
+    {
+        "response": "28+20=48\nThe",
+        "answer": 48
+    },
+    {
+        "response": "80+22=102\nThe",
+        "answer": 102
+    },
+    {
+        "response": "96+52= 144\n",
+        "answer": 148
+    },
+    {
+        "response": "76+59= 125\n",
+        "answer": 135
+    },
+    {
+        "response": "38+68=116\nThe",
+        "answer": 106
+    },
+    {
+        "response": "95+11= 86\n",
+        "answer": 106
+    },
+    {
+        "response": "98+16=74\n98",
+        "answer": 114
+    },
+    {
+        "response": "7+6=13. The",
+        "answer": 13
+    },
+    {
+        "response": "85+63= 122\n",
+        "answer": 148
+    },
+    {
+        "response": "32+1=1: The",
+        "answer": 33
+    },
+    {
+        "response": "35+86=71\nThe",
+        "answer": 121
+    },
+    {
+        "response": "77+75=152\nThe",
+        "answer": 152
+    },
+    {
+        "response": "56+21=37\nThe",
+        "answer": 77
+    },
+    {
+        "response": "52+56=108\nThe",
+        "answer": 108
+    },
+    {
+        "response": "45+5=50. ",
+        "answer": 50
+    },
+    {
+        "response": "16+23= 39\n",
+        "answer": 39
+    },
+    {
+        "response": "28+11=39. The",
+        "answer": 39
+    },
+    {
+        "response": "51+45=96\nThe",
+        "answer": 96
+    },
+    {
+        "response": "86+11=97. ",
+        "answer": 97
+    },
+    {
+        "response": "46+87=133\nThe",
+        "answer": 133
+    },
+    {
+        "response": "35+40=15\n35",
+        "answer": 75
+    },
+    {
+        "response": "29+29=59\nThe",
+        "answer": 58
+    },
+    {
+        "response": "1+2=3: The",
+        "answer": 3
+    },
+    {
+        "response": "97+46= 51\n",
+        "answer": 143
+    },
+    {
+        "response": "57+11=68. ",
+        "answer": 68
+    },
+    {
+        "response": "16+95=1\n16",
+        "answer": 111
+    },
+    {
+        "response": "46+52=98\nThe",
+        "answer": 98
+    },
+    {
+        "response": "24+54=18\n24",
+        "answer": 78
+    },
+    {
+        "response": "22+81= 51\n",
+        "answer": 103
+    },
+    {
+        "response": "62+94= 62+",
+        "answer": 156
+    },
+    {
+        "response": "67+71=138\nThe",
+        "answer": 138
+    },
+    {
+        "response": "97+64= 173\n",
+        "answer": 161
+    },
+    {
+        "response": "18+90=18\n18",
+        "answer": 108
+    },
+    {
+        "response": "1+64=1\n1",
+        "answer": 65
+    },
+    {
+        "response": "66+42=108\nThe",
+        "answer": 108
+    },
+    {
+        "response": "33+94=127\nThe",
+        "answer": 127
+    },
+    {
+        "response": "93+65=18\nThe",
+        "answer": 158
+    },
+    {
+        "response": "53+15=68\nA",
+        "answer": 68
+    },
+    {
+        "response": "4+93=4\n4",
+        "answer": 97
+    },
+    {
+        "response": "82+74=156\nThe",
+        "answer": 156
+    },
+    {
+        "response": "61+16=37\n61",
+        "answer": 77
+    },
+    {
+        "response": "43+69= 22\n",
+        "answer": 112
+    },
+    {
+        "response": "22+82= 22\n",
+        "answer": 104
+    },
+    {
+        "response": "98+24=74\n98",
+        "answer": 122
+    },
+    {
+        "response": "33+22=55. The",
+        "answer": 55
+    },
+    {
+        "response": "58+33=91\nThe",
+        "answer": 91
+    },
+    {
+        "response": "27+67= 27+",
+        "answer": 94
+    },
+    {
+        "response": "79+23=102\nThe",
+        "answer": 102
+    },
+    {
+        "response": "34+77=111\n34",
+        "answer": 111
+    },
+    {
+        "response": "53+81= 124\n",
+        "answer": 134
+    },
+    {
+        "response": "51+17= 28\n",
+        "answer": 68
+    },
+    {
+        "response": "13+0=13. The",
+        "answer": 13
+    },
+    {
+        "response": "41+91= 41\n",
+        "answer": 132
+    },
+    {
+        "response": "33+9=42. The",
+        "answer": 42
+    },
+    {
+        "response": "48+49=1\nThe",
+        "answer": 97
+    },
+    {
+        "response": "15+79= 54\n",
+        "answer": 94
+    },
+    {
+        "response": "2+51= 2+",
+        "answer": 53
+    },
+    {
+        "response": "2+85= 2+",
+        "answer": 87
+    },
+    {
+        "response": "22+59=81\nThe",
+        "answer": 81
+    },
+    {
+        "response": "3+96=3\n3",
+        "answer": 99
+    },
+    {
+        "response": "26+40=66\nThe",
+        "answer": 66
+    },
+    {
+        "response": "71+24=95\nThe",
+        "answer": 95
+    },
+    {
+        "response": "51+46=97\nThe",
+        "answer": 97
+    },
+    {
+        "response": "2+49=1\n2",
+        "answer": 51
+    },
+    {
+        "response": "34+3=27. The",
+        "answer": 37
+    },
+    {
+        "response": "80+26=56\nA",
+        "answer": 106
+    },
+    {
+        "response": "45+55=100\nThe",
+        "answer": 100
+    },
+    {
+        "response": "8+85= 8+",
+        "answer": 93
+    },
+    {
+        "response": "18+5=23. What",
+        "answer": 23
+    },
+    {
+        "response": "94+74= 20\n",
+        "answer": 168
+    },
+    {
+        "response": "49+66=115\nThe",
+        "answer": 115
+    },
+    {
+        "response": "91+79= 172\n",
+        "answer": 170
+    },
+    {
+        "response": "73+57=130\nThe",
+        "answer": 130
+    },
+    {
+        "response": "20+68=38\n20",
+        "answer": 88
+    },
+    {
+        "response": "48+63=105\nThe",
+        "answer": 111
+    },
+    {
+        "response": "32+30=12\nThe",
+        "answer": 62
+    },
+    {
+        "response": "92+95= 93\n",
+        "answer": 187
+    },
+    {
+        "response": "37+29=68\nThe",
+        "answer": 66
+    },
+    {
+        "response": "47+36=83\nThe",
+        "answer": 83
+    },
+    {
+        "response": "82+2=84. ",
+        "answer": 84
+    },
+    {
+        "response": "45+14=59. ",
+        "answer": 59
+    },
+    {
+        "response": "66+71=37\nA",
+        "answer": 137
+    },
+    {
+        "response": "59+38=91\nThe",
+        "answer": 97
+    },
+    {
+        "response": "88+50=38\nThe",
+        "answer": 138
+    },
+    {
+        "response": "63+35=98\nThe",
+        "answer": 98
+    },
+    {
+        "response": "95+62= 33\n",
+        "answer": 157
+    },
+    {
+        "response": "37+95= 142\n",
+        "answer": 132
+    },
+    {
+        "response": "94+55=149\nThe",
+        "answer": 149
+    },
+    {
+        "response": "61+55=116\nThe",
+        "answer": 116
+    },
+    {
+        "response": "12+9=21. The",
+        "answer": 21
+    },
+    {
+        "response": "7+65= 7+",
+        "answer": 72
+    },
+    {
+        "response": "95+99=4\nThe",
+        "answer": 194
+    },
+    {
+        "response": "5+52= 57\n",
+        "answer": 57
+    },
+    {
+        "response": "31+93= 93\n",
+        "answer": 124
+    },
+    {
+        "response": "60+20=40\n60",
+        "answer": 80
+    },
+    {
+        "response": "12+84=12\n12",
+        "answer": 96
+    },
+    {
+        "response": "69+7= 66\n",
+        "answer": 76
+    },
+    {
+        "response": "43+61= 62\n",
+        "answer": 104
+    },
+    {
+        "response": "72+80=152\nThe",
+        "answer": 152
+    },
+    {
+        "response": "11+4=5\n11",
+        "answer": 15
+    },
+    {
+        "response": "66+31=97\nThe",
+        "answer": 97
+    },
+    {
+        "response": "51+72=123\nThe",
+        "answer": 123
+    },
+    {
+        "response": "14+53= 57\n",
+        "answer": 67
+    },
+    {
+        "response": "91+82= 1\n",
+        "answer": 173
+    },
+    {
+        "response": "66+77=143\nThe",
+        "answer": 143
+    },
+    {
+        "response": "80+63= 17\n",
+        "answer": 143
+    },
+    {
+        "response": "52+49=1\nThe",
+        "answer": 101
+    },
+    {
+        "response": "52+23=75\nThe",
+        "answer": 75
+    },
+    {
+        "response": "78+50=128\nThe",
+        "answer": 128
+    },
+    {
+        "response": "35+32= 7\n",
+        "answer": 67
+    },
+    {
+        "response": "57+8=65\nA",
+        "answer": 65
+    },
+    {
+        "response": "15+41=42\n15",
+        "answer": 56
+    },
+    {
+        "response": "95+9=94\nA",
+        "answer": 104
+    },
+    {
+        "response": "0+49=0\n0",
+        "answer": 49
+    },
+    {
+        "response": "68+36=104\nThe",
+        "answer": 104
+    },
+    {
+        "response": "94+65= 19\n",
+        "answer": 159
+    },
+    {
+        "response": "20+99=1\n20",
+        "answer": 119
+    },
+    {
+        "response": "82+42= 124\n",
+        "answer": 124
+    },
+    {
+        "response": "15+1=16: The",
+        "answer": 16
+    },
+    {
+        "response": "2+24=2\n2",
+        "answer": 26
+    },
+    {
+        "response": "13+44=44\n13",
+        "answer": 57
+    },
+    {
+        "response": "7+43=43\n7",
+        "answer": 50
+    },
+    {
+        "response": "74+4=78. ",
+        "answer": 78
+    },
+    {
+        "response": "24+53=77\nThe",
+        "answer": 77
+    },
+    {
+        "response": "2+8=10\n2",
+        "answer": 10
+    },
+    {
+        "response": "89+15=104\nThe",
+        "answer": 104
+    },
+    {
+        "response": "13+37=58\nThe",
+        "answer": 50
+    },
+    {
+        "response": "78+86= 164\n",
+        "answer": 164
+    },
+    {
+        "response": "83+88=171\nThe",
+        "answer": 171
+    },
+    {
+        "response": "60+45=105\n60",
+        "answer": 105
+    },
+    {
+        "response": "42+72=114\nThe",
+        "answer": 114
+    },
+    {
+        "response": "36+29= 65\n",
+        "answer": 65
+    },
+    {
+        "response": "85+26= 61\n",
+        "answer": 111
+    },
+    {
+        "response": "15+98=1\nThe",
+        "answer": 113
+    },
+    {
+        "response": "58+96=142\nThe",
+        "answer": 154
+    },
+    {
+        "response": "3+25=28\n3",
+        "answer": 28
+    },
+    {
+        "response": "31+31=62: The",
+        "answer": 62
+    },
+    {
+        "response": "36+93= 93\n",
+        "answer": 129
+    },
+    {
+        "response": "31+12=43. The",
+        "answer": 43
+    },
+    {
+        "response": "69+82= 153\n",
+        "answer": 151
+    },
+    {
+        "response": "82+39= 121\n",
+        "answer": 121
+    },
+    {
+        "response": "63+11=74. ",
+        "answer": 74
+    },
+    {
+        "response": "32+55=87\nThe",
+        "answer": 87
+    },
+    {
+        "response": "60+95=145\n60",
+        "answer": 155
+    },
+    {
+        "response": "37+56=93\nThe",
+        "answer": 93
+    },
+    {
+        "response": "93+79= 1\n",
+        "answer": 172
+    },
+    {
+        "response": "23+79= 52\n",
+        "answer": 102
+    }
+]

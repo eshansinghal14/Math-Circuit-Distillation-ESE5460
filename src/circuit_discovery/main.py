@@ -2,6 +2,8 @@ import os
 import json
 import torch
 
+from transformers import AutoTokenizer
+
 from .utils import (
     s3,
     BUCKET_NAME,
@@ -46,6 +48,9 @@ def train_circuit_discovery(
         raise ValueError("No overlapping activation batches found for 1B and 8B models in S3.")
 
     files_per_epoch = 5
+
+    # Tokenizer to decode ids back into string prompts
+    tokenizer = AutoTokenizer.from_pretrained(llama_1b)
 
     for epoch in range(start_epoch, epochs):
         start = (epoch * files_per_epoch) % len(shared_suffixes)
@@ -94,20 +99,21 @@ def train_circuit_discovery(
             batch_1b = torch.load(local_1b, map_location="cpu")
             batch_8b = torch.load(local_8b, map_location="cpu")
 
-            prompts_1b, activations_dict_1b = batch_1b["prompts"], batch_1b["activations"]
-            prompts_8b, activations_dict_8b = batch_8b["prompts"], batch_8b["activations"]
+            ids_1b, activations_dict_1b = batch_1b["ids"], batch_1b["activations"]
+            ids_8b, activations_dict_8b = batch_8b["ids"], batch_8b["activations"]
 
-            if prompts_1b != prompts_8b:
+            if not torch.equal(ids_1b, ids_8b):
                 continue
 
-            prompts = prompts_1b
+            # Decode ids to recover string prompts like "12+34=46"
+            prompts = tokenizer.batch_decode(ids_1b, skip_special_tokens=True)
 
             activations_1b = _stack_layer_activations(activations_dict_1b).to(device)
             activations_8b = _stack_layer_activations(activations_dict_8b).to(device)
 
-            op1, op2, res, term_encoding = parse_equation(prompts, device=device)
+            op1, op2, res = parse_equation(prompts, device=device)
 
-            outputs = model(op1, op2, res, activations_1b, activations_8b, term_encoding)
+            outputs = model(op1, op2, res, activations_1b, activations_8b)
 
             hard_class_probs = outputs["hard_class_probs"]
             masked_1b = outputs["masked_activations_1b"]
@@ -201,7 +207,7 @@ def train_circuit_discovery(
         with open(metrics_path, "w") as f:
             json.dump(metrics_log, f, indent=4)
 
-        if (epoch + 1) % 500 == 0:
+        if (epoch + 1) % 100 == 0:
             if os.path.exists("/opt/dlami/nvme"):
                 ckpt_root = "/opt/dlami/nvme/circuit_discovery_checkpoints"
             else:
