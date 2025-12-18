@@ -15,4 +15,4 @@ dataset = '3d_add_test.json'
 
 eval_model(f'../results/meta-llama/Meta-Llama-3-8B/{dataset}')
 eval_model(f'../results/meta-llama/Llama-3.2-1B/{dataset}')
-eval_model(f'../results/vedantgaur/circuit-distilled-llama-1b-low-cka/{dataset}')
+eval_model(f'../results/vedantgaur/circuit-distilled-llama-1b-fixed-loss/{dataset}')
