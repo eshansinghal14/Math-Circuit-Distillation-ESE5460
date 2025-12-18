@@ -9,6 +9,7 @@ from constants import HF_TOKEN, BUCKET_NAME
 from transformers.utils import logging as hf_logging
 
 s3 = boto3.client("s3")
+logged_in = False
 
 def get_model_name(argv):
     if len(argv) > 1:
@@ -23,7 +24,11 @@ def load_model(model_name):
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from huggingface_hub import login
 
-    login(HF_TOKEN)
+    global logged_in
+    if not logged_in:
+        login(HF_TOKEN)
+        logged_in = True
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
