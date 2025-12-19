@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.27 (TeX Live 2025) (preloaded format=pdflatex 2025.3.8)  18 DEC 2025 19:41
+This is pdfTeX, Version 3.141592653-2.6-1.40.27 (TeX Live 2025) (preloaded format=pdflatex 2025.3.8)  18 DEC 2025 23:47
 entering extended mode
  restricted \write18 enabled.
  file:line:error style messages enabled.
@@ -699,7 +699,7 @@ File: tikzlibraryshapes.misc.code.tex 2023-01-15 v3.1.10 (3.1.10)
  (/usr/local/texlive/2025/texmf-dist/tex/generic/pgf/libraries/shapes/pgflibraryshapes.misc.code.tex
 File: pgflibraryshapes.misc.code.tex 2023-01-15 v3.1.10 (3.1.10)
 ))
-LaTeX Font Info:    Trying to load font information for OT1+ptm on input line 34.
+LaTeX Font Info:    Trying to load font information for OT1+ptm on input line 39.
  (/usr/local/texlive/2025/texmf-dist/tex/latex/psnfss/ot1ptm.fd
 File: ot1ptm.fd 2001/06/04 font definitions for OT1/ptm.
 ) (/usr/local/texlive/2025/texmf-dist/tex/latex/l3backend/l3backend-pdftex.def
@@ -709,29 +709,29 @@ File: l3backend-pdftex.def 2024-05-08 L3 backend support: PDF output (pdfTeX)
 ) (./paper.aux)
 \openout1 = `paper.aux'.
 
-LaTeX Font Info:    Checking defaults for OML/cmm/m/it on input line 34.
-LaTeX Font Info:    ... okay on input line 34.
-LaTeX Font Info:    Checking defaults for OMS/cmsy/m/n on input line 34.
-LaTeX Font Info:    ... okay on input line 34.
-LaTeX Font Info:    Checking defaults for OT1/cmr/m/n on input line 34.
-LaTeX Font Info:    ... okay on input line 34.
-LaTeX Font Info:    Checking defaults for T1/cmr/m/n on input line 34.
-LaTeX Font Info:    ... okay on input line 34.
-LaTeX Font Info:    Checking defaults for TS1/cmr/m/n on input line 34.
-LaTeX Font Info:    ... okay on input line 34.
-LaTeX Font Info:    Checking defaults for OMX/cmex/m/n on input line 34.
-LaTeX Font Info:    ... okay on input line 34.
-LaTeX Font Info:    Checking defaults for U/cmr/m/n on input line 34.
-LaTeX Font Info:    ... okay on input line 34.
-LaTeX Font Info:    Checking defaults for PD1/pdf/m/n on input line 34.
-LaTeX Font Info:    ... okay on input line 34.
-LaTeX Font Info:    Checking defaults for PU/pdf/m/n on input line 34.
-LaTeX Font Info:    ... okay on input line 34.
-LaTeX Font Info:    Trying to load font information for U+msa on input line 34.
+LaTeX Font Info:    Checking defaults for OML/cmm/m/it on input line 39.
+LaTeX Font Info:    ... okay on input line 39.
+LaTeX Font Info:    Checking defaults for OMS/cmsy/m/n on input line 39.
+LaTeX Font Info:    ... okay on input line 39.
+LaTeX Font Info:    Checking defaults for OT1/cmr/m/n on input line 39.
+LaTeX Font Info:    ... okay on input line 39.
+LaTeX Font Info:    Checking defaults for T1/cmr/m/n on input line 39.
+LaTeX Font Info:    ... okay on input line 39.
+LaTeX Font Info:    Checking defaults for TS1/cmr/m/n on input line 39.
+LaTeX Font Info:    ... okay on input line 39.
+LaTeX Font Info:    Checking defaults for OMX/cmex/m/n on input line 39.
+LaTeX Font Info:    ... okay on input line 39.
+LaTeX Font Info:    Checking defaults for U/cmr/m/n on input line 39.
+LaTeX Font Info:    ... okay on input line 39.
+LaTeX Font Info:    Checking defaults for PD1/pdf/m/n on input line 39.
+LaTeX Font Info:    ... okay on input line 39.
+LaTeX Font Info:    Checking defaults for PU/pdf/m/n on input line 39.
+LaTeX Font Info:    ... okay on input line 39.
+LaTeX Font Info:    Trying to load font information for U+msa on input line 39.
  (/usr/local/texlive/2025/texmf-dist/tex/latex/amsfonts/umsa.fd
 File: umsa.fd 2013/01/14 v3.01 AMS symbols A
 )
-LaTeX Font Info:    Trying to load font information for U+msb on input line 34.
+LaTeX Font Info:    Trying to load font information for U+msb on input line 39.
  (/usr/local/texlive/2025/texmf-dist/tex/latex/amsfonts/umsb.fd
 File: umsb.fd 2013/01/14 v3.01 AMS symbols B
 )
@@ -798,25 +798,25 @@ Package caption Info: Begin \AtBeginDocument code.
 Package caption Info: hyperref package is loaded.
 Package caption Info: wrapfig package is loaded.
 Package caption Info: End \AtBeginDocument code.
-Package hyperref Info: Link coloring OFF on input line 34.
+Package hyperref Info: Link coloring OFF on input line 39.
  (./paper.out) (./paper.out)
 \@outlinefile=\write4
 \openout4 = `paper.out'.
 
-LaTeX Info: Redefining \microtypecontext on input line 34.
-Package microtype Info: Applying patch `item' on input line 34.
-Package microtype Info: Applying patch `toc' on input line 34.
-Package microtype Info: Applying patch `eqnum' on input line 34.
-Package microtype Info: Applying patch `footnote' on input line 34.
-Package microtype Info: Applying patch `verbatim' on input line 34.
-LaTeX Info: Redefining \microtypesetup on input line 34.
+LaTeX Info: Redefining \microtypecontext on input line 39.
+Package microtype Info: Applying patch `item' on input line 39.
+Package microtype Info: Applying patch `toc' on input line 39.
+Package microtype Info: Applying patch `eqnum' on input line 39.
+Package microtype Info: Applying patch `footnote' on input line 39.
+Package microtype Info: Applying patch `verbatim' on input line 39.
+LaTeX Info: Redefining \microtypesetup on input line 39.
 Package microtype Info: Generating PDF output.
 Package microtype Info: Character protrusion enabled (level 2).
 Package microtype Info: Using default protrusion set `alltext'.
 Package microtype Info: Automatic font expansion enabled (level 2),
 (microtype)             stretch: 20, shrink: 20, step: 1, non-selected.
 Package microtype Info: Using default expansion set `alltext-nott'.
-LaTeX Info: Redefining \showhyphens on input line 34.
+LaTeX Info: Redefining \showhyphens on input line 39.
 Package microtype Info: No adjustment of tracking.
 Package microtype Info: No adjustment of interword spacing.
 Package microtype Info: No adjustment of character kerning.
@@ -838,7 +838,9 @@ Overfull \hbox (49.22551pt too wide) has occurred while \output is active
  []
 
 [2]
-LaTeX Font Info:    Trying to load font information for OT1+pcr on input line 178.
+
+[3]
+LaTeX Font Info:    Trying to load font information for OT1+pcr on input line 218.
  (/usr/local/texlive/2025/texmf-dist/tex/latex/psnfss/ot1pcr.fd
 File: ot1pcr.fd 2001/06/04 font definitions for OT1/pcr.
 )
@@ -848,32 +850,83 @@ Package microtype Info: Loading generic protrusion settings for font family
 (microtype)             See the microtype manual for details.
 
 
-[3]
-
 
 Overfull \hbox (49.22551pt too wide) has occurred while \output is active
 []  \OT1/ptm/m/n/7 ESHAN SINGHAL [ESINGHAL@SEAS], AUDHAV DURAI [AUDHAV@WHARTON],  VEDANT GAUR [VEDANTG@WHARTON], PRANEEL VARSHNEY [PVARSH@SEAS]  
  []
 
 [4]
-<figures/cd_sparsify.png, id=135, 542.025pt x 325.215pt>
-File: figures/cd_sparsify.png Graphic file (type png)
-<use figures/cd_sparsify.png>
-Package pdftex.def Info: figures/cd_sparsify.png  used on input line 311.
+
+[5]
+
+
+Overfull \hbox (49.22551pt too wide) has occurred while \output is active
+[]  \OT1/ptm/m/n/7 ESHAN SINGHAL [ESINGHAL@SEAS], AUDHAV DURAI [AUDHAV@WHARTON],  VEDANT GAUR [VEDANTG@WHARTON], PRANEEL VARSHNEY [PVARSH@SEAS]  
+ []
+
+[6]
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 338.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 338.
+
+<figures/clusters/k_vs_loss_subclass_4.png, id=196, 387.3672pt x 284.0211pt>
+File: figures/clusters/k_vs_loss_subclass_4.png Graphic file (type png)
+<use figures/clusters/k_vs_loss_subclass_4.png>
+Package pdftex.def Info: figures/clusters/k_vs_loss_subclass_4.png  used on input line 345.
+(pdftex.def)             Requested size: 225.4804pt x 165.32608pt.
+<figures/clusters/k_vs_loss_subclass_5.png, id=198, 387.3672pt x 284.0211pt>
+File: figures/clusters/k_vs_loss_subclass_5.png Graphic file (type png)
+<use figures/clusters/k_vs_loss_subclass_5.png>
+Package pdftex.def Info: figures/clusters/k_vs_loss_subclass_5.png  used on input line 352.
+(pdftex.def)             Requested size: 225.4804pt x 165.32608pt.
+
+
+[7
+
+ <./figures/clusters/k_vs_loss_subclass_4.png> <./figures/clusters/k_vs_loss_subclass_5.png>]
+
+
+Overfull \hbox (49.22551pt too wide) has occurred while \output is active
+[]  \OT1/ptm/m/n/7 ESHAN SINGHAL [ESINGHAL@SEAS], AUDHAV DURAI [AUDHAV@WHARTON],  VEDANT GAUR [VEDANTG@WHARTON], PRANEEL VARSHNEY [PVARSH@SEAS]  
+ []
+
+[8]
+
+[9]
+<figures/training_dynamics/cd_sparsify.png, id=222, 542.025pt x 325.215pt>
+File: figures/training_dynamics/cd_sparsify.png Graphic file (type png)
+<use figures/training_dynamics/cd_sparsify.png>
+Package pdftex.def Info: figures/training_dynamics/cd_sparsify.png  used on input line 513.
 (pdftex.def)             Requested size: 432.17375pt x 259.31386pt.
-
-Underfull \vbox (badness 10000) has occurred while \output is active []
-
-
-
-[5
-
-]
-<figures/cd_rep_ortho.png, id=142, 542.025pt x 325.215pt>
-File: figures/cd_rep_ortho.png Graphic file (type png)
-<use figures/cd_rep_ortho.png>
-Package pdftex.def Info: figures/cd_rep_ortho.png  used on input line 318.
+<figures/training_dynamics/cd_rep_ortho.png, id=223, 542.025pt x 325.215pt>
+File: figures/training_dynamics/cd_rep_ortho.png Graphic file (type png)
+<use figures/training_dynamics/cd_rep_ortho.png>
+Package pdftex.def Info: figures/training_dynamics/cd_rep_ortho.png  used on input line 520.
 (pdftex.def)             Requested size: 432.17375pt x 259.31386pt.
+<figures/cka/accuracy.png, id=224, 867.24pt x 361.35pt>
+File: figures/cka/accuracy.png Graphic file (type png)
+<use figures/cka/accuracy.png>
+Package pdftex.def Info: figures/cka/accuracy.png  used on input line 534.
+(pdftex.def)             Requested size: 230.18253pt x 95.90616pt.
+<figures/cka/ce_loss_steps.png, id=225, 867.24pt x 361.35pt>
+File: figures/cka/ce_loss_steps.png Graphic file (type png)
+<use figures/cka/ce_loss_steps.png>
+Package pdftex.def Info: figures/cka/ce_loss_steps.png  used on input line 541.
+(pdftex.def)             Requested size: 230.18253pt x 95.90616pt.
+<figures/cka/cka_loss_steps.png, id=226, 867.24pt x 361.35pt>
+File: figures/cka/cka_loss_steps.png Graphic file (type png)
+<use figures/cka/cka_loss_steps.png>
+Package pdftex.def Info: figures/cka/cka_loss_steps.png  used on input line 550.
+(pdftex.def)             Requested size: 230.18253pt x 95.90616pt.
+<figures/cka/loss_steps.png, id=227, 867.24pt x 361.35pt>
+File: figures/cka/loss_steps.png Graphic file (type png)
+<use figures/cka/loss_steps.png>
+Package pdftex.def Info: figures/cka/loss_steps.png  used on input line 557.
+(pdftex.def)             Requested size: 230.18253pt x 95.90616pt.
 
 
 
@@ -881,31 +934,60 @@ Overfull \hbox (49.22551pt too wide) has occurred while \output is active
 []  \OT1/ptm/m/n/7 ESHAN SINGHAL [ESINGHAL@SEAS], AUDHAV DURAI [AUDHAV@WHARTON],  VEDANT GAUR [VEDANTG@WHARTON], PRANEEL VARSHNEY [PVARSH@SEAS]  
  []
 
-[6 <./figures/cd_sparsify.png> <./figures/cd_rep_ortho.png>] (./paper.aux)
+[10 <./figures/training_dynamics/cd_sparsify.png> <./figures/training_dynamics/cd_rep_ortho.png>]
+
+[11 <./figures/cka/accuracy.png> <./figures/cka/ce_loss_steps.png> <./figures/cka/cka_loss_steps.png> <./figures/cka/loss_steps.png>]
+<figures/cka-old/accuracy.png, id=244, 867.24pt x 361.35pt>
+File: figures/cka-old/accuracy.png Graphic file (type png)
+<use figures/cka-old/accuracy.png>
+Package pdftex.def Info: figures/cka-old/accuracy.png  used on input line 576.
+(pdftex.def)             Requested size: 230.18253pt x 95.90616pt.
+<figures/cka-old/loss_steps.png, id=245, 867.24pt x 361.35pt>
+File: figures/cka-old/loss_steps.png Graphic file (type png)
+<use figures/cka-old/loss_steps.png>
+Package pdftex.def Info: figures/cka-old/loss_steps.png  used on input line 583.
+(pdftex.def)             Requested size: 230.18253pt x 95.90616pt.
+
+
+
+Overfull \hbox (49.22551pt too wide) has occurred while \output is active
+[]  \OT1/ptm/m/n/7 ESHAN SINGHAL [ESINGHAL@SEAS], AUDHAV DURAI [AUDHAV@WHARTON],  VEDANT GAUR [VEDANTG@WHARTON], PRANEEL VARSHNEY [PVARSH@SEAS]  
+ []
+
+[12 <./figures/cka-old/accuracy.png> <./figures/cka-old/loss_steps.png>]
+<figures/cka-loss/accuracy.png, id=253, 867.24pt x 361.35pt>
+File: figures/cka-loss/accuracy.png Graphic file (type png)
+<use figures/cka-loss/accuracy.png>
+Package pdftex.def Info: figures/cka-loss/accuracy.png  used on input line 608.
+(pdftex.def)             Requested size: 230.18253pt x 95.90616pt.
+<figures/cka-loss/loss_steps.png, id=254, 867.24pt x 361.35pt>
+File: figures/cka-loss/loss_steps.png Graphic file (type png)
+<use figures/cka-loss/loss_steps.png>
+Package pdftex.def Info: figures/cka-loss/loss_steps.png  used on input line 615.
+(pdftex.def)             Requested size: 230.18253pt x 95.90616pt.
+
+
+[13 <./figures/cka-loss/accuracy.png> <./figures/cka-loss/loss_steps.png>] (./paper.aux)
  ***********
 LaTeX2e <2024-11-01> patch level 2
 L3 programming layer <2025-01-18>
  ***********
 Package rerunfilecheck Info: File `paper.out' has not changed.
-(rerunfilecheck)             Checksum: 92B546FA7BC5CF76F881046A34B83A1B;3032.
+(rerunfilecheck)             Checksum: DC105F9FFC877C949A8E11A3FA3EF862;5788.
  ) 
 Here is how much of TeX's memory you used:
- 28906 strings out of 473190
- 528986 string characters out of 5715801
- 964110 words of memory out of 5000000
- 51200 multiletter control sequences out of 15000+600000
- 597799 words of font info for 252 fonts, out of 8000000 for 9000
+ 29129 strings out of 473190
+ 533832 string characters out of 5715801
+ 966170 words of memory out of 5000000
+ 51327 multiletter control sequences out of 15000+600000
+ 602046 words of font info for 296 fonts, out of 8000000 for 9000
  1302 hyphenation exceptions out of 8191
- 75i,13n,79p,1111b,794s stack positions out of 10000i,1000n,20000p,200000b,200000s
-</usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmbx10.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmex10.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi10.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi5.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi7.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmr5.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmr7.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy10.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy7.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/symbols/msbm10.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/urw/courier/ucrr8a.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/urw/times/utmb8a.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/urw/times/utmr8a.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/urw/times/utmri8a.pfb>
-<<<<<<< HEAD
-Output written on paper.pdf (6 pages, 631204 bytes).
-=======
-Output written on paper.pdf (6 pages, 670682 bytes).
->>>>>>> 96e8279430ac4caeb169870395e0b9c02813781b
+ 75i,13n,79p,1111b,795s stack positions out of 10000i,1000n,20000p,200000b,200000s
+</usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmbx10.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmex10.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi10.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi5.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi7.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmr5.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmr7.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy10.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy5.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy7.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/symbols/msbm10.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/urw/courier/ucrr8a.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/urw/times/utmb8a.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/urw/times/utmr8a.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/urw/times/utmri8a.pfb>
+Output written on paper.pdf (13 pages, 1107355 bytes).
 PDF statistics:
- 227 PDF objects out of 1000 (max. 8388607)
- 183 compressed objects within 2 object streams
- 41 named destinations out of 1000 (max. 500000)
- 51863 words of extra memory for PDF output out of 61914 (max. 10000000)
+ 349 PDF objects out of 1000 (max. 8388607)
+ 275 compressed objects within 3 object streams
+ 72 named destinations out of 1000 (max. 500000)
+ 54033 words of extra memory for PDF output out of 61914 (max. 10000000)
 
