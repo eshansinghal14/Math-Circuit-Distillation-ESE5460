@@ -35,17 +35,31 @@
 \bibcite{nanda2023attribution}{{5}{}{{}}{{}}}
 \bibcite{kramar2024atp}{{6}{}{{}}{{}}}
 \bibcite{mueller2025mib}{{7}{}{{}}{{}}}
-\bibcite{kornblith2019similarity}{{8}{}{{}}{{}}}
-\bibcite{williams2025equivalence}{{9}{}{{}}{{}}}
-\newlabel{tocindent-1}{0pt}
-\newlabel{tocindent0}{12.5pt}
-\newlabel{tocindent1}{17.5pt}
-\newlabel{tocindent2}{25.0pt}
-\newlabel{tocindent3}{0pt}
-\providecommand\NAT@force@numbers{}\NAT@force@numbers
 \@writefile{toc}{\contentsline {subsubsection}{\tocsubsubsection {}{4.3.2}{Usage Entropy}}{3}{subsubsection.4.3.2}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsubsection}{\tocsubsubsection {}{4.3.3}{Sparsity Loss}}{3}{subsubsection.4.3.3}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsubsection}{\tocsubsubsection {}{4.3.4}{KL Regularization}}{3}{subsubsection.4.3.4}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsubsection}{\tocsubsubsection {}{4.3.5}{Mask Orthogonality Loss}}{3}{subsubsection.4.3.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\tocsubsection {}{4.4}{Circuit Discovery Model Architecture}}{3}{subsection.4.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\tocsubsubsection {}{4.4.1}{Circuit Discovery Training Dynamics}}{3}{subsubsection.4.4.1}\protected@file@percent }
 \@writefile{toc}{\contentsline {section}{\tocsection {}{}{References}}{3}{section*.1}\protected@file@percent }
-\gdef \@abspage@last{3}
+\bibcite{kornblith2019similarity}{{8}{}{{}}{{}}}
+\bibcite{williams2025equivalence}{{9}{}{{}}{{}}}
+\@writefile{toc}{\contentsline {section}{\tocsection {Appendix}{A}{Additional Figures}}{5}{appendix.A}\protected@file@percent }
+\newlabel{app:additional-figures}{{A}{5}{Additional Figures}{appendix.A}{}}
+\@writefile{toc}{\contentsline {subsection}{\tocsubsection {}{A.1}{Circuit Discovery Architecture}}{5}{figure.caption.2}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Circuit discovery architecture. Problems are embedded and assigned to a latent class via a straight-through Gumbel-Softmax classifier. The sampled class selects a class-conditioned neuron mask for each teacher model (1B and 8B), which gates flattened MLP activations. Training optimizes a multi-term objective encouraging within-class functional similarity, sparse masks, distinct circuits, and balanced class usage.}}{5}{figure.caption.2}\protected@file@percent }
+\providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
+\newlabel{fig:circuit-discovery-arch}{{1}{5}{Circuit discovery architecture. Problems are embedded and assigned to a latent class via a straight-through Gumbel-Softmax classifier. The sampled class selects a class-conditioned neuron mask for each teacher model (1B and 8B), which gates flattened MLP activations. Training optimizes a multi-term objective encouraging within-class functional similarity, sparse masks, distinct circuits, and balanced class usage}{figure.caption.2}{}}
+\newlabel{tocindent-1}{0pt}
+\newlabel{tocindent0}{12.5pt}
+\newlabel{tocindent1}{61.65977pt}
+\newlabel{tocindent2}{27.21997pt}
+\newlabel{tocindent3}{0pt}
+\providecommand\NAT@force@numbers{}\NAT@force@numbers
+\@writefile{toc}{\contentsline {section}{\tocsection {Appendix}{B}{Circuit Discovery Training Dynamics}}{6}{appendix.B}\protected@file@percent }
+\newlabel{app:training-dynamics}{{B}{6}{Circuit Discovery Training Dynamics}{appendix.B}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Circuit discovery training curves related to sparsity regularization (binary-entropy sparsity loss and KL-to-prior mean activation). These curves support the discussion in Section~4.5.}}{6}{figure.caption.3}\protected@file@percent }
+\newlabel{fig:cd-training-sparsity}{{2}{6}{Circuit discovery training curves related to sparsity regularization (binary-entropy sparsity loss and KL-to-prior mean activation). These curves support the discussion in Section~4.5}{figure.caption.3}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Circuit discovery training curves related to representativeness (within-class similarity) and separation (mask orthogonality / cosine similarity). These curves support the discussion in Section~4.5.}}{6}{figure.caption.4}\protected@file@percent }
+\newlabel{fig:cd-training-rep-ortho}{{3}{6}{Circuit discovery training curves related to representativeness (within-class similarity) and separation (mask orthogonality / cosine similarity). These curves support the discussion in Section~4.5}{figure.caption.4}{}}
+\gdef \@abspage@last{6}
