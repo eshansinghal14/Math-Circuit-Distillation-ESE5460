@@ -8,7 +8,7 @@
 \usepackage{float, colortbl, tabularx, longtable, multirow, subcaption, environ, wrapfig, textcomp, booktabs}
 \usepackage{pgf, tikz, framed, url, hyperref}
 \usepackage[normalem]{ulem}
-\usetikzlibrary{arrows,positioning,automata,shadows,fit,shapes}
+% \usetikzlibrary{arrows,positioning,automata,shadows,fit,shapes}
 \usepackage[english]{babel}
 
 \usepackage{microtype}
@@ -16,6 +16,15 @@
 
 \usepackage{times}
 \usepackage[numbers,sort&compress]{natbib}
+
+\usetikzlibrary{arrows.meta, positioning, fit, shapes.misc}
+\tikzset{
+  box/.style={draw, rounded corners, align=center, inner sep=6pt, minimum width=2.6cm, minimum height=1.0cm},
+  sbox/.style={draw, rounded corners, align=center, inner sep=5pt, minimum width=2.4cm, minimum height=0.85cm},
+  line/.style={-Latex, thick},
+  dashedline/.style={-Latex, thick, dashed},
+  note/.style={align=left, font=\small}
+}
 
 \title{Circuit Distillation for Math Reasoning: Aligning Computational Mechanisms in Large Language Models}
 \author{
@@ -163,6 +172,20 @@ m_{k,d} \log m_{k,d}
 \mathbf{M}_{k_1}^\top \mathbf{M}_{k_2}.
 \]
 
+\subsection{Circuit Discovery Model Architecture}
+We learn a latent-class circuit decomposition over arithmetic problems and use it to generate sparse neuron-level masks over MLP activations. Given an equation $x$ (e.g., $12+34=46$), we parse the operands and result $(o_1,o_2,r)$ and embed them with a lightweight \emph{ProblemEncoder} that concatenates learned embeddings for $o_1$, $o_2$, and $r$ into a fixed-dimensional vector $\phi(x)$.
+
+A small MLP classifier maps $\phi(x)$ to logits over $K$ latent classes, and we sample a discrete class assignment using straight-through Gumbel-Softmax. Conditioned on the sampled class, we generate neuron masks separately for the 1B and 8B models. Each mask generator is a compact network (class embedding $\rightarrow$ linear $\rightarrow$ sigmoid) that outputs a mask vector $\mathbf{m}\in(0,1)^D$, where $D=\texttt{intermediate\_size}\times\texttt{num\_hidden\_layers}$ corresponds to flattened MLP neurons across all transformer blocks. The mask is applied multiplicatively to the stacked per-layer MLP activations.
+
+We optimize a multi-term objective that (i) increases within-class similarity of masked activations, (ii) encourages sparse/binary masks via entropy and a global Bernoulli KL-to-prior term, (iii) discourages overlap between class masks via mean pairwise cosine similarity, and (iv) encourages balanced class usage via an entropy bonus.
+
+\subsubsection{Circuit Discovery Training Dynamics}
+We analyze the optimization behavior of the circuit discovery objective to verify that it produces sparse, distinct, and functionally meaningful neuron masks. First, the sparsity-related terms jointly encourage masks with a controlled activation budget: the binary-entropy sparsity loss drives mask entries toward near-binary values, while the KL regularization term constrains the global mean activation rate toward a Bernoulli prior with $\pi=0.1$. As training progresses, these terms decrease in tandem, indicating convergence to sparse masks with approximately 10\% active neurons. 
+
+Second, we examine the interaction between representativeness and separation of discovered circuits. The within-class similarity objective encourages masked activations corresponding to the same latent class to be consistent, while the mask cosine similarity penalty discourages overlap between class-conditioned masks. Over training, similarity improves as mask cosine similarity decreases, suggesting that the learned circuits become both representative of their assigned problem classes and increasingly orthogonal to one another. See Appendix~\ref{app:training-dynamics} for training curves.
+
+
+
 \begin{thebibliography}{99}
 
 \bibitem{dubey2024llama}
@@ -211,5 +234,90 @@ Alex Williams and others.
 \newblock \emph{Cognitive Computational Neuroscience}, 2025.
 
 \end{thebibliography}
+
+\clearpage
+\appendix
+
+\section{Additional Figures}
+\label{app:additional-figures}
+\subsection{Circuit Discovery Architecture}
+
+
+\begin{figure}[b]
+    \centering
+    \begin{tikzpicture}[node distance=1.0cm and 1.5cm]
+    
+    \node[box] (eq) {Arithmetic\\equation $x$\\(string)};
+    \node[sbox, below=0.8cm of eq] (parse) {Parse\\$(o_1,o_2,r)$};
+    \node[box, below=0.8cm of parse] (enc) {ProblemEncoder\\
+    $\phi(x)=[E_1(o_1);\;E_2(o_2);\;E_\Sigma(r)]$};
+    
+    \node[box, right=4.0cm of eq] (clf) {Classifier MLP\\$p(k\mid x)$};
+    \node[sbox, below=0.7cm of clf] (gumbel) {ST Gumbel-Softmax\\$\hat{k}\in\{1,\dots,K\}$};
+    \node[note, right=0.1cm of gumbel] {\emph{latent class}};
+    
+    \node[box, below=1.2cm of gumbel, xshift=-1.8cm] (acts1b) {Llama 3.2--1B\\MLP activations\\$A^{(1B)}\in\mathbb{R}^{D}$};
+    \node[box, below=1.2cm of gumbel, xshift=1.8cm] (acts8b) {Llama 3--8B\\MLP activations\\$A^{(8B)}\in\mathbb{R}^{D}$};
+    
+    \node[box, below=1.1cm of acts1b] (mask1b) {MaskGen$_{1B}$\\
+    $\mathbf{m}^{(1B)}_{\hat{k}}\in(0,1)^{D}$};
+    \node[box, below=1.1cm of acts8b] (mask8b) {MaskGen$_{8B}$\\
+    $\mathbf{m}^{(8B)}_{\hat{k}}\in(0,1)^{D}$};
+    
+    \node[sbox, below=1.0cm of mask1b] (masked1b) {Masked\\$A^{(1B)}\odot \mathbf{m}^{(1B)}_{\hat{k}}$};
+    \node[sbox, below=1.0cm of mask8b] (masked8b) {Masked\\$A^{(8B)}\odot \mathbf{m}^{(8B)}_{\hat{k}}$};
+    
+    \node[box, below=1.2cm of masked1b, xshift=1.8cm, minimum width=5.5cm] (loss) {
+    \textbf{CircuitLoss}\\[2pt]
+    \begin{tabular}{l}
+    within-class sim (masked activations)\\
+    + sparsity (binary entropy)\\
+    + KL to prior mean activation $\pi$\\
+    + mask orthogonality (pairwise cosine sim)\\
+    $-$ class-usage entropy (avoid collapse)
+    \end{tabular}
+    };
+    
+    \draw[line] (eq) -- (parse);
+    \draw[line] (parse) -- (enc);
+    \draw[line] (enc) -- (clf);
+    \draw[line] (clf) -- (gumbel);
+    
+    \draw[dashedline] (gumbel) -- (acts1b);
+    \draw[dashedline] (gumbel) -- (acts8b);
+    
+    \draw[line] (acts1b) -- (mask1b);
+    \draw[line] (acts8b) -- (mask8b);
+    
+    \draw[line] (mask1b) -- (masked1b);
+    \draw[line] (mask8b) -- (masked8b);
+    
+    \draw[line] (masked1b) -- (loss);
+    \draw[line] (masked8b) -- (loss);
+    
+    \node[draw, rounded corners, inner sep=6pt, fit=(clf) (gumbel) (acts1b) (acts8b) (mask1b) (mask8b) (masked1b) (masked8b) (loss),
+    label={[font=\small]above:\textbf{Circuit Discovery Training Pipeline}}] (fitbox) {};
+    
+    \end{tikzpicture}
+    \caption{Circuit discovery architecture. Problems are embedded and assigned to a latent class via a straight-through Gumbel-Softmax classifier. The sampled class selects a class-conditioned neuron mask for each teacher model (1B and 8B), which gates flattened MLP activations. Training optimizes a multi-term objective encouraging within-class functional similarity, sparse masks, distinct circuits, and balanced class usage.}
+    \label{fig:circuit-discovery-arch}
+\end{figure}
+
+\section{Circuit Discovery Training Dynamics}
+\label{app:training-dynamics}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.92\linewidth]{figures/cd_sparsify.png}
+    \caption{Circuit discovery training curves related to sparsity regularization (binary-entropy sparsity loss and KL-to-prior mean activation). These curves support the discussion in Section~4.5.}
+    \label{fig:cd-training-sparsity}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.92\linewidth]{figures/cd_rep_ortho.png}
+    \caption{Circuit discovery training curves related to representativeness (within-class similarity) and separation (mask orthogonality / cosine similarity). These curves support the discussion in Section~4.5.}
+    \label{fig:cd-training-rep-ortho}
+\end{figure}
 
 \end{document}
