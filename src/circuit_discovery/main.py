@@ -51,7 +51,6 @@ def train_circuit_discovery(
 
     files_per_epoch = 5
 
-    # Tokenizer to decode ids back into string prompts
     tokenizer = AutoTokenizer.from_pretrained(llama_1b)
 
     for epoch in range(start_epoch, epochs):
@@ -68,7 +67,6 @@ def train_circuit_discovery(
         all_mask_1b = []
         all_mask_8b = []
 
-        # Per-epoch metric accumulators
         frac_1b_list = []
         frac_8b_list = []
         class_ent_list = []
@@ -107,7 +105,6 @@ def train_circuit_discovery(
             if not torch.equal(ids_1b, ids_8b):
                 continue
 
-            # Decode ids to recover string prompts like "12+34=46"
             prompts = tokenizer.batch_decode(ids_1b, skip_special_tokens=True)
 
             activations_1b = _stack_layer_activations(activations_dict_1b).to(device)
@@ -129,7 +126,6 @@ def train_circuit_discovery(
             all_masked_8b.append(masked_8b)
             all_mask_8b.append(mask_8b)
 
-            # Per-file metrics that do not affect gradients
             with torch.no_grad():
                 frac_1b_list.append(float((mask_1b > (1 - 1e-3)).float().mean()))
                 frac_8b_list.append(float((mask_8b > (1 - 1e-3)).float().mean()))
@@ -177,7 +173,6 @@ def train_circuit_discovery(
             mask_cossim_1b_loss = float(loss_dict["mask_cossim_1b"])
             mask_cossim_8b_loss = float(loss_dict["mask_cossim_8b"])
 
-            # Binary sparsity metric: mean binary entropy over mask entries
             sparsity_1b = float(criterion.binary_entropy(mask_1b.detach()))
             sparsity_8b = float(criterion.binary_entropy(mask_8b.detach()))
 
@@ -202,7 +197,6 @@ def train_circuit_discovery(
 
         metrics_log.append(epoch_metrics)
 
-        # Save metrics.json at repo_root/results/circuit-discovery
         results_dir = os.path.join(os.path.dirname(__file__), "..", "..", "results", "circuit-discovery")
         os.makedirs(results_dir, exist_ok=True)
         metrics_path = os.path.join(results_dir, "metrics.json")
