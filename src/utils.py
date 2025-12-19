@@ -151,7 +151,6 @@ def suffix_map(keys):
     return {k.split("/")[-1]: k for k in keys}
 
 def load_model_checkpoint(model_name, k_classes, lr):
-    # Import lazily to avoid circular import at module load time
     from circuit_discovery.models import CircuitDiscoveryModel
 
     device = "cuda" if torch.cuda.is_available() else "cpu"

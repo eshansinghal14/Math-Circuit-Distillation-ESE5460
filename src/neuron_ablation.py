@@ -45,7 +45,7 @@ def classify_problems(batch_size=256):
         op1, op2, res = parse_equation(batch_prompts, device=device)
         with torch.no_grad():
             logits = circuit_model.classify_problem(op1, op2, res)
-            subclass = torch.argmax(logits, dim=-1)  # [batch]
+            subclass = torch.argmax(logits, dim=-1) 
 
         for prob, cls, id in zip(batch_prompts, subclass.tolist(), batch_ids.tolist()):
             key = str(cls)
@@ -85,11 +85,8 @@ def ablation(class_to_problems=None):
         if not problems:
             continue
 
-        # Build a subclass-specific dataset JSON based on problem strings
         subclass_dataset_path = os.path.join(results_dir, f"class_{subclass_str}_dataset.json")
 
-        # Match the format of datasets/2d_add_all.json: a list of records
-        # with fields q_str, a_str, and ids.
         dataset = []
         for problem_str, _ in problems:
             if "=" not in problem_str:
@@ -112,7 +109,6 @@ def ablation(class_to_problems=None):
         with open(subclass_dataset_path, "w") as f:
             json.dump(dataset, f, indent=2)
 
-        # Baseline accuracy: load a fresh model, evaluate, then free it.
         baseline_model, _ = load_model(model_name)
         _ = test_model(
             baseline_model,
@@ -146,7 +142,6 @@ def ablation(class_to_problems=None):
         }
 
         for cluster_id, neuron_indices in cluster_to_indices.items():
-            # For each cluster, load a fresh model, ablate in-place, evaluate, then free.
             ablated_model, _ = load_model(model_name)
             apply_ablation(ablated_model, neuron_indices)
 
@@ -176,15 +171,7 @@ def ablation(class_to_problems=None):
     print(f"Saved ablation performance to {out_path}")
     return ablation_results
 def apply_ablation(model, neuron_indices):
-    """Return a copy of `model` with the specified MLP neurons ablated.
-
-    `neuron_indices` is a 1D tensor of global indices over all MLP neurons,
-    assuming a flattened ordering of [layer * intermediate_size + neuron].
-    This implementation is tailored to LLaMA-style models used in this repo.
-    """
-
     if not hasattr(model, "config"):
-        # Fallback: no ablation if model structure is unexpected
         return model
 
     cfg = model.config
@@ -194,7 +181,6 @@ def apply_ablation(model, neuron_indices):
     intermediate_size = cfg.intermediate_size
     num_layers = cfg.num_hidden_layers
 
-    # For LLaMA-like models, transformer blocks are in model.model.layers
     if not hasattr(model, "model") or not hasattr(model.model, "layers"):
         return model
 
@@ -231,7 +217,6 @@ def apply_ablation(model, neuron_indices):
             up = getattr(mlp, "up_proj", None)
             down = getattr(mlp, "down_proj", None)
 
-            # Zero out the selected neuron in gate/up, and its contribution in down
             if gate is not None and hasattr(gate, "weight"):
                 if 0 <= neuron_id < gate.weight.shape[0]:
                     gate.weight[neuron_id].zero_()
@@ -259,7 +244,6 @@ if __name__ == "__main__":
     else:
         class_to_problems = classify_problems()
 
-    # Free circuit_model before loading large teacher models for ablation to avoid OOM.
     del circuit_model
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
