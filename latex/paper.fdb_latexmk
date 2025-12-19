@@ -1,5 +1,5 @@
 # Fdb version 4
-["pdflatex"] 1766102385.81752 "/Users/praneelvarshney/Documents/UPenn/Sem 5/ESE5460/final project/Math-Circuit-Distillation-ESE5460/latex/paper.tex" "paper.pdf" "paper" 1766102387.39413 0
+["pdflatex"] 1766104915.95396 "/Users/praneelvarshney/Documents/UPenn/Sem 5/ESE5460/final project/Math-Circuit-Distillation-ESE5460/latex/paper.tex" "paper.pdf" "paper" 1766104917.66419 0
   "/Users/praneelvarshney/Documents/UPenn/Sem 5/ESE5460/final project/Math-Circuit-Distillation-ESE5460/latex/paper.tex" 1766102384.11142 18691 08e8e024d2ee2863dd90a03acfe06b27 ""
   "/usr/local/texlive/2025/texmf-dist/fonts/enc/dvips/base/8r.enc" 1165713224 4850 80dc9bab7f31fb78a000ccfed0e27cab ""
   "/usr/local/texlive/2025/texmf-dist/fonts/map/fontname/texfonts.map" 1577235249 3524 cb3e574dea2d1052e39280babc910dc8 ""
@@ -230,10 +230,10 @@
   "/usr/local/texlive/2025/texmf-var/fonts/map/pdftex/updmap/pdftex.map" 1766090482 5467155 19efa205003f9ecad95fbbaa6ff24da1 ""
   "/usr/local/texlive/2025/texmf-var/web2c/pdftex/pdflatex.fmt" 1741450574 3345740 46b66fdb0378f7bf5921b5eabf1762b8 ""
   "/usr/local/texlive/2025/texmf.cnf" 1741450484 577 418a7058ec8e006d8704f60ecd22c938 ""
-  "figures/cd_rep_ortho.png" 1766101596.39485 291525 d04034032b963d301e0e867521196851 ""
-  "figures/cd_sparsify.png" 1766101597.97793 324565 000d9211ff5e99adf5c3e9b7cffe7995 ""
-  "paper.aux" 1766102387.30503 6701 b774cca1d4be879304e2a8d1b56d6fef "pdflatex"
-  "paper.out" 1766102387.30599 3032 92b546fa7bc5cf76f881046a34b83a1b "pdflatex"
+  "figures/cd_rep_ortho.png" 1766104884.69639 324317 e6619930113361a867c6ebf4eb9c228b ""
+  "figures/cd_sparsify.png" 1766104886.0059 329502 d999cd188ebfece17c4265e045f5376c ""
+  "paper.aux" 1766104917.56826 6701 b774cca1d4be879304e2a8d1b56d6fef "pdflatex"
+  "paper.out" 1766104917.56926 3032 92b546fa7bc5cf76f881046a34b83a1b "pdflatex"
   "paper.tex" 1766102384.11142 18691 08e8e024d2ee2863dd90a03acfe06b27 ""
   (generated)
   "paper.aux"
