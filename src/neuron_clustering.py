@@ -345,7 +345,7 @@ if __name__ == "__main__":
         if neuron_masks[subclass].any().item():
             print(f"Processing subclass {subclass}")
             k_gs_testing[subclass] = {}
-            for k in range(1, 20):
+            for k in range(1, 10):
                 _, _, loss = run_neuron_kmeans(k, subclass=subclass, log=False)
                 k_gs_testing[subclass][k] = loss
                 print(f"Subclass {subclass}, k={k}, loss={loss}")
