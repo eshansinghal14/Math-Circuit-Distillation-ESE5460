@@ -1,6 +1,6 @@
 # Fdb version 4
-["pdflatex"] 1766104915.95396 "/Users/praneelvarshney/Documents/UPenn/Sem 5/ESE5460/final project/Math-Circuit-Distillation-ESE5460/latex/paper.tex" "paper.pdf" "paper" 1766104917.66419 0
-  "/Users/praneelvarshney/Documents/UPenn/Sem 5/ESE5460/final project/Math-Circuit-Distillation-ESE5460/latex/paper.tex" 1766102384.11142 18691 08e8e024d2ee2863dd90a03acfe06b27 ""
+["pdflatex"] 1766119631.19361 "/Users/praneelvarshney/Documents/UPenn/Sem 5/ESE5460/final project/Math-Circuit-Distillation-ESE5460/latex/paper.tex" "paper.pdf" "paper" 1766119633.63375 0
+  "/Users/praneelvarshney/Documents/UPenn/Sem 5/ESE5460/final project/Math-Circuit-Distillation-ESE5460/latex/paper.tex" 1766119628.43052 38614 c578dd4b4fae27446d63f46cc792b3d5 ""
   "/usr/local/texlive/2025/texmf-dist/fonts/enc/dvips/base/8r.enc" 1165713224 4850 80dc9bab7f31fb78a000ccfed0e27cab ""
   "/usr/local/texlive/2025/texmf-dist/fonts/map/fontname/texfonts.map" 1577235249 3524 cb3e574dea2d1052e39280babc910dc8 ""
   "/usr/local/texlive/2025/texmf-dist/fonts/tfm/adobe/courier/pcrr7t.tfm" 1136768653 960 379cc0019370a9e0208a0a3f949f847a ""
@@ -51,6 +51,7 @@
   "/usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmr5.pfb" 1248133631 31809 8670ca339bf94e56da1fc21c80635e2a ""
   "/usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmr7.pfb" 1248133631 32762 224316ccc9ad3ca0423a14971cfa7fc1 ""
   "/usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy10.pfb" 1248133631 32569 5e5ddc8df908dea60932f3c484a54c0d ""
+  "/usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy5.pfb" 1248133631 32915 7bf7720c61a5b3a7ff25b0964421c9b6 ""
   "/usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy7.pfb" 1248133631 32716 08e384dc442464e7285e891af9f45947 ""
   "/usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/symbols/msbm10.pfb" 1248133631 34694 ad62b13721ee8eda1dcc8993c8bd7041 ""
   "/usr/local/texlive/2025/texmf-dist/fonts/type1/urw/courier/ucrr8a.pfb" 1136849748 45758 19968a0990191524e34e1994d4a31cb6 ""
@@ -230,18 +231,21 @@
   "/usr/local/texlive/2025/texmf-var/fonts/map/pdftex/updmap/pdftex.map" 1766090482 5467155 19efa205003f9ecad95fbbaa6ff24da1 ""
   "/usr/local/texlive/2025/texmf-var/web2c/pdftex/pdflatex.fmt" 1741450574 3345740 46b66fdb0378f7bf5921b5eabf1762b8 ""
   "/usr/local/texlive/2025/texmf.cnf" 1741450484 577 418a7058ec8e006d8704f60ecd22c938 ""
-<<<<<<< HEAD
-  "figures/cd_rep_ortho.png" 1766101596.39485 291525 d04034032b963d301e0e867521196851 ""
-  "figures/cd_sparsify.png" 1766101597.97793 324565 000d9211ff5e99adf5c3e9b7cffe7995 ""
-  "paper.aux" 1766102387.30503 6701 b774cca1d4be879304e2a8d1b56d6fef "pdflatex"
-  "paper.out" 1766102387.30599 3032 92b546fa7bc5cf76f881046a34b83a1b "pdflatex"
-=======
-  "figures/cd_rep_ortho.png" 1766104884.69639 324317 e6619930113361a867c6ebf4eb9c228b ""
-  "figures/cd_sparsify.png" 1766104886.0059 329502 d999cd188ebfece17c4265e045f5376c ""
-  "paper.aux" 1766104917.56826 6701 b774cca1d4be879304e2a8d1b56d6fef "pdflatex"
-  "paper.out" 1766104917.56926 3032 92b546fa7bc5cf76f881046a34b83a1b "pdflatex"
->>>>>>> 96e8279430ac4caeb169870395e0b9c02813781b
-  "paper.tex" 1766102384.11142 18691 08e8e024d2ee2863dd90a03acfe06b27 ""
+  "figures/cka-loss/accuracy.png" 1766137142 56014 5332fab7b0d4848a887617fc1d6ad18f ""
+  "figures/cka-loss/loss_steps.png" 1766137142 50138 c6ce1cc09fcb06696c663e10fc165352 ""
+  "figures/cka-old/accuracy.png" 1766137142 71408 59844bb11afc8247088d32a6063244ae ""
+  "figures/cka-old/loss_steps.png" 1766137142 51858 58c66ca58c35a3dd9f8fb7ce6c49d0f8 ""
+  "figures/cka/accuracy.png" 1766137142 48125 5b76dff2277319b483e22b84340f9976 ""
+  "figures/cka/ce_loss_steps.png" 1766137142 32887 0a42a92d7067ff1b8e633d561ab54715 ""
+  "figures/cka/cka_loss_steps.png" 1766137142 50270 a273acaf904edd562b5f3224c1dc5a7c ""
+  "figures/cka/loss_steps.png" 1766137142 33599 f58a59a532aabd1413cfcfd3904c1787 ""
+  "figures/clusters/k_vs_loss_subclass_4.png" 1766137142 35316 7568e2a23f853e38135ed6cbe529f047 ""
+  "figures/clusters/k_vs_loss_subclass_5.png" 1766137142 33977 8af6afdf78e3408f78b326381ae8a832 ""
+  "figures/training_dynamics/cd_rep_ortho.png" 1766137142 324317 e6619930113361a867c6ebf4eb9c228b ""
+  "figures/training_dynamics/cd_sparsify.png" 1766137142 329502 d999cd188ebfece17c4265e045f5376c ""
+  "paper.aux" 1766119633.53581 15366 26fd51998d066233fea15afe5bebea76 "pdflatex"
+  "paper.out" 1766119633.53732 5788 dc105f9ffc877c949a8e11a3fa3ef862 "pdflatex"
+  "paper.tex" 1766119628.43052 38614 c578dd4b4fae27446d63f46cc792b3d5 ""
   (generated)
   "paper.aux"
   "paper.log"

@@ -7,27 +7,45 @@
 \citation{dubey2024llama}
 \citation{wadhwa2024mysteries}
 \citation{elhage2021mathematical}
-\citation{kornblith2019similarity,williams2025equivalence}
 \citation{elhage2021mathematical}
-\citation{elhage2021mathematical,wadhwa2025circuit}
 \babel@aux{english}{}
 \@writefile{toc}{\contentsline {section}{\tocsection {}{1}{Introduction}}{1}{section.1}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsection}{\tocsubsection {}{1.1}{Contributions}}{1}{subsection.1.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\tocsection {}{2}{Background}}{1}{section.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\tocsubsection {}{2.1}{Transformers and Arithmetic}}{1}{subsection.2.1}\protected@file@percent }
+\citation{elhage2021mathematical,wadhwa2025circuit}
 \citation{kornblith2019similarity,williams2025equivalence}
 \citation{wadhwa2024mysteries}
 \citation{elhage2021mathematical}
 \citation{nanda2023attribution,kramar2024atp}
 \citation{kornblith2019similarity,williams2025equivalence}
-\@writefile{toc}{\contentsline {subsection}{\tocsubsection {}{2.2}{Neuron Masks as Circuits}}{2}{subsection.2.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\tocsection {}{2}{Background}}{2}{section.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\tocsubsection {}{2.1}{Transformers and Arithmetic}}{2}{subsection.2.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\tocsubsection {}{2.2}{Circuits as Neuron-Level Subnetworks}}{2}{subsection.2.2}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsection}{\tocsubsection {}{2.3}{Representational Similarity}}{2}{subsection.2.3}\protected@file@percent }
 \@writefile{toc}{\contentsline {section}{\tocsection {}{3}{Related Work}}{2}{section.3}\protected@file@percent }
 \@writefile{toc}{\contentsline {section}{\tocsection {}{4}{Approach}}{2}{section.4}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\tocsubsection {}{4.1}{Problem Encoding and Latent Classes}}{2}{subsection.4.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\tocsubsection {}{4.2}{Neuron Mask Generator}}{2}{subsection.4.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\tocsubsection {}{4.3}{Objective Function}}{2}{subsection.4.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsubsection}{\tocsubsubsection {}{4.3.1}{Similarity Loss}}{2}{subsubsection.4.3.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\tocsubsection {}{4.1}{Method A: Functional Circuit Distillation via Ablation}}{2}{subsection.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\tocsubsubsection {}{4.1.1}{Baseline Evaluation}}{2}{subsubsection.4.1.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\tocsubsubsection {}{4.1.2}{Circuit Identification via Mean Ablation}}{3}{subsubsection.4.1.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\tocsubsubsection {}{4.1.3}{Functional Layer Pairing}}{3}{subsubsection.4.1.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\tocsubsubsection {}{4.1.4}{Representation Alignment with CKA}}{3}{subsubsection.4.1.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\tocsubsubsection {}{4.1.5}{Training Overview}}{3}{subsubsection.4.1.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\tocsubsection {}{4.2}{Method B: Neuron-Level Circuit Discovery}}{3}{subsection.4.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\tocsubsubsection {}{4.2.1}{Problem Encoding and Latent Class Assignment}}{4}{subsubsection.4.2.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\tocsubsubsection {}{4.2.2}{Choosing the number of latent classes.}}{4}{subsubsection.4.2.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\tocsubsubsection {}{4.2.3}{Neuron Mask Generation}}{4}{subsubsection.4.2.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\tocsubsubsection {}{4.2.4}{Objective Function}}{4}{subsubsection.4.2.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\tocsubsubsection {}{4.2.5}{Circuit Discovery Architecture}}{4}{subsubsection.4.2.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\tocsubsubsection {}{4.2.6}{Training Dynamics and Analysis}}{4}{subsubsection.4.2.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\tocsection {}{5}{Experiments and Results}}{4}{section.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\tocsubsection {}{5.1}{Experimental Setup}}{4}{subsection.5.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\tocsubsection {}{5.2}{Distillation Performance}}{5}{subsection.5.2}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Performance comparison on Two-Digit Addition. The Circuit Distilled Student aligns critical layers via CKA ($\lambda =0.01$).}}{5}{table.caption.1}\protected@file@percent }
+\providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
+\newlabel{tab:results}{{1}{5}{Performance comparison on Two-Digit Addition. The Circuit Distilled Student aligns critical layers via CKA ($\lambda =0.01$)}{table.caption.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\tocsubsection {}{5.3}{Training Dynamics}}{5}{subsection.5.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\tocsubsection {}{5.4}{Hyperparameter Sensitivity}}{5}{subsection.5.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\tocsubsection {}{5.5}{Neuron-Level Circuit Discovery}}{5}{subsection.5.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\tocsection {}{6}{Discussion and Future Work}}{5}{section.6}\protected@file@percent }
 \bibcite{dubey2024llama}{{1}{}{{}}{{}}}
 \bibcite{wadhwa2025circuit}{{2}{}{{}}{{}}}
 \bibcite{wadhwa2024mysteries}{{3}{}{{}}{{}}}
@@ -35,31 +53,66 @@
 \bibcite{nanda2023attribution}{{5}{}{{}}{{}}}
 \bibcite{kramar2024atp}{{6}{}{{}}{{}}}
 \bibcite{mueller2025mib}{{7}{}{{}}{{}}}
-\@writefile{toc}{\contentsline {subsubsection}{\tocsubsubsection {}{4.3.2}{Usage Entropy}}{3}{subsubsection.4.3.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsubsection}{\tocsubsubsection {}{4.3.3}{Sparsity Loss}}{3}{subsubsection.4.3.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsubsection}{\tocsubsubsection {}{4.3.4}{KL Regularization}}{3}{subsubsection.4.3.4}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsubsection}{\tocsubsubsection {}{4.3.5}{Mask Orthogonality Loss}}{3}{subsubsection.4.3.5}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\tocsubsection {}{4.4}{Circuit Discovery Model Architecture}}{3}{subsection.4.4}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsubsection}{\tocsubsubsection {}{4.4.1}{Circuit Discovery Training Dynamics}}{3}{subsubsection.4.4.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\tocsection {}{}{References}}{3}{section*.1}\protected@file@percent }
 \bibcite{kornblith2019similarity}{{8}{}{{}}{{}}}
 \bibcite{williams2025equivalence}{{9}{}{{}}{{}}}
-\@writefile{toc}{\contentsline {section}{\tocsection {Appendix}{A}{Additional Figures}}{5}{appendix.A}\protected@file@percent }
-\newlabel{app:additional-figures}{{A}{5}{Additional Figures}{appendix.A}{}}
-\@writefile{toc}{\contentsline {subsection}{\tocsubsection {}{A.1}{Circuit Discovery Architecture}}{5}{figure.caption.2}\protected@file@percent }
-\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Circuit discovery architecture. Problems are embedded and assigned to a latent class via a straight-through Gumbel-Softmax classifier. The sampled class selects a class-conditioned neuron mask for each teacher model (1B and 8B), which gates flattened MLP activations. Training optimizes a multi-term objective encouraging within-class functional similarity, sparse masks, distinct circuits, and balanced class usage.}}{5}{figure.caption.2}\protected@file@percent }
-\providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
-\newlabel{fig:circuit-discovery-arch}{{1}{5}{Circuit discovery architecture. Problems are embedded and assigned to a latent class via a straight-through Gumbel-Softmax classifier. The sampled class selects a class-conditioned neuron mask for each teacher model (1B and 8B), which gates flattened MLP activations. Training optimizes a multi-term objective encouraging within-class functional similarity, sparse masks, distinct circuits, and balanced class usage}{figure.caption.2}{}}
+\@writefile{toc}{\contentsline {section}{\tocsection {}{}{References}}{6}{section*.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\tocsection {Appendix}{A}{Selecting the Number of Clusters $K$}}{7}{appendix.A}\protected@file@percent }
+\newlabel{app:kmeans-k}{{A}{7}{Selecting the Number of Clusters $K$}{appendix.A}{}}
+\newlabel{fig:kmeans-k-8b-sub4}{{1a}{7}{Meta-Llama-3-8B, example subclass 4}{figure.caption.3}{}}
+\newlabel{sub@fig:kmeans-k-8b-sub4}{{a}{7}{Meta-Llama-3-8B, example subclass 4}{figure.caption.3}{}}
+\newlabel{fig:kmeans-k-1b-sub5}{{1b}{7}{Llama-3.2-1B, example subclass 5}{figure.caption.3}{}}
+\newlabel{sub@fig:kmeans-k-1b-sub5}{{b}{7}{Llama-3.2-1B, example subclass 5}{figure.caption.3}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Average cosine distance to $k$-means centroids (“$k$-means loss”) versus number of clusters $k$, shown for representative subclasses. The flattening of the curve indicates diminishing returns from increasing $k$, which we use as a sanity check for reasonable choices of the latent-class granularity $K$.}}{7}{figure.caption.3}\protected@file@percent }
+\newlabel{fig:kmeans-k}{{1}{7}{Average cosine distance to $k$-means centroids (“$k$-means loss”) versus number of clusters $k$, shown for representative subclasses. The flattening of the curve indicates diminishing returns from increasing $k$, which we use as a sanity check for reasonable choices of the latent-class granularity $K$}{figure.caption.3}{}}
+\@writefile{toc}{\contentsline {section}{\tocsection {Appendix}{B}{Circuit Discovery Objective Function (Full Details)}}{8}{appendix.B}\protected@file@percent }
+\newlabel{app:objective-function}{{B}{8}{Circuit Discovery Objective Function (Full Details)}{appendix.B}{}}
+\@writefile{toc}{\contentsline {paragraph}{\tocparagraph {}{}{Within-Class Similarity Loss}}{8}{section*.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{\tocparagraph {}{}{Class Usage Entropy}}{8}{section*.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{\tocparagraph {}{}{Mask Sparsity Loss}}{8}{section*.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{\tocparagraph {}{}{KL Regularization to a Bernoulli Prior}}{8}{section*.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{\tocparagraph {}{}{Mask Orthogonality Loss}}{8}{section*.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\tocsection {Appendix}{C}{Circuit Discovery Architecture}}{9}{appendix.C}\protected@file@percent }
+\newlabel{app:discovery-architecture}{{C}{9}{Circuit Discovery Architecture}{appendix.C}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Circuit discovery architecture. Problems are embedded and assigned to a latent class via a straight-through Gumbel-Softmax classifier. The sampled class selects a class-conditioned neuron mask for each teacher model (1B and 8B), which gates flattened MLP activations. Training optimizes a multi-term objective encouraging within-class functional similarity, sparse masks, distinct circuits, and balanced class usage.}}{9}{figure.caption.9}\protected@file@percent }
+\newlabel{fig:circuit-discovery-arch}{{2}{9}{Circuit discovery architecture. Problems are embedded and assigned to a latent class via a straight-through Gumbel-Softmax classifier. The sampled class selects a class-conditioned neuron mask for each teacher model (1B and 8B), which gates flattened MLP activations. Training optimizes a multi-term objective encouraging within-class functional similarity, sparse masks, distinct circuits, and balanced class usage}{figure.caption.9}{}}
+\@writefile{toc}{\contentsline {section}{\tocsection {Appendix}{D}{Circuit Discovery Training Dynamics}}{10}{appendix.D}\protected@file@percent }
+\newlabel{app:training-dynamics}{{D}{10}{Circuit Discovery Training Dynamics}{appendix.D}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Circuit discovery training curves related to sparsity regularization (binary-entropy sparsity loss and KL-to-prior mean activation). These curves support the discussion in Section~4.5.}}{10}{figure.caption.10}\protected@file@percent }
+\newlabel{fig:cd-training-sparsity}{{3}{10}{Circuit discovery training curves related to sparsity regularization (binary-entropy sparsity loss and KL-to-prior mean activation). These curves support the discussion in Section~4.5}{figure.caption.10}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces Circuit discovery training curves related to representativeness (within-class similarity) and separation (mask orthogonality / cosine similarity). These curves support the discussion in Section~4.5.}}{10}{figure.caption.11}\protected@file@percent }
+\newlabel{fig:cd-training-rep-ortho}{{4}{10}{Circuit discovery training curves related to representativeness (within-class similarity) and separation (mask orthogonality / cosine similarity). These curves support the discussion in Section~4.5}{figure.caption.11}{}}
+\@writefile{toc}{\contentsline {section}{\tocsection {Appendix}{E}{Circuit Distillation Training Dynamics}}{11}{appendix.E}\protected@file@percent }
+\newlabel{app:distillation_dynamics}{{E}{11}{Circuit Distillation Training Dynamics}{appendix.E}{}}
+\newlabel{fig:distill_acc}{{5a}{11}{Student Test Accuracy}{figure.caption.12}{}}
+\newlabel{sub@fig:distill_acc}{{a}{11}{Student Test Accuracy}{figure.caption.12}{}}
+\newlabel{fig:distill_ce}{{5b}{11}{Cross Entropy Loss}{figure.caption.12}{}}
+\newlabel{sub@fig:distill_ce}{{b}{11}{Cross Entropy Loss}{figure.caption.12}{}}
+\newlabel{fig:distill_cka}{{5c}{11}{CKA Loss (Mechanism Alignment)}{figure.caption.12}{}}
+\newlabel{sub@fig:distill_cka}{{c}{11}{CKA Loss (Mechanism Alignment)}{figure.caption.12}{}}
+\newlabel{fig:distill_total}{{5d}{11}{Total Combined Loss}{figure.caption.12}{}}
+\newlabel{sub@fig:distill_total}{{d}{11}{Total Combined Loss}{figure.caption.12}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {5}{\ignorespaces Training dynamics for Circuit Distillation. The student rapidly acquires task accuracy (a) as the cross-entropy loss drops (b). Simultaneously, the CKA loss (c) steadily decreases, indicating that the student's internal representations in critical layers are becoming increasingly isomorphic to the teacher's layers.}}{11}{figure.caption.12}\protected@file@percent }
+\newlabel{fig:full_dynamics}{{5}{11}{Training dynamics for Circuit Distillation. The student rapidly acquires task accuracy (a) as the cross-entropy loss drops (b). Simultaneously, the CKA loss (c) steadily decreases, indicating that the student's internal representations in critical layers are becoming increasingly isomorphic to the teacher's layers}{figure.caption.12}{}}
+\@writefile{toc}{\contentsline {section}{\tocsection {Appendix}{F}{Hyperparameter Sensitivity and Failed Runs}}{12}{appendix.F}\protected@file@percent }
+\newlabel{app:failed_run}{{F}{12}{Hyperparameter Sensitivity and Failed Runs}{appendix.F}{}}
+\newlabel{fig:fail_acc}{{6a}{12}{Student Test Accuracy (Failed Run)}{figure.caption.13}{}}
+\newlabel{sub@fig:fail_acc}{{a}{12}{Student Test Accuracy (Failed Run)}{figure.caption.13}{}}
+\newlabel{fig:fail_loss}{{6b}{12}{Total Loss (Failed Run)}{figure.caption.13}{}}
+\newlabel{sub@fig:fail_loss}{{b}{12}{Total Loss (Failed Run)}{figure.caption.13}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {6}{\ignorespaces Training dynamics for the failed run ($\lambda =0.05, \text  {LR}=2\times 10^{-4}$). The model fails to acquire the arithmetic capability, hovering near 0\% accuracy. The loss curves indicate optimization instability where the model likely collapsed or failed to escape a poor local minimum.}}{12}{figure.caption.13}\protected@file@percent }
+\newlabel{fig:failed_dynamics}{{6}{12}{Training dynamics for the failed run ($\lambda =0.05, \text {LR}=2\times 10^{-4}$). The model fails to acquire the arithmetic capability, hovering near 0\% accuracy. The loss curves indicate optimization instability where the model likely collapsed or failed to escape a poor local minimum}{figure.caption.13}{}}
 \newlabel{tocindent-1}{0pt}
 \newlabel{tocindent0}{12.5pt}
 \newlabel{tocindent1}{61.65977pt}
-\newlabel{tocindent2}{27.21997pt}
+\newlabel{tocindent2}{26.66992pt}
 \newlabel{tocindent3}{0pt}
 \providecommand\NAT@force@numbers{}\NAT@force@numbers
-\@writefile{toc}{\contentsline {section}{\tocsection {Appendix}{B}{Circuit Discovery Training Dynamics}}{6}{appendix.B}\protected@file@percent }
-\newlabel{app:training-dynamics}{{B}{6}{Circuit Discovery Training Dynamics}{appendix.B}{}}
-\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Circuit discovery training curves related to sparsity regularization (binary-entropy sparsity loss and KL-to-prior mean activation). These curves support the discussion in Section~4.5.}}{6}{figure.caption.3}\protected@file@percent }
-\newlabel{fig:cd-training-sparsity}{{2}{6}{Circuit discovery training curves related to sparsity regularization (binary-entropy sparsity loss and KL-to-prior mean activation). These curves support the discussion in Section~4.5}{figure.caption.3}{}}
-\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Circuit discovery training curves related to representativeness (within-class similarity) and separation (mask orthogonality / cosine similarity). These curves support the discussion in Section~4.5.}}{6}{figure.caption.4}\protected@file@percent }
-\newlabel{fig:cd-training-rep-ortho}{{3}{6}{Circuit discovery training curves related to representativeness (within-class similarity) and separation (mask orthogonality / cosine similarity). These curves support the discussion in Section~4.5}{figure.caption.4}{}}
-\gdef \@abspage@last{6}
+\@writefile{toc}{\contentsline {section}{\tocsection {Appendix}{G}{Supervised Circuit Distillation (Beating the Teacher)}}{13}{appendix.G}\protected@file@percent }
+\newlabel{app:supervised_distillation}{{G}{13}{Supervised Circuit Distillation (Beating the Teacher)}{appendix.G}{}}
+\newlabel{fig:sup_acc}{{7a}{13}{Student Accuracy (Ground Truth Supervision)}{figure.caption.14}{}}
+\newlabel{sub@fig:sup_acc}{{a}{13}{Student Accuracy (Ground Truth Supervision)}{figure.caption.14}{}}
+\newlabel{fig:sup_loss}{{7b}{13}{Total Loss}{figure.caption.14}{}}
+\newlabel{sub@fig:sup_loss}{{b}{13}{Total Loss}{figure.caption.14}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {7}{\ignorespaces Training dynamics when distilling circuits using Ground Truth labels. The student not only converges but eventually surpasses the teacher's baseline accuracy of 96.3\%, achieving near-perfect performance. This indicates that the 1B model has sufficient capacity to solve the task perfectly when guided by correct mechanisms.}}{13}{figure.caption.14}\protected@file@percent }
+\newlabel{fig:supervised_dynamics}{{7}{13}{Training dynamics when distilling circuits using Ground Truth labels. The student not only converges but eventually surpasses the teacher's baseline accuracy of 96.3\%, achieving near-perfect performance. This indicates that the 1B model has sufficient capacity to solve the task perfectly when guided by correct mechanisms}{figure.caption.14}{}}
+\gdef \@abspage@last{13}
