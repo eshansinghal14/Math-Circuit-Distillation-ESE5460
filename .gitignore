@@ -5,7 +5,7 @@ __pycache__/
 *.pyc
 esinghal.pem
 src/constants.py
-results/neuron-clustering/
+results/neuron-clustering/meta-llama
 checkpoints/
 latex/paper.aux
 latex/paper.log

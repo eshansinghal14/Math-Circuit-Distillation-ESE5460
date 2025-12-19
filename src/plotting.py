@@ -23,7 +23,7 @@ def plot_k_vs_loss(model_name: str):
         plt.plot(ks, losses, marker="o")
         plt.xlabel("k (number of clusters)")
         plt.ylabel("Mean cosine distance to centroids (loss)")
-        plt.title(f"k-means loss vs k for {model_name}, subclass {subclass_str}")
+        plt.title(f"k-means loss vs k for {model_name.split('/')[1]}, subclass {subclass_str}")
         plt.grid(True, alpha=0.3)
 
         out_path = os.path.join(base_dir, f"k_vs_loss_subclass_{subclass_str}.png")
