@@ -43,12 +43,11 @@ else:
     neuron_masks = model.neuron_masks_8b.class_masks()
 neuron_masks = neuron_masks > (1 - threshold)
 
-# Neurons that are active for at least one class (dimension-wise)
 active_neuron_indices = neuron_masks.any(dim=0)
 print("Active neurons ratio:", torch.mean(torch.mean(neuron_masks.float(), dim=1)).item())
 
 
-def _has_free_space(path, min_bytes=1024 * 1024 * 100):  # default: 100MB
+def _has_free_space(path, min_bytes=1024 * 1024 * 100):
     root = path
     if not os.path.isdir(root):
         root = os.path.dirname(root) or "."
@@ -57,35 +56,26 @@ def _has_free_space(path, min_bytes=1024 * 1024 * 100):  # default: 100MB
 
 
 def _kmeans_cosine(x, k, num_iters=20):
-    """Balanced cosine k-means with k-means++ init and (near) equal-size clusters.
-
-    x: [N, D] on device, assumed float.
-    Returns cluster_ids: [N] and centroids: [k, D].
-    """
-
     N, D = x.shape
     if k > N:
         raise ValueError("k cannot be larger than number of points")
 
-    # Normalize data for cosine
     x = F.normalize(x, p=2, dim=-1, eps=1e-8)
 
-    # k-means++ init
     indices = []
     first = torch.randint(0, N, (1,), device=x.device)
     indices.append(first.item())
     for _ in range(1, k):
-        centers = x[torch.tensor(indices, device=x.device)]  # [m, D]
-        sim = x @ centers.t()  # [N, m]
+        centers = x[torch.tensor(indices, device=x.device)]
+        sim = x @ centers.t()
         closest_sim, _ = sim.max(dim=1)
         dist = 1 - closest_sim.clamp(-1, 1)
         probs = dist / dist.sum()
         next_idx = torch.multinomial(probs, 1)
         indices.append(next_idx.item())
 
-    centroids = x[torch.tensor(indices, device=x.device)]  # [k, D]
+    centroids = x[torch.tensor(indices, device=x.device)]
 
-    # Balanced capacities: distribute remainder as +1 to the first few clusters
     base_cap = N // k
     remainder = N % k
     capacities = torch.full((k,), base_cap, device=x.device, dtype=torch.long)
@@ -97,29 +87,22 @@ def _kmeans_cosine(x, k, num_iters=20):
     loss = None
 
     for _ in range(num_iters):
-        # Compute cosine distances to current centroids
-        sim = x @ centroids.t()  # [N, k]
-        dists = 1.0 - sim.clamp(-1.0, 1.0)  # [N, k]
+        sim = x @ centroids.t()
+        dists = 1.0 - sim.clamp(-1.0, 1.0)
 
-        # Balanced assignment: each cluster j can take at most capacities[j] points
-        # Strategy: for each point, consider clusters in order of increasing distance,
-        # and assign in "rounds" while respecting capacities, using vectorized masks.
         cluster_ids = torch.full((N,), -1, device=x.device, dtype=torch.long)
         remaining_cap = capacities.clone()
 
-        # Sort clusters per point by distance once (vectorized)
-        _, sorted_clusters = torch.sort(dists, dim=1)  # [N, k]
+        _, sorted_clusters = torch.sort(dists, dim=1)
 
         for rank in range(k):
-            # Points still unassigned at this rank
             unassigned = cluster_ids.eq(-1)
             if not unassigned.any():
                 break
 
-            cand_clusters = sorted_clusters[unassigned, rank]  # [N_unassigned]
+            cand_clusters = sorted_clusters[unassigned, rank]
             unassigned_idx = unassigned.nonzero(as_tuple=False).squeeze(1)
 
-            # For each cluster j, take up to remaining_cap[j] of the candidates that want j
             for j in range(k):
                 if remaining_cap[j] <= 0:
                     continue
@@ -154,14 +137,12 @@ def _kmeans_cosine(x, k, num_iters=20):
         prev_cluster_ids = cluster_ids.clone()
         prev_loss = loss
 
-        # Update centroids with balanced assignments
         new_centroids = torch.zeros_like(centroids)
         for j in range(k):
             mask = cluster_ids == j
             if mask.any():
                 new_centroids[j] = x[mask].mean(dim=0)
             else:
-                # Reinitialize empty cluster to random point
                 rand_idx = torch.randint(0, N, (1,), device=x.device)
                 new_centroids[j] = x[rand_idx]
 
@@ -171,24 +152,15 @@ def _kmeans_cosine(x, k, num_iters=20):
 
 
 def _collect_neuron_features_per_subclass(batch_size=5, save_path=None):
-    """Collect per-neuron feature vectors separately for each subclass.
-
-    Returns:
-        features_per_subclass: dict[int, Tensor[D_c, F_c]]
-        indices_per_subclass: dict[int, Tensor[D_c]] original neuron indices per subclass
-    """
-
     keys = list_keys(model_name)
     key_map = suffix_map(keys)
     suffixes = list(key_map.keys())
 
-    # Number of subclasses is number of rows in neuron_masks
     k_classes = neuron_masks.size(0)
 
-    # Precompute neuron indices per subclass (which neurons are relevant to each subclass)
     indices_per_subclass = {}
     for c in range(k_classes):
-        mask = neuron_masks[c]  # [D] bool
+        mask = neuron_masks[c]
         idx = torch.nonzero(mask, as_tuple=False).squeeze(1)
         if idx.numel() == 0:
             continue
@@ -198,7 +170,7 @@ def _collect_neuron_features_per_subclass(batch_size=5, save_path=None):
 
     for i in range(0, len(suffixes), batch_size):
         print(f'processing batch {i}/{len(suffixes)}')
-        batch_suffixes = suffixes[i : i + batch_size]
+        batch_suffixes = suffixes[i: i + batch_size]
 
         for suffix in batch_suffixes:
             key = key_map[suffix]
@@ -211,11 +183,9 @@ def _collect_neuron_features_per_subclass(batch_size=5, save_path=None):
                 batch = torch.load(local, map_location="cpu")
             else:
                 if _has_free_space(local, min_bytes=1024 ** 3):
-                    # Enough space: download and cache to disk
                     s3.download_file(BUCKET_NAME, key, local)
                     batch = torch.load(local, map_location="cpu")
                 else:
-                    # Not enough space: stream directly from S3 without caching
                     obj = s3.get_object(Bucket=BUCKET_NAME, Key=key)
                     bytestream = io.BytesIO(obj["Body"].read())
                     batch = torch.load(bytestream, map_location="cpu")
@@ -230,30 +200,27 @@ def _collect_neuron_features_per_subclass(batch_size=5, save_path=None):
             prompts = tokenizer.batch_decode(input_id_list, skip_special_tokens=True)
             activations = _stack_layer_activations(activations_dict).to(device)
 
-            # activations: [N, D]
             op1, op2, res = parse_equation(prompts, device=device)
             classifier_logits = model.classify_problem(op1, op2, res)
-            hard = F.gumbel_softmax(classifier_logits, tau=model.tau, dim=-1, hard=True)  # [N, k], float one-hot
-            subclass = hard.argmax(dim=-1)  # [N], long
+            hard = F.gumbel_softmax(classifier_logits, tau=model.tau, dim=-1, hard=True)
+            subclass = hard.argmax(dim=-1)
 
-            mean_activations = activations.mean(dim=1)  # [N, D]
+            mean_activations = activations.mean(dim=1)
 
-            # For each subclass separately, aggregate mean activations over its examples
             for c, idx in indices_per_subclass.items():
                 ex_mask = subclass == c
                 if not ex_mask.any():
                     continue
-                acts_c = mean_activations[ex_mask][:, idx]  # [N_c, D_c]
-                file_feature_c = acts_c.mean(dim=0)        # [D_c]
+                acts_c = mean_activations[ex_mask][:, idx]
+                file_feature_c = acts_c.mean(dim=0)
                 features_lists[c].append(file_feature_c)
 
     features_per_subclass = {}
     for c, feats in features_lists.items():
         if not feats:
             continue
-        # Stack over files: [F_c, D_c] -> transpose to [D_c, F_c]
-        feats_tensor = torch.stack(feats, dim=0).to(device)  # [F_c, D_c]
-        features_per_subclass[c] = feats_tensor.t()          # [D_c, F_c]
+        feats_tensor = torch.stack(feats, dim=0).to(device)
+        features_per_subclass[c] = feats_tensor.t()
 
     if save_path is not None:
         torch.save(
@@ -269,18 +236,17 @@ def _collect_neuron_features_per_subclass(batch_size=5, save_path=None):
     return features_per_subclass, indices_per_subclass
 
 
-def run_neuron_kmeans(k, subclass: int, batch_size=5, num_iters=100, log=True,
-                      subclass_features_path=f"../results/neuron-clustering/{model_name}/subclass_features.pt"):
-    """Cluster neurons for a specific subclass into k groups using cosine k-means.
-
-    Only neurons active for `subclass` and examples classified as that subclass
-    are used to build features and clusters.
-    """
-
+def run_neuron_kmeans(
+    k,
+    subclass: int,
+    batch_size=5,
+    num_iters=100,
+    log=True,
+    subclass_features_path=f"../results/neuron-clustering/{model_name}/subclass_features.pt",
+):
     results_dir = os.path.join("..", "results", "neuron-clustering", model_name)
     os.makedirs(results_dir, exist_ok=True)
 
-    # Per-subclass clustering using only subclass-specific features
     if subclass_features_path is not None and os.path.exists(subclass_features_path):
         ckpt = torch.load(subclass_features_path, map_location=device)
         features_per_subclass = {int(c): v.to(device) for c, v in ckpt["features_per_subclass"].items()}
@@ -293,7 +259,7 @@ def run_neuron_kmeans(k, subclass: int, batch_size=5, num_iters=100, log=True,
     if subclass not in features_per_subclass:
         raise ValueError(f"No features found for subclass {subclass}")
 
-    x = features_per_subclass[subclass]  # [D_c, F_c]
+    x = features_per_subclass[subclass]
     subclass_indices = indices_per_subclass[subclass]
 
     cluster_ids, centroids, loss = _kmeans_cosine(x, k=k, num_iters=num_iters)
@@ -321,7 +287,6 @@ def run_neuron_kmeans(k, subclass: int, batch_size=5, num_iters=100, log=True,
         clusters_path,
     )
 
-    # Report basic stats
     if log:
         print(f"Subclass {subclass}: k-means over neurons completed.")
         print(f"Mean cosine distance to centroids (loss): {loss:.6f}")
@@ -332,14 +297,11 @@ def run_neuron_kmeans(k, subclass: int, batch_size=5, num_iters=100, log=True,
 
     return cluster_ids, centroids, loss
 
-if __name__ == "__main__":
-    # corr_distance_sanity_check()
 
-    # run_neuron_kmeans(k=8, subclass=0)
+if __name__ == "__main__":
     for i in range(8):
         print(neuron_masks[i].count_nonzero().item())
-    # print("Subclass 3 has active neurons:", neuron_masks[3].any().item())
-    
+
     k_gs_testing = {}
     for subclass in range(8):
         if neuron_masks[subclass].any().item():
@@ -349,7 +311,7 @@ if __name__ == "__main__":
                 _, _, loss = run_neuron_kmeans(k, subclass=subclass, log=False)
                 k_gs_testing[subclass][k] = loss
                 print(f"Subclass {subclass}, k={k}, loss={loss}")
-        
+
     results_dir = os.path.join("..", "results", "neuron-clustering", model_name)
     os.makedirs(results_dir, exist_ok=True)
     out_path = os.path.join(results_dir, "k_gs_testing.json")

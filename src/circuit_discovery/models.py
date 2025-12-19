@@ -83,18 +83,16 @@ class NeuronMask(nn.Module):
     def __init__(self, k_classes, activations_dim):
         super().__init__()
 
-        # Small network that maps a class index to a mask over activations.
         hidden_dim = 4
         self.k_classes = k_classes
         self.class_embedding = nn.Embedding(k_classes, hidden_dim)
         self.output_layer = nn.Linear(hidden_dim, activations_dim)
 
     def forward(self, class_probs, activations):
-        # Convert class probabilities to class indices and generate a mask
-        class_ids = class_probs.argmax(dim=-1)  # [batch]
-        hidden = self.class_embedding(class_ids)  # [batch, hidden_dim]
+        class_ids = class_probs.argmax(dim=-1)
+        hidden = self.class_embedding(class_ids)
         hidden = F.relu(hidden)
-        selected_mask = self.output_layer(hidden)  # [batch, activations_dim]
+        selected_mask = self.output_layer(hidden)
         sigmoid_mask = torch.sigmoid(selected_mask)
         sigmoid_mask_expanded = sigmoid_mask.unsqueeze(1)
 
@@ -102,7 +100,6 @@ class NeuronMask(nn.Module):
         return masked_activations, sigmoid_mask
 
     def class_masks(self):
-        """Return class-wise masks for all classes as a matrix [k_classes, activations_dim]."""
         device = self.class_embedding.weight.device
         class_ids = torch.arange(self.k_classes, device=device)
         hidden = self.class_embedding(class_ids)
@@ -120,9 +117,6 @@ class CircuitDiscoveryModel(nn.Module):
         num_activations_8b = config["8b"].intermediate_size * config["8b"].num_hidden_layers
 
         self.problem_encoder = ProblemEncoder(embedding_dim=problem_embedding_dim)
-        # self.activations_1b_encoder = ActivationsEncoder("1b", input_dim=num_activations_1b, embedding_dim=256, output_dim=activation_embedding_dim)
-        # self.activations_8b_encoder = ActivationsEncoder("8b", input_dim=num_activations_8b, embedding_dim=512, output_dim=activation_embedding_dim)
-        # self.classifier = ProblemClassifier(problem_embedding_dim + 2 * activation_embedding_dim, k_classes)
         self.classifier = ProblemClassifier(problem_embedding_dim, k_classes)
 
         self.neuron_masks_1b = NeuronMask(k_classes, num_activations_1b)
@@ -130,10 +124,6 @@ class CircuitDiscoveryModel(nn.Module):
 
     def classify_problem(self, op1, op2, res):
         problem_encoding = self.problem_encoder(op1, op2, res)
-        # activations_1b_encoding = self.activations_1b_encoder(activations_1b, term_encoding)
-        # activations_8b_encoding = self.activations_8b_encoder(activations_8b, term_encoding)
-
-        # combined_encoding = torch.cat((problem_encoding, activations_1b_encoding, activations_8b_encoding), dim=-1)
         logits = self.classifier(problem_encoding)
         return logits
 
@@ -190,9 +180,6 @@ class CircuitLoss(nn.Module):
     def classwise_pairwise_cossim(self, activations, hard_class_probs):
         _, k_classes = hard_class_probs.shape
 
-        # If activations have a sequence dimension, pool across it so each
-        # example is represented by a single vector before computing pairwise
-        # cosine similarities.
         if activations.dim() == 3:
             activations = activations.mean(dim=1)
 
@@ -205,13 +192,13 @@ class CircuitLoss(nn.Module):
             if idx.numel() < 2:
                 continue
 
-            acts_k = norm_acts[idx]                  # [N_k, D]
+            acts_k = norm_acts[idx]
             n_k = acts_k.size(0)
 
-            sum_vec = acts_k.sum(dim=0)              # [D]
-            sum_sq = (sum_vec * sum_vec).sum()       # scalar
+            sum_vec = acts_k.sum(dim=0)
+            sum_sq = (sum_vec * sum_vec).sum()
 
-            total_pair_sum = sum_sq - n_k           # subtract self-sims
+            total_pair_sum = sum_sq - n_k
             num_pairs = n_k * (n_k - 1)
             per_class_sims.append(total_pair_sum / num_pairs)
 
@@ -231,15 +218,7 @@ class CircuitLoss(nn.Module):
         return class_usage_entropy
 
     def bernoulli_kl_to_prior(self, p, pi=0.10, eps=1e-8):
-        """KL on the global fraction of active neurons.
-
-        We interpret the mean of p as the effective activation probability q and
-        compare Bern(q) to a Bernoulli prior with probability pi. This
-        encourages the overall fraction of active neurons to be close to pi,
-        while allowing individual entries to be near 0 or 1.
-        """
         p = torch.clamp(p, eps, 1.0 - eps)
-        # Global mean activation probability q in (0,1)
         q = p.mean()
         q = torch.clamp(q, eps, 1.0 - eps)
 
@@ -250,9 +229,7 @@ class CircuitLoss(nn.Module):
     def combined_loss(self, hard_class_probs, masked_activations, mask, class_masks):
         sim_loss = - self.classwise_pairwise_cossim(masked_activations, hard_class_probs)
         mask_cossim = _mean_pairwise_mask_cossim(class_masks)
-        # KL on overall fraction of active neurons
         kl_bernoulli_loss = self.bernoulli_kl_to_prior(mask)
-        # Binary entropy sparsity on individual mask entries
         entropy_loss = self.binary_entropy(mask)
 
         total_loss = (

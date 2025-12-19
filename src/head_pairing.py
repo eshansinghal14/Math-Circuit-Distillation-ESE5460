@@ -1,12 +1,3 @@
-"""
-Head Pairing Module for Circuit Distillation
-
-Implements ablation-based head mapping strategy from Section 2.2 of 
-"Circuit Distillation" (arxiv:2509.25002).
-
-The idea: pair student and teacher heads based on similar functional importance,
-measured by performance drop when each head is ablated.
-"""
 
 import json
 from typing import Dict, List, Tuple, Optional
@@ -20,29 +11,17 @@ except ImportError:
 
 @dataclass
 class HeadMapping:
-    """Represents a mapping between student and teacher components."""
     student_idx: int
     teacher_idx: int
     student_importance: float
     teacher_importance: float
-    distance: float  # |delta_s - delta_t|
+    distance: float
 
 
 def load_ablation_scores(cache_path: str) -> Tuple[Dict[int, float], Dict[int, float]]:
-    """
-    Load ablation scores from cache file.
-    
-    Args:
-        cache_path: Path to ablation_cache.json
-        
-    Returns:
-        Tuple of (student_scores, teacher_scores) dictionaries
-        mapping component index -> ablation impact (performance drop)
-    """
     with open(cache_path, 'r') as f:
         data = json.load(f)
     
-    # Convert string keys to int
     delta_s = {int(k): v for k, v in data['delta_s'].items()}
     delta_t = {int(k): v for k, v in data['delta_t'].items()}
     
@@ -53,13 +32,6 @@ def normalize_ablation_scores(
     scores: Dict[int, float],
     baseline_performance: Optional[float] = None
 ) -> Dict[int, float]:
-    """
-    Normalize ablation scores to be relative to baseline.
-    
-    If baseline is not provided, uses max score as reference.
-    This follows the paper's approach of computing impact relative
-    to the student's operational capabilities.
-    """
     if baseline_performance is None:
         baseline_performance = max(scores.values()) if scores else 1.0
     
@@ -76,28 +48,10 @@ def create_head_mapping(
     top_k_student: Optional[int] = None,
     top_k_teacher: Optional[int] = None
 ) -> List[HeadMapping]:
-    """
-    Create mapping from student heads to teacher heads based on ablation similarity.
-    
-    For each student head h_s, finds the teacher head h_t that minimizes:
-        d_abl(h_s, h_t) = |Δ_s(h_s) - Δ_t(h_t)|
-    
-    Args:
-        delta_s: Student ablation scores (head_idx -> performance drop)
-        delta_t: Teacher ablation scores (head_idx -> performance drop)
-        normalize: Whether to normalize scores before matching
-        top_k_student: If set, only map the top-k most important student heads
-        top_k_teacher: If set, only consider top-k teacher heads as candidates
-        
-    Returns:
-        List of HeadMapping objects sorted by student importance (descending)
-    """
-    # Optionally normalize scores
     if normalize:
         delta_s = normalize_ablation_scores(delta_s)
         delta_t = normalize_ablation_scores(delta_t)
     
-    # Filter to top-k if specified
     if top_k_student is not None:
         sorted_student = sorted(delta_s.items(), key=lambda x: x[1], reverse=True)
         delta_s = dict(sorted_student[:top_k_student])
@@ -109,7 +63,6 @@ def create_head_mapping(
     mappings = []
     
     for s_idx, s_score in delta_s.items():
-        # Find teacher head with minimum distance
         best_t_idx = None
         best_distance = float('inf')
         best_t_score = 0.0
@@ -130,7 +83,6 @@ def create_head_mapping(
                 distance=best_distance
             ))
     
-    # Sort by student importance (most important first)
     mappings.sort(key=lambda m: m.student_importance, reverse=True)
     
     return mappings
@@ -140,16 +92,6 @@ def get_paired_indices(
     cache_path: str,
     top_k: Optional[int] = None
 ) -> Dict[int, int]:
-    """
-    Convenience function to get simple student->teacher index mapping.
-    
-    Args:
-        cache_path: Path to ablation_cache.json
-        top_k: Only return top-k most important pairs
-        
-    Returns:
-        Dictionary mapping student_idx -> teacher_idx
-    """
     delta_s, delta_t = load_ablation_scores(cache_path)
     mappings = create_head_mapping(delta_s, delta_t, top_k_student=top_k)
     
@@ -157,11 +99,6 @@ def get_paired_indices(
 
 
 def analyze_mapping(mappings: List[HeadMapping]) -> Dict:
-    """
-    Analyze the quality of head mappings.
-    
-    Returns statistics useful for understanding the pairing.
-    """
     if not mappings:
         return {}
     
@@ -169,7 +106,6 @@ def analyze_mapping(mappings: List[HeadMapping]) -> Dict:
     s_importance = [m.student_importance for m in mappings]
     t_importance = [m.teacher_importance for m in mappings]
     
-    # Check for teacher heads used multiple times
     teacher_usage = {}
     for m in mappings:
         teacher_usage[m.teacher_idx] = teacher_usage.get(m.teacher_idx, 0) + 1
@@ -190,7 +126,6 @@ def analyze_mapping(mappings: List[HeadMapping]) -> Dict:
 
 
 def save_mapping(mappings: List[HeadMapping], output_path: str):
-    """Save mappings to JSON file."""
     data = [
         {
             'student_idx': m.student_idx,
@@ -207,7 +142,6 @@ def save_mapping(mappings: List[HeadMapping], output_path: str):
 
 
 def load_mapping(input_path: str) -> List[HeadMapping]:
-    """Load mappings from JSON file."""
     with open(input_path, 'r') as f:
         data = json.load(f)
     
@@ -217,11 +151,9 @@ def load_mapping(input_path: str) -> List[HeadMapping]:
 if __name__ == '__main__':
     import os
     
-    # Get path to ablation cache
     script_dir = os.path.dirname(os.path.abspath(__file__))
     cache_path = os.path.join(script_dir, '..', 'results', 'ablation_cache.json')
     
-    # Load and create mapping
     delta_s, delta_t = load_ablation_scores(cache_path)
     
     print("Student ablation scores (delta_s):")
@@ -232,7 +164,6 @@ if __name__ == '__main__':
     for idx in sorted(delta_t.keys()):
         print(f"  MLP block {idx}: {delta_t[idx]:.4f}")
     
-    # Create mapping
     mappings = create_head_mapping(delta_s, delta_t)
     
     print("\nHead mappings (student -> teacher):")
@@ -242,13 +173,11 @@ if __name__ == '__main__':
               f"t_imp={m.teacher_importance:.4f}, "
               f"dist={m.distance:.4f})")
     
-    # Analyze
     stats = analyze_mapping(mappings)
     print(f"\nMapping statistics:")
     for k, v in stats.items():
         print(f"  {k}: {v}")
     
-    # Save mapping
     output_path = os.path.join(script_dir, '..', 'results', 'head_mapping.json')
     save_mapping(mappings, output_path)
     print(f"\nSaved mapping to {output_path}")
