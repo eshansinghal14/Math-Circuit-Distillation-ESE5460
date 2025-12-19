@@ -6,7 +6,6 @@ __pycache__/
 esinghal.pem
 src/constants.py
 checkpoints/
-results/neuron-clustering/
 latex/paper.aux
 latex/paper.log
 latex/paper.out
