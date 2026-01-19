@@ -16,6 +16,8 @@ from .utils import (
 from .models import CircuitDiscoveryModel, CircuitLoss, _mean_pairwise_mask_cossim
 from utils import list_keys, suffix_map, load_model_checkpoint
 
+from gen_activations_dataset import NeuronActivationsGenerator
+
 
 def train_circuit_discovery(
     k_classes,
@@ -40,26 +42,67 @@ def train_circuit_discovery(
 
     criterion = CircuitLoss().to(device)
 
-    keys_1b = list_keys(llama_1b)
-    keys_8b = list_keys(llama_8b)
+    # keys_1b = list_keys(llama_1b)
+    # keys_8b = list_keys(llama_8b)
 
-    map_1b = suffix_map(keys_1b)
-    map_8b = suffix_map(keys_8b)
-    shared_suffixes = list(set(map_1b.keys()) & set(map_8b.keys()))
-    if not shared_suffixes:
-        raise ValueError("No overlapping activation batches found for 1B and 8B models in S3.")
+    # map_1b = suffix_map(keys_1b)
+    # map_8b = suffix_map(keys_8b)
+    # shared_suffixes = list(set(map_1b.keys()) & set(map_8b.keys()))
+    # if not shared_suffixes:
+    #     raise ValueError("No overlapping activation batches found for 1B and 8B models in S3.")
 
     files_per_epoch = 5
 
     tokenizer = AutoTokenizer.from_pretrained(llama_1b)
 
+    act_generator_1b = NeuronActivationsGenerator(llama_1b, batch_size=50)
+    act_generator_8b = NeuronActivationsGenerator(llama_8b, batch_size=50)
+
+    dataset_size = act_generator_1b.ids.shape[0]
+
     for epoch in range(start_epoch, epochs):
-        start = (epoch * files_per_epoch) % len(shared_suffixes)
+        start = (epoch * files_per_epoch) % dataset_size
         end = start + files_per_epoch
-        if end <= len(shared_suffixes):
-            epoch_suffixes = shared_suffixes[start:end]
-        else:
-            epoch_suffixes = shared_suffixes[start:] + shared_suffixes[: end - len(shared_suffixes)]
+
+        # Generate the individual batch activation files (they are saved to
+        # `activations_{model_name}.pt` by the generator). Then read those
+        # temporary files and merge them layer-wise so we can process a
+        # single, larger batch in-place below.
+        batches_1b = []
+        batches_8b = []
+        for i in range(start, end):
+            act_generator_1b.generate_batch_activations(i, log=False)
+            batch1 = torch.load(f"activations_{llama_1b}.pt", map_location="cpu")
+            batches_1b.append(batch1)
+
+            act_generator_8b.generate_batch_activations(i, log=False)
+            batch8 = torch.load(f"activations_{llama_8b}.pt", map_location="cpu")
+            batches_8b.append(batch8)
+
+        def _merge_batches(batches):
+            # batches: list of dicts {'ids': Tensor, 'activations': {layer_idx: Tensor}}
+            merged = {}
+            ids_list = []
+            for b in batches:
+                ids_list.append(b['ids'])
+                for layer_idx, t in b['activations'].items():
+                    merged.setdefault(layer_idx, []).append(t)
+            ids_cat = torch.cat(ids_list, dim=0) if ids_list else torch.empty(0, dtype=torch.long)
+            for k, chunks in list(merged.items()):
+                merged[k] = torch.cat(chunks, dim=0)
+            return {'ids': ids_cat, 'activations': merged}
+
+        merged_1b = _merge_batches(batches_1b)
+        merged_8b = _merge_batches(batches_8b)
+
+        # We'll process the merged pair as a single item in the same style as
+        # the later loop did for each suffix/file pair.
+        merged_pairs = [(merged_1b, merged_8b)]
+
+        # if end <= len(shared_suffixes):
+        #     epoch_suffixes = shared_suffixes[start:end]
+        # else:
+        #     epoch_suffixes = shared_suffixes[start:] + shared_suffixes[: end - len(shared_suffixes)]
 
         all_hard_class_probs = []
         all_masked_1b = []
@@ -84,25 +127,13 @@ def train_circuit_discovery(
 
         os.makedirs(cache_dir_resolved, exist_ok=True)
 
-        for suffix in epoch_suffixes:
-            key_1b = map_1b[suffix]
-            key_8b = map_8b[suffix]
-
-            local_1b = os.path.join(cache_dir_resolved, f"1b_{suffix}")
-            local_8b = os.path.join(cache_dir_resolved, f"8b_{suffix}")
-
-            if not os.path.exists(local_1b):
-                s3.download_file(BUCKET_NAME, key_1b, local_1b)
-            if not os.path.exists(local_8b):
-                s3.download_file(BUCKET_NAME, key_8b, local_8b)
-
-            batch_1b = torch.load(local_1b, map_location="cpu")
-            batch_8b = torch.load(local_8b, map_location="cpu")
-
-            ids_1b, activations_dict_1b = batch_1b["ids"], batch_1b["activations"]
-            ids_8b, activations_dict_8b = batch_8b["ids"], batch_8b["activations"]
+        for merged_1b_batch, merged_8b_batch in merged_pairs:
+            ids_1b, activations_dict_1b = merged_1b_batch['ids'], merged_1b_batch['activations']
+            ids_8b, activations_dict_8b = merged_8b_batch['ids'], merged_8b_batch['activations']
 
             if not torch.equal(ids_1b, ids_8b):
+                # If IDs don't match between the two models' merged batches,
+                # skip this merged pair.
                 continue
 
             prompts = tokenizer.batch_decode(ids_1b, skip_special_tokens=True)
@@ -221,4 +252,5 @@ def train_circuit_discovery(
                 ckpt_path,
             )
 
-            s3.upload_file(ckpt_path, BUCKET_NAME, f"circuit-discovery/model_{epoch+1}")
+            # Store checkpoints locally only (do not upload to S3)
+            print(f"Saved checkpoint to {ckpt_path}")
