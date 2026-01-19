@@ -52,7 +52,7 @@ class NeuronActivationsGenerator:
                 'ids': batch_inputs,
                 'activations': batch_activations,
             }
-            torch.save(activations, f'activations_{self.model_name}.pt')
+            torch.save(activations, f'activations/{self.model_name}.pt')
 
     def generate_all_activations(self):
         s3 = boto3.client('s3')
