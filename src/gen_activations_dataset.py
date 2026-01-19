@@ -59,7 +59,7 @@ class NeuronActivationsGenerator:
         num_batches = (self.ids.shape[0] + self.batch_size - 1) // self.batch_size
         for batch in range(num_batches):
             self.generate_batch_activations(batch)
-        s3.upload_file(f'activations_{self.model_name}.pt', BUCKET_NAME, f'mlp_activations/{self.model_name}/{i}_{self.ids.shape[0]}.pt')
+        s3.upload_file(f'activations/{self.model_name}.pt', BUCKET_NAME, f'mlp_activations/{self.model_name}/{i}_{self.ids.shape[0]}.pt')
 
     def remove_handles(self):
         for h in self.handles:
