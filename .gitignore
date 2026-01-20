@@ -5,6 +5,7 @@ __pycache__/
 *.pyc
 esinghal.pem
 src/constants.py
+src/run_colab_code.ipynb
 results/neuron-clustering/meta-llama
 checkpoints/
 latex/paper.aux
