@@ -21,7 +21,7 @@ def get_model_name(argv):
 def load_model(model_name):
     hf_logging.set_verbosity_error()
 
-    from transformers import AutoModelForCausacM, AutoTokenizer
+    from transformers import AutoModelForCausal, AutoTokenizer
     from huggingface_hub import login
 
     global logged_in
