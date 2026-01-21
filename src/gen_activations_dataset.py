@@ -5,6 +5,7 @@ import torch
 import boto3
 from utils import get_model_name, load_model, parse_answer
 from constants import BUCKET_NAME
+import os
 
 class NeuronActivationsGenerator:
 
@@ -52,6 +53,8 @@ class NeuronActivationsGenerator:
                 'ids': batch_inputs,
                 'activations': batch_activations,
             }
+
+            os.makedirs('activations/meta-llama', exist_ok=True)
             torch.save(activations, f'activations/{self.model_name}.pt')
 
     def generate_all_activations(self):
@@ -59,6 +62,8 @@ class NeuronActivationsGenerator:
         num_batches = (self.ids.shape[0] + self.batch_size - 1) // self.batch_size
         for batch in range(num_batches):
             self.generate_batch_activations(batch)
+
+        os.makedirs('activations/meta-llama', exist_ok=True)
         s3.upload_file(f'activations/{self.model_name}.pt', BUCKET_NAME, f'mlp_activations/{self.model_name}/{i}_{self.ids.shape[0]}.pt')
 
     def remove_handles(self):
