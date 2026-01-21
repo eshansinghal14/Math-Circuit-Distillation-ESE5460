@@ -72,11 +72,11 @@ def train_circuit_discovery(
         batches_8b = []
         for i in range(start, end):
             act_generator_1b.generate_batch_activations(i, log=False)
-            batch1 = torch.load(f"activations_{llama_1b}.pt", map_location="cpu")
+            batch1 = torch.load(f"activations/{llama_1b}.pt", map_location="cpu")
             batches_1b.append(batch1)
 
             act_generator_8b.generate_batch_activations(i, log=False)
-            batch8 = torch.load(f"activations_{llama_8b}.pt", map_location="cpu")
+            batch8 = torch.load(f"activations/{llama_8b}.pt", map_location="cpu")
             batches_8b.append(batch8)
 
         def _merge_batches(batches):
