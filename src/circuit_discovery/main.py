@@ -63,9 +63,9 @@ def train_circuit_discovery(
     num_batches = (num_examples + batch_size - 1) // batch_size
 
     for epoch in range(start_epoch, epochs):
-    # choose files_per_epoch batch indices for this epoch (wrap around)
-    start = (epoch * files_per_epoch) % num_batches
-    batch_indices = [(start + offset) % num_batches for offset in range(files_per_epoch)]
+        # choose files_per_epoch batch indices for this epoch (wrap around)
+        start = (epoch * files_per_epoch) % num_batches
+        batch_indices = [(start + offset) % num_batches for offset in range(files_per_epoch)]
 
         # Generate the individual batch activation files (they are saved to
         # `activations_{model_name}.pt` by the generator). Then read those
