@@ -58,11 +58,14 @@ def train_circuit_discovery(
     act_generator_1b = NeuronActivationsGenerator(llama_1b, batch_size=50)
     act_generator_8b = NeuronActivationsGenerator(llama_8b, batch_size=50)
 
-    dataset_size = act_generator_1b.ids.shape[0]
+    num_examples = act_generator_1b.ids.shape[0]
+    batch_size = act_generator_1b.batch_size
+    num_batches = (num_examples + batch_size - 1) // batch_size
 
     for epoch in range(start_epoch, epochs):
-        start = (epoch * files_per_epoch) % dataset_size
-        end = start + files_per_epoch
+    # choose files_per_epoch batch indices for this epoch (wrap around)
+    start = (epoch * files_per_epoch) % num_batches
+    batch_indices = [(start + offset) % num_batches for offset in range(files_per_epoch)]
 
         # Generate the individual batch activation files (they are saved to
         # `activations_{model_name}.pt` by the generator). Then read those
@@ -70,13 +73,14 @@ def train_circuit_discovery(
         # single, larger batch in-place below.
         batches_1b = []
         batches_8b = []
-        for i in range(start, end):
-            act_generator_1b.generate_batch_activations(i, log=False)
-            batch1 = torch.load(f"activations/{llama_1b}.pt", map_location="cpu")
+        # generate and load per-batch activation files
+        for i in batch_indices:
+            out1 = act_generator_1b.generate_batch_activations(i, log=False)
+            batch1 = torch.load(out1, map_location="cpu")
             batches_1b.append(batch1)
 
-            act_generator_8b.generate_batch_activations(i, log=False)
-            batch8 = torch.load(f"activations/{llama_8b}.pt", map_location="cpu")
+            out8 = act_generator_8b.generate_batch_activations(i, log=False)
+            batch8 = torch.load(out8, map_location="cpu")
             batches_8b.append(batch8)
 
         def _merge_batches(batches):

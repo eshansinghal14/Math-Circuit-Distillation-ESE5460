@@ -13,6 +13,8 @@ class NeuronActivationsGenerator:
         self.model, self.tokenizer = load_model(model_name)
         self.model.eval()
         self.model_name = model_name
+        # filesystem-safe model name (avoid slashes in filenames)
+        self.safe_model_name = model_name.replace('/', '_').replace(':', '_')
         self.batch_size = batch_size
 
         with open('../datasets/2d_add_all.json', 'r') as f:
@@ -54,17 +56,20 @@ class NeuronActivationsGenerator:
                 'activations': batch_activations,
             }
 
-            os.makedirs('activations/meta-llama', exist_ok=True)
-            torch.save(activations, f'activations/{self.model_name}.pt')
+            out_dir = 'activations'
+            os.makedirs(out_dir, exist_ok=True)
+            out_fname = os.path.join(out_dir, f'activations_{self.safe_model_name}_{batch}.pt')
+            torch.save(activations, out_fname)
+            return out_fname
 
     def generate_all_activations(self):
         s3 = boto3.client('s3')
         num_batches = (self.ids.shape[0] + self.batch_size - 1) // self.batch_size
         for batch in range(num_batches):
-            self.generate_batch_activations(batch)
-
-        os.makedirs('activations/meta-llama', exist_ok=True)
-        s3.upload_file(f'activations/{self.model_name}.pt', BUCKET_NAME, f'mlp_activations/{self.model_name}/{i}_{self.ids.shape[0]}.pt')
+            out_fname = self.generate_batch_activations(batch)
+            # upload each per-batch file to S3
+            key = f'mlp_activations/{self.model_name}/{batch}_{self.ids.shape[0]}.pt'
+            s3.upload_file(out_fname, BUCKET_NAME, key)
 
     def remove_handles(self):
         for h in self.handles:
