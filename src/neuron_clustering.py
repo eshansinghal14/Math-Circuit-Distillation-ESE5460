@@ -17,7 +17,11 @@ from utils import (
     _safe_model_name,
 )
 from circuit_discovery.utils import parse_equation
-from constants import BUCKET_NAME, USE_S3
+try:
+    from constants import BUCKET_NAME, USE_S3  # type: ignore
+except ModuleNotFoundError:
+    BUCKET_NAME = os.environ.get("S3_BUCKET", "circuit-distillation")
+    USE_S3 = os.environ.get("USE_S3", "0") == "1"
 
 try:
     import boto3  # type: ignore

@@ -4,7 +4,11 @@ from collections import deque
 import torch
 from utils import get_model_name, load_model, parse_answer
 import os
-from constants import BUCKET_NAME, UPLOAD_ACTIVATIONS_TO_S3
+try:
+    from constants import BUCKET_NAME, UPLOAD_ACTIVATIONS_TO_S3  # type: ignore
+except ModuleNotFoundError:
+    BUCKET_NAME = os.environ.get("S3_BUCKET", "circuit-distillation")
+    UPLOAD_ACTIVATIONS_TO_S3 = os.environ.get("UPLOAD_ACTIVATIONS_TO_S3", "0") == "1"
 
 try:
     import boto3  # type: ignore

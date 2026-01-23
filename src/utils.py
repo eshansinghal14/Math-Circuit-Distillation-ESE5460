@@ -5,13 +5,22 @@ import os
 import glob
 import torch
 
-from constants import (
-    HF_TOKEN,
-    CIRCUIT_DISCOVERY_CKPT_DIR,
-    ACTIVATIONS_DIR,
-    BUCKET_NAME,
-    USE_S3,
-)
+try:
+    # Preferred: repo-local constants (in the same directory as this file).
+    from constants import (  # type: ignore
+        HF_TOKEN,
+        CIRCUIT_DISCOVERY_CKPT_DIR,
+        ACTIVATIONS_DIR,
+        BUCKET_NAME,
+        USE_S3,
+    )
+except ModuleNotFoundError:
+    # Colab/back-compat fallback if `constants.py` isn't present in the checkout.
+    HF_TOKEN = os.environ.get("HF_TOKEN", "") or os.environ.get("HUGGINGFACE_TOKEN", "")
+    BUCKET_NAME = os.environ.get("S3_BUCKET", "circuit-distillation")
+    USE_S3 = os.environ.get("USE_S3", "0") == "1"
+    CIRCUIT_DISCOVERY_CKPT_DIR = os.environ.get("CIRCUIT_DISCOVERY_CKPT_DIR", "")
+    ACTIVATIONS_DIR = os.environ.get("ACTIVATIONS_DIR", "")
 from transformers.utils import logging as hf_logging
 
 try:
