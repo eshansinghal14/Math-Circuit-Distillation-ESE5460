@@ -1,51 +1,51 @@
-import io
 import json
 import torch
-import boto3
 import os
 import sys
+import argparse
+import io
 import shutil
 
 import torch.nn.functional as F
 from transformers import AutoTokenizer
 
-from constants import BUCKET_NAME
 from utils import (
     load_model_checkpoint,
-    get_model_name,
     _stack_layer_activations,
     list_keys,
     suffix_map,
+    _safe_model_name,
 )
 from circuit_discovery.utils import parse_equation
+from constants import BUCKET_NAME, USE_S3
+
+try:
+    import boto3  # type: ignore
+except Exception:  # pragma: no cover
+    boto3 = None
+
+def _get_s3_client():
+    if boto3 is None:
+        raise ImportError("USE_S3=1 but boto3 is not installed.")
+    return boto3.client("s3")
 
 
-s3 = boto3.client("s3")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-if os.path.exists("/opt/dlami/nvme"):
-    cache_dir_resolved = "/opt/dlami/nvme/activations_cache"
-else:
-    cache_dir_resolved = "/mnt/activations_cache"
-os.makedirs(cache_dir_resolved, exist_ok=True)
-
-model_name = get_model_name(sys.argv)
-checkpoint_name = "model_5000"
-model, _, _, _ = load_model_checkpoint(checkpoint_name, k_classes=8, lr=1e-3)
-model.eval()
-
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-threshold = 1e-3
-if model_name == "meta-llama/Llama-3.2-1B":
-    neuron_masks = model.neuron_masks_1b.class_masks()
-else:
-    neuron_masks = model.neuron_masks_8b.class_masks()
-neuron_masks = neuron_masks > (1 - threshold)
-
-active_neuron_indices = neuron_masks.any(dim=0)
-print("Active neurons ratio:", torch.mean(torch.mean(neuron_masks.float(), dim=1)).item())
-
+def _parse_args(argv):
+    p = argparse.ArgumentParser(description="Local-only neuron clustering (Colab-friendly).")
+    p.add_argument("--model_name", required=True, help='HF model id, e.g. "meta-llama/Llama-3.2-1B"')
+    p.add_argument(
+        "--checkpoint",
+        default=os.environ.get("CIRCUIT_DISCOVERY_CKPT", "latest"),
+        help="Checkpoint spec: path/to/epoch_1500.pt, '1500', or 'latest' (default: env CIRCUIT_DISCOVERY_CKPT or latest).",
+    )
+    p.add_argument("--k_min", type=int, default=1)
+    p.add_argument("--k_max", type=int, default=9)
+    p.add_argument("--num_iters", type=int, default=100)
+    p.add_argument("--batch_size", type=int, default=5)
+    p.add_argument("--threshold", type=float, default=1e-3)
+    return p.parse_args(argv)
 
 def _has_free_space(path, min_bytes=1024 * 1024 * 100):
     root = path
@@ -53,7 +53,6 @@ def _has_free_space(path, min_bytes=1024 * 1024 * 100):
         root = os.path.dirname(root) or "."
     total, used, free = shutil.disk_usage(root)
     return free >= min_bytes
-
 
 def _kmeans_cosine(x, k, num_iters=20):
     N, D = x.shape
@@ -173,22 +172,27 @@ def _collect_neuron_features_per_subclass(batch_size=5, save_path=None):
         batch_suffixes = suffixes[i: i + batch_size]
 
         for suffix in batch_suffixes:
-            key = key_map[suffix]
-            if model_name == "meta-llama/Llama-3.2-1B":
-                local = os.path.join(cache_dir_resolved, f"1b_{suffix}")
+            ref = key_map[suffix]
+            if isinstance(ref, str) and os.path.exists(ref):
+                batch = torch.load(ref, map_location="cpu")
             else:
-                local = os.path.join(cache_dir_resolved, f"8b_{suffix}")
-
-            if os.path.exists(local):
-                batch = torch.load(local, map_location="cpu")
-            else:
-                if _has_free_space(local, min_bytes=1024 ** 3):
-                    s3.download_file(BUCKET_NAME, key, local)
+                # Legacy S3 key fallback
+                if not USE_S3:
+                    raise FileNotFoundError(f"Activation batch not found locally: {ref}")
+                s3 = _get_s3_client()
+                cache_dir = os.environ.get("ACTIVATIONS_CACHE_DIR", "") or os.path.join("..", "results", "activations_cache")
+                os.makedirs(cache_dir, exist_ok=True)
+                local = os.path.join(cache_dir, f"{_safe_model_name(model_name)}_{suffix}")
+                if os.path.exists(local):
                     batch = torch.load(local, map_location="cpu")
                 else:
-                    obj = s3.get_object(Bucket=BUCKET_NAME, Key=key)
-                    bytestream = io.BytesIO(obj["Body"].read())
-                    batch = torch.load(bytestream, map_location="cpu")
+                    if _has_free_space(local, min_bytes=1024**3):
+                        s3.download_file(BUCKET_NAME, ref, local)
+                        batch = torch.load(local, map_location="cpu")
+                    else:
+                        obj = s3.get_object(Bucket=BUCKET_NAME, Key=ref)
+                        bytestream = io.BytesIO(obj["Body"].read())
+                        batch = torch.load(bytestream, map_location="cpu")
 
             ids, activations_dict = batch["ids"], batch["activations"]
 
@@ -242,10 +246,14 @@ def run_neuron_kmeans(
     batch_size=5,
     num_iters=100,
     log=True,
-    subclass_features_path=f"../results/neuron-clustering/{model_name}/subclass_features.pt",
+    subclass_features_path=None,
 ):
-    results_dir = os.path.join("..", "results", "neuron-clustering", model_name)
+    safe = _safe_model_name(model_name)
+    results_dir = os.path.join("..", "results", "neuron-clustering", safe)
     os.makedirs(results_dir, exist_ok=True)
+
+    if subclass_features_path is None:
+        subclass_features_path = os.path.join(results_dir, "subclass_features.pt")
 
     if subclass_features_path is not None and os.path.exists(subclass_features_path):
         ckpt = torch.load(subclass_features_path, map_location=device)
@@ -299,6 +307,22 @@ def run_neuron_kmeans(
 
 
 if __name__ == "__main__":
+    args = _parse_args(sys.argv[1:])
+
+    model_name = args.model_name
+    model, _, _, _ = load_model_checkpoint(args.checkpoint, k_classes=8, lr=1e-3)
+    model.eval()
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    threshold = args.threshold
+    if model_name == "meta-llama/Llama-3.2-1B":
+        neuron_masks = model.neuron_masks_1b.class_masks()
+    else:
+        neuron_masks = model.neuron_masks_8b.class_masks()
+    neuron_masks = neuron_masks > (1 - threshold)
+
+    print("Active neurons ratio:", torch.mean(torch.mean(neuron_masks.float(), dim=1)).item())
     for i in range(8):
         print(neuron_masks[i].count_nonzero().item())
 
@@ -307,12 +331,19 @@ if __name__ == "__main__":
         if neuron_masks[subclass].any().item():
             print(f"Processing subclass {subclass}")
             k_gs_testing[subclass] = {}
-            for k in range(1, 10):
-                _, _, loss = run_neuron_kmeans(k, subclass=subclass, log=False)
+            for k in range(args.k_min, args.k_max + 1):
+                _, _, loss = run_neuron_kmeans(
+                    k,
+                    subclass=subclass,
+                    log=False,
+                    batch_size=args.batch_size,
+                    num_iters=args.num_iters,
+                )
                 k_gs_testing[subclass][k] = loss
                 print(f"Subclass {subclass}, k={k}, loss={loss}")
 
-    results_dir = os.path.join("..", "results", "neuron-clustering", model_name)
+    safe = _safe_model_name(model_name)
+    results_dir = os.path.join("..", "results", "neuron-clustering", safe)
     os.makedirs(results_dir, exist_ok=True)
     out_path = os.path.join(results_dir, "k_gs_testing.json")
     with open(out_path, "w") as f:

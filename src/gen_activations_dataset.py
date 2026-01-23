@@ -2,10 +2,14 @@ import json
 import sys
 from collections import deque
 import torch
-import boto3
 from utils import get_model_name, load_model, parse_answer
-from constants import BUCKET_NAME
 import os
+from constants import BUCKET_NAME, UPLOAD_ACTIVATIONS_TO_S3
+
+try:
+    import boto3  # type: ignore
+except Exception:  # pragma: no cover
+    boto3 = None
 
 class NeuronActivationsGenerator:
 
@@ -56,20 +60,28 @@ class NeuronActivationsGenerator:
                 'activations': batch_activations,
             }
 
-            out_dir = 'activations'
+            out_dir = os.environ.get("ACTIVATIONS_DIR", "") or os.path.join(os.path.dirname(__file__), "..", "results", "activations")
             os.makedirs(out_dir, exist_ok=True)
             out_fname = os.path.join(out_dir, f'activations_{self.safe_model_name}_{batch}.pt')
             torch.save(activations, out_fname)
             return out_fname
 
     def generate_all_activations(self):
-        s3 = boto3.client('s3')
         num_batches = (self.ids.shape[0] + self.batch_size - 1) // self.batch_size
+        out_files = []
+        s3 = None
+        if UPLOAD_ACTIVATIONS_TO_S3:
+            if boto3 is None:
+                raise ImportError("UPLOAD_ACTIVATIONS_TO_S3=1 but boto3 is not installed.")
+            s3 = boto3.client("s3")
         for batch in range(num_batches):
             out_fname = self.generate_batch_activations(batch)
-            # upload each per-batch file to S3
-            key = f'mlp_activations/{self.model_name}/{batch}_{self.ids.shape[0]}.pt'
-            s3.upload_file(out_fname, BUCKET_NAME, key)
+            out_files.append(out_fname)
+            if UPLOAD_ACTIVATIONS_TO_S3:
+                # legacy S3 layout
+                key = f"mlp_activations/{self.model_name}/{batch}_{self.ids.shape[0]}.pt"
+                s3.upload_file(out_fname, BUCKET_NAME, key)
+        return out_files
 
     def remove_handles(self):
         for h in self.handles:

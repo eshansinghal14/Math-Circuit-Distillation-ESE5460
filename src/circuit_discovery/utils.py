@@ -5,10 +5,7 @@ from torch import nn
 from transformers import AutoConfig
 from huggingface_hub import login
 
-import boto3
-from constants import BUCKET_NAME, HF_TOKEN
-
-s3 = boto3.client("s3")
+from constants import HF_TOKEN
 
 login(HF_TOKEN)
 llama_1b = "meta-llama/Llama-3.2-1B"
