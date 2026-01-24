@@ -256,7 +256,7 @@ def load_model_checkpoint(checkpoint, k_classes, lr):
     ckpt_path = None
     try:
         ckpt_path = _resolve_ckpt_path(checkpoint)
-    except FileNotFoundError:
+    except FileNotFoundError as e:
         ckpt_path = None
 
     if ckpt_path is not None:
@@ -264,7 +264,9 @@ def load_model_checkpoint(checkpoint, k_classes, lr):
     else:
         # Legacy fallback: allow loading from S3 if enabled.
         if not USE_S3:
-            raise
+            raise FileNotFoundError(
+                f"Checkpoint not found locally {checkpoint!r}"
+            ) from e
         s3 = _get_s3_client()
         import io
         obj = s3.get_object(Bucket=BUCKET_NAME, Key=f"circuit-discovery/{checkpoint}")
