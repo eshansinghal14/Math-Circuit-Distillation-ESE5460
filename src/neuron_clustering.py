@@ -1,33 +1,21 @@
-import io
 import json
 import torch
-import boto3
 import os
 import sys
-import shutil
 
 import torch.nn.functional as F
 from transformers import AutoTokenizer
 
-from constants import BUCKET_NAME
 from utils import (
     load_model_checkpoint,
     get_model_name,
     _stack_layer_activations,
-    list_keys,
-    suffix_map,
 )
 from circuit_discovery.utils import parse_equation
+from gen_activations_dataset import NeuronActivationsGenerator
 
 
-s3 = boto3.client("s3")
 device = "cuda" if torch.cuda.is_available() else "cpu"
-
-if os.path.exists("/opt/dlami/nvme"):
-    cache_dir_resolved = "/opt/dlami/nvme/activations_cache"
-else:
-    cache_dir_resolved = "/mnt/activations_cache"
-os.makedirs(cache_dir_resolved, exist_ok=True)
 
 model_name = get_model_name(sys.argv)
 checkpoint_name = "model_5000"
@@ -43,16 +31,7 @@ else:
     neuron_masks = model.neuron_masks_8b.class_masks()
 neuron_masks = neuron_masks > (1 - threshold)
 
-active_neuron_indices = neuron_masks.any(dim=0)
 print("Active neurons ratio:", torch.mean(torch.mean(neuron_masks.float(), dim=1)).item())
-
-
-def _has_free_space(path, min_bytes=1024 * 1024 * 100):
-    root = path
-    if not os.path.isdir(root):
-        root = os.path.dirname(root) or "."
-    total, used, free = shutil.disk_usage(root)
-    return free >= min_bytes
 
 
 def _kmeans_cosine(x, k, num_iters=20):
@@ -152,9 +131,8 @@ def _kmeans_cosine(x, k, num_iters=20):
 
 
 def _collect_neuron_features_per_subclass(batch_size=5, save_path=None):
-    keys = list_keys(model_name)
-    key_map = suffix_map(keys)
-    suffixes = list(key_map.keys())
+    activations_generator = NeuronActivationsGenerator(model_name, batch_size=batch_size)
+    num_batches = (activations_generator.ids.shape[0] + batch_size - 1) // batch_size
 
     k_classes = neuron_masks.size(0)
 
@@ -168,52 +146,36 @@ def _collect_neuron_features_per_subclass(batch_size=5, save_path=None):
 
     features_lists = {c: [] for c in indices_per_subclass.keys()}
 
-    for i in range(0, len(suffixes), batch_size):
-        print(f'processing batch {i}/{len(suffixes)}')
-        batch_suffixes = suffixes[i: i + batch_size]
+    for batch_idx in range(num_batches):
+        out_fname = activations_generator.generate_batch_activations(batch_idx, log=True)
+        batch = torch.load(out_fname, map_location="cpu")
 
-        for suffix in batch_suffixes:
-            key = key_map[suffix]
-            if model_name == "meta-llama/Llama-3.2-1B":
-                local = os.path.join(cache_dir_resolved, f"1b_{suffix}")
-            else:
-                local = os.path.join(cache_dir_resolved, f"8b_{suffix}")
+        ids, activations_dict = batch["ids"], batch["activations"]
 
-            if os.path.exists(local):
-                batch = torch.load(local, map_location="cpu")
-            else:
-                if _has_free_space(local, min_bytes=1024 ** 3):
-                    s3.download_file(BUCKET_NAME, key, local)
-                    batch = torch.load(local, map_location="cpu")
-                else:
-                    obj = s3.get_object(Bucket=BUCKET_NAME, Key=key)
-                    bytestream = io.BytesIO(obj["Body"].read())
-                    batch = torch.load(bytestream, map_location="cpu")
+        if isinstance(ids, torch.Tensor):
+            input_id_list = ids.tolist()
+        else:
+            input_id_list = ids
 
-            ids, activations_dict = batch["ids"], batch["activations"]
+        prompts = tokenizer.batch_decode(input_id_list, skip_special_tokens=True)
+        activations = _stack_layer_activations(activations_dict).to(device)
 
-            if isinstance(ids, torch.Tensor):
-                input_id_list = ids.tolist()
-            else:
-                input_id_list = ids
+        op1, op2, res = parse_equation(prompts, device=device)
+        classifier_logits = model.classify_problem(op1, op2, res)
+        hard = F.gumbel_softmax(classifier_logits, tau=model.tau, dim=-1, hard=True)
+        subclass = hard.argmax(dim=-1)
 
-            prompts = tokenizer.batch_decode(input_id_list, skip_special_tokens=True)
-            activations = _stack_layer_activations(activations_dict).to(device)
+        mean_activations = activations.mean(dim=1)
 
-            op1, op2, res = parse_equation(prompts, device=device)
-            classifier_logits = model.classify_problem(op1, op2, res)
-            hard = F.gumbel_softmax(classifier_logits, tau=model.tau, dim=-1, hard=True)
-            subclass = hard.argmax(dim=-1)
+        for c, idx in indices_per_subclass.items():
+            ex_mask = subclass == c
+            if not ex_mask.any():
+                continue
+            acts_c = mean_activations[ex_mask][:, idx]
+            file_feature_c = acts_c.mean(dim=0)
+            features_lists[c].append(file_feature_c)
 
-            mean_activations = activations.mean(dim=1)
-
-            for c, idx in indices_per_subclass.items():
-                ex_mask = subclass == c
-                if not ex_mask.any():
-                    continue
-                acts_c = mean_activations[ex_mask][:, idx]
-                file_feature_c = acts_c.mean(dim=0)
-                features_lists[c].append(file_feature_c)
+    activations_generator.remove_handles()
 
     features_per_subclass = {}
     for c, feats in features_lists.items():
@@ -273,7 +235,7 @@ def run_neuron_kmeans(
             cluster_to_indices[j] = torch.empty(0, dtype=subclass_indices.dtype)
 
     clusters_path = os.path.join(results_dir, f"subclass_{subclass}_clusters/k{k}.pt")
-    os.makedirs(results_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(clusters_path), exist_ok=True)
     torch.save(
         {
             "model_name": model_name,
@@ -307,7 +269,7 @@ if __name__ == "__main__":
         if neuron_masks[subclass].any().item():
             print(f"Processing subclass {subclass}")
             k_gs_testing[subclass] = {}
-            for k in range(1, 10):
+            for k in range(7, 8):
                 _, _, loss = run_neuron_kmeans(k, subclass=subclass, log=False)
                 k_gs_testing[subclass][k] = loss
                 print(f"Subclass {subclass}, k={k}, loss={loss}")
