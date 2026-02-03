@@ -8,7 +8,6 @@ from transformers import AutoTokenizer
 
 from utils import (
     load_model_checkpoint,
-    get_model_name,
     _stack_layer_activations,
 )
 from circuit_discovery.utils import parse_equation
@@ -204,10 +203,14 @@ def run_neuron_kmeans(
     batch_size=5,
     num_iters=100,
     log=True,
-    subclass_features_path=f"../results/neuron-clustering/{model_name}/subclass_features.pt",
+    subclass_features_path=None,
 ):
-    results_dir = os.path.join("..", "results", "neuron-clustering", model_name)
+    safe = _safe_model_name(model_name)
+    results_dir = os.path.join("..", "results", "neuron-clustering", safe)
     os.makedirs(results_dir, exist_ok=True)
+
+    if subclass_features_path is None:
+        subclass_features_path = os.path.join(results_dir, "subclass_features.pt")
 
     if subclass_features_path is not None and os.path.exists(subclass_features_path):
         ckpt = torch.load(subclass_features_path, map_location=device)
@@ -261,6 +264,22 @@ def run_neuron_kmeans(
 
 
 if __name__ == "__main__":
+    args = _parse_args(sys.argv[1:])
+
+    model_name = args.model_name
+    model, _, _, _ = load_model_checkpoint(args.checkpoint, k_classes=8, lr=1e-3)
+    model.eval()
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    threshold = args.threshold
+    if model_name == "meta-llama/Llama-3.2-1B":
+        neuron_masks = model.neuron_masks_1b.class_masks()
+    else:
+        neuron_masks = model.neuron_masks_8b.class_masks()
+    neuron_masks = neuron_masks > (1 - threshold)
+
+    print("Active neurons ratio:", torch.mean(torch.mean(neuron_masks.float(), dim=1)).item())
     for i in range(8):
         print(neuron_masks[i].count_nonzero().item())
 
@@ -274,7 +293,8 @@ if __name__ == "__main__":
                 k_gs_testing[subclass][k] = loss
                 print(f"Subclass {subclass}, k={k}, loss={loss}")
 
-    results_dir = os.path.join("..", "results", "neuron-clustering", model_name)
+    safe = _safe_model_name(model_name)
+    results_dir = os.path.join("..", "results", "neuron-clustering", safe)
     os.makedirs(results_dir, exist_ok=True)
     out_path = os.path.join(results_dir, "k_gs_testing.json")
     with open(out_path, "w") as f:

@@ -1,14 +1,38 @@
 import random
 import json
 import re
+import os
+import glob
 import torch
-import boto3
-import io
 
-from constants import HF_TOKEN, BUCKET_NAME
+try:
+    # Preferred: repo-local constants (in the same directory as this file).
+    from constants import (  # type: ignore
+        HF_TOKEN,
+        CIRCUIT_DISCOVERY_CKPT_DIR,
+        ACTIVATIONS_DIR,
+        BUCKET_NAME,
+        USE_S3,
+    )
+except ModuleNotFoundError:
+    # Colab/back-compat fallback if `constants.py` isn't present in the checkout.
+    HF_TOKEN = os.environ.get("HF_TOKEN", "") or os.environ.get("HUGGINGFACE_TOKEN", "")
+    BUCKET_NAME = os.environ.get("S3_BUCKET", "circuit-distillation")
+    USE_S3 = os.environ.get("USE_S3", "0") == "1"
+    CIRCUIT_DISCOVERY_CKPT_DIR = os.environ.get("CIRCUIT_DISCOVERY_CKPT_DIR", "")
+    ACTIVATIONS_DIR = os.environ.get("ACTIVATIONS_DIR", "")
 from transformers.utils import logging as hf_logging
 
-s3 = boto3.client("s3")
+try:
+    import boto3  # type: ignore
+except Exception:  # pragma: no cover
+    boto3 = None
+
+def _get_s3_client():
+    if boto3 is None:
+        raise ImportError("boto3 is not installed. Install boto3 or disable S3 mode (USE_S3=0).")
+    return boto3.client("s3")
+
 logged_in = False
 
 def get_model_name(argv):
@@ -131,33 +155,123 @@ def gen_3d_add_dataset(dataset_fname, samples, tokenizer):
     with open(dataset_fname, 'w') as f:
         json.dump(dataset, f, indent=4)
 
-def list_keys(model_name):
-    prefix = f"mlp_activations/{model_name}/"
-    keys = []
-    token = None
-    while True:
-        kwargs = {"Bucket": BUCKET_NAME, "Prefix": prefix}
-        if token is not None:
-            kwargs["ContinuationToken"] = token
-        resp = s3.list_objects_v2(**kwargs)
-        for obj in resp.get("Contents", []):
-            keys.append(obj["Key"])
-        if not resp.get("IsTruncated"):
-            break
-        token = resp.get("NextContinuationToken")
-    return keys  
+def _safe_model_name(model_name: str) -> str:
+    return model_name.replace("/", "_").replace(":", "_")
+
+
+def list_keys(model_name: str, activations_dir: str | None = None):
+    """
+    Local-first listing of activation batch files for `model_name`.
+
+    - If `USE_S3=1`, returns legacy S3 keys under `mlp_activations/{model_name}/`.
+    - Otherwise returns local filepaths under `results/activations/` (or `ACTIVATIONS_DIR`).
+
+    Returns a list of filepaths to activation batch .pt files for `model_name`.
+    We keep the old name `list_keys` so existing code keeps working.
+    """
+    if USE_S3:
+        s3 = _get_s3_client()
+        prefix = f"mlp_activations/{model_name}/"
+        keys = []
+        token = None
+        while True:
+            kwargs = {"Bucket": BUCKET_NAME, "Prefix": prefix}
+            if token is not None:
+                kwargs["ContinuationToken"] = token
+            resp = s3.list_objects_v2(**kwargs)
+            for obj in resp.get("Contents", []):
+                keys.append(obj["Key"])
+            if not resp.get("IsTruncated"):
+                break
+            token = resp.get("NextContinuationToken")
+        return keys
+
+    safe = _safe_model_name(model_name)
+    base_dir = activations_dir or (ACTIVATIONS_DIR or os.path.join(os.path.dirname(__file__), "..", "results", "activations"))
+    base_dir = os.path.abspath(base_dir)
+
+    patterns = [
+        # New local convention (recommended): results/activations/activations_<safe>_<batch>.pt
+        os.path.join(base_dir, f"activations_{safe}_*.pt"),
+        # Back-compat: results/activations/<safe>/activations_<safe>_<batch>.pt
+        os.path.join(base_dir, safe, f"activations_{safe}_*.pt"),
+        # Looser match if user saved elsewhere under base_dir
+        os.path.join(base_dir, "**", f"activations_{safe}_*.pt"),
+    ]
+
+    files = []
+    for p in patterns:
+        files.extend(glob.glob(p, recursive=True))
+
+    # De-dup + stable sort
+    files = sorted(set(files))
+    return files
 
 def suffix_map(keys):
-    return {k.split("/")[-1]: k for k in keys}
+    # Works for both local filepaths and S3 keys
+    return {str(k).split("/")[-1]: k for k in keys}
 
-def load_model_checkpoint(model_name, k_classes, lr):
+def _resolve_ckpt_path(checkpoint: str) -> str:
+    """
+    Resolve a checkpoint spec to a local .pt file.
+
+    Accepted forms:
+    - absolute/relative filepath to a .pt file
+    - "latest"
+    - "1500" / "epoch_1500" / "epoch_1500.pt"
+    """
+    if os.path.exists(checkpoint):
+        return checkpoint
+
+    ckpt_root = CIRCUIT_DISCOVERY_CKPT_DIR or os.path.join(os.path.dirname(__file__), "..", "results", "circuit-discovery", "checkpoints")
+    ckpt_root = os.path.abspath(ckpt_root)
+
+    if checkpoint == "latest":
+        cand = glob.glob(os.path.join(ckpt_root, "epoch_*.pt"))
+        if not cand:
+            raise FileNotFoundError(f"No checkpoints found in {ckpt_root}")
+        def _epoch_num(p: str) -> int:
+            m = re.search(r"epoch_(\d+)\.pt$", os.path.basename(p))
+            return int(m.group(1)) if m else -1
+        return max(cand, key=_epoch_num)
+
+    m = re.search(r"(\d+)", checkpoint)
+    if m:
+        epoch = int(m.group(1))
+        cand = os.path.join(ckpt_root, f"epoch_{epoch}.pt")
+        if os.path.exists(cand):
+            return cand
+
+    raise FileNotFoundError(
+        f"Could not resolve checkpoint '{checkpoint}'. "
+        f"Provide a path to a .pt file, 'latest', or an epoch like '1500'. "
+        f"Looked in {ckpt_root}."
+    )
+
+
+def load_model_checkpoint(checkpoint, k_classes, lr):
     from circuit_discovery.models import CircuitDiscoveryModel
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    obj = s3.get_object(Bucket=BUCKET_NAME, Key=f"circuit-discovery/{model_name}")
-    bytestream = io.BytesIO(obj["Body"].read())
+    ckpt_path = None
+    try:
+        ckpt_path = _resolve_ckpt_path(checkpoint)
+    except FileNotFoundError as e:
+        ckpt_path = None
 
-    checkpoint = torch.load(bytestream, map_location=device)
+    if ckpt_path is not None:
+        checkpoint = torch.load(ckpt_path, map_location=device)
+    else:
+        # Legacy fallback: allow loading from S3 if enabled.
+        if not USE_S3:
+            raise FileNotFoundError(
+                f"Checkpoint not found locally {checkpoint!r}"
+            ) from e
+        s3 = _get_s3_client()
+        import io
+        obj = s3.get_object(Bucket=BUCKET_NAME, Key=f"circuit-discovery/{checkpoint}")
+        bytestream = io.BytesIO(obj["Body"].read())
+        checkpoint = torch.load(bytestream, map_location=device)
 
     model = CircuitDiscoveryModel(k_classes=k_classes).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
@@ -165,7 +279,9 @@ def load_model_checkpoint(model_name, k_classes, lr):
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
-    return model, optimizer, checkpoint["metrics_log"], checkpoint["epoch"]
+    epoch = checkpoint.get("epoch", checkpoint.get("step", 0))
+    metrics_log = checkpoint.get("metrics_log", [])
+    return model, optimizer, metrics_log, epoch
 
 def _stack_layer_activations(batch_activations):
     if not batch_activations:

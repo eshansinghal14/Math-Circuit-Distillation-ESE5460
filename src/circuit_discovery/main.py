@@ -5,8 +5,6 @@ import torch
 from transformers import AutoTokenizer
 
 from .utils import (
-    s3,
-    BUCKET_NAME,
     llama_1b,
     llama_8b,
     parse_equation,
