@@ -1,7 +1,20 @@
+"""Neuron-cluster ablation study.
+
+For each subclass discovered by the circuit model, loads k-means neuron
+clusters, ablates each cluster independently, and records the resulting
+accuracy drop.  The output ``ablation_performance.json`` is consumed by
+``cluster_pairing.py`` to pair student/teacher clusters by importance.
+
+Can be used as a library (``classify_problems``, ``ablation``,
+``apply_ablation``) or as a CLI script.
+"""
+
 import json
-import torch
 import os
 import sys
+from typing import Dict, List, Optional, Tuple
+
+import torch
 
 from utils import (
     load_model_checkpoint,
@@ -12,32 +25,45 @@ from utils import (
 )
 from circuit_discovery.utils import parse_equation
 
-model_name = get_model_name(sys.argv)
-_, tokenizer = load_model(model_name)
-checkpoint_name = "model_2000"
-circuit_model, _, _, _ = load_model_checkpoint(checkpoint_name, k_classes=8, lr=1e-3)
-circuit_model.eval()
-
-CLASSIFIED_PROBLEMS_PATH = os.path.join("..", "results", "circuit-discovery", "classified_problems.json")
-
-class_clusters = [6] * 8
+DEFAULT_CLASSIFIED_PROBLEMS_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "results", "circuit-discovery", "classified_problems.json"
+)
 
 
-def classify_problems(batch_size=256):
+def classify_problems(
+    circuit_model,
+    tokenizer,
+    dataset_path: str = None,
+    output_path: str = None,
+    batch_size: int = 256,
+) -> Dict[str, List]:
+    """Classify every problem in the dataset into latent subclasses.
+
+    Args:
+        circuit_model: A trained ``CircuitDiscoveryModel`` (will be used in eval mode).
+        tokenizer: HuggingFace tokenizer for decoding token ids.
+        dataset_path: Path to ``2d_add_all.json``.  Defaults to ``../datasets/2d_add_all.json``.
+        output_path: Where to save the JSON mapping.  ``None`` skips saving.
+        batch_size: Inference batch size.
+
+    Returns:
+        ``{subclass_str: [(problem_str, token_ids), ...]}``
+    """
     device = next(circuit_model.parameters()).device
 
-    dataset_path = os.path.join("..", "datasets", "2d_add_all.json")
+    if dataset_path is None:
+        dataset_path = os.path.join(os.path.dirname(__file__), "..", "datasets", "2d_add_all.json")
+
     with open(dataset_path, "r") as f:
         dataset = json.load(f)
 
-    ids = []
-    for record in dataset:
-        ids.append(record['ids'])
+    ids = [record["ids"] for record in dataset]
     ids = torch.tensor(ids).to(device)
     prompts = tokenizer.batch_decode(ids, skip_special_tokens=True)
 
-    class_to_problems = {}
+    class_to_problems: Dict[str, List] = {}
 
+    circuit_model.eval()
     for i in range(0, len(prompts), batch_size):
         batch_prompts = prompts[i : i + batch_size]
         batch_ids = ids[i : i + batch_size]
@@ -45,38 +71,68 @@ def classify_problems(batch_size=256):
         op1, op2, res = parse_equation(batch_prompts, device=device)
         with torch.no_grad():
             logits = circuit_model.classify_problem(op1, op2, res)
-            subclass = torch.argmax(logits, dim=-1) 
+            subclass = torch.argmax(logits, dim=-1)
 
-        for prob, cls, id in zip(batch_prompts, subclass.tolist(), batch_ids.tolist()):
+        for prob, cls, tid in zip(batch_prompts, subclass.tolist(), batch_ids.tolist()):
             key = str(cls)
-            if key not in class_to_problems:
-                class_to_problems[key] = []
-            class_to_problems[key].append((prob, id))
+            class_to_problems.setdefault(key, []).append((prob, tid))
 
-    results_dir = os.path.join("..", "results", "circuit-discovery")
-    os.makedirs(results_dir, exist_ok=True)
-    with open(CLASSIFIED_PROBLEMS_PATH, "w") as f:
-        json.dump(class_to_problems, f, indent=2)
+    if output_path is not None:
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "w") as f:
+            json.dump(class_to_problems, f, indent=2)
+        print(f"Saved classified problems to {output_path}")
 
-    print(f"Saved classified problems to {CLASSIFIED_PROBLEMS_PATH}")
-    for key in class_to_problems:
-        print(key, len(class_to_problems[key]))
-    
+    for key in sorted(class_to_problems, key=int):
+        print(f"  Subclass {key}: {len(class_to_problems[key])} problems")
+
     return class_to_problems
-def ablation(class_to_problems=None):
-    results_dir = os.path.join("..", "results", f"circuit-discovery/{model_name}")
-    os.makedirs(results_dir, exist_ok=True)
 
-    out_path = os.path.join(results_dir, "ablation_performance.json")
-    buffer_results_path = os.path.join(results_dir, "ablation_results_buffer.json")
 
-    if class_to_problems is None:
-        if not os.path.exists(CLASSIFIED_PROBLEMS_PATH):
-            raise FileNotFoundError(f"classified_problems.json not found at {CLASSIFIED_PROBLEMS_PATH}. Run classify_problems() first.")
-        with open(CLASSIFIED_PROBLEMS_PATH, "r") as f:
-            class_to_problems = json.load(f)
+def ablation(
+    model_name: str,
+    tokenizer,
+    class_to_problems: Dict[str, List],
+    class_clusters: Optional[List[int]] = None,
+    results_base_dir: str = None,
+    clusters_base_dir: str = None,
+    batch_size: int = 4,
+    max_new_tokens: int = 1,
+) -> Dict:
+    """Run per-cluster ablation study for a single model.
 
-    ablation_results = {}
+    For every subclass, loads the k-means cluster file, ablates each cluster
+    in turn, and records the accuracy relative to the un-ablated baseline.
+
+    Args:
+        model_name: HuggingFace model identifier (e.g. ``meta-llama/Llama-3.2-1B``).
+        tokenizer: Tokenizer matching ``model_name``.
+        class_to_problems: Output of ``classify_problems``.
+        class_clusters: List of *k* values per subclass.  Defaults to ``[6]*8``.
+        results_base_dir: Root for ablation output files.
+        clusters_base_dir: Root where neuron-clustering results live.
+        batch_size: Evaluation batch size.
+        max_new_tokens: Tokens to generate during eval.
+
+    Returns:
+        Nested dict saved as ``ablation_performance.json``::
+
+            {subclass: {"baseline": float, "clusters": {cluster_id: accuracy}}}
+    """
+    if class_clusters is None:
+        class_clusters = [6] * 8
+
+    if results_base_dir is None:
+        results_base_dir = os.path.join(os.path.dirname(__file__), "..", "results", "circuit-discovery", model_name)
+    os.makedirs(results_base_dir, exist_ok=True)
+
+    if clusters_base_dir is None:
+        clusters_base_dir = os.path.join(os.path.dirname(__file__), "..", "results", "neuron-clustering", model_name)
+
+    out_path = os.path.join(results_base_dir, "ablation_performance.json")
+    buffer_results_path = os.path.join(results_base_dir, "ablation_results_buffer.json")
+
+    ablation_results: Dict = {}
 
     for subclass in range(len(class_clusters)):
         print(f"Processing subclass {subclass}")
@@ -85,7 +141,7 @@ def ablation(class_to_problems=None):
         if not problems:
             continue
 
-        subclass_dataset_path = os.path.join(results_dir, f"class_{subclass_str}_dataset.json")
+        subclass_dataset_path = os.path.join(results_base_dir, f"class_{subclass_str}_dataset.json")
 
         dataset = []
         for problem_str, _ in problems:
@@ -95,39 +151,26 @@ def ablation(class_to_problems=None):
             ans_str = rhs.strip()
             if not ans_str.isdigit():
                 continue
-
             q_str = lhs + "="
             a_str = ans_str
-            ids = tokenizer.encode(q_str + a_str, add_special_tokens=False)
-
-            dataset.append({
-                "q_str": q_str,
-                "a_str": a_str,
-                "ids": ids,
-            })
+            tok_ids = tokenizer.encode(q_str + a_str, add_special_tokens=False)
+            dataset.append({"q_str": q_str, "a_str": a_str, "ids": tok_ids})
 
         with open(subclass_dataset_path, "w") as f:
             json.dump(dataset, f, indent=2)
 
+        # Baseline (no ablation)
         baseline_model, _ = load_model(model_name)
-        _ = test_model(
-            baseline_model,
-            tokenizer,
-            subclass_dataset_path,
-            buffer_results_path,
-            batch_size=4,
-            max_new_tokens=1,
-            log=False,
-        )
+        _ = test_model(baseline_model, tokenizer, subclass_dataset_path, buffer_results_path,
+                        batch_size=batch_size, max_new_tokens=max_new_tokens, log=False)
         baseline_acc = eval_model(buffer_results_path)
-        print(f"Subclass {subclass}: baseline accuracy = {baseline_acc:.4f}")
+        print(f"  Subclass {subclass}: baseline accuracy = {baseline_acc:.4f}")
         del baseline_model
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
         k = class_clusters[subclass]
-        clusters_dir = os.path.join("..", "results", "neuron-clustering", model_name)
-        clusters_path = os.path.join(clusters_dir, f"subclass_{subclass}_clusters/k{k}.pt")
+        clusters_path = os.path.join(clusters_base_dir, f"subclass_{subclass}_clusters/k{k}.pt")
 
         if not os.path.exists(clusters_path):
             print(f"  Skipping subclass {subclass}: missing cluster file {clusters_path}")
@@ -136,26 +179,16 @@ def ablation(class_to_problems=None):
         ckpt = torch.load(clusters_path, map_location="cpu")
         cluster_to_indices = ckpt["cluster_to_indices"]
 
-        subclass_result = {
-            "baseline": baseline_acc,
-            "clusters": {},
-        }
+        subclass_result = {"baseline": baseline_acc, "clusters": {}}
 
         for cluster_id, neuron_indices in cluster_to_indices.items():
             ablated_model, _ = load_model(model_name)
             apply_ablation(ablated_model, neuron_indices)
 
-            _ = test_model(
-                ablated_model,
-                tokenizer,
-                subclass_dataset_path,
-                buffer_results_path,
-                batch_size=4,
-                max_new_tokens=1,
-                log=False,
-            )
+            _ = test_model(ablated_model, tokenizer, subclass_dataset_path, buffer_results_path,
+                            batch_size=batch_size, max_new_tokens=max_new_tokens, log=False)
             acc = eval_model(buffer_results_path)
-            print(f"  Cluster {cluster_id}: accuracy = {acc:.4f}")
+            print(f"    Cluster {cluster_id}: accuracy = {acc:.4f}")
 
             del ablated_model
             if torch.cuda.is_available():
@@ -170,7 +203,10 @@ def ablation(class_to_problems=None):
 
     print(f"Saved ablation performance to {out_path}")
     return ablation_results
+
+
 def apply_ablation(model, neuron_indices):
+    """Zero-out specific neurons (by flattened index across all MLP layers)."""
     if not hasattr(model, "config"):
         return model
 
@@ -237,15 +273,25 @@ def apply_ablation(model, neuron_indices):
 
 
 if __name__ == "__main__":
-    if os.path.exists(CLASSIFIED_PROBLEMS_PATH):
-        with open(CLASSIFIED_PROBLEMS_PATH, "r") as f:
-            class_to_problems = json.load(f)
-        print(f"Loaded classified problems from {CLASSIFIED_PROBLEMS_PATH}")
-    else:
-        class_to_problems = classify_problems()
+    _model_name = get_model_name(sys.argv)
+    _, _tokenizer = load_model(_model_name)
+    _checkpoint_name = "model_2000"
+    _circuit_model, _, _, _ = load_model_checkpoint(_checkpoint_name, k_classes=8, lr=1e-3)
+    _circuit_model.eval()
 
-    del circuit_model
+    _classified_path = DEFAULT_CLASSIFIED_PROBLEMS_PATH
+
+    if os.path.exists(_classified_path):
+        with open(_classified_path, "r") as f:
+            _class_to_problems = json.load(f)
+        print(f"Loaded classified problems from {_classified_path}")
+    else:
+        _class_to_problems = classify_problems(
+            _circuit_model, _tokenizer, output_path=_classified_path
+        )
+
+    del _circuit_model
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    ablation(class_to_problems)
+    ablation(_model_name, _tokenizer, _class_to_problems)
