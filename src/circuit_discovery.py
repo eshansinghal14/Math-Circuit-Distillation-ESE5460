@@ -1,6 +1,5 @@
 from circuit_discovery import (  # noqa: F401
     ProblemEncoder,
-    ActivationsEncoder,
     ProblemClassifier,
     NeuronMask,
     CircuitDiscoveryModel,

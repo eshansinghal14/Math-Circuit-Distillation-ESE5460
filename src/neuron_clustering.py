@@ -7,12 +7,12 @@ import torch.nn.functional as F
 from transformers import AutoTokenizer
 
 from utils import (
+    get_model_name,
     load_model_checkpoint,
     _stack_layer_activations,
 )
 from circuit_discovery.utils import parse_equation
 from gen_activations_dataset import NeuronActivationsGenerator
-
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -146,8 +146,7 @@ def _collect_neuron_features_per_subclass(batch_size=5, save_path=None):
     features_lists = {c: [] for c in indices_per_subclass.keys()}
 
     for batch_idx in range(num_batches):
-        out_fname = activations_generator.generate_batch_activations(batch_idx, log=True)
-        batch = torch.load(out_fname, map_location="cpu")
+        batch = activations_generator.generate_batch_activations(batch_idx, log=True)
 
         ids, activations_dict = batch["ids"], batch["activations"]
 
@@ -164,14 +163,14 @@ def _collect_neuron_features_per_subclass(batch_size=5, save_path=None):
         hard = F.gumbel_softmax(classifier_logits, tau=model.tau, dim=-1, hard=True)
         subclass = hard.argmax(dim=-1)
 
-        mean_activations = activations.mean(dim=1)
-
         for c, idx in indices_per_subclass.items():
             ex_mask = subclass == c
             if not ex_mask.any():
                 continue
-            acts_c = mean_activations[ex_mask][:, idx]
-            file_feature_c = acts_c.mean(dim=0)
+            # activations: [B, T, D]. Pool *after* token-wise comparisons:
+            # first aggregate examples, keep token positions distinct.
+            acts_c = activations[ex_mask][:, :, idx]  # [n_c, T, |idx|]
+            file_feature_c = acts_c.mean(dim=0)  # [T, |idx|]
             features_lists[c].append(file_feature_c)
 
     activations_generator.remove_handles()
@@ -180,8 +179,11 @@ def _collect_neuron_features_per_subclass(batch_size=5, save_path=None):
     for c, feats in features_lists.items():
         if not feats:
             continue
+        # feats_tensor: [num_files, T, |idx|]
         feats_tensor = torch.stack(feats, dim=0).to(device)
-        features_per_subclass[c] = feats_tensor.t()
+        # Arrange as [|idx|, num_files*T] so downstream kmeans stays 2D.
+        feats_flat = feats_tensor.permute(2, 0, 1).reshape(feats_tensor.size(-1), -1)
+        features_per_subclass[c] = feats_flat
 
     if save_path is not None:
         torch.save(
@@ -237,7 +239,7 @@ def run_neuron_kmeans(
         else:
             cluster_to_indices[j] = torch.empty(0, dtype=subclass_indices.dtype)
 
-    clusters_path = os.path.join(results_dir, f"subclass_{subclass}_clusters/k{k}.pt")
+    clusters_path = os.path.join(results_dir, f"results/neuron-clustering/clusters/subclass_{subclass}_clusters/k{k}.pt")
     os.makedirs(os.path.dirname(clusters_path), exist_ok=True)
     torch.save(
         {

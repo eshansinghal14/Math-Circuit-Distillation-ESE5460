@@ -1,7 +1,5 @@
 import os
-import json
 import torch
-from torch import nn
 from transformers import AutoConfig
 from huggingface_hub import login
 
@@ -25,7 +23,6 @@ def parse_equation(probs, device=None):
     op1_list = []
     op2_list = []
     res_list = []
-    term_encodings = []
 
     for prob in probs:
         add_idx = prob.index("+")
@@ -43,6 +40,20 @@ def parse_equation(probs, device=None):
     res = torch.tensor(res_list, dtype=torch.long, device=device)
 
     return op1, op2, res
+
+
+def merge_activation_batches(batches):
+    merged = {}
+    ids_list = []
+    for b in batches:
+        ids_list.append(b["ids"])
+        for layer_idx, t in b["activations"].items():
+            merged.setdefault(layer_idx, []).append(t)
+
+    ids_cat = torch.cat(ids_list, dim=0) if ids_list else torch.empty(0, dtype=torch.long)
+    for layer_idx, chunks in list(merged.items()):
+        merged[layer_idx] = torch.cat(chunks, dim=0)
+    return {"ids": ids_cat, "activations": merged}
 
 
 def _stack_layer_activations(batch_activations):

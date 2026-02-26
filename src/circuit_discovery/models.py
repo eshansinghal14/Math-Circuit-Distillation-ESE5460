@@ -20,49 +20,6 @@ class ProblemEncoder(nn.Module):
         return torch.cat((op1_emb, op2_emb, sum_emb), dim=-1)
 
 
-class ActivationsEncoder(nn.Module):
-    def __init__(self, model, input_dim, embedding_dim, output_dim, num_layers=4, num_heads=4, max_seq_len=5):
-        super().__init__()
-
-        self.input_proj = nn.Linear(input_dim, embedding_dim)
-
-        self.max_seq_len = max_seq_len
-        num_term_ids = 5
-        self.pos_embedding = nn.Embedding(num_term_ids * max_seq_len, embedding_dim)
-
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=embedding_dim,
-            nhead=num_heads,
-            batch_first=True,
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-
-        self.output_proj = nn.Linear(embedding_dim, output_dim)
-
-    def forward(self, activations, term_encoding):
-        x = self.input_proj(activations)
-        _, seq_len, _ = x.shape
-
-        if term_encoding.size(1) < seq_len:
-            pad_len = seq_len - term_encoding.size(1)
-            pad = torch.zeros(term_encoding.size(0), pad_len, dtype=term_encoding.dtype, device=term_encoding.device)
-            term_encoding = torch.cat([term_encoding, pad], dim=1)
-        elif term_encoding.size(1) > seq_len:
-            term_encoding = term_encoding[:, :seq_len]
-
-        positions = torch.arange(seq_len, device=activations.device)
-        positions = positions.unsqueeze(0).expand(term_encoding.size(0), -1)
-        combined_ids = term_encoding * self.max_seq_len + positions
-        pos_emb = self.pos_embedding(combined_ids)
-        x = x + pos_emb
-
-        x = self.transformer(x)
-        x = self.output_proj(x)
-        x = x.mean(dim=1)
-
-        return x
-
-
 class ProblemClassifier(nn.Module):
     def __init__(self, input_dim, k_classes, hidden1_dim=256, hidden2_dim=32):
         super().__init__()
@@ -148,25 +105,6 @@ class CircuitDiscoveryModel(nn.Module):
         }
 
 
-def _mean_pairwise_mask_cossim(masks, eps=1e-8):
-    if masks.dim() != 2:
-        return masks.new_tensor(0.0)
-
-    num_classes = masks.size(0)
-    if num_classes < 2:
-        return masks.new_tensor(0.0)
-
-    norm_masks = F.normalize(masks, p=2, dim=-1, eps=eps)
-    sim_mat = norm_masks @ norm_masks.t()
-
-    triu_indices = torch.triu_indices(num_classes, num_classes, offset=1, device=masks.device)
-    pair_sims = sim_mat[triu_indices[0], triu_indices[1]]
-    if pair_sims.numel() == 0:
-        return masks.new_tensor(0.0)
-
-    return pair_sims.mean()
-
-
 class CircuitLoss(nn.Module):
     def __init__(self, lambda_sim=1.0, lambda_sparsity=5e-0, lambda_usage=1, lambda_kl=1e-1, lambda_mask_cossim=5, eps=1e-8):
         super().__init__()
@@ -177,12 +115,32 @@ class CircuitLoss(nn.Module):
         self.lambda_mask_cossim = lambda_mask_cossim
         self.eps = eps
 
+    def mean_pairwise_mask_cossim(self, masks):
+        if masks.dim() != 2:
+            return masks.new_tensor(0.0)
+
+        num_classes = masks.size(0)
+        if num_classes < 2:
+            return masks.new_tensor(0.0)
+
+        norm_masks = F.normalize(masks, p=2, dim=-1, eps=self.eps)
+        sim_mat = norm_masks @ norm_masks.t()
+
+        triu_indices = torch.triu_indices(num_classes, num_classes, offset=1, device=masks.device)
+        pair_sims = sim_mat[triu_indices[0], triu_indices[1]]
+        if pair_sims.numel() == 0:
+            return masks.new_tensor(0.0)
+
+        return pair_sims.mean()
+
     def classwise_pairwise_cossim(self, activations, hard_class_probs):
         _, k_classes = hard_class_probs.shape
 
-        if activations.dim() == 3:
-            activations = activations.mean(dim=1)
+        if activations.dim() != 3:
+            raise ValueError(f"Expected activations to have shape [B, T, D] (dim=3), got {tuple(activations.shape)}")
 
+        # Token-wise comparison: keep token dimension and normalize per token.
+        # activations: [B, T, D]
         norm_acts = F.normalize(activations, p=2, dim=-1, eps=self.eps)
 
         per_class_sims = []
@@ -195,12 +153,15 @@ class CircuitLoss(nn.Module):
             acts_k = norm_acts[idx]
             n_k = acts_k.size(0)
 
-            sum_vec = acts_k.sum(dim=0)
-            sum_sq = (sum_vec * sum_vec).sum()
+            # acts_k: [n_k, T, D]
+            # For each token t, compute mean pairwise cosine similarity among examples in this class.
+            sum_vec = acts_k.sum(dim=0)  # [T, D]
+            sum_sq = (sum_vec * sum_vec).sum(dim=-1)  # [T]
 
             total_pair_sum = sum_sq - n_k
             num_pairs = n_k * (n_k - 1)
-            per_class_sims.append(total_pair_sum / num_pairs)
+            per_token_sim = total_pair_sum / num_pairs  # [T]
+            per_class_sims.append(per_token_sim.mean())
 
         if not per_class_sims:
             return activations.new_tensor(0.0)
@@ -228,7 +189,7 @@ class CircuitLoss(nn.Module):
 
     def combined_loss(self, hard_class_probs, masked_activations, mask, class_masks):
         sim_loss = - self.classwise_pairwise_cossim(masked_activations, hard_class_probs)
-        mask_cossim = _mean_pairwise_mask_cossim(class_masks)
+        mask_cossim = self.mean_pairwise_mask_cossim(class_masks)
         kl_bernoulli_loss = self.bernoulli_kl_to_prior(mask)
         entropy_loss = self.binary_entropy(mask)
 

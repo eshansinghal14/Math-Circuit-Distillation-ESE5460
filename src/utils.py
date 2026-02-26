@@ -7,20 +7,17 @@ import torch
 
 try:
     # Preferred: repo-local constants (in the same directory as this file).
-    from constants import (  # type: ignore
-        HF_TOKEN,
-        CIRCUIT_DISCOVERY_CKPT_DIR,
-        ACTIVATIONS_DIR,
-        BUCKET_NAME,
-        USE_S3,
-    )
-except ModuleNotFoundError:
+    import constants as _constants  # type: ignore
+    HF_TOKEN = getattr(_constants, "HF_TOKEN", "")
+    CIRCUIT_DISCOVERY_CKPT_DIR = getattr(_constants, "CIRCUIT_DISCOVERY_CKPT_DIR", "")
+    BUCKET_NAME = getattr(_constants, "BUCKET_NAME", "circuit-distillation")
+    USE_S3 = bool(getattr(_constants, "USE_S3", False))
+except (ModuleNotFoundError, ImportError):
     # Colab/back-compat fallback if `constants.py` isn't present in the checkout.
     HF_TOKEN = os.environ.get("HF_TOKEN", "") or os.environ.get("HUGGINGFACE_TOKEN", "")
     BUCKET_NAME = os.environ.get("S3_BUCKET", "circuit-distillation")
     USE_S3 = os.environ.get("USE_S3", "0") == "1"
     CIRCUIT_DISCOVERY_CKPT_DIR = os.environ.get("CIRCUIT_DISCOVERY_CKPT_DIR", "")
-    ACTIVATIONS_DIR = os.environ.get("ACTIVATIONS_DIR", "")
 from transformers.utils import logging as hf_logging
 
 try:
@@ -157,59 +154,6 @@ def gen_3d_add_dataset(dataset_fname, samples, tokenizer):
 
 def _safe_model_name(model_name: str) -> str:
     return model_name.replace("/", "_").replace(":", "_")
-
-
-def list_keys(model_name: str, activations_dir: str | None = None):
-    """
-    Local-first listing of activation batch files for `model_name`.
-
-    - If `USE_S3=1`, returns legacy S3 keys under `mlp_activations/{model_name}/`.
-    - Otherwise returns local filepaths under `results/activations/` (or `ACTIVATIONS_DIR`).
-
-    Returns a list of filepaths to activation batch .pt files for `model_name`.
-    We keep the old name `list_keys` so existing code keeps working.
-    """
-    if USE_S3:
-        s3 = _get_s3_client()
-        prefix = f"mlp_activations/{model_name}/"
-        keys = []
-        token = None
-        while True:
-            kwargs = {"Bucket": BUCKET_NAME, "Prefix": prefix}
-            if token is not None:
-                kwargs["ContinuationToken"] = token
-            resp = s3.list_objects_v2(**kwargs)
-            for obj in resp.get("Contents", []):
-                keys.append(obj["Key"])
-            if not resp.get("IsTruncated"):
-                break
-            token = resp.get("NextContinuationToken")
-        return keys
-
-    safe = _safe_model_name(model_name)
-    base_dir = activations_dir or (ACTIVATIONS_DIR or os.path.join(os.path.dirname(__file__), "..", "results", "activations"))
-    base_dir = os.path.abspath(base_dir)
-
-    patterns = [
-        # New local convention (recommended): results/activations/activations_<safe>_<batch>.pt
-        os.path.join(base_dir, f"activations_{safe}_*.pt"),
-        # Back-compat: results/activations/<safe>/activations_<safe>_<batch>.pt
-        os.path.join(base_dir, safe, f"activations_{safe}_*.pt"),
-        # Looser match if user saved elsewhere under base_dir
-        os.path.join(base_dir, "**", f"activations_{safe}_*.pt"),
-    ]
-
-    files = []
-    for p in patterns:
-        files.extend(glob.glob(p, recursive=True))
-
-    # De-dup + stable sort
-    files = sorted(set(files))
-    return files
-
-def suffix_map(keys):
-    # Works for both local filepaths and S3 keys
-    return {str(k).split("/")[-1]: k for k in keys}
 
 def _resolve_ckpt_path(checkpoint: str) -> str:
     """
