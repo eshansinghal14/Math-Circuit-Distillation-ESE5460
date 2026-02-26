@@ -1,8 +1,18 @@
-from utils import load_model, get_model_name, test_model, eval_model, gen_2d_add_dataset, gen_3d_add_dataset
+from utils import load_model, test_model, eval_model, gen_2d_add_dataset, gen_3d_add_dataset
 import json
-import sys
+import argparse
 
-model_name = get_model_name(sys.argv)
+
+parser = argparse.ArgumentParser(description="Benchmark model on arithmetic dataset")
+parser.add_argument(
+    "--model-name",
+    type=str,
+    required=True,
+    help="HuggingFace model identifier (e.g. meta-llama/Llama-3.2-1B)",
+)
+args = parser.parse_args()
+
+model_name = args.model_name
 model, tokenizer = load_model(model_name)
 
 # gen_2d_add_dataset('../datasets/2d_add_train.json', samples=5000)

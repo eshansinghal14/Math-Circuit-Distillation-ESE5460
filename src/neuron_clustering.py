@@ -2,12 +2,12 @@ import json
 import torch
 import os
 import sys
+import argparse
 
 import torch.nn.functional as F
 from transformers import AutoTokenizer
 
 from utils import (
-    get_model_name,
     load_model_checkpoint,
     _stack_layer_activations,
 )
@@ -16,21 +16,21 @@ from gen_activations_dataset import NeuronActivationsGenerator
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-model_name = get_model_name(sys.argv)
-checkpoint_name = "model_5000"
-model, _, _, _ = load_model_checkpoint(checkpoint_name, k_classes=8, lr=1e-3)
-model.eval()
-
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-threshold = 1e-3
-if model_name == "meta-llama/Llama-3.2-1B":
-    neuron_masks = model.neuron_masks_1b.class_masks()
-else:
-    neuron_masks = model.neuron_masks_8b.class_masks()
-neuron_masks = neuron_masks > (1 - threshold)
-
-print("Active neurons ratio:", torch.mean(torch.mean(neuron_masks.float(), dim=1)).item())
+def _parse_args(argv):
+    parser = argparse.ArgumentParser(description="Neuron clustering")
+    parser.add_argument(
+        "--model-name",
+        type=str,
+        required=True,
+        help="HuggingFace model identifier (e.g. meta-llama/Llama-3.2-1B)",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default="model_5000",
+        help="Circuit discovery checkpoint to load (default: model_5000)",
+    )
+    return parser.parse_args(argv)
 
 
 def _kmeans_cosine(x, k, num_iters=20):
@@ -274,7 +274,7 @@ if __name__ == "__main__":
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    threshold = args.threshold
+    threshold = 1e-3
     if model_name == "meta-llama/Llama-3.2-1B":
         neuron_masks = model.neuron_masks_1b.class_masks()
     else:

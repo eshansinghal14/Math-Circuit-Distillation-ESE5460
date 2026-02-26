@@ -12,6 +12,7 @@ Can be used as a library (``classify_problems``, ``ablation``,
 import json
 import os
 import sys
+import argparse
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -19,7 +20,6 @@ import torch
 from utils import (
     load_model_checkpoint,
     load_model,
-    get_model_name,
     test_model,
     eval_model,
 )
@@ -273,7 +273,16 @@ def apply_ablation(model, neuron_indices):
 
 
 if __name__ == "__main__":
-    _model_name = get_model_name(sys.argv)
+    parser = argparse.ArgumentParser(description="Neuron cluster ablation study")
+    parser.add_argument(
+        "--model-name",
+        type=str,
+        required=True,
+        help="HuggingFace model identifier (e.g. meta-llama/Llama-3.2-1B)",
+    )
+    args = parser.parse_args(sys.argv[1:])
+
+    _model_name = args.model_name
     _, _tokenizer = load_model(_model_name)
     _checkpoint_name = "model_2000"
     _circuit_model, _, _, _ = load_model_checkpoint(_checkpoint_name, k_classes=8, lr=1e-3)

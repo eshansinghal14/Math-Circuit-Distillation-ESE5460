@@ -32,13 +32,6 @@ def _get_s3_client():
 
 logged_in = False
 
-def get_model_name(argv):
-    if len(argv) > 1:
-        return argv[1]
-    else:
-        print('Please provide model name')
-        exit()
-
 def load_model(model_name):
     hf_logging.set_verbosity_error()
 
