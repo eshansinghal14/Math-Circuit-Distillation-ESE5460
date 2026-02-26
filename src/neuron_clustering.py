@@ -49,10 +49,27 @@ def _kmeans_cosine(x, k, num_iters=20):
         centers = x[torch.tensor(indices, device=x.device)]
         sim = x @ centers.t()
         closest_sim, _ = sim.max(dim=1)
-        dist = 1 - closest_sim.clamp(-1, 1)
-        probs = dist / dist.sum()
-        next_idx = torch.multinomial(probs, 1)
-        indices.append(next_idx.item())
+        dist = (1.0 - closest_sim.clamp(-1.0, 1.0)).clamp(min=0.0)
+        dist = torch.nan_to_num(dist, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Avoid re-selecting already chosen centers.
+        if indices:
+            dist[torch.tensor(indices, device=x.device)] = 0.0
+
+        dist_sum = dist.sum()
+        if not torch.isfinite(dist_sum) or dist_sum.item() <= 0.0:
+            remaining = torch.ones(N, device=x.device, dtype=torch.bool)
+            remaining[torch.tensor(indices, device=x.device)] = False
+            remaining_idx = remaining.nonzero(as_tuple=False).squeeze(1)
+            if remaining_idx.numel() == 0:
+                break
+            next_idx = remaining_idx[torch.randint(0, remaining_idx.numel(), (1,), device=x.device)]
+            indices.append(int(next_idx.item()))
+        else:
+            probs = (dist / dist_sum).float()
+            # Sample on CPU to avoid CUDA device-side asserts.
+            next_idx = torch.multinomial(probs.detach().cpu(), 1).to(x.device)
+            indices.append(int(next_idx.item()))
 
     centroids = x[torch.tensor(indices, device=x.device)]
 
