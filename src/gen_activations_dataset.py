@@ -10,7 +10,7 @@ class NeuronActivationsGenerator:
         self.model_name = model_name
         self.batch_size = batch_size
 
-        with open('../datasets/2d_add_all.json', 'r') as f:
+        with open('datasets/2d_add_all.json', 'r') as f:
             dataset = json.load(f)
 
         ids = []
