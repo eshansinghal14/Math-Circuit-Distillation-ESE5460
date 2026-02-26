@@ -239,7 +239,7 @@ def run_neuron_kmeans(
         else:
             cluster_to_indices[j] = torch.empty(0, dtype=subclass_indices.dtype)
 
-    clusters_path = os.path.join(results_dir, f"results/neuron-clustering/clusters/subclass_{subclass}_clusters/k{k}.pt")
+    clusters_path = os.path.join(results_dir, f"clusters/subclass_{subclass}_clusters/k{k}.pt")
     os.makedirs(os.path.dirname(clusters_path), exist_ok=True)
     torch.save(
         {
@@ -286,34 +286,33 @@ if __name__ == "__main__":
         print(neuron_masks[i].count_nonzero().item())
 
     k_gs_testing = {}
+    plots_dir = os.path.join(results_dir, "plots")
+    os.makedirs(plots_dir, exist_ok=True)
     for subclass in range(8):
         if neuron_masks[subclass].any().item():
             print(f"Processing subclass {subclass}")
             k_gs_testing[subclass] = {}
-            for k in range(1, 8):
+            for k in range(1, 14):
                 _, _, loss = run_neuron_kmeans(k, subclass=subclass, log=False)
                 k_gs_testing[subclass][k] = loss
                 print(f"Subclass {subclass}, k={k}, loss={loss}")
+
+            ks = sorted(int(k) for k in k_gs_testing[subclass].keys())
+            losses = [float(k_gs_testing[subclass][k]) for k in ks]
+
+            plt.figure(figsize=(6, 4))
+            plt.plot(ks, losses, marker="o")
+            plt.xlabel("k (number of clusters)")
+            plt.ylabel("Mean cosine distance to centroids (loss)")
+            plt.title(f"k-means loss vs k for {model_name}, subclass {subclass}")
+            plt.grid(True, alpha=0.3)
+
+            plot_path = os.path.join(plots_dir, f"k_vs_loss_subclass_{subclass}.png")
+            plt.savefig(plot_path, bbox_inches="tight")
+            plt.close()
 
     results_dir = os.path.join("results", "neuron-clustering", model_name)
     os.makedirs(results_dir, exist_ok=True)
     out_path = os.path.join(results_dir, "k_gs_testing.json")
     with open(out_path, "w") as f:
         json.dump(k_gs_testing, f, indent=2)
-
-    plots_dir = os.path.join("results", "neuron-clustering", "plots", model_name)
-    os.makedirs(plots_dir, exist_ok=True)
-    for subclass, k_dict in k_gs_testing.items():
-        ks = sorted(int(k) for k in k_dict.keys())
-        losses = [float(k_dict[k]) for k in ks]
-
-        plt.figure(figsize=(6, 4))
-        plt.plot(ks, losses, marker="o")
-        plt.xlabel("k (number of clusters)")
-        plt.ylabel("Mean cosine distance to centroids (loss)")
-        plt.title(f"k-means loss vs k for {model_name}, subclass {subclass}")
-        plt.grid(True, alpha=0.3)
-
-        plot_path = os.path.join(plots_dir, f"k_vs_loss_subclass_{subclass}.png")
-        plt.savefig(plot_path, bbox_inches="tight")
-        plt.close()
