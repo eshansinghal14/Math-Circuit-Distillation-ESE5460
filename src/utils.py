@@ -196,19 +196,7 @@ def load_model_checkpoint(checkpoint, k_classes, lr):
     except FileNotFoundError as e:
         ckpt_path = None
 
-    if ckpt_path is not None:
-        checkpoint = torch.load(ckpt_path, map_location=device)
-    else:
-        # Legacy fallback: allow loading from S3 if enabled.
-        if not USE_S3:
-            raise FileNotFoundError(
-                f"Checkpoint not found locally {checkpoint!r}"
-            ) from e
-        s3 = _get_s3_client()
-        import io
-        obj = s3.get_object(Bucket=BUCKET_NAME, Key=f"circuit-discovery/{checkpoint}")
-        bytestream = io.BytesIO(obj["Body"].read())
-        checkpoint = torch.load(bytestream, map_location=device)
+    checkpoint = torch.load(ckpt_path, map_location=device)
 
     model = CircuitDiscoveryModel(k_classes=k_classes).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
