@@ -12,9 +12,6 @@ CIRCUIT_DISCOVERY_CKPT_DIR = getattr(_constants, "CIRCUIT_DISCOVERY_CKPT_DIR", "
 from transformers.utils import logging as hf_logging
 
 logged_in = False
-if not logged_in:
-    login(HF_TOKEN)
-    logged_in = True
 
 def load_model(model_name):
     hf_logging.set_verbosity_error()
