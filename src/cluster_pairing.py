@@ -288,19 +288,19 @@ if __name__ == "__main__":
 
     # Usage:
     #   python cluster_pairing.py <student_model_name> <teacher_model_name> [top_k_per_subclass]
-    if len(sys.argv) < 3 or len(sys.argv) > 4:
+    if len(sys.argv) != 2:
         print(
-            "Usage: python cluster_pairing.py <student_model_name> <teacher_model_name> [top_k_per_subclass]",
+            "Usage: python cluster_pairing.py [top_k_per_subclass]"
         )
         sys.exit(1)
 
-    student_model_name = sys.argv[1]
-    teacher_model_name = sys.argv[2]
+    student_model_name = "meta-llama/Llama-3.2-1B"
+    teacher_model_name = "meta-llama/Meta-Llama-3-8B"
 
     top_k_per_subclass: Optional[int]
-    if len(sys.argv) == 4:
+    if len(sys.argv) == 2:
         try:
-            top_k_per_subclass = int(sys.argv[3])
+            top_k_per_subclass = int(sys.argv[1])
         except ValueError:
             print("top_k_per_subclass must be an integer if provided")
             sys.exit(1)
