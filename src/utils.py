@@ -5,32 +5,16 @@ import os
 import glob
 import torch
 
-try:
-    # Preferred: repo-local constants (in the same directory as this file).
-    import constants as _constants  # type: ignore
-    HF_TOKEN = getattr(_constants, "HF_TOKEN", "")
-    CIRCUIT_DISCOVERY_CKPT_DIR = getattr(_constants, "CIRCUIT_DISCOVERY_CKPT_DIR", "")
-    BUCKET_NAME = getattr(_constants, "BUCKET_NAME", "circuit-distillation")
-    USE_S3 = bool(getattr(_constants, "USE_S3", False))
-except (ModuleNotFoundError, ImportError):
-    # Colab/back-compat fallback if `constants.py` isn't present in the checkout.
-    HF_TOKEN = os.environ.get("HF_TOKEN", "") or os.environ.get("HUGGINGFACE_TOKEN", "")
-    BUCKET_NAME = os.environ.get("S3_BUCKET", "circuit-distillation")
-    USE_S3 = os.environ.get("USE_S3", "0") == "1"
-    CIRCUIT_DISCOVERY_CKPT_DIR = os.environ.get("CIRCUIT_DISCOVERY_CKPT_DIR", "")
+import constants as _constants  # type: ignore
+HF_TOKEN = getattr(_constants, "HF_TOKEN", "")
+CIRCUIT_DISCOVERY_CKPT_DIR = getattr(_constants, "CIRCUIT_DISCOVERY_CKPT_DIR", "")
+
 from transformers.utils import logging as hf_logging
 
-try:
-    import boto3  # type: ignore
-except Exception:  # pragma: no cover
-    boto3 = None
-
-def _get_s3_client():
-    if boto3 is None:
-        raise ImportError("boto3 is not installed. Install boto3 or disable S3 mode (USE_S3=0).")
-    return boto3.client("s3")
-
 logged_in = False
+if not logged_in:
+    login(HF_TOKEN)
+    logged_in = True
 
 def load_model(model_name):
     hf_logging.set_verbosity_error()
