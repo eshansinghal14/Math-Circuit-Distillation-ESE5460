@@ -267,6 +267,10 @@ def run_neuron_kmeans(
 
 
 if __name__ == "__main__":
+
+    results_dir = os.path.join("results", "neuron-clustering", model_name)
+    os.makedirs(results_dir, exist_ok=True)
+    
     args = _parse_args(sys.argv[1:])
 
     model_name = args.model_name
@@ -312,8 +316,6 @@ if __name__ == "__main__":
             plt.savefig(plot_path, bbox_inches="tight")
             plt.close()
 
-    results_dir = os.path.join("results", "neuron-clustering", model_name)
-    os.makedirs(results_dir, exist_ok=True)
     out_path = os.path.join(results_dir, "k_gs_testing.json")
     with open(out_path, "w") as f:
         json.dump(k_gs_testing, f, indent=2)
