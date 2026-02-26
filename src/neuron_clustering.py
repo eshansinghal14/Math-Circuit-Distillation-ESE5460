@@ -207,8 +207,7 @@ def run_neuron_kmeans(
     log=True,
     subclass_features_path=None,
 ):
-    safe = _safe_model_name(model_name)
-    results_dir = os.path.join("..", "results", "neuron-clustering", safe)
+    results_dir = os.path.join("..", "results", "neuron-clustering", model_name)
     os.makedirs(results_dir, exist_ok=True)
 
     if subclass_features_path is None:
