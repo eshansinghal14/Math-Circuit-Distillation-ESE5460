@@ -295,8 +295,7 @@ if __name__ == "__main__":
                 k_gs_testing[subclass][k] = loss
                 print(f"Subclass {subclass}, k={k}, loss={loss}")
 
-    safe = _safe_model_name(model_name)
-    results_dir = os.path.join("..", "results", "neuron-clustering", safe)
+    results_dir = os.path.join("..", "results", "neuron-clustering", model_name)
     os.makedirs(results_dir, exist_ok=True)
     out_path = os.path.join(results_dir, "k_gs_testing.json")
     with open(out_path, "w") as f:
