@@ -35,7 +35,7 @@ class NeuronActivationsGenerator:
             start_prob = batch * self.batch_size
             batch_inputs = self.ids[start_prob: start_prob + min(self.batch_size, self.ids.shape[0] - start_prob)]
             
-            if log: 
+            if log and batch % 100 == 0: 
                 print(f'processing batch {batch}/{self.ids.shape[0] // self.batch_size}')
 
             self.layer_activations = {}
