@@ -25,10 +25,10 @@ def _parse_args(argv):
         help="HuggingFace model identifier (e.g. meta-llama/Llama-3.2-1B)",
     )
     parser.add_argument(
-        "--checkpoint",
+        "--checkpoint-path",
         type=str,
-        default="model_5000",
-        help="Circuit discovery checkpoint to load (default: model_5000)",
+        required=True
+        help="Circuit discovery checkpoint to load",
     )
     return parser.parse_args(argv)
 
