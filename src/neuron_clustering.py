@@ -269,7 +269,7 @@ if __name__ == "__main__":
     args = _parse_args(sys.argv[1:])
 
     model_name = args.model_name
-    model, _, _, _ = load_model_checkpoint(args.checkpoint, k_classes=8, lr=1e-3)
+    model, _, _, _ = load_model_checkpoint(args.checkpoint_path, k_classes=8, lr=1e-3)
     model.eval()
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
