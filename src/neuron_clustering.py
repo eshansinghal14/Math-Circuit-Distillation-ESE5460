@@ -27,7 +27,7 @@ def _parse_args(argv):
     parser.add_argument(
         "--checkpoint-path",
         type=str,
-        required=True
+        required=True,
         help="Circuit discovery checkpoint to load",
     )
     return parser.parse_args(argv)
