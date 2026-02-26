@@ -9,6 +9,7 @@ from transformers import AutoTokenizer
 import matplotlib.pyplot as plt
 
 from utils import (
+
     load_model_checkpoint,
     _stack_layer_activations,
 )
@@ -272,7 +273,6 @@ if __name__ == "__main__":
     model, _, _, _ = load_model_checkpoint(args.checkpoint_path, k_classes=8, lr=1e-3)
     model.eval()
 
-    load_model(model_name)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     threshold = 1e-3
