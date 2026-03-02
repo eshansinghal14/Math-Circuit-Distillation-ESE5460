@@ -141,82 +141,90 @@ def ablation(
     model, _ = load_model(model_name)
     model.eval()
 
-    for subclass in range(len(class_clusters)):
-        print(f"Processing subclass {subclass}")
-        subclass_str = str(subclass)
-        problems = class_to_problems.get(subclass_str, [])
-        if not problems:
-            continue
-
-        subclass_dataset_path = os.path.join(results_base_dir, f"class_{subclass_str}_dataset.json")
-
-        dataset = []
-        for problem_str, _ in problems:
-            if "=" not in problem_str:
+    try:
+        for subclass in range(len(class_clusters)):
+            print(f"Processing subclass {subclass}")
+            subclass_str = str(subclass)
+            problems = class_to_problems.get(subclass_str, [])
+            if not problems:
                 continue
-            lhs, rhs = problem_str.split("=", 1)
-            ans_str = rhs.strip()
-            if not ans_str.isdigit():
+
+            subclass_dataset_path = os.path.join(results_base_dir, f"class_{subclass_str}_dataset.json")
+
+            dataset = []
+            for problem_str, _ in problems:
+                if "=" not in problem_str:
+                    continue
+                lhs, rhs = problem_str.split("=", 1)
+                ans_str = rhs.strip()
+                if not ans_str.isdigit():
+                    continue
+                q_str = lhs + "="
+                a_str = ans_str
+                tok_ids = tokenizer.encode(q_str + a_str, add_special_tokens=False)
+                dataset.append({"q_str": q_str, "a_str": a_str, "ids": tok_ids})
+
+            with open(subclass_dataset_path, "w") as f:
+                json.dump(dataset, f, indent=2)
+
+            # Baseline (no ablation)
+            _ = test_model(
+                model,
+                tokenizer,
+                subclass_dataset_path,
+                buffer_results_path,
+                batch_size=batch_size,
+                max_new_tokens=max_new_tokens,
+                log=False,
+            )
+            baseline_acc = eval_model(buffer_results_path)
+            print(f"  Subclass {subclass}: baseline accuracy = {baseline_acc:.4f}")
+
+            k = class_clusters[subclass]
+            clusters_path = os.path.join(clusters_base_dir, f"subclass_{subclass}_clusters/k{k}.pt")
+
+            if not os.path.exists(clusters_path):
+                print(f"  Skipping subclass {subclass}: missing cluster file {clusters_path}")
                 continue
-            q_str = lhs + "="
-            a_str = ans_str
-            tok_ids = tokenizer.encode(q_str + a_str, add_special_tokens=False)
-            dataset.append({"q_str": q_str, "a_str": a_str, "ids": tok_ids})
 
-        with open(subclass_dataset_path, "w") as f:
-            json.dump(dataset, f, indent=2)
+            ckpt = torch.load(clusters_path, map_location="cpu")
+            cluster_to_indices = ckpt["cluster_to_indices"]
 
-        # Baseline (no ablation)
-        _ = test_model(
-            model,
-            tokenizer,
-            subclass_dataset_path,
-            buffer_results_path,
-            batch_size=batch_size,
-            max_new_tokens=max_new_tokens,
-            log=False,
-        )
-        baseline_acc = eval_model(buffer_results_path)
-        print(f"  Subclass {subclass}: baseline accuracy = {baseline_acc:.4f}")
+            subclass_result = {"baseline": baseline_acc, "clusters": {}}
 
-        k = class_clusters[subclass]
-        clusters_path = os.path.join(clusters_base_dir, f"subclass_{subclass}_clusters/k{k}.pt")
+            for cluster_id, neuron_indices in cluster_to_indices.items():
+                handles = apply_activation_ablation_hooks(model, neuron_indices)
+                try:
+                    _ = test_model(
+                        model,
+                        tokenizer,
+                        subclass_dataset_path,
+                        buffer_results_path,
+                        batch_size=batch_size,
+                        max_new_tokens=max_new_tokens,
+                        log=False,
+                    )
+                finally:
+                    remove_ablation_hooks(handles)
+                acc = eval_model(buffer_results_path)
+                print(f"    Cluster {cluster_id}: accuracy = {acc:.4f}")
 
-        if not os.path.exists(clusters_path):
-            print(f"  Skipping subclass {subclass}: missing cluster file {clusters_path}")
-            continue
+                subclass_result["clusters"][str(cluster_id)] = acc
 
-        ckpt = torch.load(clusters_path, map_location="cpu")
-        cluster_to_indices = ckpt["cluster_to_indices"]
+            ablation_results[subclass_str] = subclass_result
 
-        subclass_result = {"baseline": baseline_acc, "clusters": {}}
+        with open(out_path, "w") as f:
+            json.dump(ablation_results, f, indent=2)
 
-        for cluster_id, neuron_indices in cluster_to_indices.items():
-            handles = apply_activation_ablation_hooks(model, neuron_indices)
-            try:
-                _ = test_model(
-                    model,
-                    tokenizer,
-                    subclass_dataset_path,
-                    buffer_results_path,
-                    batch_size=batch_size,
-                    max_new_tokens=max_new_tokens,
-                    log=False,
-                )
-            finally:
-                remove_ablation_hooks(handles)
-            acc = eval_model(buffer_results_path)
-            print(f"    Cluster {cluster_id}: accuracy = {acc:.4f}")
-
-            subclass_result["clusters"][str(cluster_id)] = acc
-
-        ablation_results[subclass_str] = subclass_result
-
-    with open(out_path, "w") as f:
-        json.dump(ablation_results, f, indent=2)
-
-    print(f"Saved ablation performance to {out_path}")
-    return ablation_results
+        print(f"Saved ablation performance to {out_path}")
+        return ablation_results
+    finally:
+        try:
+            del model
+        except Exception:
+            pass
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 def _layer_neuron_map_from_flat_indices(model, neuron_indices) -> Dict[int, List[int]]:
