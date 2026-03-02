@@ -280,12 +280,44 @@ if __name__ == "__main__":
         required=True,
         help="HuggingFace model identifier (e.g. meta-llama/Llama-3.2-1B)",
     )
-    args = parser.parse_args(sys.argv[1:])
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default="latest",
+        help="Path to circuit-discovery model checkpoint (.pt file), or 'latest'",
+    )
+    parser.add_argument(
+        "--k",
+        type=int,
+        default=7,
+        help="Number of clusters (k) to use per subclass",
+    )
+    parser.add_argument(
+        "--clusters-dir",
+        type=str,
+        default=None,
+        help="Root directory containing subclass_N_clusters/ folders",
+    )
+    parser.add_argument(
+        "--results-dir",
+        type=str,
+        default=None,
+        help="Directory to write ablation results into",
+    )
+    parser.add_argument(
+        "--k-classes",
+        type=int,
+        default=8,
+        help="Number of latent subclasses in the circuit-discovery model",
+    )
+    args = parser.parse_args()
 
     _model_name = args.model_name
     _, _tokenizer = load_model(_model_name)
-    _checkpoint_name = "model_2000"
-    _circuit_model, _, _, _ = load_model_checkpoint(_checkpoint_name, k_classes=8, lr=1e-3)
+
+    _circuit_model, _, _, _ = load_model_checkpoint(
+        args.checkpoint, k_classes=args.k_classes, lr=1e-3
+    )
     _circuit_model.eval()
 
     _classified_path = DEFAULT_CLASSIFIED_PROBLEMS_PATH
@@ -303,4 +335,13 @@ if __name__ == "__main__":
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    ablation(_model_name, _tokenizer, _class_to_problems)
+    _class_clusters = [args.k] * args.k_classes
+
+    ablation(
+        _model_name,
+        _tokenizer,
+        _class_to_problems,
+        class_clusters=_class_clusters,
+        results_base_dir=args.results_dir,
+        clusters_base_dir=args.clusters_dir,
+    )
