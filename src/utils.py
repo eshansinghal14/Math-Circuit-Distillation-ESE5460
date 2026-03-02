@@ -174,8 +174,14 @@ def load_model_checkpoint(checkpoint, k_classes, lr):
     ckpt_path = None
     try:
         ckpt_path = _resolve_ckpt_path(checkpoint)
-    except FileNotFoundError as e:
+    except FileNotFoundError:
         ckpt_path = None
+
+    if ckpt_path is None:
+        raise FileNotFoundError(
+            f"Checkpoint not found: {checkpoint!r}. "
+            "Provide a valid path to a .pt file, 'latest', or an epoch number."
+        )
 
     checkpoint = torch.load(ckpt_path, map_location=device)
 
