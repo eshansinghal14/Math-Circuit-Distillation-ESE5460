@@ -228,6 +228,33 @@ class ClusterActivationCache:
             parts.append(last_tok.float())
         return torch.cat(parts, dim=-1)
 
+    def get_flattened_mean_pool(
+        self, attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Mean-pool across all non-pad token positions, then concatenate layers.
+
+        This is consistent with how neuron clustering defines clusters:
+        clustering uses activations across ALL token positions, not just the
+        last.  MLP/FFN operates independently per token, so each position's
+        activations carry unique information (unlike attention, which
+        aggregates across positions).
+
+        Returns:
+            ``(B, num_layers * intermediate_size)`` in float32.
+        """
+        layers = sorted(self.layer_activations.keys())
+        parts = []
+        for i in layers:
+            act = self.layer_activations[i].float()  # (B, S, D_intermediate)
+            if attention_mask is not None:
+                mask = attention_mask.unsqueeze(-1).float()  # (B, S, 1)
+                token_count = mask.sum(dim=1, keepdim=True).clamp(min=1)  # (B, 1, 1)
+                pooled = (act * mask).sum(dim=1) / token_count.squeeze(-1)  # (B, D)
+            else:
+                pooled = act.mean(dim=1)  # (B, D_intermediate)
+            parts.append(pooled)
+        return torch.cat(parts, dim=-1)
+
     def clear(self):
         self.layer_activations.clear()
         for h in self.hooks:
@@ -576,14 +603,14 @@ class ClusterDistillationTrainer:
             # Teacher forward (no grad)
             with torch.no_grad():
                 self.teacher(input_ids=input_ids, attention_mask=attention_mask)
-            teacher_flat = self.teacher_cache.get_flattened_last_token(attention_mask)
+            teacher_flat = self.teacher_cache.get_flattened_mean_pool(attention_mask)
 
             # Student forward
             student_out = self.student(
                 input_ids=input_ids, attention_mask=attention_mask,
                 labels=labels,
             )
-            student_flat = self.student_cache.get_flattened_last_token(attention_mask)
+            student_flat = self.student_cache.get_flattened_mean_pool(attention_mask)
 
             ce_loss = student_out.loss
 
