@@ -17,6 +17,7 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 
+
 from utils import (
     load_model_checkpoint,
     load_model,
@@ -134,6 +135,12 @@ def ablation(
 
     ablation_results: Dict = {}
 
+    if batch_size <= 0:
+        batch_size = 50
+
+    model, _ = load_model(model_name)
+    model.eval()
+
     for subclass in range(len(class_clusters)):
         print(f"Processing subclass {subclass}")
         subclass_str = str(subclass)
@@ -160,14 +167,17 @@ def ablation(
             json.dump(dataset, f, indent=2)
 
         # Baseline (no ablation)
-        baseline_model, _ = load_model(model_name)
-        _ = test_model(baseline_model, tokenizer, subclass_dataset_path, buffer_results_path,
-                        batch_size=batch_size, max_new_tokens=max_new_tokens, log=False)
+        _ = test_model(
+            model,
+            tokenizer,
+            subclass_dataset_path,
+            buffer_results_path,
+            batch_size=batch_size,
+            max_new_tokens=max_new_tokens,
+            log=False,
+        )
         baseline_acc = eval_model(buffer_results_path)
         print(f"  Subclass {subclass}: baseline accuracy = {baseline_acc:.4f}")
-        del baseline_model
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
         k = class_clusters[subclass]
         clusters_path = os.path.join(clusters_base_dir, f"subclass_{subclass}_clusters/k{k}.pt")
@@ -182,17 +192,21 @@ def ablation(
         subclass_result = {"baseline": baseline_acc, "clusters": {}}
 
         for cluster_id, neuron_indices in cluster_to_indices.items():
-            ablated_model, _ = load_model(model_name)
-            apply_ablation(ablated_model, neuron_indices)
-
-            _ = test_model(ablated_model, tokenizer, subclass_dataset_path, buffer_results_path,
-                            batch_size=batch_size, max_new_tokens=max_new_tokens, log=False)
+            handles = apply_activation_ablation_hooks(model, neuron_indices)
+            try:
+                _ = test_model(
+                    model,
+                    tokenizer,
+                    subclass_dataset_path,
+                    buffer_results_path,
+                    batch_size=batch_size,
+                    max_new_tokens=max_new_tokens,
+                    log=False,
+                )
+            finally:
+                remove_ablation_hooks(handles)
             acc = eval_model(buffer_results_path)
             print(f"    Cluster {cluster_id}: accuracy = {acc:.4f}")
-
-            del ablated_model
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
 
             subclass_result["clusters"][str(cluster_id)] = acc
 
@@ -203,6 +217,106 @@ def ablation(
 
     print(f"Saved ablation performance to {out_path}")
     return ablation_results
+
+
+def _layer_neuron_map_from_flat_indices(model, neuron_indices) -> Dict[int, List[int]]:
+    if not hasattr(model, "config"):
+        return {}
+
+    cfg = model.config
+    if not hasattr(cfg, "intermediate_size") or not hasattr(cfg, "num_hidden_layers"):
+        return {}
+
+    intermediate_size = int(cfg.intermediate_size)
+    num_layers = int(cfg.num_hidden_layers)
+
+    if isinstance(neuron_indices, torch.Tensor):
+        idx_list = neuron_indices.view(-1).tolist()
+    else:
+        idx_list = list(neuron_indices)
+
+    layer_to_neurons: Dict[int, List[int]] = {}
+    for idx in idx_list:
+        if not isinstance(idx, int):
+            try:
+                idx = int(idx)
+            except Exception:
+                continue
+        if idx < 0:
+            continue
+        layer_id = idx // intermediate_size
+        neuron_id = idx % intermediate_size
+        if layer_id < 0 or layer_id >= num_layers:
+            continue
+        layer_to_neurons.setdefault(layer_id, []).append(neuron_id)
+
+    for lid in list(layer_to_neurons.keys()):
+        layer_to_neurons[lid] = sorted(set(layer_to_neurons[lid]))
+
+    return layer_to_neurons
+
+
+def apply_activation_ablation_hooks(model, neuron_indices):
+    """Temporarily ablate neurons by masking the MLP down-projection input.
+
+    This avoids in-place weight mutation and allows reusing a single loaded model.
+    Neurons are specified as flattened indices across all MLP layers, matching
+    the neuron-clustering output format.
+
+    Returns a list of hook handles; call ``remove_ablation_hooks`` after eval.
+    """
+    if not hasattr(model, "model") or not hasattr(model.model, "layers"):
+        return []
+
+    layer_to_neurons = _layer_neuron_map_from_flat_indices(model, neuron_indices)
+    if not layer_to_neurons:
+        return []
+
+    layers = model.model.layers
+    handles = []
+
+    for layer_id, neuron_ids in layer_to_neurons.items():
+        if layer_id < 0 or layer_id >= len(layers):
+            continue
+
+        block = layers[layer_id]
+        if not hasattr(block, "mlp"):
+            continue
+
+        mlp = block.mlp
+        down = getattr(mlp, "down_proj", None)
+        if down is None:
+            continue
+
+        def _make_pre_hook(_neuron_ids: List[int]):
+            def _pre_hook(module, inputs):
+                if not inputs:
+                    return inputs
+                x = inputs[0]
+                if not torch.is_tensor(x):
+                    return inputs
+                if x.dim() < 2:
+                    return inputs
+
+                with torch.no_grad():
+                    x2 = x.clone()
+                    x2[..., _neuron_ids] = 0
+                return (x2,) + tuple(inputs[1:])
+
+            return _pre_hook
+
+        handle = down.register_forward_pre_hook(_make_pre_hook(neuron_ids))
+        handles.append(handle)
+
+    return handles
+
+
+def remove_ablation_hooks(handles) -> None:
+    for h in handles or []:
+        try:
+            h.remove()
+        except Exception:
+            pass
 
 
 def apply_ablation(model, neuron_indices):
