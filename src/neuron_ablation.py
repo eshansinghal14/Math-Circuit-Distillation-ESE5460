@@ -96,7 +96,7 @@ def ablation(
     class_clusters: Optional[List[int]] = None,
     results_base_dir: str = None,
     clusters_base_dir: str = None,
-    batch_size: int = 4,
+    batch_size: int = 50,
     max_new_tokens: int = 1,
 ) -> Dict:
     """Run per-cluster ablation study for a single model.
@@ -303,4 +303,4 @@ if __name__ == "__main__":
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    ablation(_model_name, _tokenizer, _class_to_problems)
+    ablation(_model_name, _tokenizer, _class_to_problems, None, None, None, args.batch_size)
