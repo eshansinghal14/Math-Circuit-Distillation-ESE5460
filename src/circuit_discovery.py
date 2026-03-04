@@ -33,12 +33,6 @@ def _parse_args(argv=None):
         help="Circuit discovery checkpoint to resume from",
     )
     parser.add_argument(
-        "--device",
-        type=str,
-        default=None,
-        help="Device (e.g. cuda, cpu); default is cuda if available",
-    )
-    parser.add_argument(
         "--lambda-usage",
         type=float,
         default=0.15,
@@ -71,7 +65,6 @@ if __name__ == "__main__":
         k_classes=args.k_classes,
         epochs=args.epochs,
         resume_model=args.checkpoint_path,
-        device=args.device,
         lambda_usage=args.lambda_usage,
         lambda_mask_cossim=args.lambda_mask_cossim,
         lambda_kl=args.lambda_kl,
