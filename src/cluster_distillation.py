@@ -228,6 +228,24 @@ class ClusterActivationCache:
             parts.append(last_tok.float())
         return torch.cat(parts, dim=-1)
 
+    def get_flattened_per_token(self) -> torch.Tensor:
+        """Concatenate all per-layer activations, keeping the token dimension.
+
+        MLP/FFN operates independently per token, so each position carries
+        unique information.  This returns per-token activations so that CKA
+        can be computed at each token position separately and then averaged,
+        matching how neuron clustering defined clusters (across all tokens).
+
+        Returns:
+            ``(B, T, num_layers * intermediate_size)`` in float32.
+        """
+        layers = sorted(self.layer_activations.keys())
+        parts = []
+        for i in layers:
+            act = self.layer_activations[i].float()  # (B, T, D_intermediate)
+            parts.append(act)
+        return torch.cat(parts, dim=-1)  # (B, T, D_total)
+
     def clear(self):
         self.layer_activations.clear()
         for h in self.hooks:
@@ -242,8 +260,10 @@ class ClusterActivationCache:
 class ClusterAlignmentLoss(nn.Module):
     """Importance-weighted CKA over paired neuron clusters.
 
-    For each cluster pair, extracts the relevant neuron subsets from the
-    flattened student/teacher activation vectors and computes CKA.
+    Computes CKA **per token position** and averages across tokens.
+    This respects the fact that MLP/FFN operates independently at each
+    position, so per-token alignment is more informative than aligning
+    a pre-averaged representation.
     """
 
     def __init__(self, eps: float = 1e-8):
@@ -252,48 +272,73 @@ class ClusterAlignmentLoss(nn.Module):
 
     def forward(
         self,
-        student_flat: torch.Tensor,
-        teacher_flat: torch.Tensor,
+        student_acts: torch.Tensor,
+        teacher_acts: torch.Tensor,
         cluster_pairs: List[ClusterPairInfo],
+        attention_mask: Optional[torch.Tensor] = None,
         importance_weighting: bool = True,
     ) -> Tuple[torch.Tensor, Dict]:
         """
         Args:
-            student_flat: ``(B, D_student_total)`` flattened up_proj activations.
-            teacher_flat: ``(B, D_teacher_total)`` same for teacher.
+            student_acts: ``(B, T, D_student_total)`` per-token up_proj activations.
+            teacher_acts: ``(B, T, D_teacher_total)`` same for teacher.
             cluster_pairs: List of :class:`ClusterPairInfo`.
+            attention_mask: ``(B, T)`` binary mask; 1 = real token, 0 = pad.
             importance_weighting: Scale each pair's loss by its importance.
 
         Returns:
-            ``(total_loss, info_dict)`` where info_dict has per-pair CKA scores.
+            ``(total_loss, info_dict)`` where info_dict has per-pair mean CKA.
         """
-        device = student_flat.device
-        losses = []
-        weights = []
+        device = student_acts.device
+        B, T, _ = student_acts.shape
+
+        if attention_mask is not None:
+            valid_mask = attention_mask.bool()  # (B, T)
+        else:
+            valid_mask = torch.ones(B, T, dtype=torch.bool, device=device)
+
+        # Find token positions where ALL examples are non-pad so CKA gets
+        # the full batch at each position.
+        all_valid = valid_mask.all(dim=0)  # (T,)
+        valid_positions = all_valid.nonzero(as_tuple=False).squeeze(-1)
+
+        if valid_positions.numel() == 0:
+            return torch.tensor(0.0, device=device, requires_grad=True), {}
+
+        pair_losses = []
+        pair_weights = []
         cka_scores: Dict[Tuple[int, int, int], float] = {}
 
         for pair in cluster_pairs:
             s_idx = pair.student_neuron_indices.to(device)
             t_idx = pair.teacher_neuron_indices.to(device)
 
-            s_act = student_flat[:, s_idx]  # (B, |C_s|)
-            t_act = teacher_flat[:, t_idx]  # (B, |C_t|)
+            # (B, T, |C_s|) and (B, T, |C_t|)
+            s_cluster = student_acts[:, :, s_idx]
+            t_cluster = teacher_acts[:, :, t_idx]
 
-            if s_act.size(0) < 2:
+            if B < 2:
                 continue
 
-            cka = linear_cka_efficient(s_act, t_act, eps=self.eps)
-            loss = 1.0 - cka
-            losses.append(loss)
-            weights.append(pair.importance if importance_weighting else 1.0)
-            cka_scores[(pair.subclass, pair.student_cluster_idx,
-                         pair.teacher_cluster_idx)] = cka.item()
+            # CKA at each valid token position, then average
+            token_ckas = []
+            for t in valid_positions:
+                s_t = s_cluster[:, t, :]  # (B, |C_s|)
+                t_t = t_cluster[:, t, :]  # (B, |C_t|)
+                cka = linear_cka_efficient(s_t, t_t, eps=self.eps)
+                token_ckas.append(cka)
 
-        if not losses:
+            mean_cka = torch.stack(token_ckas).mean()
+            pair_losses.append(1.0 - mean_cka)
+            pair_weights.append(pair.importance if importance_weighting else 1.0)
+            cka_scores[(pair.subclass, pair.student_cluster_idx,
+                         pair.teacher_cluster_idx)] = mean_cka.item()
+
+        if not pair_losses:
             return torch.tensor(0.0, device=device, requires_grad=True), {}
 
-        losses_t = torch.stack(losses)
-        weights_t = torch.tensor(weights, device=device, dtype=losses_t.dtype)
+        losses_t = torch.stack(pair_losses)
+        weights_t = torch.tensor(pair_weights, device=device, dtype=losses_t.dtype)
         weights_t = weights_t / (weights_t.sum() + 1e-12)
 
         total = (losses_t * weights_t).sum()
@@ -576,28 +621,31 @@ class ClusterDistillationTrainer:
             # Teacher forward (no grad)
             with torch.no_grad():
                 self.teacher(input_ids=input_ids, attention_mask=attention_mask)
-            teacher_flat = self.teacher_cache.get_flattened_last_token(attention_mask)
+            teacher_acts = self.teacher_cache.get_flattened_per_token()
 
             # Student forward
             student_out = self.student(
                 input_ids=input_ids, attention_mask=attention_mask,
                 labels=labels,
             )
-            student_flat = self.student_cache.get_flattened_last_token(attention_mask)
+            student_acts = self.student_cache.get_flattened_per_token()
 
             ce_loss = student_out.loss
 
-            # Cluster CKA alignment
+            # Cluster CKA alignment (per-token CKA, then mean across tokens)
             cluster_loss, cka_scores = self.cluster_loss_fn(
-                student_flat, teacher_flat, self.cluster_pairs,
+                student_acts, teacher_acts, self.cluster_pairs,
+                attention_mask=attention_mask,
                 importance_weighting=self.config.importance_weighting,
             )
 
-            # Optional projection loss
+            # Optional projection loss (uses mean-pooled for simplicity)
             proj_loss = torch.tensor(0.0, device=self.device)
             if self.proj_heads is not None and self.config.lambda_proj > 0:
+                s_pooled = student_acts.mean(dim=1)
+                t_pooled = teacher_acts.mean(dim=1)
                 proj_loss = self.proj_heads(
-                    student_flat, teacher_flat, self.cluster_pairs,
+                    s_pooled, t_pooled, self.cluster_pairs,
                 )
 
             total = (
