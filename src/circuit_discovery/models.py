@@ -123,7 +123,7 @@ class CircuitLoss(nn.Module):
         lambda_kl=None,
         lambda_mask_cossim=None,
     ):
-        """Update loss weights (e.g. from a LossScheduler). Omitted keys are left unchanged."""
+        """Update loss weights. Omitted keys are left unchanged."""
         if lambda_sim is not None:
             self.lambda_sim = lambda_sim
         if lambda_sparsity is not None:

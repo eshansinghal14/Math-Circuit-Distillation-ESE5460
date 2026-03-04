@@ -14,7 +14,6 @@ from .utils import (
     log_epoch_metrics,
 )
 from .models import CircuitDiscoveryModel, CircuitLoss
-from .loss_scheduler import LossScheduler
 
 
 def train_circuit_discovery(
@@ -24,10 +23,10 @@ def train_circuit_discovery(
     lr=1e-3,
     device=None,
     files_per_epoch=5,
-    use_loss_scheduler=True,
-    orthogonality_threshold=0.35,
-    balance_ratio=0.85,
-    loss_scheduler_kwargs=None,
+    lambda_usage=0.15,
+    lambda_mask_cossim=0.25,
+    lambda_kl=0.15,
+    lambda_sparsity=0.20,
 ):
     from utils import load_model_checkpoint
     from gen_activations_dataset import NeuronActivationsGenerator
@@ -51,15 +50,19 @@ def train_circuit_discovery(
     else:
         model, optimizer, metrics_log, start_epoch = load_model_checkpoint(resume_model, k_classes, lr)
 
-    criterion = CircuitLoss().to(device)
-    scheduler_kw = dict(loss_scheduler_kwargs or {})
-    scheduler_kw.setdefault("orthogonality_threshold", orthogonality_threshold)
-    scheduler_kw.setdefault("balance_ratio", balance_ratio)
-    loss_scheduler = (
-        LossScheduler(k_classes=k_classes, **scheduler_kw)
-        if use_loss_scheduler
-        else None
-    )
+    # Sim loss weight = 1 - sum of auxiliary weights so total weights sum to 1
+    lambda_sim = 1.0 - (lambda_usage + lambda_mask_cossim + lambda_kl + lambda_sparsity)
+    if lambda_sim <= 0:
+        raise ValueError(
+            "Auxiliary weights must sum to < 1 (lambda_usage + lambda_mask_cossim + lambda_kl + lambda_sparsity < 1)"
+        )
+    criterion = CircuitLoss(
+        lambda_sim=lambda_sim,
+        lambda_usage=lambda_usage,
+        lambda_mask_cossim=lambda_mask_cossim,
+        lambda_kl=lambda_kl,
+        lambda_sparsity=lambda_sparsity,
+    ).to(device)
 
     act_generator_1b = NeuronActivationsGenerator(llama_1b, batch_size=50)
     act_generator_8b = NeuronActivationsGenerator(llama_8b, batch_size=50)
@@ -72,15 +75,11 @@ def train_circuit_discovery(
     batch_size = act_generator_1b.batch_size
     num_batches = (num_examples + batch_size - 1) // batch_size
 
-    for epoch in range(start_epoch, epochs):
-        # Update loss weights from scheduler (use previous epoch metrics after first epoch)
-        if loss_scheduler is not None:
-            prev_metrics = metrics_log[-1] if metrics_log else {}
-            lambdas = loss_scheduler.get_lambdas(epoch, prev_metrics)
-            criterion.update_lambdas(**lambdas)
-        else:
-            lambdas = {}
+    results_dir = os.path.join(os.path.dirname(__file__), "..", "..", "results", "circuit-discovery")
+    os.makedirs(results_dir, exist_ok=True)
+    metrics_path = os.path.join(results_dir, "metrics.json")
 
+    for epoch in range(start_epoch, epochs):
         # choose files_per_epoch batch indices for this epoch (wrap around)
         start = (epoch * files_per_epoch) % num_batches
         batch_indices = [(start + offset) % num_batches for offset in range(files_per_epoch)]
@@ -161,6 +160,9 @@ def train_circuit_discovery(
             sparsity_1b = float(criterion.binary_entropy(mask_1b.detach()))
             sparsity_8b = float(criterion.binary_entropy(mask_8b.detach()))
 
+            # Number of problems assigned to each class (hard_class_probs is one-hot [B, k])
+            class_counts = hard_class_probs.sum(dim=0).cpu().tolist()
+
         max_class_usage_entropy = math.log(k_classes) if k_classes > 0 else 0.0
         epoch_metrics = {
             "epoch": epoch + 1,
@@ -178,19 +180,24 @@ def train_circuit_discovery(
             "kl_bernoulli_8b": float(kl_bernoulli_8b),
             "mask_cossim_1b_loss": float(mask_cossim_1b_loss),
             "mask_cossim_8b_loss": float(mask_cossim_8b_loss),
-            "loss_phase": loss_scheduler.phase if loss_scheduler is not None else -1,
-            **lambdas,
+            "class_counts": class_counts,
         }
 
         log_epoch_metrics(epoch_metrics)
 
-        metrics_log.append(epoch_metrics)
+        # Overwrite existing epoch entry when resuming from checkpoint, else append
+        if epoch < len(metrics_log):
+            metrics_log[epoch] = epoch_metrics
+        else:
+            metrics_log.append(epoch_metrics)
 
-        results_dir = os.path.join(os.path.dirname(__file__), "..", "..", "results", "circuit-discovery")
-        os.makedirs(results_dir, exist_ok=True)
-        metrics_path = os.path.join(results_dir, "metrics.json")
+        # Write metrics to JSON in real time (exclude class_counts)
+        metrics_for_json = [
+            {k: v for k, v in m.items() if k != "class_counts"}
+            for m in metrics_log
+        ]
         with open(metrics_path, "w") as f:
-            json.dump(metrics_log, f, indent=4)
+            json.dump(metrics_for_json, f, indent=4)
 
         if (epoch + 1) % 500 == 0:
             if os.path.exists("/opt/dlami/nvme"):

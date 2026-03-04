@@ -5,7 +5,6 @@ from .models import (
     CircuitDiscoveryModel,
     CircuitLoss,
 )
-from .loss_scheduler import LossScheduler
 from .utils import parse_equation, _stack_layer_activations
 
 

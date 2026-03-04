@@ -62,11 +62,33 @@ def _stack_layer_activations(batch_activations):
     return torch.cat(tensors, dim=-1)
 
 
+# Pairs of keys to log as "name_1b/8b: val_1b/val_8b"
+_1B_8B_PAIRS = [
+    ("sim_loss_1b", "sim_loss_8b", "sim_loss_1b/8b"),
+    ("frac_activated_1b", "frac_activated_8b", "frac_activated_1b/8b"),
+    ("sparsity_1b", "sparsity_8b", "sparsity_1b/8b"),
+    ("kl_bernoulli_1b", "kl_bernoulli_8b", "kl_bernoulli_1b/8b"),
+    ("mask_cossim_1b_loss", "mask_cossim_8b_loss", "mask_cossim_1b/8b"),
+]
+
+
 def log_epoch_metrics(epoch_metrics):
     parts = []
     skip_keys = set()
     if "max_class_usage_entropy" in epoch_metrics:
         skip_keys.add("max_class_usage_entropy")
+    if "class_counts" in epoch_metrics:
+        skip_keys.add("class_counts")
+    for key_1b, key_8b, label in _1B_8B_PAIRS:
+        if key_1b in epoch_metrics and key_8b in epoch_metrics:
+            v1 = epoch_metrics[key_1b]
+            v2 = epoch_metrics[key_8b]
+            if isinstance(v1, (int, float)) and isinstance(v2, (int, float)):
+                parts.append(f"{label}: {v1:.4f}/{v2:.4f}")
+            else:
+                parts.append(f"{label}: {v1}/{v2}")
+            skip_keys.add(key_1b)
+            skip_keys.add(key_8b)
     for key, value in epoch_metrics.items():
         if key in skip_keys:
             continue
@@ -78,3 +100,9 @@ def log_epoch_metrics(epoch_metrics):
         else:
             parts.append(f"{key}: {value}")
     print(" - ".join(parts))
+    if "class_counts" in epoch_metrics:
+        counts = epoch_metrics["class_counts"]
+        if isinstance(counts, (list, tuple)):
+            print("  class counts: " + " - ".join(str(c) for c in counts))
+        else:
+            print("  class counts:", counts)
