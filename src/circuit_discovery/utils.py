@@ -64,8 +64,16 @@ def _stack_layer_activations(batch_activations):
 
 def log_epoch_metrics(epoch_metrics):
     parts = []
+    skip_keys = set()
+    if "max_class_usage_entropy" in epoch_metrics:
+        skip_keys.add("max_class_usage_entropy")
     for key, value in epoch_metrics.items():
-        if isinstance(value, (int, float)):
+        if key in skip_keys:
+            continue
+        if key == "class_usage_entropy" and "max_class_usage_entropy" in epoch_metrics:
+            max_ent = epoch_metrics["max_class_usage_entropy"]
+            parts.append(f"class_usage_entropy: {value:.4f} (max: {max_ent:.4f})")
+        elif isinstance(value, (int, float)):
             parts.append(f"{key}: {value:.4f}")
         else:
             parts.append(f"{key}: {value}")

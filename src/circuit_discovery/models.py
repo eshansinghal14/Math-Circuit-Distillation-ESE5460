@@ -115,6 +115,26 @@ class CircuitLoss(nn.Module):
         self.lambda_mask_cossim = lambda_mask_cossim
         self.eps = eps
 
+    def update_lambdas(
+        self,
+        lambda_sim=None,
+        lambda_sparsity=None,
+        lambda_usage=None,
+        lambda_kl=None,
+        lambda_mask_cossim=None,
+    ):
+        """Update loss weights (e.g. from a LossScheduler). Omitted keys are left unchanged."""
+        if lambda_sim is not None:
+            self.lambda_sim = lambda_sim
+        if lambda_sparsity is not None:
+            self.lambda_sparsity = lambda_sparsity
+        if lambda_usage is not None:
+            self.lambda_usage = lambda_usage
+        if lambda_kl is not None:
+            self.lambda_kl = lambda_kl
+        if lambda_mask_cossim is not None:
+            self.lambda_mask_cossim = lambda_mask_cossim
+
     def mean_pairwise_mask_cossim(self, masks):
         if masks.dim() != 2:
             return masks.new_tensor(0.0)

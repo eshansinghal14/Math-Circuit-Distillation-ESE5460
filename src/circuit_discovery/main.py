@@ -1,3 +1,4 @@
+import math
 import os
 import json
 import torch
@@ -13,6 +14,7 @@ from .utils import (
     log_epoch_metrics,
 )
 from .models import CircuitDiscoveryModel, CircuitLoss
+from .loss_scheduler import LossScheduler
 
 
 def train_circuit_discovery(
@@ -21,7 +23,11 @@ def train_circuit_discovery(
     resume_model=None,
     lr=1e-3,
     device=None,
-    files_per_epoch=5
+    files_per_epoch=5,
+    use_loss_scheduler=True,
+    orthogonality_threshold=0.35,
+    balance_ratio=0.85,
+    loss_scheduler_kwargs=None,
 ):
     from utils import load_model_checkpoint
     from gen_activations_dataset import NeuronActivationsGenerator
@@ -46,6 +52,14 @@ def train_circuit_discovery(
         model, optimizer, metrics_log, start_epoch = load_model_checkpoint(resume_model, k_classes, lr)
 
     criterion = CircuitLoss().to(device)
+    scheduler_kw = dict(loss_scheduler_kwargs or {})
+    scheduler_kw.setdefault("orthogonality_threshold", orthogonality_threshold)
+    scheduler_kw.setdefault("balance_ratio", balance_ratio)
+    loss_scheduler = (
+        LossScheduler(k_classes=k_classes, **scheduler_kw)
+        if use_loss_scheduler
+        else None
+    )
 
     act_generator_1b = NeuronActivationsGenerator(llama_1b, batch_size=50)
     act_generator_8b = NeuronActivationsGenerator(llama_8b, batch_size=50)
@@ -59,6 +73,14 @@ def train_circuit_discovery(
     num_batches = (num_examples + batch_size - 1) // batch_size
 
     for epoch in range(start_epoch, epochs):
+        # Update loss weights from scheduler (use previous epoch metrics after first epoch)
+        if loss_scheduler is not None:
+            prev_metrics = metrics_log[-1] if metrics_log else {}
+            lambdas = loss_scheduler.get_lambdas(epoch, prev_metrics)
+            criterion.update_lambdas(**lambdas)
+        else:
+            lambdas = {}
+
         # choose files_per_epoch batch indices for this epoch (wrap around)
         start = (epoch * files_per_epoch) % num_batches
         batch_indices = [(start + offset) % num_batches for offset in range(files_per_epoch)]
@@ -139,12 +161,14 @@ def train_circuit_discovery(
             sparsity_1b = float(criterion.binary_entropy(mask_1b.detach()))
             sparsity_8b = float(criterion.binary_entropy(mask_8b.detach()))
 
+        max_class_usage_entropy = math.log(k_classes) if k_classes > 0 else 0.0
         epoch_metrics = {
             "epoch": epoch + 1,
             "loss": float(loss.item()),
             "sim_loss_1b": float(sim_loss_1b),
             "sim_loss_8b": float(sim_loss_8b),
             "class_usage_entropy": float(class_usage_entropy),
+            "max_class_usage_entropy": float(max_class_usage_entropy),
             "frac_activated_1b": float(frac_1b),
             "frac_activated_8b": float(frac_8b),
             "class_entropy": float(class_ent),
@@ -154,6 +178,8 @@ def train_circuit_discovery(
             "kl_bernoulli_8b": float(kl_bernoulli_8b),
             "mask_cossim_1b_loss": float(mask_cossim_1b_loss),
             "mask_cossim_8b_loss": float(mask_cossim_8b_loss),
+            "loss_phase": loss_scheduler.phase if loss_scheduler is not None else -1,
+            **lambdas,
         }
 
         log_epoch_metrics(epoch_metrics)

@@ -648,13 +648,13 @@ class ClusterDistillationTrainer:
                 agg[k] += v
             n += 1
 
-            # if step % 5 == 0:
-            print(
-                f"  step {step:04d} | "
-                f"CE {metrics['ce_loss']:.4f} | "
-                f"Cluster {metrics['cluster_loss']:.4f} | "
-                f"CKA {metrics['mean_cka']:.4f}"
-            )
+            if step % 5 == 0:
+                print(
+                    f"  step {step:04d} | "
+                    f"CE {metrics['ce_loss']:.4f} | "
+                    f"Cluster {metrics['cluster_loss']:.4f} | "
+                    f"CKA {metrics['mean_cka']:.4f}"
+                )
 
         return {k: v / max(n, 1) for k, v in agg.items()}
 
