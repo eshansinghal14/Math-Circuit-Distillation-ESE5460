@@ -10,6 +10,7 @@ HF_TOKEN = getattr(_constants, "HF_TOKEN", "")
 CIRCUIT_DISCOVERY_CKPT_DIR = getattr(_constants, "CIRCUIT_DISCOVERY_CKPT_DIR", "")
 
 from transformers.utils import logging as hf_logging
+from transformers import AutoTokenizer
 
 logged_in = False
 
@@ -126,6 +127,56 @@ def gen_3d_add_dataset(dataset_fname, samples, tokenizer):
     with open(dataset_fname, 'w') as f:
         json.dump(dataset, f, indent=4)
 
+def gen_2d1d_mult_dataset(dataset_fname, samples, tokenizer):
+    all_pairs = [(f'{num1}*{num2}=', num1 * num2) for num1 in range(100) for num2 in range(10)]
+    all_pairs += [(f'{num1}*{num2}=', num1 * num2) for num1 in range(10) for num2 in range(100)]
+
+    if samples is None or samples >= len(all_pairs):
+        selected = all_pairs
+        random.shuffle(selected)
+    else:
+        selected = random.sample(all_pairs, samples)
+
+    dataset = []
+    for prompt, answer in selected:
+        q_str = prompt
+        a_str = str(answer)
+        ids = tokenizer.encode(q_str + a_str, add_special_tokens=False)
+        dataset.append(
+            {
+                "q_str": q_str,
+                "a_str": a_str,
+                "ids": ids,
+            }
+        )
+
+    with open(dataset_fname, 'w') as f:
+        json.dump(dataset, f, indent=4)
+
+def gen_mix_dataset(dataset_fname, files):
+    dataset = []
+    for file in files:
+        with open(file, 'r') as f:
+            dataset.extend(json.load(f))
+    
+    random.shuffle(dataset)
+    
+    with open(dataset_fname, 'w') as f:
+        json.dump(dataset, f, indent=4)
+
+def split_dataset(dataset_fname, test_frac=0.1):
+    with open(dataset_fname, 'r') as f:
+        dataset = json.load(f)
+
+    split = int(len(dataset) * (1 - test_frac))
+    train = dataset[:split]
+    test = dataset[split:]
+    
+    with open(f"{dataset_fname.replace('_all.json', f'_train_{100 - int(test_frac * 100)}.json')}", 'w') as f:
+        json.dump(train, f, indent=4)
+    with open(f"{dataset_fname.replace('_all.json', f'_test_{int(test_frac * 100)}.json')}", 'w') as f:
+        json.dump(test, f, indent=4)
+
 def _safe_model_name(model_name: str) -> str:
     return model_name.replace("/", "_").replace(":", "_")
 
@@ -202,3 +253,9 @@ def _stack_layer_activations(batch_activations):
     layers = sorted(batch_activations.keys())
     tensors = [batch_activations[i] for i in layers]
     return torch.cat(tensors, dim=-1)
+
+if __name__ == "__main__":
+    # tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
+    # gen_2d1d_mult_dataset("datasets/2d1d_mult_all.json", None, tokenizer) 
+    # gen_mix_dataset("datasets/add_mult_all.json", ["datasets/2d_add_all.json", "datasets/2d1d_mult_all.json"])
+    split_dataset("datasets/2d1d_mult_all.json", test_frac=0.2)
