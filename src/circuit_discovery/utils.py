@@ -75,6 +75,9 @@ _1B_8B_PAIRS = [
 def log_epoch_metrics(epoch_metrics):
     parts = []
     skip_keys = set()
+    if "epoch" in epoch_metrics:
+        parts.append(f"epoch: {int(epoch_metrics['epoch'])}")
+        skip_keys.add("epoch")
     if "max_class_usage_entropy" in epoch_metrics:
         skip_keys.add("max_class_usage_entropy")
     if "class_counts" in epoch_metrics:
