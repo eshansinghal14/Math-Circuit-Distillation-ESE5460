@@ -37,6 +37,8 @@ class ProblemClassifier(nn.Module):
 
 
 class NeuronMask(nn.Module):
+    _SIGMOID_CLAMP = 60.0  # keeps sigmoid and its backward numerically stable
+
     def __init__(self, k_classes, activations_dim):
         super().__init__()
 
@@ -45,13 +47,19 @@ class NeuronMask(nn.Module):
         self.class_embedding = nn.Embedding(k_classes, hidden_dim)
         self.output_layer = nn.Linear(hidden_dim, activations_dim)
 
+    def _sigmoid_mask(self, logits, mask_temperature):
+        t = mask_temperature.clamp(min=1e-6)
+        x = logits / t
+        x = torch.nan_to_num(x, nan=0.0, posinf=self._SIGMOID_CLAMP, neginf=-self._SIGMOID_CLAMP)
+        x = x.clamp(min=-self._SIGMOID_CLAMP, max=self._SIGMOID_CLAMP)
+        return torch.sigmoid(x)
+
     def forward(self, class_probs, activations, mask_temperature):
         class_ids = class_probs.argmax(dim=-1)
         hidden = self.class_embedding(class_ids)
         hidden = F.relu(hidden)
         selected_mask = self.output_layer(hidden)
-        t = mask_temperature.clamp(min=1e-6)
-        sigmoid_mask = torch.sigmoid(selected_mask / t)
+        sigmoid_mask = self._sigmoid_mask(selected_mask, mask_temperature)
         sigmoid_mask_expanded = sigmoid_mask.unsqueeze(1)
 
         masked_activations = activations * sigmoid_mask_expanded
@@ -63,8 +71,7 @@ class NeuronMask(nn.Module):
         hidden = self.class_embedding(class_ids)
         hidden = F.relu(hidden)
         masks = self.output_layer(hidden)
-        t = mask_temperature.clamp(min=1e-6)
-        return torch.sigmoid(masks / t)
+        return self._sigmoid_mask(masks, mask_temperature)
 
 
 class CircuitDiscoveryModel(nn.Module):
