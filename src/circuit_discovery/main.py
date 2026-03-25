@@ -28,6 +28,7 @@ def train_circuit_discovery(
     lambda_kl=0.15,
     lambda_sparsity=0.20,
     mask_temperature=1.0,
+    mask_activate_threshold=0.99,
 ):
     from utils import load_model_checkpoint
     from gen_activations_dataset import NeuronActivationsGenerator
@@ -129,8 +130,9 @@ def train_circuit_discovery(
         mask_8b = outputs["mask_8b"]
 
         with torch.no_grad():
-            frac_1b = float((mask_1b > 0.99).float().mean())
-            frac_8b = float((mask_8b > 0.99).float().mean())
+            thr = mask_activate_threshold
+            frac_1b = float((mask_1b > thr).float().mean())
+            frac_8b = float((mask_8b > thr).float().mean())
             class_ent = float(outputs["class_entropy"])
 
         assert torch.isfinite(mask_1b).all(), "mask_1b non-finite"

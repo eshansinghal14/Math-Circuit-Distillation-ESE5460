@@ -62,6 +62,12 @@ def _parse_args(argv=None):
         default=1.0,
         help="Constant mask sigmoid temperature: sigmoid(logits/T); lower = sharper (stored in checkpoint)",
     )
+    parser.add_argument(
+        "--mask-activate-threshold",
+        type=float,
+        default=0.99,
+        help="Mask value above this counts as activated for frac_activated_* metrics (not used in loss)",
+    )
     return parser.parse_args(argv)
 
 
@@ -76,4 +82,5 @@ if __name__ == "__main__":
         lambda_kl=args.lambda_kl,
         lambda_sparsity=args.lambda_sparsity,
         mask_temperature=args.mask_temperature,
+        mask_activate_threshold=args.mask_activate_threshold,
     )
