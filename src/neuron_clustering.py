@@ -297,10 +297,11 @@ if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     threshold = 1e-3
+    T = model.mask_temperature
     if model_name == "meta-llama/Llama-3.2-1B":
-        neuron_masks = model.neuron_masks_1b.class_masks()
+        neuron_masks = model.neuron_masks_1b.class_masks(T)
     else:
-        neuron_masks = model.neuron_masks_8b.class_masks()
+        neuron_masks = model.neuron_masks_8b.class_masks(T)
     neuron_masks = neuron_masks > (1 - threshold)
 
     print("Active neurons ratio:", torch.mean(torch.mean(neuron_masks.float(), dim=1)).item())

@@ -236,8 +236,15 @@ def load_model_checkpoint(checkpoint, k_classes, lr):
 
     checkpoint = torch.load(ckpt_path, map_location=device)
 
-    model = CircuitDiscoveryModel(k_classes=k_classes).to(device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    model = CircuitDiscoveryModel(k_classes=k_classes, mask_temperature=1.0).to(device)
+    incompatible = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+    if incompatible.missing_keys:
+        print(
+            "Warning: checkpoint missing keys (using model defaults):",
+            incompatible.missing_keys,
+        )
+    if incompatible.unexpected_keys:
+        print("Warning: checkpoint unexpected keys ignored:", incompatible.unexpected_keys)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])

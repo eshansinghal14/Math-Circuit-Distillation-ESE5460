@@ -45,28 +45,37 @@ class NeuronMask(nn.Module):
         self.class_embedding = nn.Embedding(k_classes, hidden_dim)
         self.output_layer = nn.Linear(hidden_dim, activations_dim)
 
-    def forward(self, class_probs, activations):
+    def forward(self, class_probs, activations, mask_temperature):
         class_ids = class_probs.argmax(dim=-1)
         hidden = self.class_embedding(class_ids)
         hidden = F.relu(hidden)
         selected_mask = self.output_layer(hidden)
-        sigmoid_mask = torch.sigmoid(selected_mask)
+        t = mask_temperature.clamp(min=1e-6)
+        sigmoid_mask = torch.sigmoid(selected_mask / t)
         sigmoid_mask_expanded = sigmoid_mask.unsqueeze(1)
 
         masked_activations = activations * sigmoid_mask_expanded
         return masked_activations, sigmoid_mask
 
-    def class_masks(self):
+    def class_masks(self, mask_temperature):
         device = self.class_embedding.weight.device
         class_ids = torch.arange(self.k_classes, device=device)
         hidden = self.class_embedding(class_ids)
         hidden = F.relu(hidden)
         masks = self.output_layer(hidden)
-        return torch.sigmoid(masks)
+        t = mask_temperature.clamp(min=1e-6)
+        return torch.sigmoid(masks / t)
 
 
 class CircuitDiscoveryModel(nn.Module):
-    def __init__(self, k_classes, problem_embedding_dim=256, activation_embedding_dim=1024, tau=0.5):
+    def __init__(
+        self,
+        k_classes,
+        problem_embedding_dim=256,
+        activation_embedding_dim=1024,
+        tau=0.5,
+        mask_temperature=1.0,
+    ):
         super().__init__()
 
         self.tau = tau
@@ -78,6 +87,8 @@ class CircuitDiscoveryModel(nn.Module):
 
         self.neuron_masks_1b = NeuronMask(k_classes, num_activations_1b)
         self.neuron_masks_8b = NeuronMask(k_classes, num_activations_8b)
+        # sigmoid(logits / T); lower T sharpens masks. Constant for the lifetime of this model (saved in ckpt).
+        self.register_buffer("mask_temperature", torch.tensor(float(mask_temperature)))
 
     def classify_problem(self, op1, op2, res):
         problem_encoding = self.problem_encoder(op1, op2, res)
@@ -88,8 +99,9 @@ class CircuitDiscoveryModel(nn.Module):
         logits = self.classify_problem(op1, op2, res)
         hard_class_probs = F.gumbel_softmax(logits, tau=self.tau, hard=True, dim=-1)
 
-        masked_activations_1b, mask_1b = self.neuron_masks_1b(hard_class_probs, activations_1b)
-        masked_activations_8b, mask_8b = self.neuron_masks_8b(hard_class_probs, activations_8b)
+        T = self.mask_temperature
+        masked_activations_1b, mask_1b = self.neuron_masks_1b(hard_class_probs, activations_1b, T)
+        masked_activations_8b, mask_8b = self.neuron_masks_8b(hard_class_probs, activations_8b, T)
 
         with torch.no_grad():
             soft_class_probs = F.gumbel_softmax(logits, tau=self.tau, hard=False, dim=-1)
@@ -198,19 +210,22 @@ class CircuitLoss(nn.Module):
         class_usage_entropy = -(class_freq * class_freq.log()).sum()
         return class_usage_entropy
 
-    def bernoulli_kl_to_prior(self, p, pi=0.10, eps=1e-8):
-        p = torch.clamp(p, eps, 1.0 - eps)
-        q = p.mean()
+    def bernoulli_kl_to_prior(self, class_masks, pi=0.10, eps=1e-8):
+        """KL(Bernoulli(q_k) || Bernoulli(pi)) averaged over classes, with q_k = row mean of class k."""
+        p = torch.clamp(class_masks, eps, 1.0 - eps)
+        if p.dim() != 2:
+            raise ValueError(f"Expected class_masks [K, D], got shape {tuple(p.shape)}")
+        q = p.mean(dim=-1)
         q = torch.clamp(q, eps, 1.0 - eps)
 
-        pi = torch.clamp(torch.tensor(pi, device=p.device, dtype=p.dtype), eps, 1.0 - eps)
-        kl = q * (q / pi).log() + (1 - q) * ((1 - q) / (1 - pi)).log()
-        return kl
+        pi_t = torch.clamp(torch.tensor(pi, device=p.device, dtype=p.dtype), eps, 1.0 - eps)
+        kl = q * (q / pi_t).log() + (1 - q) * ((1 - q) / (1 - pi_t)).log()
+        return kl.mean()
 
     def combined_loss(self, hard_class_probs, masked_activations, mask, class_masks):
         sim_loss = - self.classwise_pairwise_cossim(masked_activations, hard_class_probs)
         mask_cossim = self.mean_pairwise_mask_cossim(class_masks)
-        kl_bernoulli_loss = self.bernoulli_kl_to_prior(mask)
+        kl_bernoulli_loss = self.bernoulli_kl_to_prior(class_masks)
         entropy_loss = self.binary_entropy(mask)
 
         total_loss = (

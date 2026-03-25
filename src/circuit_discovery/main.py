@@ -27,6 +27,7 @@ def train_circuit_discovery(
     lambda_mask_cossim=0.25,
     lambda_kl=0.15,
     lambda_sparsity=0.20,
+    mask_temperature=1.0,
 ):
     from utils import load_model_checkpoint
     from gen_activations_dataset import NeuronActivationsGenerator
@@ -115,6 +116,7 @@ def train_circuit_discovery(
 
         op1, op2, res = parse_equation(prompts, device=device)
 
+        T = model.mask_temperature
         outputs = model(op1, op2, res, stacked_activations["1b"], stacked_activations["8b"])
 
         hard_class_probs = outputs["hard_class_probs"]
@@ -126,6 +128,10 @@ def train_circuit_discovery(
         with torch.no_grad():
             frac_1b = float((mask_1b > (1 - 1e-3)).float().mean())
             frac_8b = float((mask_8b > (1 - 1e-3)).float().mean())
+            cm1 = model.neuron_masks_1b.class_masks(T)
+            cm8 = model.neuron_masks_8b.class_masks(T)
+            mean_class_mask_1b = float(cm1.mean())
+            mean_class_mask_8b = float(cm8.mean())
             class_ent = float(outputs["class_entropy"])
 
         assert torch.isfinite(mask_1b).all(), "mask_1b non-finite"
@@ -140,8 +146,8 @@ def train_circuit_discovery(
             masked_8b,
             mask_1b,
             mask_8b,
-            model.neuron_masks_1b.class_masks(),
-            model.neuron_masks_8b.class_masks(),
+            model.neuron_masks_1b.class_masks(T),
+            model.neuron_masks_8b.class_masks(T),
         )
         loss = loss_dict["loss"]
         loss.backward()
@@ -167,12 +173,15 @@ def train_circuit_discovery(
         epoch_metrics = {
             "epoch": epoch + 1,
             "loss": float(loss.item()),
+            "mask_temperature": float(model.mask_temperature.item()),
             "sim_loss_1b": float(sim_loss_1b),
             "sim_loss_8b": float(sim_loss_8b),
             "class_usage_entropy": float(class_usage_entropy),
             "max_class_usage_entropy": float(max_class_usage_entropy),
             "frac_activated_1b": float(frac_1b),
             "frac_activated_8b": float(frac_8b),
+            "mean_class_mask_1b": float(mean_class_mask_1b),
+            "mean_class_mask_8b": float(mean_class_mask_8b),
             "class_entropy": float(class_ent),
             "sparsity_1b": float(sparsity_1b),
             "sparsity_8b": float(sparsity_8b),

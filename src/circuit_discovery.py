@@ -56,6 +56,12 @@ def _parse_args(argv=None):
         default=0.20,
         help="Weight for mask sparsity (auxiliary)",
     )
+    parser.add_argument(
+        "--mask-temperature",
+        type=float,
+        default=1.0,
+        help="Constant mask sigmoid temperature: sigmoid(logits/T); lower = sharper (stored in checkpoint)",
+    )
     return parser.parse_args(argv)
 
 
@@ -69,4 +75,5 @@ if __name__ == "__main__":
         lambda_mask_cossim=args.lambda_mask_cossim,
         lambda_kl=args.lambda_kl,
         lambda_sparsity=args.lambda_sparsity,
+        mask_temperature=args.mask_temperature,
     )
