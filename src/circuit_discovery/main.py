@@ -44,12 +44,15 @@ def train_circuit_discovery(
     tokenizer = AutoTokenizer.from_pretrained(llama_1b)
 
     if resume_model is None:
-        model = CircuitDiscoveryModel(k_classes=k_classes).to(device)
+        model = CircuitDiscoveryModel(k_classes=k_classes, mask_temperature=mask_temperature).to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=lr)
         metrics_log = []
         start_epoch = 0
     else:
         model, optimizer, metrics_log, start_epoch = load_model_checkpoint(resume_model, k_classes, lr)
+
+    # Training hyperparameter (overrides value from checkpoint on resume)
+    model.mask_temperature.fill_(float(mask_temperature))
 
     # Sim loss weight = 1 - sum of auxiliary weights so total weights sum to 1
     lambda_sim = 1.0 - (lambda_usage + lambda_mask_cossim + lambda_kl + lambda_sparsity)
@@ -128,10 +131,6 @@ def train_circuit_discovery(
         with torch.no_grad():
             frac_1b = float((mask_1b > (1 - 1e-3)).float().mean())
             frac_8b = float((mask_8b > (1 - 1e-3)).float().mean())
-            cm1 = model.neuron_masks_1b.class_masks(T)
-            cm8 = model.neuron_masks_8b.class_masks(T)
-            mean_class_mask_1b = float(cm1.mean())
-            mean_class_mask_8b = float(cm8.mean())
             class_ent = float(outputs["class_entropy"])
 
         assert torch.isfinite(mask_1b).all(), "mask_1b non-finite"
@@ -173,15 +172,12 @@ def train_circuit_discovery(
         epoch_metrics = {
             "epoch": epoch + 1,
             "loss": float(loss.item()),
-            "mask_temperature": float(model.mask_temperature.item()),
             "sim_loss_1b": float(sim_loss_1b),
             "sim_loss_8b": float(sim_loss_8b),
             "class_usage_entropy": float(class_usage_entropy),
             "max_class_usage_entropy": float(max_class_usage_entropy),
             "frac_activated_1b": float(frac_1b),
             "frac_activated_8b": float(frac_8b),
-            "mean_class_mask_1b": float(mean_class_mask_1b),
-            "mean_class_mask_8b": float(mean_class_mask_8b),
             "class_entropy": float(class_ent),
             "sparsity_1b": float(sparsity_1b),
             "sparsity_8b": float(sparsity_8b),

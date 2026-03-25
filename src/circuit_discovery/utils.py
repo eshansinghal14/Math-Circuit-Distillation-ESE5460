@@ -66,7 +66,6 @@ def _stack_layer_activations(batch_activations):
 _1B_8B_PAIRS = [
     ("sim_loss_1b", "sim_loss_8b", "sim_loss_1b/8b"),
     ("frac_activated_1b", "frac_activated_8b", "frac_activated_1b/8b"),
-    ("mean_class_mask_1b", "mean_class_mask_8b", "mean_class_mask_1b/8b"),
     ("sparsity_1b", "sparsity_8b", "sparsity_1b/8b"),
     ("kl_bernoulli_1b", "kl_bernoulli_8b", "kl_bernoulli_1b/8b"),
     ("mask_cossim_1b_loss", "mask_cossim_8b_loss", "mask_cossim_1b/8b"),
