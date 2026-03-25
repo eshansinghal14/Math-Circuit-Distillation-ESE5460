@@ -129,8 +129,8 @@ def train_circuit_discovery(
         mask_8b = outputs["mask_8b"]
 
         with torch.no_grad():
-            frac_1b = float((mask_1b > (1 - 1e-3)).float().mean())
-            frac_8b = float((mask_8b > (1 - 1e-3)).float().mean())
+            frac_1b = float((mask_1b > 0.99).float().mean())
+            frac_8b = float((mask_8b > 0.99).float().mean())
             class_ent = float(outputs["class_entropy"])
 
         assert torch.isfinite(mask_1b).all(), "mask_1b non-finite"
