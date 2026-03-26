@@ -52,7 +52,8 @@ class NeuronMask(nn.Module):
         x = logits / t
         x = torch.nan_to_num(x, nan=0.0, posinf=self._SIGMOID_CLAMP, neginf=-self._SIGMOID_CLAMP)
         x = x.clamp(min=-self._SIGMOID_CLAMP, max=self._SIGMOID_CLAMP)
-        return torch.sigmoid(x)
+        out = torch.sigmoid(x)
+        return torch.nan_to_num(out, nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
 
     def forward(self, class_probs, activations, mask_temperature):
         class_ids = class_probs.argmax(dim=-1)
@@ -207,9 +208,10 @@ class CircuitLoss(nn.Module):
         return torch.stack(per_class_sims).mean()
 
     def binary_entropy(self, p):
+        p = torch.nan_to_num(p, nan=0.5, posinf=1.0, neginf=0.0)
         p = torch.clamp(p, self.eps, 1.0 - self.eps)
         entropy = -(p * torch.log(p) + (1 - p) * torch.log(1 - p))
-        return entropy.mean()
+        return torch.nan_to_num(entropy, nan=0.0, posinf=0.0, neginf=0.0).mean()
 
     def class_usage_entropy(self, hard_class_probs):
         class_freq = hard_class_probs.float().mean(dim=0)

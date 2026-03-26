@@ -152,10 +152,20 @@ def train_circuit_discovery(
             model.neuron_masks_8b.class_masks(T),
         )
         loss = loss_dict["loss"]
-        loss.backward()
-        if grad_clip_norm is not None and grad_clip_norm > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
-        optimizer.step()
+        loss_finite = torch.isfinite(loss).all().item()
+        if loss_finite:
+            loss.backward()
+            grad_finite = all(
+                p.grad is None or torch.isfinite(p.grad).all() for p in model.parameters()
+            )
+            if grad_finite and grad_clip_norm is not None and grad_clip_norm > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
+            if grad_finite:
+                optimizer.step()
+            else:
+                optimizer.zero_grad(set_to_none=True)
+        else:
+            optimizer.zero_grad(set_to_none=True)
 
         with torch.no_grad():
             class_usage_entropy = float(loss_dict["class_usage_entropy"])
