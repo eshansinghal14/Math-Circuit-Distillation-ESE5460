@@ -68,6 +68,12 @@ def _parse_args(argv=None):
         default=0.99,
         help="Mask value above this counts as activated for frac_activated_* metrics (not used in loss)",
     )
+    parser.add_argument(
+        "--grad-clip-norm",
+        type=float,
+        default=1.0,
+        help="Max L2 norm for global gradient clipping (0 disables)",
+    )
     return parser.parse_args(argv)
 
 
@@ -83,4 +89,5 @@ if __name__ == "__main__":
         lambda_sparsity=args.lambda_sparsity,
         mask_temperature=args.mask_temperature,
         mask_activate_threshold=args.mask_activate_threshold,
+        grad_clip_norm=args.grad_clip_norm,
     )

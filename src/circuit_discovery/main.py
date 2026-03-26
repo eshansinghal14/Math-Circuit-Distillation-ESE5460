@@ -29,6 +29,7 @@ def train_circuit_discovery(
     lambda_sparsity=0.20,
     mask_temperature=1.0,
     mask_activate_threshold=0.99,
+    grad_clip_norm=1.0,
 ):
     from utils import load_model_checkpoint
     from gen_activations_dataset import NeuronActivationsGenerator
@@ -152,6 +153,8 @@ def train_circuit_discovery(
         )
         loss = loss_dict["loss"]
         loss.backward()
+        if grad_clip_norm is not None and grad_clip_norm > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
         optimizer.step()
 
         with torch.no_grad():
