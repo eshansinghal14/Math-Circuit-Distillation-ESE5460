@@ -32,6 +32,24 @@ def _parse_args(argv):
         required=True,
         help="Circuit discovery checkpoint to load",
     )
+    parser.add_argument(
+        "--k-classes",
+        type=int,
+        default=8,
+        help="Number of circuit classes (must match the trained checkpoint)",
+    )
+    parser.add_argument(
+        "--mask-temperature",
+        type=float,
+        default=None,
+        help="Override mask sigmoid temperature T; omit to use value stored in checkpoint",
+    )
+    parser.add_argument(
+        "--mask-activate-thresh",
+        type=float,
+        default=0.99,
+        help="Mask probability above this counts as neuron active (hard threshold)",
+    )
     return parser.parse_args(argv)
 
 
@@ -288,15 +306,19 @@ if __name__ == "__main__":
     args = _parse_args(sys.argv[1:])
 
     model_name = args.model_name
-    model, _, _, _ = load_model_checkpoint(args.checkpoint_path, k_classes=8, lr=1e-3)
+    k_classes = args.k_classes
+    model, _, _, _ = load_model_checkpoint(args.checkpoint_path, k_classes=k_classes, lr=1e-3)
     model.eval()
+
+    if args.mask_temperature is not None:
+        model.mask_temperature.fill_(float(args.mask_temperature))
 
     results_dir = os.path.join("results", "neuron-clustering", model_name)
     os.makedirs(results_dir, exist_ok=True)
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    mask_on_threshold = 0.99
+    mask_on_threshold = args.mask_activate_thresh
     T = model.mask_temperature
     if model_name == "meta-llama/Llama-3.2-1B":
         neuron_masks = model.neuron_masks_1b.class_masks(T)
@@ -305,13 +327,13 @@ if __name__ == "__main__":
     neuron_masks = neuron_masks > mask_on_threshold
 
     print("Active neurons ratio:", torch.mean(torch.mean(neuron_masks.float(), dim=1)).item())
-    for i in range(8):
+    for i in range(k_classes):
         print(neuron_masks[i].count_nonzero().item())
 
     k_gs_testing = {}
     plots_dir = os.path.join(results_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
-    for subclass in range(8):
+    for subclass in range(k_classes):
         if neuron_masks[subclass].any().item():
             print(f"Processing subclass {subclass}")
             k_gs_testing[subclass] = {}
