@@ -127,6 +127,7 @@ def train_circuit_discovery(
         T = model.mask_temperature
         outputs = model(op1, op2, res, stacked_activations["1b"], stacked_activations["8b"])
 
+        logits = outputs["logits"]
         hard_class_probs = outputs["hard_class_probs"]
         masked_1b = outputs["masked_activations_1b"]
         masked_8b = outputs["masked_activations_8b"]
@@ -146,6 +147,7 @@ def train_circuit_discovery(
         assert torch.isfinite(hard_class_probs).all(), "hard_class_probs non-finite"
 
         loss_dict = criterion(
+            logits,
             hard_class_probs,
             masked_1b,
             masked_8b,
@@ -183,8 +185,9 @@ def train_circuit_discovery(
             sparsity_1b = float(criterion.binary_entropy(mask_1b.detach()))
             sparsity_8b = float(criterion.binary_entropy(mask_8b.detach()))
 
-            # Number of problems assigned to each class (hard_class_probs is one-hot [B, k])
-            class_counts = hard_class_probs.sum(dim=0).cpu().tolist()
+            # Number of problems assigned to each class using argmax over logits
+            preds = logits.argmax(dim=-1)
+            class_counts = torch.bincount(preds, minlength=k_classes).cpu().tolist()
 
         max_class_usage_entropy = math.log(k_classes) if k_classes > 0 else 0.0
         epoch_metrics = {

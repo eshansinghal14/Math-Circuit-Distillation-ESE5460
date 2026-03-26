@@ -116,6 +116,7 @@ class CircuitDiscoveryModel(nn.Module):
             class_entropy = -(soft_class_probs * torch.log(soft_class_probs)).sum(dim=-1).mean()
 
         return {
+            "logits": logits,
             "hard_class_probs": hard_class_probs,
             "masked_activations_1b": masked_activations_1b,
             "masked_activations_8b": masked_activations_8b,
@@ -219,6 +220,12 @@ class CircuitLoss(nn.Module):
         class_usage_entropy = -(class_freq * class_freq.log()).sum()
         return class_usage_entropy
 
+    def soft_usage_entropy_from_logits(self, logits):
+        probs = F.softmax(logits, dim=-1)
+        class_freq = probs.mean(dim=0)
+        class_freq = torch.clamp(class_freq, self.eps, 1.0)
+        return -(class_freq * class_freq.log()).sum()
+
     def bernoulli_kl_to_prior(self, class_masks, pi=0.10, eps=1e-8):
         """KL(Bernoulli(q_k) || Bernoulli(pi)) averaged over classes, with q_k = row mean of class k."""
         p = torch.clamp(class_masks, eps, 1.0 - eps)
@@ -245,13 +252,13 @@ class CircuitLoss(nn.Module):
         )
         return total_loss, sim_loss, kl_bernoulli_loss, entropy_loss, mask_cossim
 
-    def forward(self, hard_class_probs, masked_activations_1b, masked_activations_8b, mask_1b, mask_8b, class_masks_1b, class_masks_8b):
+    def forward(self, logits, hard_class_probs, masked_activations_1b, masked_activations_8b, mask_1b, mask_8b, class_masks_1b, class_masks_8b):
         assert torch.isfinite(class_masks_1b).all(), "class_masks_1b non-finite"
         loss_1b, sim_loss_1b, kl_bernoulli_loss_1b, entropy_loss_1b, mask_cossim_1b = self.combined_loss(hard_class_probs, masked_activations_1b, mask_1b, class_masks_1b)
         loss_8b, sim_loss_8b, kl_bernoulli_loss_8b, entropy_loss_8b, mask_cossim_8b = self.combined_loss(hard_class_probs, masked_activations_8b, mask_8b, class_masks_8b)
         total_loss = loss_1b + loss_8b
 
-        class_usage_entropy = self.class_usage_entropy(hard_class_probs)
+        class_usage_entropy = self.soft_usage_entropy_from_logits(logits)
         total_loss = total_loss - self.lambda_usage * class_usage_entropy
 
         return {
