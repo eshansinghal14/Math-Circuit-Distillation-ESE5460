@@ -110,6 +110,9 @@ def train_circuit_discovery(
         ids = {key: batch["ids"] for key, batch in merged.items()}
         ref_ids = ids["1b"]
         if not torch.equal(ref_ids, ids["8b"]):
+            del merged
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             continue
 
         prompts = tokenizer.batch_decode(ref_ids, skip_special_tokens=True)
@@ -152,18 +155,18 @@ def train_circuit_discovery(
             model.neuron_masks_8b.class_masks(T),
         )
         loss = loss_dict["loss"]
+        # Always backward so the autograd graph is freed this iteration. Skipping backward
+        # when loss is NaN leaves huge intermediates (1b/8b activations path) alive until the
+        # loop body ends and can spike peak VRAM when the next epoch allocates.
+        loss.backward()
+        grad_finite = all(
+            p.grad is None or torch.isfinite(p.grad).all() for p in model.parameters()
+        )
         loss_finite = torch.isfinite(loss).all().item()
-        if loss_finite:
-            loss.backward()
-            grad_finite = all(
-                p.grad is None or torch.isfinite(p.grad).all() for p in model.parameters()
-            )
-            if grad_finite and grad_clip_norm is not None and grad_clip_norm > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
-            if grad_finite:
-                optimizer.step()
-            else:
-                optimizer.zero_grad(set_to_none=True)
+        if grad_finite and grad_clip_norm is not None and grad_clip_norm > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
+        if loss_finite and grad_finite:
+            optimizer.step()
         else:
             optimizer.zero_grad(set_to_none=True)
 
@@ -239,3 +242,8 @@ def train_circuit_discovery(
 
             # Store checkpoints locally only (do not upload to S3)
             print(f"Saved checkpoint to {ckpt_path}")
+
+        del merged, stacked_activations, outputs, hard_class_probs
+        del masked_1b, masked_8b, mask_1b, mask_8b, loss_dict, loss
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
