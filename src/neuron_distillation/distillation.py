@@ -15,9 +15,9 @@ full outputs, this module:
   4. The total loss is:  L = L_CE + lambda * L_cluster_align
 
 Pipeline prerequisites (run before this module):
-  - Neuron clustering  (neuron_clustering.py)
-  - Cluster ablation   (neuron_ablation.py)
-  - Cluster pairing    (cluster_pairing.py)
+  - Neuron clustering  (clustering.py)
+  - Cluster ablation   (ablation.py)
+  - Cluster pairing    (pairing.py)
 """
 
 import json
@@ -36,7 +36,7 @@ from torch.optim import AdamW
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from cka_loss import linear_cka_efficient
-from cluster_pairing import (
+from neuron_distillation.pairing import (
     ClusterMapping,
     _load_single_ablation_performance,
     create_cluster_mapping,

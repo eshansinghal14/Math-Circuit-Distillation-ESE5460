@@ -3,7 +3,7 @@
 For each subclass discovered by the circuit model, loads k-means neuron
 clusters, ablates each cluster independently, and records the resulting
 accuracy drop.  The output ``ablation_performance.json`` is consumed by
-``cluster_pairing.py`` to pair student/teacher clusters by importance.
+``pairing.py`` to pair student/teacher clusters by importance.
 
 Can be used as a library (``classify_problems``, ``ablation``,
 ``apply_ablation``) or as a CLI script.
@@ -27,7 +27,7 @@ from utils import (
 from circuit_discovery.utils import parse_equation
 
 DEFAULT_CLASSIFIED_PROBLEMS_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "results", "circuit-discovery", "classified_problems.json"
+    os.path.dirname(__file__), "..", "..", "results", "circuit-discovery", "classified_problems.json"
 )
 
 
@@ -53,7 +53,7 @@ def classify_problems(
     device = next(circuit_model.parameters()).device
 
     if dataset_path is None:
-        dataset_path = os.path.join(os.path.dirname(__file__), "..", "datasets", "2d_add_all.json")
+        dataset_path = os.path.join(os.path.dirname(__file__), "..", "..", "datasets", "2d_add_all.json")
 
     with open(dataset_path, "r") as f:
         dataset = json.load(f)
@@ -124,11 +124,11 @@ def ablation(
         class_clusters = [6] * 8
 
     if results_base_dir is None:
-        results_base_dir = os.path.join(os.path.dirname(__file__), "..", "results", "circuit-discovery", model_name)
+        results_base_dir = os.path.join(os.path.dirname(__file__), "..", "..", "results", "circuit-discovery", model_name)
     os.makedirs(results_base_dir, exist_ok=True)
 
     if clusters_base_dir is None:
-        clusters_base_dir = os.path.join(os.path.dirname(__file__), "..", "results", "neuron-clustering", model_name)
+        clusters_base_dir = os.path.join(os.path.dirname(__file__), "..", "..", "results", "neuron-clustering", model_name)
 
     out_path = os.path.join(results_base_dir, "ablation_performance.json")
     buffer_results_path = os.path.join(results_base_dir, "ablation_results_buffer.json")

@@ -32,7 +32,7 @@ def train_circuit_discovery(
     grad_clip_norm=1.0,
 ):
     from utils import load_model_checkpoint
-    from gen_activations_dataset import NeuronActivationsGenerator
+    from neuron_distillation.activations import NeuronActivationsGenerator
 
     def _generate_and_merge_batches(act_generator, batch_indices):
         batches = []

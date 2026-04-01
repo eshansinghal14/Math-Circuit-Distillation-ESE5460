@@ -8,13 +8,9 @@ import torch.nn.functional as F
 from transformers import AutoTokenizer
 import matplotlib.pyplot as plt
 
-from utils import (
-
-    load_model_checkpoint,
-    _stack_layer_activations,
-)
+from utils import load_model_checkpoint, _stack_layer_activations
 from circuit_discovery.utils import parse_equation
-from gen_activations_dataset import NeuronActivationsGenerator
+from neuron_distillation.activations import NeuronActivationsGenerator
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 

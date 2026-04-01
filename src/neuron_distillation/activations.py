@@ -1,4 +1,5 @@
 import json
+import os
 import torch
 from utils import load_model
 
@@ -10,7 +11,8 @@ class NeuronActivationsGenerator:
         self.model_name = model_name
         self.batch_size = batch_size
 
-        with open('datasets/2d_add_all.json', 'r') as f:
+        dataset_path = os.path.join(os.path.dirname(__file__), '..', '..', 'datasets', '2d_add_all.json')
+        with open(dataset_path, 'r') as f:
             dataset = json.load(f)
 
         ids = []

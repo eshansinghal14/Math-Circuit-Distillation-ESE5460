@@ -1,21 +1,24 @@
-"""CLI entry-point for the full neuron-cluster distillation pipeline.
+"""Single entry-point for the neuron-cluster distillation pipeline.
 
-Steps executed:
-  1. Load ablation results for student and teacher.
-  2. Create cluster pairings (via cluster_pairing).
-  3. Load neuron indices from k-means cluster files.
-  4. Run distillation training (ClusterDistillationTrainer).
+After Eshan runs clustering and saves results to Google Drive, you:
+  1. Set the paths at the top of this file (or pass via CLI).
+  2. Run:  python -m neuron_distillation.run
 
-Usage:
-  python run_cluster_distillation.py \
+That's it. The script handles ablation, pairing, and distillation.
+
+Usage (from src/):
+  python -m neuron_distillation.run \
+      --clustering-dir "/content/drive/MyDrive/Math Circuit Distillation (ESE 5460)/neuron-clustering" \
+      --checkpoint "/content/drive/MyDrive/Math Circuit Distillation (ESE 5460)/circuit discovery model /epoch_4000.pt"
+
+  Or with all options:
+  python -m neuron_distillation.run \
+      --clustering-dir <path> \
+      --checkpoint <path> \
       --student-model "meta-llama/Llama-3.2-1B" \
       --teacher-model "meta-llama/Meta-Llama-3-8B" \
-      --student-ablation  ../results/circuit-discovery/meta-llama/Llama-3.2-1B/ablation_performance.json \
-      --teacher-ablation  ../results/circuit-discovery/meta-llama/Meta-Llama-3-8B/ablation_performance.json \
-      --student-clusters  ../results/neuron-clustering/meta-llama/Llama-3.2-1B/clusters \
-      --teacher-clusters  ../results/neuron-clustering/meta-llama/Meta-Llama-3-8B/clusters \
-      --dataset           ../datasets/2d_add_all.json \
-      --k 7 --epochs 50 --batch-size 8 --lr 1e-4 --lambda-cluster 0.01
+      --k 7 --epochs 50 --batch-size 8 --lr 1e-4 --lambda-cluster 0.01 \
+      --save-dir <path>
 """
 
 import argparse
@@ -26,18 +29,20 @@ import sys
 
 import torch
 
-from cluster_pairing import (
+from neuron_distillation.ablation import classify_problems, ablation
+from neuron_distillation.pairing import (
     _load_single_ablation_performance,
     create_cluster_mapping,
     analyze_mapping,
     save_mapping,
 )
-from cluster_distillation import (
+from neuron_distillation.distillation import (
     ClusterDistillationConfig,
     ClusterDistillationTrainer,
     ClusterPairInfo,
     eval_accuracy,
 )
+from utils import load_model, load_model_checkpoint
 
 
 def build_train_test_split(dataset_path: str, test_frac: float = 0.1, seed: int = 42):
@@ -53,6 +58,48 @@ def build_train_test_split(dataset_path: str, test_frac: float = 0.1, seed: int 
     train = dict(pairs[:split])
     test = dict(pairs[split:])
     return train, test
+
+
+def run_ablation_if_needed(
+    model_name: str,
+    checkpoint_path: str,
+    clusters_dir: str,
+    k: int,
+    k_classes: int,
+    results_dir: str,
+):
+    """Run ablation for a model, or skip if results already exist."""
+    ablation_path = os.path.join(results_dir, "ablation_performance.json")
+
+    if os.path.exists(ablation_path):
+        print(f"  Found existing ablation results: {ablation_path}")
+        return ablation_path
+
+    print(f"  Running ablation for {model_name}...")
+
+    _, tokenizer = load_model(model_name)
+
+    circuit_model, _, _, _ = load_model_checkpoint(
+        checkpoint_path, k_classes=k_classes, lr=1e-3,
+    )
+    circuit_model.eval()
+
+    class_to_problems = classify_problems(circuit_model, tokenizer)
+
+    del circuit_model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    class_clusters = [k] * k_classes
+    ablation(
+        model_name,
+        tokenizer,
+        class_to_problems,
+        class_clusters=class_clusters,
+        results_base_dir=results_dir,
+        clusters_base_dir=clusters_dir,
+    )
+    return ablation_path
 
 
 def build_cluster_pairs(
@@ -73,9 +120,9 @@ def build_cluster_pairs(
     )
 
     stats = analyze_mapping(mappings)
-    print("\nCluster mapping statistics:")
+    print("\n  Cluster mapping statistics:")
     for key, val in stats.items():
-        print(f"  {key}: {val}")
+        print(f"    {key}: {val}")
 
     pairs = []
     for m in mappings:
@@ -88,10 +135,10 @@ def build_cluster_pairs(
         )
 
         if not os.path.exists(s_path):
-            print(f"  [skip] student cluster file missing: {s_path}")
+            print(f"    [skip] student cluster file missing: {s_path}")
             continue
         if not os.path.exists(t_path):
-            print(f"  [skip] teacher cluster file missing: {t_path}")
+            print(f"    [skip] teacher cluster file missing: {t_path}")
             continue
 
         s_ckpt = torch.load(s_path, map_location="cpu")
@@ -104,8 +151,6 @@ def build_cluster_pairs(
         t_key = m.teacher_cluster_idx
 
         if s_key not in s_c2i or t_key not in t_c2i:
-            print(f"  [skip] subclass {sc}: student cluster {s_key} or "
-                  f"teacher cluster {t_key} not in file")
             continue
 
         s_idx = s_c2i[s_key]
@@ -128,35 +173,45 @@ def build_cluster_pairs(
         ))
 
     pairs.sort(key=lambda p: p.importance, reverse=True)
-    print(f"\nBuilt {len(pairs)} cluster pairs across "
+    print(f"\n  Built {len(pairs)} cluster pairs across "
           f"{len(set(p.subclass for p in pairs))} subclasses")
     return pairs, mappings
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Neuron-cluster circuit distillation"
+        description="Neuron-cluster circuit distillation (end-to-end)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Example:
+  python -m neuron_distillation.run \\
+      --clustering-dir /content/drive/MyDrive/.../neuron-clustering \\
+      --checkpoint /content/drive/MyDrive/.../epoch_4000.pt
+""",
     )
+
+    # === The two paths you need to change ===
+    parser.add_argument(
+        "--clustering-dir", type=str, required=True,
+        help="Root dir with <model-name>/clusters/ subfolders from Eshan's clustering run",
+    )
+    parser.add_argument(
+        "--checkpoint", type=str, required=True,
+        help="Path to circuit-discovery model checkpoint (.pt)",
+    )
+
+    # === Usually don't need to change these ===
     parser.add_argument("--student-model", type=str,
                         default="meta-llama/Llama-3.2-1B")
     parser.add_argument("--teacher-model", type=str,
                         default="meta-llama/Meta-Llama-3-8B")
-    parser.add_argument("--student-ablation", type=str, required=True,
-                        help="Path to student ablation_performance.json")
-    parser.add_argument("--teacher-ablation", type=str, required=True,
-                        help="Path to teacher ablation_performance.json")
-    parser.add_argument("--student-clusters", type=str, required=True,
-                        help="Dir with student subclass_N_clusters/kK.pt files")
-    parser.add_argument("--teacher-clusters", type=str, required=True,
-                        help="Dir with teacher subclass_N_clusters/kK.pt files")
     parser.add_argument("--dataset", type=str,
-                        default="../datasets/2d_add_all.json")
+                        default=os.path.join(os.path.dirname(__file__), "..", "..", "datasets", "2d_add_all.json"))
     parser.add_argument("--k", type=int, default=7,
                         help="Number of clusters per subclass")
     parser.add_argument("--k-classes", type=int, default=8,
                         help="Number of latent subclasses")
-    parser.add_argument("--top-k-pairs", type=int, default=5,
-                        help="Keep top-k student clusters per subclass for pairing")
+    parser.add_argument("--top-k-pairs", type=int, default=5)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -164,19 +219,51 @@ def main():
     parser.add_argument("--lambda-proj", type=float, default=0.0)
     parser.add_argument("--use-projection", action="store_true")
     parser.add_argument("--save-dir", type=str,
-                        default="../results/cluster-distillation")
+                        default=os.path.join(os.path.dirname(__file__), "..", "..", "results", "cluster-distillation"))
+    parser.add_argument("--skip-ablation", action="store_true",
+                        help="Skip ablation (assumes ablation_performance.json already exists)")
     args = parser.parse_args()
 
-    # ---- 1. Cluster pairing ------------------------------------------------
+    # Derive paths from --clustering-dir
+    student_clusters = os.path.join(args.clustering_dir, args.student_model, "clusters")
+    teacher_clusters = os.path.join(args.clustering_dir, args.teacher_model, "clusters")
+
+    base_results = os.path.join(os.path.dirname(__file__), "..", "..", "results", "circuit-discovery")
+    student_results = os.path.join(base_results, args.student_model)
+    teacher_results = os.path.join(base_results, args.teacher_model)
+
+    # ---- Step 1: Ablation ---------------------------------------------------
     print("=" * 60)
-    print("Step 1: Cluster pairing")
+    print("Step 1: Neuron-cluster ablation")
+    print("=" * 60)
+
+    if args.skip_ablation:
+        student_abl = os.path.join(student_results, "ablation_performance.json")
+        teacher_abl = os.path.join(teacher_results, "ablation_performance.json")
+        print(f"  Skipping ablation. Using:\n    {student_abl}\n    {teacher_abl}")
+    else:
+        print(f"\n  Student: {args.student_model}")
+        student_abl = run_ablation_if_needed(
+            args.student_model, args.checkpoint, student_clusters,
+            args.k, args.k_classes, student_results,
+        )
+
+        print(f"\n  Teacher: {args.teacher_model}")
+        teacher_abl = run_ablation_if_needed(
+            args.teacher_model, args.checkpoint, teacher_clusters,
+            args.k, args.k_classes, teacher_results,
+        )
+
+    # ---- Step 2: Cluster pairing --------------------------------------------
+    print("\n" + "=" * 60)
+    print("Step 2: Cluster pairing")
     print("=" * 60)
 
     cluster_pairs, mappings = build_cluster_pairs(
-        student_ablation_path=args.student_ablation,
-        teacher_ablation_path=args.teacher_ablation,
-        student_clusters_dir=args.student_clusters,
-        teacher_clusters_dir=args.teacher_clusters,
+        student_ablation_path=student_abl,
+        teacher_ablation_path=teacher_abl,
+        student_clusters_dir=student_clusters,
+        teacher_clusters_dir=teacher_clusters,
         k=args.k,
         k_classes=args.k_classes,
         top_k_per_subclass=args.top_k_pairs,
@@ -189,18 +276,18 @@ def main():
     os.makedirs(args.save_dir, exist_ok=True)
     save_mapping(mappings, os.path.join(args.save_dir, "cluster_mapping.json"))
 
-    # ---- 2. Dataset ---------------------------------------------------------
+    # ---- Step 3: Dataset ----------------------------------------------------
     print("\n" + "=" * 60)
-    print("Step 2: Loading dataset")
+    print("Step 3: Loading dataset")
     print("=" * 60)
 
     train_data, test_data = build_train_test_split(args.dataset)
     print(f"  Train: {len(train_data)} examples")
     print(f"  Test:  {len(test_data)} examples")
 
-    # ---- 3. Distillation training -------------------------------------------
+    # ---- Step 4: Distillation training --------------------------------------
     print("\n" + "=" * 60)
-    print("Step 3: Distillation training")
+    print("Step 4: Distillation training")
     print("=" * 60)
 
     config = ClusterDistillationConfig(
@@ -225,7 +312,7 @@ def main():
 
     history = trainer.train()
 
-    # ---- 4. Final summary ---------------------------------------------------
+    # ---- Done ---------------------------------------------------------------
     print("\n" + "=" * 60)
     print("Done!")
     print("=" * 60)

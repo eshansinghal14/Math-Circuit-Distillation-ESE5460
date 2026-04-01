@@ -16,7 +16,7 @@ from transformers import AutoTokenizer
 from utils import load_model, load_model_checkpoint, test_model, eval_model
 from circuit_discovery.utils import parse_equation
 from circuit_discovery.models import CircuitDiscoveryModel
-from cluster_pairing import _load_single_ablation_performance, create_cluster_mapping, ClusterMapping
+from neuron_distillation.pairing import _load_single_ablation_performance, create_cluster_mapping, ClusterMapping
 
 
 def linear_cka(X: torch.Tensor, Y: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
