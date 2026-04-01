@@ -1,9 +1,14 @@
 import json
-import torch
 import os
 import sys
-import argparse
 
+# Project imports expect `src` on sys.path (works when run from repo root or this file directly).
+_SRC_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _SRC_ROOT not in sys.path:
+    sys.path.insert(0, _SRC_ROOT)
+
+import argparse
+import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer
 import matplotlib.pyplot as plt
