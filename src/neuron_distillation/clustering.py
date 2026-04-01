@@ -304,7 +304,9 @@ def run_neuron_kmeans(
 
 def print_problem_counts_per_class(model, tokenizer, k_classes, device, batch_size=128):
     """Argmax class assignment over `datasets/2d_add_all.json` (same source as activation gen)."""
-    dataset_path = os.path.join(os.path.dirname(__file__), "..", "datasets", "2d_add_all.json")
+    dataset_path = os.path.join(
+        os.path.dirname(__file__), "..", "..", "datasets", "2d_add_all.json"
+    )
     if not os.path.isfile(dataset_path):
         print(f"Warning: dataset not found at {dataset_path}, skipping problems-per-class counts.")
         return
