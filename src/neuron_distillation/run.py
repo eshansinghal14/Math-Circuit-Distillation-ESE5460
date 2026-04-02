@@ -214,7 +214,7 @@ Example:
     parser.add_argument("--top-k-pairs", type=int, default=5)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--lambda-cluster", type=float, default=0.01)
     parser.add_argument("--lambda-proj", type=float, default=0.0)
     parser.add_argument("--checkpoint-every", type=int, default=5,

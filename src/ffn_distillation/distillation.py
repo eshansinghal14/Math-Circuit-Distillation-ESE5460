@@ -12,6 +12,7 @@ Usage (from src/):
 """
 
 import json
+import math
 import os
 import re
 from collections import defaultdict
@@ -24,6 +25,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
+from torch.optim.lr_scheduler import LambdaLR
 
 from cka_loss import CKALoss
 from ffn_distillation.layer_pairing import LayerPairInfo
@@ -36,7 +38,7 @@ class FFNDistillationConfig:
 
     epochs: int = 50
     batch_size: int = 8
-    learning_rate: float = 1e-4
+    learning_rate: float = 2e-5
     grad_clip: float = 1.0
 
     lambda_cka: float = 0.1
@@ -71,10 +73,10 @@ def collate_fn(examples, tokenizer):
     attention_mask = enc["attention_mask"]
 
     labels = input_ids.clone()
-    prompt_enc = tokenizer(prompts, return_tensors="pt", padding=True, truncation=True)
-    prompt_lens = (prompt_enc["input_ids"] != tokenizer.pad_token_id).sum(dim=1)
-    for i, length in enumerate(prompt_lens.tolist()):
-        labels[i, :length] = -100
+    for i in range(len(prompts)):
+        answer_ids = tokenizer(answers[i], add_special_tokens=False)["input_ids"]
+        n_answer = len(answer_ids)
+        labels[i, :-n_answer] = -100
 
     return {
         "input_ids": input_ids,
@@ -198,7 +200,7 @@ class FFNDistillationTrainer:
         # Loss
         self.cka_loss_fn = CKALoss(efficient=True)
 
-        # Optimizer
+        # Optimizer + scheduler
         self.optimizer = AdamW(self.student.parameters(), lr=config.learning_rate)
 
         # Data
@@ -208,6 +210,16 @@ class FFNDistillationTrainer:
             collate_fn=partial(collate_fn, tokenizer=self.tokenizer),
         )
 
+        total_steps = len(self.loader) * config.epochs
+        warmup_steps = min(len(self.loader), total_steps // 10)
+
+        def lr_lambda(current_step):
+            if current_step < warmup_steps:
+                return current_step / max(warmup_steps, 1)
+            progress = (current_step - warmup_steps) / max(total_steps - warmup_steps, 1)
+            return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+        self.scheduler = LambdaLR(self.optimizer, lr_lambda)
         self.history: Dict[str, List] = defaultdict(list)
 
     def _forward_and_loss(self, batch):
@@ -318,6 +330,7 @@ class FFNDistillationTrainer:
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.student.parameters(), cfg.grad_clip)
                 self.optimizer.step()
+                self.scheduler.step()
 
                 for k, v in metrics.items():
                     agg[k] += v

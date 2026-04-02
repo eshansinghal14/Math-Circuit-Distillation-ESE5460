@@ -21,6 +21,7 @@ Pipeline prerequisites (run before this module):
 """
 
 import json
+import math
 import os
 import re
 from collections import defaultdict
@@ -32,6 +33,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
+from torch.optim.lr_scheduler import LambdaLR
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -65,7 +67,7 @@ class ClusterDistillationConfig:
 
     epochs: int = 50
     batch_size: int = 8
-    learning_rate: float = 1e-4
+    learning_rate: float = 2e-5
     grad_clip: float = 1.0
 
     lambda_cluster: float = 0.01
@@ -599,6 +601,18 @@ class ClusterDistillationTrainer:
             self.dataset, batch_size=config.batch_size, shuffle=True,
         )
 
+        # LR scheduler: linear warmup + cosine decay
+        total_steps = len(self.loader) * config.epochs
+        warmup_steps = min(len(self.loader), total_steps // 10)
+
+        def lr_lambda(current_step):
+            if current_step < warmup_steps:
+                return current_step / max(warmup_steps, 1)
+            progress = (current_step - warmup_steps) / max(total_steps - warmup_steps, 1)
+            return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+        self.scheduler = LambdaLR(self.optimizer, lr_lambda)
+
         # History
         self.history: Dict[str, List] = defaultdict(list)
 
@@ -691,6 +705,7 @@ class ClusterDistillationTrainer:
                 self.student.parameters(), self.config.grad_clip,
             )
             self.optimizer.step()
+            self.scheduler.step()
 
             for k, v in metrics.items():
                 agg[k] += v

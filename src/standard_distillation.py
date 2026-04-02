@@ -16,11 +16,14 @@ from collections import defaultdict
 from functools import partial
 from typing import Dict, Optional
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
+from torch.optim.lr_scheduler import LambdaLR
 
 from utils import load_model
 
@@ -49,10 +52,16 @@ def collate_fn(examples, tokenizer):
     attention_mask = enc["attention_mask"]
 
     labels = input_ids.clone()
-    prompt_enc = tokenizer(prompts, return_tensors="pt", padding=True, truncation=True)
-    prompt_lens = (prompt_enc["input_ids"] != tokenizer.pad_token_id).sum(dim=1)
-    for i, length in enumerate(prompt_lens.tolist()):
-        labels[i, :length] = -100
+    # Mask everything except answer tokens.
+    # With left-padding the layout is [PAD... prompt answer].
+    # We need to find where the answer starts by tokenizing prompt alone
+    # (without padding) to get its true token length.
+    for i, prompt in enumerate(prompts):
+        prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+        answer_ids = tokenizer(answers[i], add_special_tokens=False)["input_ids"]
+        # Mask all tokens except the last len(answer_ids) tokens
+        n_answer = len(answer_ids)
+        labels[i, :-n_answer] = -100
 
     return {
         "input_ids": input_ids,
@@ -130,6 +139,17 @@ def train(args):
     )
 
     optimizer = AdamW(student.parameters(), lr=args.lr)
+
+    total_steps = len(loader) * args.epochs
+    warmup_steps = min(len(loader), total_steps // 10)
+
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            return current_step / max(warmup_steps, 1)
+        progress = (current_step - warmup_steps) / max(total_steps - warmup_steps, 1)
+        return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    scheduler = LambdaLR(optimizer, lr_lambda)
     history = defaultdict(list)
     best_acc = 0.0
 
@@ -210,6 +230,7 @@ def train(args):
             loss.backward()
             torch.nn.utils.clip_grad_norm_(student.parameters(), args.grad_clip)
             optimizer.step()
+            scheduler.step()
 
             epoch_ce += ce_loss.item()
             epoch_kl += kl_loss.item()
@@ -263,7 +284,7 @@ def main():
     parser.add_argument("--test-path", default=os.path.join(script_dir, "..", "datasets", "2d_add_test_20.json"))
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--alpha-kl", type=float, default=1.0)
     parser.add_argument("--temperature", type=float, default=2.0)
     parser.add_argument("--grad-clip", type=float, default=1.0)
