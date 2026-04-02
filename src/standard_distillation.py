@@ -87,18 +87,20 @@ def train(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(args.save_dir, exist_ok=True)
 
+    dtype = torch.float16 if device == "cuda" else torch.float32
+
     print("Loading student...")
     student = AutoModelForCausalLM.from_pretrained(
-        args.student_model, torch_dtype=torch.float32, device_map=device,
-    )
+        args.student_model, torch_dtype=dtype,
+    ).to(device)
     tokenizer = AutoTokenizer.from_pretrained(args.student_model)
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"
 
     print("Loading teacher...")
     teacher = AutoModelForCausalLM.from_pretrained(
-        args.teacher_model, torch_dtype=torch.float32, device_map=device,
-    )
+        args.teacher_model, torch_dtype=dtype,
+    ).to(device)
     teacher.eval()
     for p in teacher.parameters():
         p.requires_grad = False

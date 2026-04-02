@@ -161,14 +161,15 @@ class FFNDistillationTrainer:
         self.tokenizer.padding_side = "left"
 
         # Models
+        dtype = torch.float16 if config.device == "cuda" else torch.float32
         print(f"Loading student: {config.student_model}")
         self.student = AutoModelForCausalLM.from_pretrained(
-            config.student_model, torch_dtype=torch.float32, device_map=config.device,
-        )
+            config.student_model, torch_dtype=dtype,
+        ).to(config.device)
         print(f"Loading teacher: {config.teacher_model}")
         self.teacher = AutoModelForCausalLM.from_pretrained(
-            config.teacher_model, torch_dtype=torch.float32, device_map=config.device,
-        )
+            config.teacher_model, torch_dtype=dtype,
+        ).to(config.device)
         self.teacher.eval()
         for p in self.teacher.parameters():
             p.requires_grad = False

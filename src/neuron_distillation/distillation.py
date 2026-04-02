@@ -556,23 +556,22 @@ class ClusterDistillationTrainer:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         # Models
+        dtype = torch.float16 if config.device == "cuda" else torch.float32
         if student is not None:
             self.student = student
         else:
             print(f"Loading student: {config.student_model}")
             self.student = AutoModelForCausalLM.from_pretrained(
-                config.student_model, torch_dtype=torch.float32,
-                device_map=config.device,
-            )
+                config.student_model, torch_dtype=dtype,
+            ).to(config.device)
 
         if teacher is not None:
             self.teacher = teacher
         else:
             print(f"Loading teacher: {config.teacher_model}")
             self.teacher = AutoModelForCausalLM.from_pretrained(
-                config.teacher_model, torch_dtype=torch.float32,
-                device_map=config.device,
-            )
+                config.teacher_model, torch_dtype=dtype,
+            ).to(config.device)
         self.teacher.eval()
         for p in self.teacher.parameters():
             p.requires_grad = False
