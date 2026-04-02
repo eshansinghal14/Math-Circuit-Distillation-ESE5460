@@ -5,9 +5,13 @@ import os
 import glob
 import torch
 
-import constants as _constants  # type: ignore
-HF_TOKEN = getattr(_constants, "HF_TOKEN", "")
-CIRCUIT_DISCOVERY_CKPT_DIR = getattr(_constants, "CIRCUIT_DISCOVERY_CKPT_DIR", "")
+try:
+    import constants as _constants
+    HF_TOKEN = getattr(_constants, "HF_TOKEN", "")
+    CIRCUIT_DISCOVERY_CKPT_DIR = getattr(_constants, "CIRCUIT_DISCOVERY_CKPT_DIR", "")
+except ModuleNotFoundError:
+    HF_TOKEN = os.environ.get("HF_TOKEN", "")
+    CIRCUIT_DISCOVERY_CKPT_DIR = os.environ.get("CIRCUIT_DISCOVERY_CKPT_DIR", "")
 
 from transformers.utils import logging as hf_logging
 from transformers import AutoTokenizer
