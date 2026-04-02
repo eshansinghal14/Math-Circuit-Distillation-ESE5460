@@ -281,6 +281,15 @@ class FFNDistillationTrainer:
         cfg = self.config
         os.makedirs(cfg.save_dir, exist_ok=True)
 
+        # Baseline accuracy before training
+        print("Evaluating baselines...")
+        student_base = evaluate(self.student, self.tokenizer, self.test_path)
+        teacher_base = evaluate(self.teacher, self.tokenizer, self.test_path)
+        print(f"  Student baseline accuracy: {student_base:.4f}")
+        print(f"  Teacher baseline accuracy: {teacher_base:.4f}")
+        self.history["student_baseline"] = student_base
+        self.history["teacher_baseline"] = teacher_base
+
         print("=" * 60)
         print("FFN Layer-Level CKA Distillation")
         print(f"  Epochs:      {cfg.epochs}")

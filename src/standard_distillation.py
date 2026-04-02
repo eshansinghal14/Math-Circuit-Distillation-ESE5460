@@ -133,6 +133,13 @@ def train(args):
     history = defaultdict(list)
     best_acc = 0.0
 
+    # Baseline accuracy before any training
+    print("Evaluating baselines...")
+    student_base = evaluate(student, tokenizer, args.test_path)
+    teacher_base = evaluate(teacher, tokenizer, args.test_path)
+    print(f"  Student baseline accuracy: {student_base:.4f}")
+    print(f"  Teacher baseline accuracy: {teacher_base:.4f}")
+
     print("=" * 60)
     print("Standard KL Distillation")
     print(f"  Epochs:    {args.epochs}")
@@ -236,7 +243,12 @@ def train(args):
         if args.checkpoint_every > 0 and (epoch + 1) % args.checkpoint_every == 0:
             save_checkpoint(student, tokenizer, args.save_dir, f"epoch_{epoch+1}")
 
+    history["student_baseline"] = student_base
+    history["teacher_baseline"] = teacher_base
+
     save_checkpoint(student, tokenizer, args.save_dir, "final")
+    with open(os.path.join(args.save_dir, "training_history.json"), "w") as f:
+        json.dump(dict(history), f, indent=2)
     print(f"\nDone. Best accuracy: {best_acc:.4f}")
     print(f"Results saved to: {args.save_dir}")
 

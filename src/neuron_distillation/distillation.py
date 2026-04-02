@@ -712,6 +712,15 @@ class ClusterDistillationTrainer:
         """Run the full training loop."""
         cfg = self.config
 
+        # Baseline accuracy before training
+        print("Evaluating baselines...")
+        student_base = eval_accuracy(self.student, self.tokenizer, self.test_data)
+        teacher_base = eval_accuracy(self.teacher, self.tokenizer, self.test_data)
+        print(f"  Student baseline accuracy: {student_base:.4f}")
+        print(f"  Teacher baseline accuracy: {teacher_base:.4f}")
+        self.history["student_baseline"] = student_base
+        self.history["teacher_baseline"] = teacher_base
+
         print("=" * 60)
         print("Neuron-Cluster Circuit Distillation")
         print("=" * 60)
