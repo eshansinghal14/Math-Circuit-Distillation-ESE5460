@@ -25,7 +25,7 @@ def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     default_dataset = os.path.join(script_dir, "..", "..", "datasets", "2d_add_all.json")
     default_train = os.path.join(script_dir, "..", "..", "datasets", "2d_add_train_80.json")
-    default_test = os.path.join(script_dir, "..", "..", "datasets", "2d_add_test_20_formatted.json")
+    default_test = os.path.join(script_dir, "..", "..", "datasets", "2d_add_test_20.json")
 
     parser = argparse.ArgumentParser(
         description="FFN layer-level CKA distillation (end-to-end)",

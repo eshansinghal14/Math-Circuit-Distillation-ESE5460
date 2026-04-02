@@ -89,7 +89,7 @@ class Config:
     grad_clip: float = 1.0
     top_k_pairs_per_subclass: Optional[int] = None
     train_path: str = "../datasets/2d_add_train_80.json"
-    test_path: str = "../datasets/2d_add_test_20_formatted.json"
+    test_path: str = "../datasets/2d_add_test_20.json"
     teacher_cache_path: str = "../results/teacher_cache_train.pt"
 
 

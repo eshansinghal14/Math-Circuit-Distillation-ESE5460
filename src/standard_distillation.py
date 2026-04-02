@@ -24,7 +24,7 @@ from torch.optim import AdamW
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from utils import load_model, test_model, eval_model
+from utils import load_model
 
 
 class AddDataset(Dataset):
@@ -70,10 +70,37 @@ def _extract_int_after_equals(text: str) -> Optional[int]:
 
 @torch.no_grad()
 def evaluate(model, tokenizer, test_path: str, batch_size: int = 32) -> float:
-    results_path = os.path.join(os.path.dirname(test_path), "_std_distill_eval.json")
-    test_model(model, tokenizer, test_path, results_path,
-               batch_size=batch_size, max_new_tokens=2, log=False)
-    return eval_model(results_path)
+    with open(test_path, "r") as f:
+        data = json.load(f)
+
+    # Handle both formats: {"prompt": answer} dict or [{"q_str":..,"a_str":..}] list
+    if isinstance(data, dict):
+        prompts = list(data.keys())
+        answers = [int(data[p]) for p in prompts]
+    else:
+        prompts = [d["q_str"] for d in data]
+        answers = [int(d["a_str"]) for d in data]
+
+    model.eval()
+    correct = total = 0
+    original_side = tokenizer.padding_side
+    tokenizer.padding_side = "left"
+
+    for i in range(0, len(prompts), batch_size):
+        batch_p = prompts[i : i + batch_size]
+        batch_a = answers[i : i + batch_size]
+        inputs = tokenizer(batch_p, return_tensors="pt", padding=True).to(model.device)
+        outputs = model.generate(**inputs, max_new_tokens=5, do_sample=False,
+                                 pad_token_id=tokenizer.eos_token_id)
+        decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+        for text, gold in zip(decoded, batch_a):
+            pred = _extract_int_after_equals(text)
+            if pred == gold:
+                correct += 1
+            total += 1
+
+    tokenizer.padding_side = original_side
+    return correct / max(total, 1)
 
 
 def save_checkpoint(model, tokenizer, save_dir: str, tag: str):
@@ -210,7 +237,7 @@ def main():
     parser.add_argument("--student-model", default="meta-llama/Llama-3.2-1B")
     parser.add_argument("--teacher-model", default="meta-llama/Meta-Llama-3-8B")
     parser.add_argument("--train-path", default=os.path.join(script_dir, "..", "datasets", "2d_add_train_80.json"))
-    parser.add_argument("--test-path", default=os.path.join(script_dir, "..", "datasets", "2d_add_test_20_formatted.json"))
+    parser.add_argument("--test-path", default=os.path.join(script_dir, "..", "datasets", "2d_add_test_20.json"))
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-4)

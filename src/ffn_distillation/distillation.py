@@ -123,11 +123,36 @@ def _extract_int_after_equals(text: str) -> Optional[int]:
 
 @torch.no_grad()
 def evaluate(model, tokenizer, test_path: str, batch_size: int = 32) -> float:
-    from utils import test_model, eval_model
-    results_path = os.path.join(os.path.dirname(test_path), "_ffn_distill_eval.json")
-    test_model(model, tokenizer, test_path, results_path,
-               batch_size=batch_size, max_new_tokens=2, log=False)
-    return eval_model(results_path)
+    with open(test_path, "r") as f:
+        data = json.load(f)
+
+    if isinstance(data, dict):
+        prompts = list(data.keys())
+        answers = [int(data[p]) for p in prompts]
+    else:
+        prompts = [d["q_str"] for d in data]
+        answers = [int(d["a_str"]) for d in data]
+
+    model.eval()
+    correct = total = 0
+    original_side = tokenizer.padding_side
+    tokenizer.padding_side = "left"
+
+    for i in range(0, len(prompts), batch_size):
+        batch_p = prompts[i : i + batch_size]
+        batch_a = answers[i : i + batch_size]
+        inputs = tokenizer(batch_p, return_tensors="pt", padding=True).to(model.device)
+        outputs = model.generate(**inputs, max_new_tokens=5, do_sample=False,
+                                 pad_token_id=tokenizer.eos_token_id)
+        decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+        for text, gold in zip(decoded, batch_a):
+            pred = _extract_int_after_equals(text)
+            if pred == gold:
+                correct += 1
+            total += 1
+
+    tokenizer.padding_side = original_side
+    return correct / max(total, 1)
 
 
 def save_checkpoint(model, tokenizer, save_dir: str, tag: str):
