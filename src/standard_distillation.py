@@ -167,14 +167,14 @@ def train(args):
             student_out = student(
                 input_ids=input_ids, attention_mask=attention_mask, labels=labels,
             )
-            ce_loss = student_out.loss
-            student_logits = student_out.logits
+            ce_loss = student_out.loss.float()
+            student_logits = student_out.logits.float()
 
             with torch.no_grad():
                 teacher_out = teacher(
                     input_ids=input_ids, attention_mask=attention_mask,
                 )
-                teacher_logits = teacher_out.logits
+                teacher_logits = teacher_out.logits.float()
 
             T = args.temperature
             kl_loss = F.kl_div(
