@@ -217,6 +217,8 @@ Example:
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--lambda-cluster", type=float, default=0.01)
     parser.add_argument("--lambda-proj", type=float, default=0.0)
+    parser.add_argument("--checkpoint-every", type=int, default=5,
+                        help="Save a checkpoint every N epochs")
     parser.add_argument("--use-projection", action="store_true")
     parser.add_argument("--save-dir", type=str,
                         default=os.path.join(os.path.dirname(__file__), "..", "..", "results", "cluster-distillation"))
@@ -232,8 +234,20 @@ Example:
     student_results = os.path.join(base_results, args.student_model)
     teacher_results = os.path.join(base_results, args.teacher_model)
 
-    # ---- Step 1: Ablation ---------------------------------------------------
+    # ---- Diagnostics --------------------------------------------------------
     print("=" * 60)
+    print("Configuration")
+    print("=" * 60)
+    print(f"  k_classes:       {args.k_classes}")
+    print(f"  k (clusters):    {args.k}")
+    print(f"  clustering_dir:  {args.clustering_dir}")
+    print(f"  checkpoint:      {args.checkpoint}")
+    print(f"  student_clusters: {student_clusters}")
+    print(f"  teacher_clusters: {teacher_clusters}")
+    print(f"  save_dir:        {args.save_dir}")
+
+    # ---- Step 1: Ablation ---------------------------------------------------
+    print("\n" + "=" * 60)
     print("Step 1: Neuron-cluster ablation")
     print("=" * 60)
 
@@ -300,6 +314,7 @@ Example:
         lambda_proj=args.lambda_proj,
         use_projection_heads=args.use_projection,
         top_k_clusters_per_subclass=args.top_k_pairs,
+        checkpoint_every=args.checkpoint_every,
         save_dir=args.save_dir,
     )
 

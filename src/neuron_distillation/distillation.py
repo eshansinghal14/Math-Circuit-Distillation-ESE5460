@@ -76,6 +76,7 @@ class ClusterDistillationConfig:
     use_projection_heads: bool = False
 
     eval_every: int = 1
+    checkpoint_every: int = 5
     save_dir: str = "results/cluster-distillation"
 
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
@@ -722,6 +723,7 @@ class ClusterDistillationTrainer:
         print(f"  lambda_proj:      {cfg.lambda_proj}")
         print(f"  Cluster pairs:    {len(self.cluster_pairs)}")
         print(f"  Projection heads: {cfg.use_projection_heads}")
+        print(f"  Checkpoint every: {cfg.checkpoint_every}")
         print("=" * 60)
 
         best_acc = 0.0
@@ -746,6 +748,9 @@ class ClusterDistillationTrainer:
             for k, v in epoch_metrics.items():
                 self.history[k].append(v)
 
+            # Incremental history save after each epoch
+            self._save_history()
+
             print(
                 f"  Epoch {epoch + 1}: "
                 f"CE={epoch_metrics.get('ce_loss', 0):.4f}, "
@@ -753,6 +758,10 @@ class ClusterDistillationTrainer:
                 f"CKA={epoch_metrics.get('mean_cka', 0):.4f}, "
                 f"Acc={acc:.3f}"
             )
+
+            # Periodic checkpoint
+            if cfg.checkpoint_every > 0 and (epoch + 1) % cfg.checkpoint_every == 0:
+                self._save_checkpoint(f"epoch_{epoch + 1}")
 
         self._save_checkpoint("final")
         self._save_history()
