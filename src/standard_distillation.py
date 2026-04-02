@@ -22,8 +22,6 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
 from utils import load_model
 
 
@@ -114,20 +112,13 @@ def train(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(args.save_dir, exist_ok=True)
 
-    dtype = torch.float16 if device == "cuda" else torch.float32
-
     print("Loading student...")
-    student = AutoModelForCausalLM.from_pretrained(
-        args.student_model, torch_dtype=dtype,
-    ).to(device)
-    tokenizer = AutoTokenizer.from_pretrained(args.student_model)
-    tokenizer.pad_token = tokenizer.eos_token
+    student, tokenizer = load_model(args.student_model)
+    student = student.to("cpu").float().to(device)
     tokenizer.padding_side = "left"
 
     print("Loading teacher...")
-    teacher = AutoModelForCausalLM.from_pretrained(
-        args.teacher_model, torch_dtype=dtype,
-    ).to(device)
+    teacher, _ = load_model(args.teacher_model)
     teacher.eval()
     for p in teacher.parameters():
         p.requires_grad = False
