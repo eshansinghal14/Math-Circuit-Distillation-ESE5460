@@ -25,8 +25,6 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
 from cka_loss import CKALoss
 from ffn_distillation.layer_pairing import LayerPairInfo
 
@@ -180,21 +178,15 @@ class FFNDistillationTrainer:
         self.student_layer_indices = sorted(set(p.student_layer for p in layer_pairs))
         self.teacher_layer_indices = sorted(set(p.teacher_layer for p in layer_pairs))
 
-        # Tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(config.student_model)
-        self.tokenizer.pad_token = self.tokenizer.eos_token
+        # Models -- student fp32 for stable training, teacher fp16 (frozen)
+        from utils import load_model
+        print(f"Loading student: {config.student_model}")
+        self.student, self.tokenizer = load_model(config.student_model)
+        self.student = self.student.to("cpu").float().to(config.device)
         self.tokenizer.padding_side = "left"
 
-        # Models
-        dtype = torch.float16 if config.device == "cuda" else torch.float32
-        print(f"Loading student: {config.student_model}")
-        self.student = AutoModelForCausalLM.from_pretrained(
-            config.student_model, torch_dtype=dtype,
-        ).to(config.device)
         print(f"Loading teacher: {config.teacher_model}")
-        self.teacher = AutoModelForCausalLM.from_pretrained(
-            config.teacher_model, torch_dtype=dtype,
-        ).to(config.device)
+        self.teacher, _ = load_model(config.teacher_model)
         self.teacher.eval()
         for p in self.teacher.parameters():
             p.requires_grad = False
@@ -238,9 +230,16 @@ class FFNDistillationTrainer:
                 self.teacher(input_ids=input_ids, attention_mask=attention_mask)
 
             student_out = self.student(
-                input_ids=input_ids, attention_mask=attention_mask, labels=labels,
+                input_ids=input_ids, attention_mask=attention_mask,
             )
-            ce_loss = student_out.loss
+            # Manual CE in float32 with proper causal shift
+            shift_logits = student_out.logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            ce_loss = F.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)).float(),
+                shift_labels.view(-1),
+                ignore_index=-100,
+            )
 
             # CKA over each paired layer
             cka_losses = []

@@ -187,7 +187,9 @@ def train(args):
             if num_valid > 0:
                 teacher_prob = F.softmax(flat_teacher[mask] / args.temperature, dim=-1, dtype=torch.float32)
                 student_logprob = F.log_softmax(flat_student[mask] / args.temperature, dim=-1, dtype=torch.float32)
-                kl_loss = -(teacher_prob * student_logprob).sum() / num_valid
+                teacher_logprob = F.log_softmax(flat_teacher[mask] / args.temperature, dim=-1, dtype=torch.float32)
+                # True KL(teacher || student) = sum(p * (log(p) - log(q)))
+                kl_loss = (teacher_prob * (teacher_logprob - student_logprob)).sum() / num_valid
                 kl_loss = kl_loss * (args.temperature ** 2)
             else:
                 kl_loss = torch.tensor(0.0, device=device)

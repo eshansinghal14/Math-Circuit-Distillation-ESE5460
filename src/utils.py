@@ -238,10 +238,24 @@ def load_model_checkpoint(checkpoint, k_classes, lr):
             "Provide a valid path to a .pt file, 'latest', or an epoch number."
         )
 
-    checkpoint = torch.load(ckpt_path, map_location=device)
+    ckpt_data = torch.load(ckpt_path, map_location=device)
+
+    # Auto-detect k_classes from checkpoint weights
+    state = ckpt_data["model_state_dict"]
+    ckpt_k = None
+    if "classifier.classifier.4.weight" in state:
+        ckpt_k = state["classifier.classifier.4.weight"].shape[0]
+
+    if ckpt_k is not None and ckpt_k != k_classes:
+        raise RuntimeError(
+            f"Checkpoint was trained with k_classes={ckpt_k} but you "
+            f"requested k_classes={k_classes}. Use a checkpoint that "
+            f"matches your experiment, or pass --k-classes {ckpt_k}.\n"
+            f"  Checkpoint: {ckpt_path}"
+        )
 
     model = CircuitDiscoveryModel(k_classes=k_classes, mask_temperature=1.0).to(device)
-    incompatible = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+    incompatible = model.load_state_dict(state, strict=False)
     if incompatible.missing_keys:
         print(
             "Warning: checkpoint missing keys (using model defaults):",
@@ -251,10 +265,10 @@ def load_model_checkpoint(checkpoint, k_classes, lr):
         print("Warning: checkpoint unexpected keys ignored:", incompatible.unexpected_keys)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    optimizer.load_state_dict(ckpt_data["optimizer_state_dict"])
 
-    epoch = checkpoint.get("epoch", checkpoint.get("step", 0))
-    metrics_log = checkpoint.get("metrics_log", [])
+    epoch = ckpt_data.get("epoch", ckpt_data.get("step", 0))
+    metrics_log = ckpt_data.get("metrics_log", [])
     return model, optimizer, metrics_log, epoch
 
 def _stack_layer_activations(batch_activations):
