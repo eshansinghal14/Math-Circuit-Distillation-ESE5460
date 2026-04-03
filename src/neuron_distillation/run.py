@@ -7,17 +7,16 @@ After Eshan runs clustering and saves results to Google Drive, you:
 That's it. The script handles ablation, pairing, and distillation.
 
 Usage (from src/):
+  # Simplest -- auto-detects checkpoint (.pt) and k_classes from clustering dir:
   python -m neuron_distillation.run \
-      --clustering-dir "/content/drive/MyDrive/Math Circuit Distillation (ESE 5460)/neuron-clustering" \
-      --checkpoint "/content/drive/MyDrive/Math Circuit Distillation (ESE 5460)/circuit discovery model /epoch_4000.pt"
+      --clustering-dir "/content/drive/MyDrive/.../2_class_22_addition" \
+      --save-dir "/content/drive/MyDrive/.../results/neuron-2class"
 
-  Or with all options:
+  # Explicit checkpoint and k_classes:
   python -m neuron_distillation.run \
       --clustering-dir <path> \
-      --checkpoint <path> \
-      --student-model "meta-llama/Llama-3.2-1B" \
-      --teacher-model "meta-llama/Meta-Llama-3-8B" \
-      --k 7 --epochs 50 --batch-size 8 --lr 1e-4 --lambda-cluster 0.01 \
+      --checkpoint <path-to-.pt> \
+      --k-classes 2 \
       --save-dir <path>
 """
 
@@ -196,8 +195,9 @@ Example:
         help="Root dir with <model-name>/clusters/ subfolders from Eshan's clustering run",
     )
     parser.add_argument(
-        "--checkpoint", type=str, required=True,
-        help="Path to circuit-discovery model checkpoint (.pt)",
+        "--checkpoint", type=str, default=None,
+        help="Path to circuit-discovery model checkpoint (.pt). "
+             "If omitted, auto-searches clustering-dir for a .pt file.",
     )
 
     # === Usually don't need to change these ===
@@ -209,8 +209,8 @@ Example:
                         default=os.path.join(os.path.dirname(__file__), "..", "..", "datasets", "2d_add_all.json"))
     parser.add_argument("--k", type=int, default=7,
                         help="Number of clusters per subclass")
-    parser.add_argument("--k-classes", type=int, default=8,
-                        help="Number of latent subclasses")
+    parser.add_argument("--k-classes", type=int, default=None,
+                        help="Number of latent subclasses (auto-detected from checkpoint if omitted)")
     parser.add_argument("--top-k-pairs", type=int, default=5)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=8)
@@ -225,6 +225,43 @@ Example:
     parser.add_argument("--skip-ablation", action="store_true",
                         help="Skip ablation (assumes ablation_performance.json already exists)")
     args = parser.parse_args()
+
+    # ---- Auto-detect checkpoint from clustering dir if not provided ----------
+    if args.checkpoint is None:
+        # Search clustering-dir (and one level up) for .pt files
+        candidates = []
+        for root, _dirs, files in os.walk(args.clustering_dir):
+            for f in files:
+                if f.endswith(".pt"):
+                    candidates.append(os.path.join(root, f))
+            # Only search top-level, not deep recursion into model folders
+            if root != args.clustering_dir:
+                break
+        if not candidates:
+            # Also check parent dir (e.g. if clustering-dir is "2_class_22_addition"
+            # and checkpoint is alongside it)
+            parent = os.path.dirname(args.clustering_dir)
+            for f in os.listdir(parent):
+                if f.endswith(".pt"):
+                    candidates.append(os.path.join(parent, f))
+        if candidates:
+            args.checkpoint = candidates[0]
+            print(f"Auto-detected checkpoint: {args.checkpoint}")
+        else:
+            print("ERROR: No --checkpoint provided and no .pt file found in or near --clustering-dir")
+            sys.exit(1)
+
+    # ---- Auto-detect k_classes from checkpoint if not provided ---------------
+    if args.k_classes is None:
+        ckpt_data = torch.load(args.checkpoint, map_location="cpu")
+        state = ckpt_data.get("model_state_dict", {})
+        if "classifier.classifier.4.weight" in state:
+            args.k_classes = state["classifier.classifier.4.weight"].shape[0]
+            print(f"Auto-detected k_classes={args.k_classes} from checkpoint")
+        else:
+            print("ERROR: Could not detect k_classes from checkpoint. Pass --k-classes explicitly.")
+            sys.exit(1)
+        del ckpt_data
 
     # Derive paths from --clustering-dir
     student_clusters = os.path.join(args.clustering_dir, args.student_model, "clusters")
