@@ -146,8 +146,8 @@ def eval_accuracy(model, tokenizer, test_path: str, device: str) -> float:
     # test_model runs the model over the dataset and writes predictions,
     # eval_model reads that file and returns accuracy.
     results_path = os.path.join(os.path.dirname(test_path), "student_eval_results.json")
-    # Use a conservative batch size in eval to avoid OOM while keeping eval fast
-    test_model(model, tokenizer, test_path, results_path, batch_size=32, max_new_tokens=2, log=False)
+    # Match standard_distillation / utils.test_model default: answers can be 3 digits (e.g. 198).
+    test_model(model, tokenizer, test_path, results_path, batch_size=32, max_new_tokens=5, log=False)
     return eval_model(results_path)
 
 
