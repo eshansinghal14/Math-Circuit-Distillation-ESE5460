@@ -197,26 +197,28 @@ def train(args):
             shift_student = student_logits[..., :-1, :].contiguous()
             shift_teacher = teacher_logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
+            shift_attn = attention_mask[..., 1:].contiguous()
 
-            # Flatten to (B*T, V) and (B*T,)
             B, T_len, V = shift_student.shape
             flat_student = shift_student.view(-1, V)
             flat_teacher = shift_teacher.view(-1, V)
             flat_labels = shift_labels.view(-1)
+            flat_attn = shift_attn.view(-1)
 
-            # CE loss on answer tokens only
+            # CE loss on answer tokens only (labels has -100 for pad+prompt)
             ce_loss = F.cross_entropy(flat_student.float(), flat_labels, ignore_index=-100)
 
-            # KL loss on answer tokens only (following torchtune ForwardKLLoss)
-            mask = (flat_labels != -100)
-            num_valid = mask.sum()
+            # KL loss on ALL non-padding tokens (not just answer tokens).
+            # This ensures the student learns the teacher's full processing
+            # of the prompt, preventing catastrophic forgetting of generation ability.
+            kl_mask = flat_attn.bool()
+            num_kl = kl_mask.sum()
 
-            if num_valid > 0:
-                teacher_prob = F.softmax(flat_teacher[mask] / args.temperature, dim=-1, dtype=torch.float32)
-                student_logprob = F.log_softmax(flat_student[mask] / args.temperature, dim=-1, dtype=torch.float32)
-                teacher_logprob = F.log_softmax(flat_teacher[mask] / args.temperature, dim=-1, dtype=torch.float32)
-                # True KL(teacher || student) = sum(p * (log(p) - log(q)))
-                kl_loss = (teacher_prob * (teacher_logprob - student_logprob)).sum() / num_valid
+            if num_kl > 0:
+                teacher_prob = F.softmax(flat_teacher[kl_mask] / args.temperature, dim=-1, dtype=torch.float32)
+                student_logprob = F.log_softmax(flat_student[kl_mask] / args.temperature, dim=-1, dtype=torch.float32)
+                teacher_logprob = F.log_softmax(flat_teacher[kl_mask] / args.temperature, dim=-1, dtype=torch.float32)
+                kl_loss = (teacher_prob * (teacher_logprob - student_logprob)).sum() / num_kl
                 kl_loss = kl_loss * (args.temperature ** 2)
             else:
                 kl_loss = torch.tensor(0.0, device=device)
