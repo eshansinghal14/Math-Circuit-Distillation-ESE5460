@@ -33,7 +33,7 @@ def layer_ablation(
     dataset_path: str,
     results_dir: str,
     batch_size: int = 50,
-    max_new_tokens: int = 1,
+    max_new_tokens: int = 5,
 ) -> Dict:
     """Ablate each MLP layer one at a time and record accuracy.
 
@@ -42,7 +42,8 @@ def layer_ablation(
         dataset_path: Path to a JSON evaluation dataset (``2d_add_all.json`` format).
         results_dir: Where to write results.
         batch_size: Evaluation batch size.
-        max_new_tokens: Tokens to generate per example.
+        max_new_tokens: Tokens to generate per example (use >=5 for multi-digit
+            answers; 1 token was too low and skewed baselines vs distillation eval).
 
     Returns:
         ``{"baseline": float, "layers": {"0": float, "1": float, ...}}``
@@ -99,6 +100,7 @@ if __name__ == "__main__":
     parser.add_argument("--results-dir", type=str,
                         default=os.path.join(script_dir, "..", "..", "results", "ffn-layer-ablation"))
     parser.add_argument("--batch-size", type=int, default=50)
+    parser.add_argument("--max-new-tokens", type=int, default=5)
     args = parser.parse_args()
 
     layer_ablation(
@@ -106,4 +108,5 @@ if __name__ == "__main__":
         dataset_path=args.dataset,
         results_dir=os.path.join(args.results_dir, args.model_name),
         batch_size=args.batch_size,
+        max_new_tokens=args.max_new_tokens,
     )
