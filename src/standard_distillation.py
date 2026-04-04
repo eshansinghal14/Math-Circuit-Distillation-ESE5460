@@ -1,8 +1,9 @@
 """Standard Knowledge Distillation (pure KL baseline).
 
-Loss = CE(student, labels) + alpha * KL(student_logits/T, teacher_logits/T)
+Loss = T^2 * KL(softmax(student/T) || softmax(teacher/T))
 
 No internal alignment -- this is the baseline that other experiments compare against.
+Paper target: 63.6% accuracy on 2-digit addition.
 
 Usage (from src/):
   python standard_distillation.py --save-dir /path/to/drive/results/standard-kl
@@ -14,16 +15,12 @@ import os
 import re
 from collections import defaultdict
 from functools import partial
-from typing import Dict, Optional
-
-import math
+from typing import Optional
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import LambdaLR
 
 from utils import load_model
 
@@ -48,25 +45,10 @@ def collate_fn(examples, tokenizer):
     full_texts = [p + a for p, a in zip(prompts, answers)]
 
     enc = tokenizer(full_texts, return_tensors="pt", padding=True, truncation=True)
-    input_ids = enc["input_ids"]
-    attention_mask = enc["attention_mask"]
-
-    labels = input_ids.clone()
-    # Mask everything except answer tokens.
-    # With left-padding the layout is [PAD... prompt answer].
-    # We need to find where the answer starts by tokenizing prompt alone
-    # (without padding) to get its true token length.
-    for i, prompt in enumerate(prompts):
-        prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
-        answer_ids = tokenizer(answers[i], add_special_tokens=False)["input_ids"]
-        # Mask all tokens except the last len(answer_ids) tokens
-        n_answer = len(answer_ids)
-        labels[i, :-n_answer] = -100
 
     return {
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
-        "labels": labels,
+        "input_ids": enc["input_ids"],
+        "attention_mask": enc["attention_mask"],
     }
 
 
@@ -80,7 +62,6 @@ def evaluate(model, tokenizer, test_path: str, batch_size: int = 32) -> float:
     with open(test_path, "r") as f:
         data = json.load(f)
 
-    # Handle both formats: {"prompt": answer} dict or [{"q_str":..,"a_str":..}] list
     if isinstance(data, dict):
         prompts = list(data.keys())
         answers = [int(data[p]) for p in prompts]
@@ -139,21 +120,9 @@ def train(args):
     )
 
     optimizer = AdamW(student.parameters(), lr=args.lr)
-
-    total_steps = len(loader) * args.epochs
-    warmup_steps = min(len(loader), total_steps // 10)
-
-    def lr_lambda(current_step):
-        if current_step < warmup_steps:
-            return current_step / max(warmup_steps, 1)
-        progress = (current_step - warmup_steps) / max(total_steps - warmup_steps, 1)
-        return 0.5 * (1.0 + math.cos(math.pi * progress))
-
-    scheduler = LambdaLR(optimizer, lr_lambda)
     history = defaultdict(list)
     best_acc = 0.0
 
-    # Baseline accuracy before any training
     print("Evaluating baselines...")
     student_base = evaluate(student, tokenizer, args.test_path)
     teacher_base = evaluate(teacher, tokenizer, args.test_path)
@@ -165,65 +134,30 @@ def train(args):
     print(f"  Epochs:    {args.epochs}")
     print(f"  Batch:     {args.batch_size}")
     print(f"  LR:        {args.lr}")
-    print(f"  alpha_kl:  {args.alpha_kl}")
     print(f"  temp:      {args.temperature}")
     print(f"  Save dir:  {args.save_dir}")
     print("=" * 60)
 
+    T = args.temperature
+
     for epoch in range(args.epochs):
         student.train()
-        epoch_ce, epoch_kl, epoch_total, n_steps = 0.0, 0.0, 0.0, 0
+        epoch_loss, n_steps = 0.0, 0
 
         for step, batch in enumerate(loader):
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
-            labels = batch["labels"].to(device)
 
-            if (labels != -100).sum().item() == 0:
-                continue
-
-            student_out = student(
-                input_ids=input_ids, attention_mask=attention_mask,
-            )
-            student_logits = student_out.logits
+            student_logits = student(input_ids=input_ids, attention_mask=attention_mask).logits
 
             with torch.no_grad():
-                teacher_out = teacher(
-                    input_ids=input_ids, attention_mask=attention_mask,
-                )
-                teacher_logits = teacher_out.logits
+                teacher_logits = teacher(input_ids=input_ids, attention_mask=attention_mask).logits
 
-            # Shift for next-token prediction (standard causal LM)
-            shift_student = student_logits[..., :-1, :].contiguous()
-            shift_teacher = teacher_logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            shift_attn = attention_mask[..., 1:].contiguous()
-
-            B, T_len, V = shift_student.shape
-            flat_student = shift_student.view(-1, V)
-            flat_teacher = shift_teacher.view(-1, V)
-            flat_labels = shift_labels.view(-1)
-            flat_attn = shift_attn.view(-1)
-
-            # CE loss on answer tokens only (labels has -100 for pad+prompt)
-            ce_loss = F.cross_entropy(flat_student.float(), flat_labels, ignore_index=-100)
-
-            # KL loss on ALL non-padding tokens (not just answer tokens).
-            # This ensures the student learns the teacher's full processing
-            # of the prompt, preventing catastrophic forgetting of generation ability.
-            kl_mask = flat_attn.bool()
-            num_kl = kl_mask.sum()
-
-            if num_kl > 0:
-                teacher_prob = F.softmax(flat_teacher[kl_mask] / args.temperature, dim=-1, dtype=torch.float32)
-                student_logprob = F.log_softmax(flat_student[kl_mask] / args.temperature, dim=-1, dtype=torch.float32)
-                teacher_logprob = F.log_softmax(flat_teacher[kl_mask] / args.temperature, dim=-1, dtype=torch.float32)
-                kl_loss = (teacher_prob * (teacher_logprob - student_logprob)).sum() / num_kl
-                kl_loss = kl_loss * (args.temperature ** 2)
-            else:
-                kl_loss = torch.tensor(0.0, device=device)
-
-            loss = ce_loss + args.alpha_kl * kl_loss
+            loss = F.kl_div(
+                F.log_softmax(student_logits / T, dim=-1),
+                F.softmax(teacher_logits / T, dim=-1),
+                reduction="batchmean",
+            ) * (T ** 2)
 
             if torch.isnan(loss):
                 continue
@@ -232,30 +166,22 @@ def train(args):
             loss.backward()
             torch.nn.utils.clip_grad_norm_(student.parameters(), args.grad_clip)
             optimizer.step()
-            scheduler.step()
 
-            epoch_ce += ce_loss.item()
-            epoch_kl += kl_loss.item()
-            epoch_total += loss.item()
+            epoch_loss += loss.item()
             n_steps += 1
 
             if step % 50 == 0:
-                print(f"  step {step:04d} | CE {ce_loss.item():.4f} | "
-                      f"KL {kl_loss.item():.4f} | Total {loss.item():.4f}")
+                print(f"  step {step:04d} | KL {loss.item():.4f}")
 
-        avg = lambda v: v / max(n_steps, 1)
+        avg_loss = epoch_loss / max(n_steps, 1)
         acc = evaluate(student, tokenizer, args.test_path)
 
         history["epoch"].append(epoch + 1)
-        history["ce_loss"].append(avg(epoch_ce))
-        history["kl_loss"].append(avg(epoch_kl))
-        history["total_loss"].append(avg(epoch_total))
+        history["kl_loss"].append(avg_loss)
         history["accuracy"].append(acc)
 
-        print(f"Epoch {epoch+1}/{args.epochs}: "
-              f"CE={avg(epoch_ce):.4f} KL={avg(epoch_kl):.4f} Acc={acc:.4f}")
+        print(f"Epoch {epoch+1}/{args.epochs}: KL={avg_loss:.4f} Acc={acc:.4f}")
 
-        # Incremental history save
         with open(os.path.join(args.save_dir, "training_history.json"), "w") as f:
             json.dump(dict(history), f, indent=2)
 
@@ -285,9 +211,8 @@ def main():
     parser.add_argument("--train-path", default=os.path.join(script_dir, "..", "datasets", "2d_add_train_80.json"))
     parser.add_argument("--test-path", default=os.path.join(script_dir, "..", "datasets", "2d_add_test_20.json"))
     parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--lr", type=float, default=2e-5)
-    parser.add_argument("--alpha-kl", type=float, default=1.0)
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--temperature", type=float, default=2.0)
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--checkpoint-every", type=int, default=5)

@@ -12,7 +12,7 @@ full outputs, this module:
   3. For each paired cluster (discovered via ablation-based importance
      matching), extracts the corresponding neuron subsets and computes
      CKA between student and teacher.
-  4. The total loss is:  L = L_CE + lambda * L_cluster_align
+  4. The total loss is:  L = T^2 * KL(student/T, teacher/T) + lambda * L_cluster_align
 
 Pipeline prerequisites (run before this module):
   - Neuron clustering  (clustering.py)
@@ -21,7 +21,6 @@ Pipeline prerequisites (run before this module):
 """
 
 import json
-import math
 import os
 import re
 from collections import defaultdict
@@ -33,7 +32,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import LambdaLR
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -66,8 +64,9 @@ class ClusterDistillationConfig:
     student_model: str = "meta-llama/Llama-3.2-1B"
 
     epochs: int = 50
-    batch_size: int = 8
-    learning_rate: float = 2e-5
+    batch_size: int = 32
+    learning_rate: float = 1e-4
+    temperature: float = 2.0
     grad_clip: float = 1.0
 
     lambda_cluster: float = 0.01
@@ -601,18 +600,6 @@ class ClusterDistillationTrainer:
             self.dataset, batch_size=config.batch_size, shuffle=True,
         )
 
-        # LR scheduler: linear warmup + cosine decay
-        total_steps = len(self.loader) * config.epochs
-        warmup_steps = min(len(self.loader), total_steps // 10)
-
-        def lr_lambda(current_step):
-            if current_step < warmup_steps:
-                return current_step / max(warmup_steps, 1)
-            progress = (current_step - warmup_steps) / max(total_steps - warmup_steps, 1)
-            return 0.5 * (1.0 + math.cos(math.pi * progress))
-
-        self.scheduler = LambdaLR(self.optimizer, lr_lambda)
-
         # History
         self.history: Dict[str, List] = defaultdict(list)
 
@@ -622,38 +609,35 @@ class ClusterDistillationTrainer:
         """One forward pass through student + teacher, returns composite loss."""
         input_ids = batch["input_ids"].to(self.device)
         attention_mask = batch["attention_mask"].to(self.device)
-        labels = batch["labels"].to(self.device)
+        T = self.config.temperature
 
-        if (labels != -100).sum().item() == 0:
-            return None, {}
-
-        # Register hooks
         self.teacher_cache.register_hooks(self.teacher, detach=True)
         self.student_cache.register_hooks(self.student, detach=False)
 
         try:
-            # Teacher forward (no grad)
             with torch.no_grad():
-                self.teacher(input_ids=input_ids, attention_mask=attention_mask)
+                teacher_out = self.teacher(input_ids=input_ids, attention_mask=attention_mask)
+                teacher_logits = teacher_out.logits
             teacher_acts = self.teacher_cache.get_flattened_per_token()
 
-            # Student forward
             student_out = self.student(
                 input_ids=input_ids, attention_mask=attention_mask,
-                labels=labels,
             )
+            student_logits = student_out.logits
             student_acts = self.student_cache.get_flattened_per_token()
 
-            ce_loss = student_out.loss
+            kl_loss = F.kl_div(
+                F.log_softmax(student_logits / T, dim=-1),
+                F.softmax(teacher_logits / T, dim=-1),
+                reduction="batchmean",
+            ) * (T ** 2)
 
-            # Cluster CKA alignment (per-token CKA, then mean across tokens)
             cluster_loss, cka_scores = self.cluster_loss_fn(
                 student_acts, teacher_acts, self.cluster_pairs,
                 attention_mask=attention_mask,
                 importance_weighting=self.config.importance_weighting,
             )
 
-            # Optional projection loss (uses mean-pooled for simplicity)
             proj_loss = torch.tensor(0.0, device=self.device)
             if self.proj_heads is not None and self.config.lambda_proj > 0:
                 s_pooled = student_acts.mean(dim=1)
@@ -663,13 +647,13 @@ class ClusterDistillationTrainer:
                 )
 
             total = (
-                ce_loss
+                kl_loss
                 + self.config.lambda_cluster * cluster_loss
                 + self.config.lambda_proj * proj_loss
             )
 
             metrics = {
-                "ce_loss": ce_loss.item(),
+                "kl_loss": kl_loss.item(),
                 "cluster_loss": cluster_loss.item(),
                 "proj_loss": proj_loss.item(),
                 "total_loss": total.item(),
@@ -705,7 +689,6 @@ class ClusterDistillationTrainer:
                 self.student.parameters(), self.config.grad_clip,
             )
             self.optimizer.step()
-            self.scheduler.step()
 
             for k, v in metrics.items():
                 agg[k] += v
@@ -714,7 +697,7 @@ class ClusterDistillationTrainer:
             if step % 5 == 0:
                 print(
                     f"  step {step:04d} | "
-                    f"CE {metrics['ce_loss']:.4f} | "
+                    f"KL {metrics['kl_loss']:.4f} | "
                     f"Cluster {metrics['cluster_loss']:.4f} | "
                     f"CKA {metrics['mean_cka']:.4f}"
                 )
@@ -737,11 +720,12 @@ class ClusterDistillationTrainer:
         self.history["teacher_baseline"] = teacher_base
 
         print("=" * 60)
-        print("Neuron-Cluster Circuit Distillation")
+        print("Neuron-Cluster KL + CKA Distillation")
         print("=" * 60)
         print(f"  Epochs:           {cfg.epochs}")
         print(f"  Batch size:       {cfg.batch_size}")
         print(f"  LR:               {cfg.learning_rate}")
+        print(f"  Temperature:      {cfg.temperature}")
         print(f"  lambda_cluster:   {cfg.lambda_cluster}")
         print(f"  lambda_proj:      {cfg.lambda_proj}")
         print(f"  Cluster pairs:    {len(self.cluster_pairs)}")
@@ -776,7 +760,7 @@ class ClusterDistillationTrainer:
 
             print(
                 f"  Epoch {epoch + 1}: "
-                f"CE={epoch_metrics.get('ce_loss', 0):.4f}, "
+                f"KL={epoch_metrics.get('kl_loss', 0):.4f}, "
                 f"Cluster={epoch_metrics.get('cluster_loss', 0):.4f}, "
                 f"CKA={epoch_metrics.get('mean_cka', 0):.4f}, "
                 f"Acc={acc:.3f}"

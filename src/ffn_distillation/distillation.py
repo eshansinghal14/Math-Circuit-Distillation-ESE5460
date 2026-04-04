@@ -1,18 +1,18 @@
-"""FFN layer-level distillation with CKA alignment.
+"""FFN layer-level distillation with KL + CKA alignment.
 
-Loss = CE(student, labels) + lambda * mean(CKA_loss per paired MLP layer)
+Loss = T^2 * KL(softmax(student/T) || softmax(teacher/T)) + lambda * mean(CKA_loss per paired MLP layer)
 
 Hooks the full MLP output of each paired layer in both student and teacher,
-then computes CKA between those outputs.  This is the "full MLP layer pairing"
-experiment -- a middle ground between pure KL (no internal alignment) and
-neuron-cluster CKA (fine-grained internal alignment).
+mean-pools over the token dimension to [B, H], then computes CKA between
+those pooled representations.
+
+Paper target: 96.3% accuracy on 2-digit addition.
 
 Usage (from src/):
   python -m ffn_distillation.distillation --save-dir /path/to/results
 """
 
 import json
-import math
 import os
 import re
 from collections import defaultdict
@@ -25,7 +25,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import LambdaLR
 
 from cka_loss import CKALoss
 from ffn_distillation.layer_pairing import LayerPairInfo
@@ -37,11 +36,12 @@ class FFNDistillationConfig:
     student_model: str = "meta-llama/Llama-3.2-1B"
 
     epochs: int = 50
-    batch_size: int = 8
-    learning_rate: float = 2e-5
+    batch_size: int = 32
+    learning_rate: float = 1e-4
+    temperature: float = 2.0
     grad_clip: float = 1.0
 
-    lambda_cka: float = 0.1
+    lambda_cka: float = 0.01
     eval_every: int = 1
     checkpoint_every: int = 5
     save_dir: str = "results/ffn-distillation"
@@ -69,19 +69,10 @@ def collate_fn(examples, tokenizer):
     full_texts = [p + a for p, a in zip(prompts, answers)]
 
     enc = tokenizer(full_texts, return_tensors="pt", padding=True, truncation=True)
-    input_ids = enc["input_ids"]
-    attention_mask = enc["attention_mask"]
-
-    labels = input_ids.clone()
-    for i in range(len(prompts)):
-        answer_ids = tokenizer(answers[i], add_special_tokens=False)["input_ids"]
-        n_answer = len(answer_ids)
-        labels[i, :-n_answer] = -100
 
     return {
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
-        "labels": labels,
+        "input_ids": enc["input_ids"],
+        "attention_mask": enc["attention_mask"],
     }
 
 
@@ -163,7 +154,7 @@ def save_checkpoint(model, tokenizer, save_dir: str, tag: str):
 
 
 class FFNDistillationTrainer:
-    """Training loop for FFN layer-level CKA distillation."""
+    """Training loop for FFN layer-level KL + CKA distillation."""
 
     def __init__(
         self,
@@ -180,7 +171,6 @@ class FFNDistillationTrainer:
         self.student_layer_indices = sorted(set(p.student_layer for p in layer_pairs))
         self.teacher_layer_indices = sorted(set(p.teacher_layer for p in layer_pairs))
 
-        # Models -- student fp32 for stable training, teacher fp16 (frozen)
         from utils import load_model
         print(f"Loading student: {config.student_model}")
         self.student, self.tokenizer = load_model(config.student_model)
@@ -193,42 +183,25 @@ class FFNDistillationTrainer:
         for p in self.teacher.parameters():
             p.requires_grad = False
 
-        # Caches
         self.student_cache = MLPActivationCache()
         self.teacher_cache = MLPActivationCache()
 
-        # Loss
         self.cka_loss_fn = CKALoss(efficient=True)
 
-        # Optimizer + scheduler
         self.optimizer = AdamW(self.student.parameters(), lr=config.learning_rate)
 
-        # Data
         dataset = AddDataset(train_path)
         self.loader = DataLoader(
             dataset, batch_size=config.batch_size, shuffle=True,
             collate_fn=partial(collate_fn, tokenizer=self.tokenizer),
         )
 
-        total_steps = len(self.loader) * config.epochs
-        warmup_steps = min(len(self.loader), total_steps // 10)
-
-        def lr_lambda(current_step):
-            if current_step < warmup_steps:
-                return current_step / max(warmup_steps, 1)
-            progress = (current_step - warmup_steps) / max(total_steps - warmup_steps, 1)
-            return 0.5 * (1.0 + math.cos(math.pi * progress))
-
-        self.scheduler = LambdaLR(self.optimizer, lr_lambda)
         self.history: Dict[str, List] = defaultdict(list)
 
     def _forward_and_loss(self, batch):
         input_ids = batch["input_ids"].to(self.device)
         attention_mask = batch["attention_mask"].to(self.device)
-        labels = batch["labels"].to(self.device)
-
-        if (labels != -100).sum().item() == 0:
-            return None, {}
+        T = self.config.temperature
 
         self.teacher_cache.register_hooks(
             self.teacher, self.teacher_layer_indices, detach=True,
@@ -239,21 +212,20 @@ class FFNDistillationTrainer:
 
         try:
             with torch.no_grad():
-                self.teacher(input_ids=input_ids, attention_mask=attention_mask)
+                teacher_out = self.teacher(input_ids=input_ids, attention_mask=attention_mask)
+                teacher_logits = teacher_out.logits
 
             student_out = self.student(
                 input_ids=input_ids, attention_mask=attention_mask,
             )
-            # Manual CE in float32 with proper causal shift
-            shift_logits = student_out.logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            ce_loss = F.cross_entropy(
-                shift_logits.view(-1, shift_logits.size(-1)).float(),
-                shift_labels.view(-1),
-                ignore_index=-100,
-            )
+            student_logits = student_out.logits
 
-            # CKA over each paired layer
+            kl_loss = F.kl_div(
+                F.log_softmax(student_logits / T, dim=-1),
+                F.softmax(teacher_logits / T, dim=-1),
+                reduction="batchmean",
+            ) * (T ** 2)
+
             cka_losses = []
             cka_scores = {}
             for pair in self.layer_pairs:
@@ -263,7 +235,11 @@ class FFNDistillationTrainer:
                 if s_act is None or t_act is None:
                     continue
 
-                loss_i, cka_i = self.cka_loss_fn(s_act.float(), t_act.float())
+                # Mean-pool over token dim: [B, T, H] -> [B, H]
+                s_pooled = s_act.float().mean(dim=1)
+                t_pooled = t_act.float().mean(dim=1)
+
+                loss_i, cka_i = self.cka_loss_fn(s_pooled, t_pooled)
                 cka_losses.append(loss_i)
                 cka_scores[(pair.student_layer, pair.teacher_layer)] = cka_i.item()
 
@@ -272,10 +248,10 @@ class FFNDistillationTrainer:
             else:
                 cka_loss = torch.tensor(0.0, device=self.device)
 
-            total = ce_loss + self.config.lambda_cka * cka_loss
+            total = kl_loss + self.config.lambda_cka * cka_loss
 
             metrics = {
-                "ce_loss": ce_loss.item(),
+                "kl_loss": kl_loss.item(),
                 "cka_loss": cka_loss.item(),
                 "total_loss": total.item(),
                 "mean_cka": (
@@ -293,7 +269,6 @@ class FFNDistillationTrainer:
         cfg = self.config
         os.makedirs(cfg.save_dir, exist_ok=True)
 
-        # Baseline accuracy before training
         print("Evaluating baselines...")
         student_base = evaluate(self.student, self.tokenizer, self.test_path)
         teacher_base = evaluate(self.teacher, self.tokenizer, self.test_path)
@@ -303,10 +278,11 @@ class FFNDistillationTrainer:
         self.history["teacher_baseline"] = teacher_base
 
         print("=" * 60)
-        print("FFN Layer-Level CKA Distillation")
+        print("FFN Layer-Level KL + CKA Distillation")
         print(f"  Epochs:      {cfg.epochs}")
         print(f"  Batch:       {cfg.batch_size}")
         print(f"  LR:          {cfg.learning_rate}")
+        print(f"  Temperature: {cfg.temperature}")
         print(f"  lambda_cka:  {cfg.lambda_cka}")
         print(f"  Layer pairs: {len(self.layer_pairs)}")
         print(f"  Save dir:    {cfg.save_dir}")
@@ -330,14 +306,13 @@ class FFNDistillationTrainer:
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.student.parameters(), cfg.grad_clip)
                 self.optimizer.step()
-                self.scheduler.step()
 
                 for k, v in metrics.items():
                     agg[k] += v
                 n += 1
 
                 if step % 10 == 0:
-                    print(f"  step {step:04d} | CE {metrics['ce_loss']:.4f} | "
+                    print(f"  step {step:04d} | KL {metrics['kl_loss']:.4f} | "
                           f"CKA_loss {metrics['cka_loss']:.4f} | "
                           f"mean_CKA {metrics['mean_cka']:.4f}")
 
@@ -352,12 +327,11 @@ class FFNDistillationTrainer:
             for k, v in avg.items():
                 self.history[k].append(v)
 
-            # Incremental history save
             with open(os.path.join(cfg.save_dir, "training_history.json"), "w") as f:
                 json.dump(dict(self.history), f, indent=2)
 
             print(f"Epoch {epoch+1}/{cfg.epochs}: "
-                  f"CE={avg.get('ce_loss', 0):.4f} CKA_loss={avg.get('cka_loss', 0):.4f} "
+                  f"KL={avg.get('kl_loss', 0):.4f} CKA_loss={avg.get('cka_loss', 0):.4f} "
                   f"mean_CKA={avg.get('mean_cka', 0):.4f} Acc={acc:.4f}")
 
             if acc > best_acc:

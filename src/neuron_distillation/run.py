@@ -213,8 +213,9 @@ Example:
                         help="Number of latent subclasses (auto-detected from checkpoint if omitted)")
     parser.add_argument("--top-k-pairs", type=int, default=5)
     parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--lr", type=float, default=2e-5)
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--temperature", type=float, default=2.0)
     parser.add_argument("--lambda-cluster", type=float, default=0.01)
     parser.add_argument("--lambda-proj", type=float, default=0.0)
     parser.add_argument("--checkpoint-every", type=int, default=5,
@@ -347,6 +348,7 @@ Example:
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.lr,
+        temperature=args.temperature,
         lambda_cluster=args.lambda_cluster,
         lambda_proj=args.lambda_proj,
         use_projection_heads=args.use_projection,
