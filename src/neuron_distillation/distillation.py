@@ -24,7 +24,7 @@ import json
 import os
 import re
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -41,6 +41,7 @@ from neuron_distillation.pairing import (
     _load_single_ablation_performance,
     create_cluster_mapping,
 )
+from utils import EVAL_MAX_NEW_TOKENS
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +79,7 @@ class ClusterDistillationConfig:
 
     eval_every: int = 1
     checkpoint_every: int = 5
+    eval_max_new_tokens: int = EVAL_MAX_NEW_TOKENS
     save_dir: str = "results/cluster-distillation"
 
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
@@ -492,8 +494,14 @@ def _extract_int_after_equals(text: str) -> Optional[int]:
 
 @torch.no_grad()
 def eval_accuracy(
-    model, tokenizer, data: Dict[str, int], batch_size: int = 50,
+    model,
+    tokenizer,
+    data: Dict[str, int],
+    batch_size: int = 50,
+    max_new_tokens: Optional[int] = None,
 ) -> float:
+    if max_new_tokens is None:
+        max_new_tokens = EVAL_MAX_NEW_TOKENS
     model.eval()
     prompts = list(data.keys())
     answers = list(data.values())
@@ -511,7 +519,9 @@ def eval_accuracy(
         ).to(model.device)
 
         outputs = model.generate(
-            **inputs, max_new_tokens=10, do_sample=False,
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
             pad_token_id=tokenizer.eos_token_id,
         )
         decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
@@ -712,8 +722,14 @@ class ClusterDistillationTrainer:
 
         # Baseline accuracy before training
         print("Evaluating baselines...")
-        student_base = eval_accuracy(self.student, self.tokenizer, self.test_data)
-        teacher_base = eval_accuracy(self.teacher, self.tokenizer, self.test_data)
+        student_base = eval_accuracy(
+            self.student, self.tokenizer, self.test_data,
+            max_new_tokens=cfg.eval_max_new_tokens,
+        )
+        teacher_base = eval_accuracy(
+            self.teacher, self.tokenizer, self.test_data,
+            max_new_tokens=cfg.eval_max_new_tokens,
+        )
         print(f"  Student baseline accuracy: {student_base:.4f}")
         print(f"  Teacher baseline accuracy: {teacher_base:.4f}")
         self.history["student_baseline"] = student_base
@@ -726,6 +742,7 @@ class ClusterDistillationTrainer:
         print(f"  Batch size:       {cfg.batch_size}")
         print(f"  LR:               {cfg.learning_rate}")
         print(f"  Temperature:      {cfg.temperature}")
+        print(f"  eval max_new_tokens: {cfg.eval_max_new_tokens}")
         print(f"  lambda_cluster:   {cfg.lambda_cluster}")
         print(f"  lambda_proj:      {cfg.lambda_proj}")
         print(f"  Cluster pairs:    {len(self.cluster_pairs)}")
@@ -744,6 +761,7 @@ class ClusterDistillationTrainer:
             if (epoch + 1) % cfg.eval_every == 0:
                 acc = eval_accuracy(
                     self.student, self.tokenizer, self.test_data,
+                    max_new_tokens=cfg.eval_max_new_tokens,
                 )
                 epoch_metrics["accuracy"] = acc
 

@@ -19,6 +19,7 @@ from ffn_distillation.distillation import (
     FFNDistillationConfig,
     FFNDistillationTrainer,
 )
+from utils import EVAL_MAX_NEW_TOKENS
 
 
 def main():
@@ -42,10 +43,22 @@ def main():
     parser.add_argument("--lambda-cka", type=float, default=0.01)
     parser.add_argument("--temperature", type=float, default=2.0)
     parser.add_argument("--checkpoint-every", type=int, default=5)
+    parser.add_argument(
+        "--eval-max-new-tokens",
+        type=int,
+        default=None,
+        help="Greedy test accuracy during training (default: utils.EVAL_MAX_NEW_TOKENS)",
+    )
     parser.add_argument("--save-dir", default=os.path.join(script_dir, "..", "..", "results", "ffn-distillation"))
     parser.add_argument("--skip-ablation", action="store_true",
                         help="Skip ablation (assumes layer_ablation_performance.json exists)")
     args = parser.parse_args()
+
+    eval_max_new_tokens = (
+        args.eval_max_new_tokens
+        if args.eval_max_new_tokens is not None
+        else EVAL_MAX_NEW_TOKENS
+    )
 
     os.makedirs(args.save_dir, exist_ok=True)
 
@@ -69,6 +82,7 @@ def main():
                 model_name=args.student_model,
                 dataset_path=args.ablation_dataset,
                 results_dir=student_abl_dir,
+                max_new_tokens=eval_max_new_tokens,
             )
         else:
             print(f"  Student ablation exists: {student_abl_path}")
@@ -79,6 +93,7 @@ def main():
                 model_name=args.teacher_model,
                 dataset_path=args.ablation_dataset,
                 results_dir=teacher_abl_dir,
+                max_new_tokens=eval_max_new_tokens,
             )
         else:
             print(f"  Teacher ablation exists: {teacher_abl_path}")
@@ -118,6 +133,7 @@ def main():
         temperature=args.temperature,
         lambda_cka=args.lambda_cka,
         checkpoint_every=args.checkpoint_every,
+        eval_max_new_tokens=eval_max_new_tokens,
         save_dir=args.save_dir,
     )
 

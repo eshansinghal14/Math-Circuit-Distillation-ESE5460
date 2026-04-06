@@ -18,7 +18,7 @@ from typing import Dict, List
 
 import torch
 
-from utils import load_model, test_model, eval_model
+from utils import EVAL_MAX_NEW_TOKENS, eval_model, load_model, test_model
 
 
 def _zero_mlp_hook(module, inputs, output):
@@ -33,7 +33,7 @@ def layer_ablation(
     dataset_path: str,
     results_dir: str,
     batch_size: int = 50,
-    max_new_tokens: int = 5,
+    max_new_tokens: int = EVAL_MAX_NEW_TOKENS,
 ) -> Dict:
     """Ablate each MLP layer one at a time and record accuracy.
 
@@ -42,8 +42,7 @@ def layer_ablation(
         dataset_path: Path to a JSON evaluation dataset (``2d_add_all.json`` format).
         results_dir: Where to write results.
         batch_size: Evaluation batch size.
-        max_new_tokens: Tokens to generate per example (use >=5 for multi-digit
-            answers; 1 token was too low and skewed baselines vs distillation eval).
+        max_new_tokens: Greedy generation cap (default ``EVAL_MAX_NEW_TOKENS``; same as distillation eval).
 
     Returns:
         ``{"baseline": float, "layers": {"0": float, "1": float, ...}}``
@@ -100,7 +99,7 @@ if __name__ == "__main__":
     parser.add_argument("--results-dir", type=str,
                         default=os.path.join(script_dir, "..", "..", "results", "ffn-layer-ablation"))
     parser.add_argument("--batch-size", type=int, default=50)
-    parser.add_argument("--max-new-tokens", type=int, default=5)
+    parser.add_argument("--max-new-tokens", type=int, default=EVAL_MAX_NEW_TOKENS)
     args = parser.parse_args()
 
     layer_ablation(
