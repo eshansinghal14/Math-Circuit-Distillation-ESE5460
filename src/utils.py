@@ -18,6 +18,11 @@ from transformers import AutoTokenizer
 
 logged_in = False
 
+# Greedy eval on prompts ending in "=" (2-digit addition). Two new tokens match
+# typical Llama BPE for answers up to three digits; increase to 3 if you see truncation.
+EVAL_MAX_NEW_TOKENS = 2
+
+
 def load_model(model_name):
     hf_logging.set_verbosity_error()
 
@@ -39,7 +44,7 @@ def load_model(model_name):
     tokenizer.padding_size = 'left'
     return model, tokenizer
 
-def test_model(model, tokenizer, dataset_fname, results_fname, batch_size=50, max_new_tokens=5, log=True):
+def test_model(model, tokenizer, dataset_fname, results_fname, batch_size=50, max_new_tokens=EVAL_MAX_NEW_TOKENS, log=True):
     model.eval()
     with open(dataset_fname, 'r') as f:
         dataset = json.load(f)

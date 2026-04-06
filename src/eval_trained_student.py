@@ -1,6 +1,7 @@
 """Load a saved standard-KL student checkpoint and score the addition test set.
 
-Uses the same decoding/eval as standard_distillation.py (left padding, greedy, max_new_tokens=5).
+Uses the same decoding/eval as standard_distillation.py (left padding, greedy;
+default max_new_tokens matches utils.EVAL_MAX_NEW_TOKENS).
 
 Examples:
   cd src
@@ -24,6 +25,7 @@ if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
 from standard_distillation import evaluate  # noqa: E402
+from utils import EVAL_MAX_NEW_TOKENS  # noqa: E402
 
 
 def main():
@@ -39,6 +41,12 @@ def main():
         help="Test JSON (dict prompt->int or list of q_str/a_str)",
     )
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=EVAL_MAX_NEW_TOKENS,
+        help="Greedy decode cap after prompt (default: utils.EVAL_MAX_NEW_TOKENS)",
+    )
     args = parser.parse_args()
 
     ckpt = os.path.expanduser(args.checkpoint)
@@ -57,7 +65,13 @@ def main():
     model.eval()
 
     test_path = os.path.abspath(os.path.expanduser(args.test_path))
-    acc = evaluate(model, tokenizer, test_path, batch_size=args.batch_size)
+    acc = evaluate(
+        model,
+        tokenizer,
+        test_path,
+        batch_size=args.batch_size,
+        max_new_tokens=args.max_new_tokens,
+    )
     print(f"Checkpoint: {ckpt}")
     print(f"Test file:  {test_path}")
     print(f"Accuracy:   {acc:.4f}")

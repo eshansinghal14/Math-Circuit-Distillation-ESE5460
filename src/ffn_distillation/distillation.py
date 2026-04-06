@@ -16,7 +16,7 @@ import json
 import os
 import re
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import partial
 from typing import Dict, List, Optional, Tuple
 
@@ -28,6 +28,7 @@ from torch.optim import AdamW
 
 from cka_loss import CKALoss
 from ffn_distillation.layer_pairing import LayerPairInfo
+from utils import EVAL_MAX_NEW_TOKENS
 
 
 @dataclass
@@ -44,6 +45,7 @@ class FFNDistillationConfig:
     lambda_cka: float = 0.01
     eval_every: int = 1
     checkpoint_every: int = 5
+    eval_max_new_tokens: int = EVAL_MAX_NEW_TOKENS
     save_dir: str = "results/ffn-distillation"
 
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
@@ -113,7 +115,15 @@ def _extract_int_after_equals(text: str) -> Optional[int]:
 
 
 @torch.no_grad()
-def evaluate(model, tokenizer, test_path: str, batch_size: int = 32) -> float:
+def evaluate(
+    model,
+    tokenizer,
+    test_path: str,
+    batch_size: int = 32,
+    max_new_tokens: Optional[int] = None,
+) -> float:
+    if max_new_tokens is None:
+        max_new_tokens = EVAL_MAX_NEW_TOKENS
     with open(test_path, "r") as f:
         data = json.load(f)
 
@@ -133,8 +143,12 @@ def evaluate(model, tokenizer, test_path: str, batch_size: int = 32) -> float:
         batch_p = prompts[i : i + batch_size]
         batch_a = answers[i : i + batch_size]
         inputs = tokenizer(batch_p, return_tensors="pt", padding=True).to(model.device)
-        outputs = model.generate(**inputs, max_new_tokens=5, do_sample=False,
-                                 pad_token_id=tokenizer.eos_token_id)
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            pad_token_id=tokenizer.eos_token_id,
+        )
         decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
         for text, gold in zip(decoded, batch_a):
             pred = _extract_int_after_equals(text)
@@ -270,8 +284,14 @@ class FFNDistillationTrainer:
         os.makedirs(cfg.save_dir, exist_ok=True)
 
         print("Evaluating baselines...")
-        student_base = evaluate(self.student, self.tokenizer, self.test_path)
-        teacher_base = evaluate(self.teacher, self.tokenizer, self.test_path)
+        student_base = evaluate(
+            self.student, self.tokenizer, self.test_path,
+            max_new_tokens=cfg.eval_max_new_tokens,
+        )
+        teacher_base = evaluate(
+            self.teacher, self.tokenizer, self.test_path,
+            max_new_tokens=cfg.eval_max_new_tokens,
+        )
         print(f"  Student baseline accuracy: {student_base:.4f}")
         print(f"  Teacher baseline accuracy: {teacher_base:.4f}")
         self.history["student_baseline"] = student_base
@@ -284,6 +304,7 @@ class FFNDistillationTrainer:
         print(f"  LR:          {cfg.learning_rate}")
         print(f"  Temperature: {cfg.temperature}")
         print(f"  lambda_cka:  {cfg.lambda_cka}")
+        print(f"  eval max_new_tokens: {cfg.eval_max_new_tokens}")
         print(f"  Layer pairs: {len(self.layer_pairs)}")
         print(f"  Save dir:    {cfg.save_dir}")
         print("=" * 60)
@@ -320,7 +341,10 @@ class FFNDistillationTrainer:
 
             acc = 0.0
             if (epoch + 1) % cfg.eval_every == 0:
-                acc = evaluate(self.student, self.tokenizer, self.test_path)
+                acc = evaluate(
+                    self.student, self.tokenizer, self.test_path,
+                    max_new_tokens=cfg.eval_max_new_tokens,
+                )
                 avg["accuracy"] = acc
 
             self.history["epoch"].append(epoch + 1)

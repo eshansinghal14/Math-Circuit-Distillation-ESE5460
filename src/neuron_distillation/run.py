@@ -41,7 +41,7 @@ from neuron_distillation.distillation import (
     ClusterPairInfo,
     eval_accuracy,
 )
-from utils import load_model, load_model_checkpoint
+from utils import EVAL_MAX_NEW_TOKENS, load_model, load_model_checkpoint
 
 
 def build_train_test_split(dataset_path: str, test_frac: float = 0.1, seed: int = 42):
@@ -216,6 +216,12 @@ Example:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--temperature", type=float, default=2.0)
+    parser.add_argument(
+        "--eval-max-new-tokens",
+        type=int,
+        default=None,
+        help="Greedy eval during training (default: utils.EVAL_MAX_NEW_TOKENS)",
+    )
     parser.add_argument("--lambda-cluster", type=float, default=0.01)
     parser.add_argument("--lambda-proj", type=float, default=0.0)
     parser.add_argument("--checkpoint-every", type=int, default=5,
@@ -226,6 +232,12 @@ Example:
     parser.add_argument("--skip-ablation", action="store_true",
                         help="Skip ablation (assumes ablation_performance.json already exists)")
     args = parser.parse_args()
+
+    eval_max_new_tokens = (
+        args.eval_max_new_tokens
+        if args.eval_max_new_tokens is not None
+        else EVAL_MAX_NEW_TOKENS
+    )
 
     # ---- Auto-detect checkpoint from clustering dir if not provided ----------
     if args.checkpoint is None:
@@ -354,6 +366,7 @@ Example:
         use_projection_heads=args.use_projection,
         top_k_clusters_per_subclass=args.top_k_pairs,
         checkpoint_every=args.checkpoint_every,
+        eval_max_new_tokens=eval_max_new_tokens,
         save_dir=args.save_dir,
     )
 

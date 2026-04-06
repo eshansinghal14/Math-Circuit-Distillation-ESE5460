@@ -19,10 +19,11 @@ import torch
 
 
 from utils import (
-    load_model_checkpoint,
-    load_model,
-    test_model,
+    EVAL_MAX_NEW_TOKENS,
     eval_model,
+    load_model,
+    load_model_checkpoint,
+    test_model,
 )
 from circuit_discovery.utils import parse_equation
 
@@ -98,7 +99,7 @@ def ablation(
     results_base_dir: str = None,
     clusters_base_dir: str = None,
     batch_size: int = 50,
-    max_new_tokens: int = 1,
+    max_new_tokens: int = EVAL_MAX_NEW_TOKENS,
 ) -> Dict:
     """Run per-cluster ablation study for a single model.
 
