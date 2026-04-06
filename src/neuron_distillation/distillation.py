@@ -12,7 +12,7 @@ full outputs, this module:
   3. For each paired cluster (discovered via ablation-based importance
      matching), extracts the corresponding neuron subsets and computes
      CKA between student and teacher.
-  4. The total loss is:  L = L_CE + lambda * L_cluster_align
+  4. The total loss is:  L = T^2 * KL(student/T, teacher/T) + lambda * L_cluster_align
 
 Pipeline prerequisites (run before this module):
   - Neuron clustering  (clustering.py)
@@ -64,8 +64,9 @@ class ClusterDistillationConfig:
     student_model: str = "meta-llama/Llama-3.2-1B"
 
     epochs: int = 50
-    batch_size: int = 8
+    batch_size: int = 32
     learning_rate: float = 1e-4
+    temperature: float = 2.0
     grad_clip: float = 1.0
 
     lambda_cluster: float = 0.01
@@ -76,6 +77,7 @@ class ClusterDistillationConfig:
     use_projection_heads: bool = False
 
     eval_every: int = 1
+    checkpoint_every: int = 5
     save_dir: str = "results/cluster-distillation"
 
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
@@ -555,23 +557,22 @@ class ClusterDistillationTrainer:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         # Models
+        dtype = torch.float16 if config.device == "cuda" else torch.float32
         if student is not None:
             self.student = student
         else:
             print(f"Loading student: {config.student_model}")
             self.student = AutoModelForCausalLM.from_pretrained(
-                config.student_model, torch_dtype=torch.float32,
-                device_map=config.device,
-            )
+                config.student_model, torch_dtype=dtype,
+            ).to(config.device)
 
         if teacher is not None:
             self.teacher = teacher
         else:
             print(f"Loading teacher: {config.teacher_model}")
             self.teacher = AutoModelForCausalLM.from_pretrained(
-                config.teacher_model, torch_dtype=torch.float32,
-                device_map=config.device,
-            )
+                config.teacher_model, torch_dtype=dtype,
+            ).to(config.device)
         self.teacher.eval()
         for p in self.teacher.parameters():
             p.requires_grad = False
@@ -608,38 +609,35 @@ class ClusterDistillationTrainer:
         """One forward pass through student + teacher, returns composite loss."""
         input_ids = batch["input_ids"].to(self.device)
         attention_mask = batch["attention_mask"].to(self.device)
-        labels = batch["labels"].to(self.device)
+        T = self.config.temperature
 
-        if (labels != -100).sum().item() == 0:
-            return None, {}
-
-        # Register hooks
         self.teacher_cache.register_hooks(self.teacher, detach=True)
         self.student_cache.register_hooks(self.student, detach=False)
 
         try:
-            # Teacher forward (no grad)
             with torch.no_grad():
-                self.teacher(input_ids=input_ids, attention_mask=attention_mask)
+                teacher_out = self.teacher(input_ids=input_ids, attention_mask=attention_mask)
+                teacher_logits = teacher_out.logits
             teacher_acts = self.teacher_cache.get_flattened_per_token()
 
-            # Student forward
             student_out = self.student(
                 input_ids=input_ids, attention_mask=attention_mask,
-                labels=labels,
             )
+            student_logits = student_out.logits
             student_acts = self.student_cache.get_flattened_per_token()
 
-            ce_loss = student_out.loss
+            kl_loss = F.kl_div(
+                F.log_softmax(student_logits / T, dim=-1),
+                F.softmax(teacher_logits / T, dim=-1),
+                reduction="batchmean",
+            ) * (T ** 2)
 
-            # Cluster CKA alignment (per-token CKA, then mean across tokens)
             cluster_loss, cka_scores = self.cluster_loss_fn(
                 student_acts, teacher_acts, self.cluster_pairs,
                 attention_mask=attention_mask,
                 importance_weighting=self.config.importance_weighting,
             )
 
-            # Optional projection loss (uses mean-pooled for simplicity)
             proj_loss = torch.tensor(0.0, device=self.device)
             if self.proj_heads is not None and self.config.lambda_proj > 0:
                 s_pooled = student_acts.mean(dim=1)
@@ -649,13 +647,13 @@ class ClusterDistillationTrainer:
                 )
 
             total = (
-                ce_loss
+                kl_loss
                 + self.config.lambda_cluster * cluster_loss
                 + self.config.lambda_proj * proj_loss
             )
 
             metrics = {
-                "ce_loss": ce_loss.item(),
+                "kl_loss": kl_loss.item(),
                 "cluster_loss": cluster_loss.item(),
                 "proj_loss": proj_loss.item(),
                 "total_loss": total.item(),
@@ -699,7 +697,7 @@ class ClusterDistillationTrainer:
             if step % 5 == 0:
                 print(
                     f"  step {step:04d} | "
-                    f"CE {metrics['ce_loss']:.4f} | "
+                    f"KL {metrics['kl_loss']:.4f} | "
                     f"Cluster {metrics['cluster_loss']:.4f} | "
                     f"CKA {metrics['mean_cka']:.4f}"
                 )
@@ -712,16 +710,27 @@ class ClusterDistillationTrainer:
         """Run the full training loop."""
         cfg = self.config
 
+        # Baseline accuracy before training
+        print("Evaluating baselines...")
+        student_base = eval_accuracy(self.student, self.tokenizer, self.test_data)
+        teacher_base = eval_accuracy(self.teacher, self.tokenizer, self.test_data)
+        print(f"  Student baseline accuracy: {student_base:.4f}")
+        print(f"  Teacher baseline accuracy: {teacher_base:.4f}")
+        self.history["student_baseline"] = student_base
+        self.history["teacher_baseline"] = teacher_base
+
         print("=" * 60)
-        print("Neuron-Cluster Circuit Distillation")
+        print("Neuron-Cluster KL + CKA Distillation")
         print("=" * 60)
         print(f"  Epochs:           {cfg.epochs}")
         print(f"  Batch size:       {cfg.batch_size}")
         print(f"  LR:               {cfg.learning_rate}")
+        print(f"  Temperature:      {cfg.temperature}")
         print(f"  lambda_cluster:   {cfg.lambda_cluster}")
         print(f"  lambda_proj:      {cfg.lambda_proj}")
         print(f"  Cluster pairs:    {len(self.cluster_pairs)}")
         print(f"  Projection heads: {cfg.use_projection_heads}")
+        print(f"  Checkpoint every: {cfg.checkpoint_every}")
         print("=" * 60)
 
         best_acc = 0.0
@@ -746,13 +755,20 @@ class ClusterDistillationTrainer:
             for k, v in epoch_metrics.items():
                 self.history[k].append(v)
 
+            # Incremental history save after each epoch
+            self._save_history()
+
             print(
                 f"  Epoch {epoch + 1}: "
-                f"CE={epoch_metrics.get('ce_loss', 0):.4f}, "
+                f"KL={epoch_metrics.get('kl_loss', 0):.4f}, "
                 f"Cluster={epoch_metrics.get('cluster_loss', 0):.4f}, "
                 f"CKA={epoch_metrics.get('mean_cka', 0):.4f}, "
                 f"Acc={acc:.3f}"
             )
+
+            # Periodic checkpoint
+            if cfg.checkpoint_every > 0 and (epoch + 1) % cfg.checkpoint_every == 0:
+                self._save_checkpoint(f"epoch_{epoch + 1}")
 
         self._save_checkpoint("final")
         self._save_history()

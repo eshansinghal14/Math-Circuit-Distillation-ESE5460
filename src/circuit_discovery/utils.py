@@ -3,7 +3,10 @@ import torch
 from transformers import AutoConfig
 from huggingface_hub import login
 
-from constants import HF_TOKEN
+try:
+    from constants import HF_TOKEN
+except ModuleNotFoundError:
+    HF_TOKEN = os.environ.get("HF_TOKEN", "")
 
 if HF_TOKEN:
     login(HF_TOKEN)
