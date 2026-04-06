@@ -15,6 +15,10 @@ in the loss unless you intended a different setup (e.g. random init).
 
 Usage (from src/):
   python standard_distillation.py --save-dir /path/to/drive/results/standard-kl
+
+Resume (same ``--save-dir``, weights + optimizer state):
+  python standard_distillation.py --save-dir /path/.../standard-kl \\
+    --resume-from /path/.../standard-kl/student_best --epochs 20
 """
 
 import argparse
@@ -171,12 +175,45 @@ def save_checkpoint(model, tokenizer, save_dir: str, tag: str):
     tokenizer.save_pretrained(path)
 
 
+def _training_state_path(save_dir: str) -> str:
+    return os.path.join(save_dir, "training_state.pt")
+
+
+def save_training_state(
+    save_dir: str,
+    optimizer: torch.optim.Optimizer,
+    next_epoch: int,
+    best_acc: float,
+) -> None:
+    """next_epoch = number of epochs already completed (resume will start training at this index)."""
+    path = _training_state_path(save_dir)
+    torch.save(
+        {
+            "optimizer": optimizer.state_dict(),
+            "next_epoch": next_epoch,
+            "best_acc": best_acc,
+        },
+        path,
+    )
+
+
+def load_training_state(path: str, optimizer: torch.optim.Optimizer, map_location) -> tuple[int, float]:
+    # Optimizer dicts are not loadable with weights_only=True (PyTorch 2.6+).
+    try:
+        chk = torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        chk = torch.load(path, map_location=map_location)
+    optimizer.load_state_dict(chk["optimizer"])
+    return int(chk["next_epoch"]), float(chk["best_acc"])
+
+
 def train(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(args.save_dir, exist_ok=True)
 
-    print("Loading student...")
-    student, tokenizer = load_model(args.student_model)
+    student_source = args.resume_from if args.resume_from else args.student_model
+    print(f"Loading student from {student_source!r}...")
+    student, tokenizer = load_model(student_source)
     student = student.to("cpu").float().to(device)
     tokenizer.padding_side = "left"
 
@@ -195,42 +232,70 @@ def train(args):
     )
 
     optimizer = AdamW(student.parameters(), lr=args.lr)
-    history = defaultdict(list)
+    history: dict = {}
+    hist_path = os.path.join(args.save_dir, "training_history.json")
+    state_path = _training_state_path(args.save_dir)
+    start_epoch = 0
     best_acc = 0.0
 
-    print("Evaluating baselines...")
-    student_base = evaluate(
-        student,
-        tokenizer,
-        args.test_path,
-        max_new_tokens=args.eval_max_new_tokens,
-        debug_decode=args.debug_decode,
-        debug_tag="student baseline",
-    )
-    teacher_base = evaluate(
-        teacher,
-        tokenizer,
-        args.test_path,
-        max_new_tokens=args.eval_max_new_tokens,
-        debug_decode=args.debug_decode,
-        debug_tag="teacher baseline",
-    )
-    print(f"  Student baseline accuracy: {student_base:.4f}")
-    print(f"  Teacher baseline accuracy: {teacher_base:.4f}")
+    if args.resume_from and os.path.isfile(state_path):
+        start_epoch, best_acc = load_training_state(state_path, optimizer, device)
+        print(f"Resumed optimizer state from {state_path} (starting at epoch {start_epoch + 1}, best_acc={best_acc:.4f})")
+        if os.path.isfile(hist_path):
+            with open(hist_path, "r") as f:
+                history = json.load(f)
+            if not isinstance(history, dict):
+                history = {}
+        for key in ("epoch", "kl_loss", "accuracy"):
+            if key not in history:
+                history[key] = []
+    elif args.resume_from:
+        print(f"No {state_path} found — warm-starting weights only (new optimizer, epoch 1).")
+
+    if start_epoch == 0 and not history:
+        history = defaultdict(list)
+
+    if start_epoch == 0:
+        print("Evaluating baselines...")
+        student_base = evaluate(
+            student,
+            tokenizer,
+            args.test_path,
+            max_new_tokens=args.eval_max_new_tokens,
+            debug_decode=args.debug_decode,
+            debug_tag="student baseline",
+        )
+        teacher_base = evaluate(
+            teacher,
+            tokenizer,
+            args.test_path,
+            max_new_tokens=args.eval_max_new_tokens,
+            debug_decode=args.debug_decode,
+            debug_tag="teacher baseline",
+        )
+        print(f"  Student baseline accuracy: {student_base:.4f}")
+        print(f"  Teacher baseline accuracy: {teacher_base:.4f}")
+    else:
+        print("Skipping baseline eval (resumed run).")
+        student_base = float(history.get("student_baseline", 0.0))
+        teacher_base = float(history.get("teacher_baseline", 0.0))
 
     print("=" * 60)
     print("Standard KL Distillation")
-    print(f"  Epochs:    {args.epochs}")
+    end_epoch = start_epoch + args.epochs
+    print(f"  Epochs:    {args.epochs} (global epochs {start_epoch + 1}..{end_epoch})")
     print(f"  Batch:     {args.batch_size}")
     print(f"  LR:        {args.lr}")
     print(f"  temp:      {args.temperature}")
     print(f"  eval max_new_tokens: {args.eval_max_new_tokens}")
     print(f"  Save dir:  {args.save_dir}")
+    if args.resume_from:
+        print(f"  Resume:    {args.resume_from!r}")
     print("=" * 60)
 
     T = args.temperature
 
-    for epoch in range(args.epochs):
+    for epoch in range(start_epoch, end_epoch):
         student.train()
         epoch_loss, n_steps = 0.0, 0
 
@@ -278,10 +343,15 @@ def train(args):
         history["kl_loss"].append(avg_loss)
         history["accuracy"].append(acc)
 
-        print(f"Epoch {epoch+1}/{args.epochs}: KL={avg_loss:.4f} Acc={acc:.4f}")
+        print(f"Epoch {epoch+1}/{end_epoch}: KL={avg_loss:.4f} Acc={acc:.4f}")
 
-        with open(os.path.join(args.save_dir, "training_history.json"), "w") as f:
-            json.dump(dict(history), f, indent=2)
+        # Normalize history to a plain dict for JSON (handles resumed non-defaultdict).
+        if isinstance(history, defaultdict):
+            hist_out = dict(history)
+        else:
+            hist_out = dict(history)
+        with open(hist_path, "w") as f:
+            json.dump(hist_out, f, indent=2)
 
         if acc > best_acc:
             best_acc = acc
@@ -290,12 +360,18 @@ def train(args):
         if args.checkpoint_every > 0 and (epoch + 1) % args.checkpoint_every == 0:
             save_checkpoint(student, tokenizer, args.save_dir, f"epoch_{epoch+1}")
 
-    history["student_baseline"] = student_base
-    history["teacher_baseline"] = teacher_base
+        save_training_state(args.save_dir, optimizer, epoch + 1, best_acc)
+
+    if isinstance(history, defaultdict):
+        hist_out = dict(history)
+    else:
+        hist_out = dict(history)
+    hist_out["student_baseline"] = student_base
+    hist_out["teacher_baseline"] = teacher_base
 
     save_checkpoint(student, tokenizer, args.save_dir, "final")
-    with open(os.path.join(args.save_dir, "training_history.json"), "w") as f:
-        json.dump(dict(history), f, indent=2)
+    with open(hist_path, "w") as f:
+        json.dump(hist_out, f, indent=2)
     print(f"\nDone. Best accuracy: {best_acc:.4f}")
     print(f"Results saved to: {args.save_dir}")
 
@@ -320,6 +396,13 @@ def main():
         help="Greedy eval: max new tokens after prompt (default 1 for single-token answers)",
     )
     parser.add_argument("--checkpoint-every", type=int, default=5)
+    parser.add_argument(
+        "--resume-from",
+        default=None,
+        metavar="DIR",
+        help="Load student+tokenizer from this HF save dir (e.g. save_dir/student_best). "
+        "If save_dir/training_state.pt exists, optimizer and epoch resume; else weights only.",
+    )
     parser.add_argument(
         "--debug-decode",
         type=int,
