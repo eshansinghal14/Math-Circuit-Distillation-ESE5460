@@ -30,6 +30,7 @@ def train_circuit_discovery(
     mask_temperature=1.0,
     mask_activate_threshold=0.99,
     grad_clip_norm=1.0,
+    class_reweight=False,
 ):
     from utils import load_model_checkpoint
     from neuron_distillation.activations import NeuronActivationsGenerator
@@ -68,6 +69,7 @@ def train_circuit_discovery(
         lambda_mask_cossim=lambda_mask_cossim,
         lambda_kl=lambda_kl,
         lambda_sparsity=lambda_sparsity,
+        class_reweight=class_reweight,
     ).to(device)
 
     act_generator_1b = NeuronActivationsGenerator(llama_1b, batch_size=50)

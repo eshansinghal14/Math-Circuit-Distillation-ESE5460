@@ -74,6 +74,11 @@ def _parse_args(argv=None):
         default=1.0,
         help="Max L2 norm for global gradient clipping (0 disables)",
     )
+    parser.add_argument(
+        "--class-reweight",
+        action="store_true",
+        help="Inverse-frequency (add-one) weights for sim and KL; per-example weights for sparsity (mask cossim unchanged)",
+    )
     return parser.parse_args(argv)
 
 
@@ -90,4 +95,5 @@ if __name__ == "__main__":
         mask_temperature=args.mask_temperature,
         mask_activate_threshold=args.mask_activate_threshold,
         grad_clip_norm=args.grad_clip_norm,
+        class_reweight=args.class_reweight,
     )

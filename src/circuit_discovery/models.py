@@ -127,7 +127,16 @@ class CircuitDiscoveryModel(nn.Module):
 
 
 class CircuitLoss(nn.Module):
-    def __init__(self, lambda_sim=1.0, lambda_sparsity=5e-0, lambda_usage=1, lambda_kl=1e-1, lambda_mask_cossim=5, eps=1e-8):
+    def __init__(
+        self,
+        lambda_sim=1.0,
+        lambda_sparsity=5e-0,
+        lambda_usage=1,
+        lambda_kl=1e-1,
+        lambda_mask_cossim=5,
+        eps=1e-8,
+        class_reweight=False,
+    ):
         super().__init__()
         self.lambda_sim = lambda_sim
         self.lambda_sparsity = lambda_sparsity
@@ -135,6 +144,7 @@ class CircuitLoss(nn.Module):
         self.lambda_kl = lambda_kl
         self.lambda_mask_cossim = lambda_mask_cossim
         self.eps = eps
+        self.class_reweight = class_reweight
 
     def update_lambdas(
         self,
@@ -156,6 +166,14 @@ class CircuitLoss(nn.Module):
         if lambda_mask_cossim is not None:
             self.lambda_mask_cossim = lambda_mask_cossim
 
+    @staticmethod
+    def inverse_frequency_class_weights(hard_class_probs, eps=1e-6):
+        """Per-class weights inversely related to batch counts (add-one smoothed), normalized to mean 1."""
+        counts = hard_class_probs.float().sum(dim=0)
+        w = 1.0 / (counts + 1.0)
+        w = w * w.numel() / (w.sum() + eps)
+        return w
+
     def mean_pairwise_mask_cossim(self, masks):
         if masks.dim() != 2:
             return masks.new_tensor(0.0)
@@ -174,7 +192,7 @@ class CircuitLoss(nn.Module):
 
         return pair_sims.mean()
 
-    def classwise_pairwise_cossim(self, activations, hard_class_probs):
+    def classwise_pairwise_cossim(self, activations, hard_class_probs, class_weights=None):
         _, k_classes = hard_class_probs.shape
 
         if activations.dim() != 3:
@@ -185,6 +203,7 @@ class CircuitLoss(nn.Module):
         norm_acts = F.normalize(activations, p=2, dim=-1, eps=self.eps)
 
         per_class_sims = []
+        included_weights = []
         for k in range(k_classes):
             class_mask = hard_class_probs[:, k].bool()
             idx = class_mask.nonzero(as_tuple=False).squeeze(-1)
@@ -203,16 +222,27 @@ class CircuitLoss(nn.Module):
             num_pairs = n_k * (n_k - 1)
             per_token_sim = total_pair_sum / num_pairs  # [T]
             per_class_sims.append(per_token_sim.mean())
+            if class_weights is not None:
+                included_weights.append(class_weights[k])
 
         if not per_class_sims:
             return activations.new_tensor(0.0)
-        return torch.stack(per_class_sims).mean()
+        stacked = torch.stack(per_class_sims)
+        if class_weights is None:
+            return stacked.mean()
+        iw = torch.stack(included_weights)
+        return (stacked * iw).sum() / (iw.sum() + self.eps)
 
-    def binary_entropy(self, p):
+    def binary_entropy(self, p, sample_weights=None):
         p = torch.nan_to_num(p, nan=0.5, posinf=1.0, neginf=0.0)
         p = torch.clamp(p, self.eps, 1.0 - self.eps)
         entropy = -(p * torch.log(p) + (1 - p) * torch.log(1 - p))
-        return torch.nan_to_num(entropy, nan=0.0, posinf=0.0, neginf=0.0).mean()
+        entropy = torch.nan_to_num(entropy, nan=0.0, posinf=0.0, neginf=0.0)
+        if sample_weights is None:
+            return entropy.mean()
+        per_ex = entropy.view(entropy.size(0), -1).mean(dim=-1)
+        sw = sample_weights / (sample_weights.mean() + self.eps)
+        return (per_ex * sw).mean()
 
     def class_usage_entropy(self, hard_class_probs):
         class_freq = hard_class_probs.float().mean(dim=0)
@@ -226,8 +256,8 @@ class CircuitLoss(nn.Module):
         class_freq = torch.clamp(class_freq, self.eps, 1.0)
         return -(class_freq * class_freq.log()).sum()
 
-    def bernoulli_kl_to_prior(self, class_masks, pi=0.10, eps=1e-8):
-        """KL(Bernoulli(q_k) || Bernoulli(pi)) averaged over classes, with q_k = row mean of class k."""
+    def bernoulli_kl_to_prior(self, class_masks, class_weights=None, pi=0.10, eps=1e-8):
+        """KL(Bernoulli(q_k) || Bernoulli(pi)) per class k, with q_k = row mean of class k."""
         p = torch.clamp(class_masks, eps, 1.0 - eps)
         if p.dim() != 2:
             raise ValueError(f"Expected class_masks [K, D], got shape {tuple(p.shape)}")
@@ -236,13 +266,26 @@ class CircuitLoss(nn.Module):
 
         pi_t = torch.clamp(torch.tensor(pi, device=p.device, dtype=p.dtype), eps, 1.0 - eps)
         kl = q * (q / pi_t).log() + (1 - q) * ((1 - q) / (1 - pi_t)).log()
-        return kl.mean()
+        if class_weights is None:
+            return kl.mean()
+        cw = class_weights / (class_weights.mean() + self.eps)
+        return (kl * cw).mean()
 
     def combined_loss(self, hard_class_probs, masked_activations, mask, class_masks):
-        sim_loss = - self.classwise_pairwise_cossim(masked_activations, hard_class_probs)
+        if self.class_reweight:
+            class_weights = self.inverse_frequency_class_weights(hard_class_probs)
+            class_ids = hard_class_probs.argmax(dim=-1)
+            sample_weights = class_weights[class_ids]
+        else:
+            class_weights = None
+            sample_weights = None
+
+        sim_loss = -self.classwise_pairwise_cossim(
+            masked_activations, hard_class_probs, class_weights=class_weights
+        )
         mask_cossim = self.mean_pairwise_mask_cossim(class_masks)
-        kl_bernoulli_loss = self.bernoulli_kl_to_prior(class_masks)
-        entropy_loss = self.binary_entropy(mask)
+        kl_bernoulli_loss = self.bernoulli_kl_to_prior(class_masks, class_weights=class_weights)
+        entropy_loss = self.binary_entropy(mask, sample_weights=sample_weights)
 
         total_loss = (
             self.lambda_sim * sim_loss
