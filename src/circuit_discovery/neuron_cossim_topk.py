@@ -10,6 +10,8 @@ Run from ``src`` (always builds a **single-class** ``k_classes=1`` model)::
 
     python -m circuit_discovery.neuron_cossim_topk
     python -m circuit_discovery.neuron_cossim_topk --frac-activated 0.05
+
+Gated Llama weights use ``HF_TOKEN`` from ``constants.py`` (see ``circuit_discovery.utils``), same as elsewhere in this repo.
 """
 
 from __future__ import annotations
@@ -112,6 +114,16 @@ def save_cossim_record(path: str, record: Dict[str, Any]) -> None:
         json.dump(record, f, indent=2)
 
 
+def mean_cossim_topk_neurons(cossim: List[float], k: int) -> float:
+    """Average of the *k* largest per-neuron mean pairwise cossim values (the activated set)."""
+    if k <= 0:
+        raise ValueError("k must be positive")
+    t = torch.tensor(cossim, dtype=torch.float64)
+    k = min(k, t.numel())
+    topv, _ = torch.topk(t, k, largest=True)
+    return float(topv.mean().item())
+
+
 def topk_binary_mask(dim: int, cossim: List[float], k: int) -> torch.Tensor:
     """Indices with largest mean pairwise cossim get weight 1."""
     if k <= 0 or k > dim:
@@ -184,6 +196,10 @@ def run(
     mask_1b = topk_binary_mask(d1, c1, k1)
     mask_8b = topk_binary_mask(d8, c2, k8)
 
+    avg_c_1b = mean_cossim_topk_neurons(c1, k1)
+    avg_c_8b = mean_cossim_topk_neurons(c2, k8)
+    print(f"Mean pairwise cossim (activated / top-k neurons): 1b={avg_c_1b:.6f}, 8b={avg_c_8b:.6f}")
+
     model = build_sparse_circuit_model(
         mask_1b=mask_1b.cpu(),
         mask_8b=mask_8b.cpu(),
@@ -228,7 +244,7 @@ def load_saved_sparse_binary_checkpoint(path: str) -> CircuitDiscoveryModel:
 
 def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Neuron pairwise cossim stats + optional sparse binary circuit model (k_classes=1 only)."
+        description="Neuron pairwise cossim stats + optional sparse binary circuit model (k_classes=1 only).",
     )
     p.add_argument(
         "--cossim-json",
@@ -236,7 +252,14 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=None,
         help=f"Path for neuron cossim JSON (default: {default_cossim_json_path()})",
     )
-    p.add_argument("--batch-size", type=int, default=50, help="Batch size for activation generation")
+    p.add_argument(
+        "-b",
+        "--batch-size",
+        type=int,
+        default=50,
+        metavar="N",
+        help="Batch size for activation generation (default: 50)",
+    )
     p.add_argument(
         "--frac-activated",
         type=float,
