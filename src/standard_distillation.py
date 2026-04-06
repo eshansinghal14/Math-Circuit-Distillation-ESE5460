@@ -1,9 +1,17 @@
 """Standard Knowledge Distillation (pure KL baseline).
 
-Loss = T^2 * KL(softmax(student/T) || softmax(teacher/T))
+Assumes **one token per answer** (typical for 3-digit sums in Llama BPE). KL is only at
+the causal step whose logits predict that answer token (index ``answer_start - 1``).
+
+Eval defaults to ``--eval-max-new-tokens 1``.
 
 No internal alignment -- this is the baseline that other experiments compare against.
 Paper target: 63.6% accuracy on 2-digit addition.
+
+**Why the student can approach the teacher:** both ``load_model`` calls load **pretrained**
+HuggingFace weights, not random init. A 1B student that already speaks English/math will
+often land close to an 8B teacher after sequence-level KD on this task; that is not a bug
+in the loss unless you intended a different setup (e.g. random init).
 
 Usage (from src/):
   python standard_distillation.py --save-dir /path/to/drive/results/standard-kl
@@ -39,16 +47,56 @@ class AddDataset(Dataset):
         return {"prompt": self.prompts[idx], "answer": self.answers[idx]}
 
 
+def _answer_token_start(prompt: str, full_text: str, tokenizer) -> int:
+    """Index in ``full`` token sequence of the first answer token (after shared prompt prefix)."""
+    p_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+    f_ids = tokenizer(full_text, add_special_tokens=False)["input_ids"]
+    lcp = 0
+    while lcp < len(p_ids) and lcp < len(f_ids) and p_ids[lcp] == f_ids[lcp]:
+        lcp += 1
+    return lcp
+
+
+def _kl_mask_single_answer_logit(
+    attention_mask: torch.Tensor,
+    answer_starts: torch.Tensor,
+) -> torch.Tensor:
+    """One-hot mask: KL only at logits predicting the first answer token. Shape [B, L]."""
+    B, L = attention_mask.shape
+    kl = torch.zeros(B, L, dtype=torch.float32)
+    for b in range(B):
+        real_len = int(attention_mask[b].sum().item())
+        a0 = int(answer_starts[b].item())
+        if 0 < a0 < real_len:
+            i = a0 - 1
+            if i < L:
+                kl[b, i] = 1.0
+    return kl
+
+
 def collate_fn(examples, tokenizer):
     prompts = [ex["prompt"] for ex in examples]
     answers = [ex["answer"] for ex in examples]
     full_texts = [p + a for p, a in zip(prompts, answers)]
 
+    # Right-pad so token indices align with per-string tokenization (prompt + answer).
+    old_side = tokenizer.padding_side
+    tokenizer.padding_side = "right"
     enc = tokenizer(full_texts, return_tensors="pt", padding=True, truncation=True)
+    tokenizer.padding_side = old_side
+
+    input_ids = enc["input_ids"]
+    attention_mask = enc["attention_mask"]
+    answer_starts = torch.tensor(
+        [_answer_token_start(p, f, tokenizer) for p, f in zip(prompts, full_texts)],
+        dtype=torch.long,
+    )
+    kl_mask = _kl_mask_single_answer_logit(attention_mask, answer_starts)
 
     return {
-        "input_ids": enc["input_ids"],
-        "attention_mask": enc["attention_mask"],
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+        "kl_mask": kl_mask,
     }
 
 
@@ -127,7 +175,9 @@ def train(args):
 
     dataset = AddDataset(args.train_path)
     loader = DataLoader(
-        dataset, batch_size=args.batch_size, shuffle=True,
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
         collate_fn=partial(collate_fn, tokenizer=tokenizer),
     )
 
@@ -164,17 +214,18 @@ def train(args):
         for step, batch in enumerate(loader):
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
+            kl_mask = batch["kl_mask"].to(device)
 
             student_logits = student(input_ids=input_ids, attention_mask=attention_mask).logits
 
             with torch.no_grad():
                 teacher_logits = teacher(input_ids=input_ids, attention_mask=attention_mask).logits
 
-            loss = F.kl_div(
-                F.log_softmax(student_logits / T, dim=-1),
-                F.softmax(teacher_logits / T, dim=-1),
-                reduction="batchmean",
-            ) * (T ** 2)
+            # KL only at the single answer-logit position (see collate_fn).
+            log_p_s = F.log_softmax(student_logits / T, dim=-1)
+            p_t = F.softmax(teacher_logits / T, dim=-1)
+            kl_per_token = F.kl_div(log_p_s, p_t, reduction="none").sum(dim=-1)
+            loss = (kl_per_token * kl_mask).sum() / kl_mask.sum().clamp_min(1.0) * (T**2)
 
             if torch.isnan(loss):
                 continue
@@ -237,8 +288,8 @@ def main():
     parser.add_argument(
         "--eval-max-new-tokens",
         type=int,
-        default=EVAL_MAX_NEW_TOKENS,
-        help="Greedy eval: max new tokens after prompt (default matches EVAL_MAX_NEW_TOKENS in utils)",
+        default=1,
+        help="Greedy eval: max new tokens after prompt (default 1 for single-token answers)",
     )
     parser.add_argument("--checkpoint-every", type=int, default=5)
     parser.add_argument("--save-dir", default=os.path.join(script_dir, "..", "results", "standard-kl"))
