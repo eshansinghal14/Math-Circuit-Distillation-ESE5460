@@ -240,7 +240,7 @@ def train_circuit_discovery(
         with open(metrics_path, "w") as f:
             json.dump(metrics_for_json, f, indent=4)
 
-        if (epoch + 1) % 250 == 0:
+        if (epoch + 1) % 100 == 0:
             if os.path.exists("/opt/dlami/nvme"):
                 ckpt_root = "/opt/dlami/nvme/circuit_discovery_checkpoints"
             else:
