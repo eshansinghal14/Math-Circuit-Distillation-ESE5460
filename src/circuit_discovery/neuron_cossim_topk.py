@@ -1,15 +1,21 @@
 """
 Compute per-neuron mean pairwise cosine similarity of (pooled) activations across all
 problems in ``datasets/2d_add_all.json`` for 1B and 8B, save to JSON, and optionally
-build a circuit-discovery-style model with fixed binary masks (top-k by this metric).
+build a :class:`~circuit_discovery.models.CircuitDiscoveryModel` using standard
+:class:`~circuit_discovery.models.NeuronMask` modules initialized from a binary top-k mask
+(checkpoint format matches training runs so ``load_model_checkpoint`` / ``clustering.py``
+work with ``--k-classes 1``).
 
-Run from ``src``::
+Run from ``src`` (always builds a **single-class** ``k_classes=1`` model)::
 
-    python -m circuit_discovery.neuron_cossim_topk --k-classes 8
-    python -m circuit_discovery.neuron_cossim_topk --k-classes 8 --frac-activated 0.05 --circuit-checkpoint path/to/epoch_100.pt
+    python -m circuit_discovery.neuron_cossim_topk
+    python -m circuit_discovery.neuron_cossim_topk --frac-activated 0.05
 """
 
 from __future__ import annotations
+
+# Binary-mask pipeline is only defined for one latent class.
+K_CLASSES = 1
 
 import argparse
 import json
@@ -18,14 +24,13 @@ import sys
 from typing import Any, Dict, List, Optional
 
 import torch
-from torch import nn
 
 _src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 if _src not in sys.path:
     sys.path.insert(0, _src)
 
 from circuit_discovery.utils import _stack_layer_activations, config, llama_1b, llama_8b
-from circuit_discovery.models import CircuitDiscoveryModel
+from circuit_discovery.models import CircuitDiscoveryModel, neuron_mask_from_binary_mask
 
 
 def _results_dir() -> str:
@@ -107,29 +112,6 @@ def save_cossim_record(path: str, record: Dict[str, Any]) -> None:
         json.dump(record, f, indent=2)
 
 
-class FixedBinaryNeuronMask(nn.Module):
-    """Same binary mask for every class (and forward path), values in ``{0, 1}``."""
-
-    def __init__(self, k_classes: int, activations_dim: int, mask_01: torch.Tensor):
-        super().__init__()
-        self.k_classes = k_classes
-        self.activations_dim = activations_dim
-        if mask_01.shape != (activations_dim,):
-            raise ValueError(f"mask_01 must be [{activations_dim}], got {tuple(mask_01.shape)}")
-        self.register_buffer("mask", mask_01.float().clamp(0.0, 1.0))
-
-    def forward(self, class_probs, activations, mask_temperature):
-        del class_probs, mask_temperature
-        b = activations.size(0)
-        m = self.mask.unsqueeze(0).expand(b, -1)
-        masked_activations = activations * m.unsqueeze(1)
-        return masked_activations, m
-
-    def class_masks(self, mask_temperature):
-        del mask_temperature
-        return self.mask.unsqueeze(0).expand(self.k_classes, -1)
-
-
 def topk_binary_mask(dim: int, cossim: List[float], k: int) -> torch.Tensor:
     """Indices with largest mean pairwise cossim get weight 1."""
     if k <= 0 or k > dim:
@@ -142,28 +124,16 @@ def topk_binary_mask(dim: int, cossim: List[float], k: int) -> torch.Tensor:
 
 
 def build_sparse_circuit_model(
-    k_classes: int,
     mask_1b: torch.Tensor,
     mask_8b: torch.Tensor,
     mask_temperature: float = 1.0,
-    circuit_checkpoint: Optional[str] = None,
 ) -> CircuitDiscoveryModel:
-    from utils import _resolve_ckpt_path
-
+    """``CircuitDiscoveryModel`` with standard :class:`NeuronMask` modules (``k_classes=1``)."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = CircuitDiscoveryModel(k_classes=k_classes, mask_temperature=mask_temperature).to(device)
-
-    if circuit_checkpoint is not None:
-        ckpt_path = _resolve_ckpt_path(circuit_checkpoint)
-        ckpt_data = torch.load(ckpt_path, map_location=device)
-        state = ckpt_data["model_state_dict"]
-        prefix_ok = {k: v for k, v in state.items() if not k.startswith("neuron_masks")}
-        model.load_state_dict(prefix_ok, strict=False)
-
-    d1 = mask_1b.numel()
-    d8 = mask_8b.numel()
-    model.neuron_masks_1b = FixedBinaryNeuronMask(k_classes, d1, mask_1b.to(device)).to(device)
-    model.neuron_masks_8b = FixedBinaryNeuronMask(k_classes, d8, mask_8b.to(device)).to(device)
+    model = CircuitDiscoveryModel(k_classes=K_CLASSES, mask_temperature=mask_temperature).to(device)
+    T = model.mask_temperature
+    model.neuron_masks_1b = neuron_mask_from_binary_mask(mask_1b.to(device), T, k_classes=K_CLASSES).to(device)
+    model.neuron_masks_8b = neuron_mask_from_binary_mask(mask_8b.to(device), T, k_classes=K_CLASSES).to(device)
     return model
 
 
@@ -188,11 +158,9 @@ def ensure_cossim_file(
 
 
 def run(
-    k_classes: int,
     cossim_json: str,
     batch_size: int,
     frac_activated: Optional[float],
-    circuit_checkpoint: Optional[str],
     force_recompute_cossim: bool,
 ) -> None:
     os.makedirs(_results_dir(), exist_ok=True)
@@ -217,50 +185,51 @@ def run(
     mask_8b = topk_binary_mask(d8, c2, k8)
 
     model = build_sparse_circuit_model(
-        k_classes=k_classes,
         mask_1b=mask_1b.cpu(),
         mask_8b=mask_8b.cpu(),
         mask_temperature=1.0,
-        circuit_checkpoint=circuit_checkpoint,
     )
 
-    tag = f"sparse_binary_frac{frac_activated:g}_k1b{k1}_k8b{k8}_kcls{k_classes}.pt"
+    tag = f"sparse_binary_frac{frac_activated:g}_k1b{k1}_k8b{k8}.pt"
     out_pt = os.path.join(_results_dir(), tag)
-    payload = {
-        "k_classes": k_classes,
-        "frac_activated": frac_activated,
-        "k_1b": k1,
-        "k_8b": k8,
-        "dim_1b": d1,
-        "dim_8b": d8,
-        "mask_1b": mask_1b.cpu().clone(),
-        "mask_8b": mask_8b.cpu().clone(),
-        "cossim_json": os.path.abspath(cossim_json),
-        "circuit_checkpoint": circuit_checkpoint,
-        "model_state_dict": model.state_dict(),
-    }
-    torch.save(payload, out_pt)
-    print(f"Saved sparse binary circuit model to {out_pt}")
-
-
-def load_saved_sparse_binary_checkpoint(path: str, device: Optional[str] = None) -> CircuitDiscoveryModel:
-    """Load a file produced by ``run(..., frac_activated=...)``."""
-    dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    data = torch.load(path, map_location=dev)
-    m = build_sparse_circuit_model(
-        k_classes=int(data["k_classes"]),
-        mask_1b=data["mask_1b"].to(dev),
-        mask_8b=data["mask_8b"].to(dev),
-        mask_temperature=1.0,
-        circuit_checkpoint=None,
+    # Same keys as training checkpoints so ``utils.load_model_checkpoint`` / clustering work.
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    torch.save(
+        {
+            "epoch": 0,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "metrics_log": [],
+            "sparse_binary_metadata": {
+                "k_classes": K_CLASSES,
+                "frac_activated": frac_activated,
+                "k_1b": k1,
+                "k_8b": k8,
+                "dim_1b": d1,
+                "dim_8b": d8,
+                "mask_1b": mask_1b.cpu().clone(),
+                "mask_8b": mask_8b.cpu().clone(),
+                "cossim_json": os.path.abspath(cossim_json),
+            },
+        },
+        out_pt,
     )
-    m.load_state_dict(data["model_state_dict"], strict=True)
-    return m
+    print(f"Saved sparse binary circuit model to {out_pt}")
+    print("  Load with: utils.load_model_checkpoint(path, k_classes=1, lr=1e-3) or use --k-classes 1 in clustering.")
+
+
+def load_saved_sparse_binary_checkpoint(path: str) -> CircuitDiscoveryModel:
+    """Thin wrapper: same as ``load_model_checkpoint(path, k_classes=1, ...)`` for sparse exports."""
+    from utils import load_model_checkpoint
+
+    model, _, _, _ = load_model_checkpoint(path, k_classes=K_CLASSES, lr=1e-3)
+    return model
 
 
 def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Neuron pairwise cossim stats + optional sparse binary circuit model")
-    p.add_argument("--k-classes", type=int, required=True, help="Number of circuit classes (for saved model)")
+    p = argparse.ArgumentParser(
+        description="Neuron pairwise cossim stats + optional sparse binary circuit model (k_classes=1 only)."
+    )
     p.add_argument(
         "--cossim-json",
         type=str,
@@ -275,12 +244,6 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="If set, fraction of neurons to keep (top-k by cossim per tower); builds and saves a .pt model",
     )
     p.add_argument(
-        "--circuit-checkpoint",
-        type=str,
-        default=None,
-        help="Optional trained circuit checkpoint to copy problem_encoder/classifier from (masks replaced)",
-    )
-    p.add_argument(
         "--force-recompute-cossim",
         action="store_true",
         help="Recompute cossim JSON even if it already exists",
@@ -292,11 +255,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     args = _parse_args(argv)
     cossim_path = args.cossim_json or default_cossim_json_path()
     run(
-        k_classes=args.k_classes,
         cossim_json=cossim_path,
         batch_size=args.batch_size,
         frac_activated=args.frac_activated,
-        circuit_checkpoint=args.circuit_checkpoint,
         force_recompute_cossim=args.force_recompute_cossim,
     )
 

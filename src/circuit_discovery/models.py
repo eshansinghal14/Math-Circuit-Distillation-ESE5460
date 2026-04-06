@@ -75,6 +75,40 @@ class NeuronMask(nn.Module):
         return self._sigmoid_mask(masks, mask_temperature)
 
 
+def neuron_mask_from_binary_mask(
+    binary_mask: torch.Tensor,
+    mask_temperature: float | torch.Tensor = 1.0,
+    k_classes: int = 1,
+    eps: float = 1e-4,
+) -> NeuronMask:
+    """Build a :class:`NeuronMask` whose masks match ``binary_mask`` for ``k_classes == 1``.
+
+    Uses zero class embeddings and zero output weights; only ``output_layer.bias`` is set so
+    that with ``hidden = 0``, ``sigmoid(bias / T)`` equals the target probability per neuron.
+    This matches the usual ``CircuitDiscoveryModel`` / ``load_model_checkpoint`` layout so
+    sparse top-k exports load in ``clustering.py`` like any other circuit checkpoint.
+
+    ``binary_mask`` is shape ``[D]`` with values in ``[0, 1]`` (typically hard 0/1). ``T``
+    should match the model's ``mask_temperature`` buffer when you care about exact values
+    after ``sigmoid``; changing ``T`` later will rescale the effective mask slightly.
+    """
+    if k_classes != 1:
+        raise ValueError("neuron_mask_from_binary_mask only supports k_classes=1")
+    if binary_mask.dim() != 1:
+        raise ValueError(f"binary_mask must be 1D [D], got shape {tuple(binary_mask.shape)}")
+    D = binary_mask.numel()
+    T = float(mask_temperature.item()) if torch.is_tensor(mask_temperature) else float(mask_temperature)
+    nm = NeuronMask(k_classes=1, activations_dim=D)
+    p = binary_mask.detach().float().view(-1).clamp(eps, 1.0 - eps)
+    logits = T * torch.log(p / (1.0 - p))
+    logits = logits.clamp(-NeuronMask._SIGMOID_CLAMP + 1e-3, NeuronMask._SIGMOID_CLAMP - 1e-3)
+    with torch.no_grad():
+        nm.class_embedding.weight.zero_()
+        nm.output_layer.weight.zero_()
+        nm.output_layer.bias.copy_(logits)
+    return nm
+
+
 class CircuitDiscoveryModel(nn.Module):
     def __init__(
         self,
