@@ -112,6 +112,8 @@ def evaluate(
     test_path: str,
     batch_size: int = 32,
     max_new_tokens: Optional[int] = None,
+    debug_decode: int = 0,
+    debug_tag: Optional[str] = None,
 ) -> float:
     if max_new_tokens is None:
         max_new_tokens = EVAL_MAX_NEW_TOKENS
@@ -141,6 +143,17 @@ def evaluate(
             pad_token_id=tokenizer.eos_token_id,
         )
         decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+        if debug_decode > 0 and i == 0:
+            n = min(debug_decode, len(decoded))
+            tag = f" [{debug_tag}]" if debug_tag else ""
+            print(f"--- decode debug{tag} (first batch, max_new_tokens={max_new_tokens}) ---")
+            for j in range(n):
+                text = decoded[j]
+                gold = batch_a[j]
+                pred = _extract_int_after_equals(text)
+                print(f"  gold={gold}  pred={pred}  decoded={text!r}")
+            print("---")
+
         for text, gold in zip(decoded, batch_a):
             pred = _extract_int_after_equals(text)
             if pred == gold:
@@ -187,10 +200,20 @@ def train(args):
 
     print("Evaluating baselines...")
     student_base = evaluate(
-        student, tokenizer, args.test_path, max_new_tokens=args.eval_max_new_tokens,
+        student,
+        tokenizer,
+        args.test_path,
+        max_new_tokens=args.eval_max_new_tokens,
+        debug_decode=args.debug_decode,
+        debug_tag="student baseline",
     )
     teacher_base = evaluate(
-        teacher, tokenizer, args.test_path, max_new_tokens=args.eval_max_new_tokens,
+        teacher,
+        tokenizer,
+        args.test_path,
+        max_new_tokens=args.eval_max_new_tokens,
+        debug_decode=args.debug_decode,
+        debug_tag="teacher baseline",
     )
     print(f"  Student baseline accuracy: {student_base:.4f}")
     print(f"  Teacher baseline accuracy: {teacher_base:.4f}")
@@ -243,7 +266,12 @@ def train(args):
 
         avg_loss = epoch_loss / max(n_steps, 1)
         acc = evaluate(
-            student, tokenizer, args.test_path, max_new_tokens=args.eval_max_new_tokens,
+            student,
+            tokenizer,
+            args.test_path,
+            max_new_tokens=args.eval_max_new_tokens,
+            debug_decode=args.debug_decode,
+            debug_tag=f"epoch {epoch + 1} student",
         )
 
         history["epoch"].append(epoch + 1)
@@ -292,6 +320,13 @@ def main():
         help="Greedy eval: max new tokens after prompt (default 1 for single-token answers)",
     )
     parser.add_argument("--checkpoint-every", type=int, default=5)
+    parser.add_argument(
+        "--debug-decode",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Print N examples (gold, pred, decoded repr) from the first batch of each evaluate (0=off)",
+    )
     parser.add_argument("--save-dir", default=os.path.join(script_dir, "..", "results", "standard-kl"))
     args = parser.parse_args()
     train(args)
