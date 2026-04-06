@@ -12,6 +12,7 @@ from .utils import (
     merge_activation_batches,
     _stack_layer_activations,
     log_epoch_metrics,
+    tower_grad_balance_weights,
 )
 from .models import CircuitDiscoveryModel, CircuitLoss
 
@@ -31,6 +32,7 @@ def train_circuit_discovery(
     mask_activate_threshold=0.99,
     grad_clip_norm=1.0,
     class_reweight=False,
+    balance_tower_grads=True,
 ):
     from utils import load_model_checkpoint
     from neuron_distillation.activations import NeuronActivationsGenerator
@@ -158,7 +160,16 @@ def train_circuit_discovery(
             model.neuron_masks_1b.class_masks(T),
             model.neuron_masks_8b.class_masks(T),
         )
-        loss = loss_dict["loss"]
+        lt1 = loss_dict["tower_loss_1b"]
+        lt2 = loss_dict["tower_loss_8b"]
+        usage_ent = loss_dict["class_usage_entropy"]
+        if balance_tower_grads:
+            w1, w2, gn1, gn2 = tower_grad_balance_weights(lt1, lt2, model.parameters())
+            loss = w1 * lt1 + w2 * lt2 - criterion.lambda_usage * usage_ent
+        else:
+            loss = lt1 + lt2 - criterion.lambda_usage * usage_ent
+            w1 = w2 = 0.5
+            gn1 = gn2 = float("nan")
         # Always backward so the autograd graph is freed this iteration. Skipping backward
         # when loss is NaN leaves huge intermediates (1b/8b activations path) alive until the
         # loop body ends and can spike peak VRAM when the next epoch allocates.
@@ -175,7 +186,7 @@ def train_circuit_discovery(
             optimizer.zero_grad(set_to_none=True)
 
         with torch.no_grad():
-            class_usage_entropy = float(loss_dict["class_usage_entropy"])
+            class_usage_entropy = float(loss_dict["class_usage_entropy"].detach())
 
             sim_loss_1b = float(loss_dict["sim_1b"])
             sim_loss_8b = float(loss_dict["sim_8b"])
@@ -204,6 +215,7 @@ def train_circuit_discovery(
         epoch_metrics = {
             "epoch": epoch + 1,
             "loss": float(loss.item()),
+            "loss_unweighted": float(loss_dict["loss"].detach().item()),
             "sim_loss_1b": float(sim_loss_1b),
             "sim_loss_8b": float(sim_loss_8b),
             "class_usage_entropy": float(class_usage_entropy),
@@ -221,6 +233,11 @@ def train_circuit_discovery(
             "prop_active_neurons_1b_per_class": prop_active_neurons_1b_per_class,
             "prop_active_neurons_8b_per_class": prop_active_neurons_8b_per_class,
         }
+        if balance_tower_grads:
+            epoch_metrics["tower_balance_w1"] = w1
+            epoch_metrics["tower_balance_w2"] = w2
+            epoch_metrics["tower_grad_norm_1b"] = gn1
+            epoch_metrics["tower_grad_norm_8b"] = gn2
 
         log_epoch_metrics(epoch_metrics)
 

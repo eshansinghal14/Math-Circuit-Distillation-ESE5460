@@ -306,13 +306,15 @@ class CircuitLoss(nn.Module):
 
         return {
             "loss": total_loss,
+            "tower_loss_1b": loss_1b,
+            "tower_loss_8b": loss_8b,
+            "class_usage_entropy": class_usage_entropy,
             "sim_1b": sim_loss_1b.detach(),
             "sim_8b": sim_loss_8b.detach(),
             "kl_bernoulli_1b": kl_bernoulli_loss_1b.detach(),
             "kl_bernoulli_8b": kl_bernoulli_loss_8b.detach(),
             "entropy_1b": entropy_loss_1b.detach(),
             "entropy_8b": entropy_loss_8b.detach(),
-            "class_usage_entropy": class_usage_entropy.detach(),
             "mask_cossim_1b": mask_cossim_1b.detach(),
             "mask_cossim_8b": mask_cossim_8b.detach(),
         }

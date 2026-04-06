@@ -65,6 +65,36 @@ def _stack_layer_activations(batch_activations):
     return torch.cat(tensors, dim=-1)
 
 
+def tower_grad_balance_weights(loss_1b, loss_8b, parameters, eps=1e-8):
+    """Inverse grad-norm weights so neither 1b nor 8b tower dominates the combined gradient.
+
+    Uses ||∇_θ L_k|| over all ``parameters`` for each tower loss separately, then
+    w_k ∝ 1 / ||g_k|| (normalized to sum to 1). Falls back to 0.5 / 0.5 if norms are non-finite.
+    """
+    params = [p for p in parameters if p.requires_grad]
+    g1 = torch.autograd.grad(loss_1b, params, retain_graph=True, allow_unused=True)
+    g2 = torch.autograd.grad(loss_8b, params, retain_graph=True, allow_unused=True)
+
+    def _flatten_norm(gs):
+        s = torch.zeros((), device=loss_1b.device, dtype=torch.float32)
+        for g in gs:
+            if g is not None:
+                s = s + g.detach().float().pow(2).sum()
+        return torch.sqrt(s + eps)
+
+    n1 = _flatten_norm(g1)
+    n2 = _flatten_norm(g2)
+    if not (torch.isfinite(n1) and torch.isfinite(n2)):
+        return 0.5, 0.5, float("nan"), float("nan")
+
+    inv1 = 1.0 / (n1 + eps)
+    inv2 = 1.0 / (n2 + eps)
+    s = inv1 + inv2
+    w1 = (inv1 / s).item()
+    w2 = (inv2 / s).item()
+    return w1, w2, n1.item(), n2.item()
+
+
 # Pairs of keys to log as "name_1b/8b: val_1b/val_8b"
 _1B_8B_PAIRS = [
     ("sim_loss_1b", "sim_loss_8b", "sim_loss_1b/8b"),
@@ -87,7 +117,10 @@ def log_epoch_metrics(epoch_metrics):
         skip_keys.add("class_counts")
     for _k in ("prop_active_neurons_1b_per_class", "prop_active_neurons_8b_per_class"):
         skip_keys.add(_k)
+    for _k in ("tower_balance_w1", "tower_balance_w2", "tower_grad_norm_1b", "tower_grad_norm_8b"):
+        skip_keys.add(_k)
     skip_keys.add("loss")
+    skip_keys.add("loss_unweighted")
     for key_1b, key_8b, label in _1B_8B_PAIRS:
         if key_1b in epoch_metrics and key_8b in epoch_metrics:
             v1 = epoch_metrics[key_1b]
@@ -109,6 +142,15 @@ def log_epoch_metrics(epoch_metrics):
         else:
             parts.append(f"{key}: {value}")
     print(" - ".join(parts))
+    if "tower_balance_w1" in epoch_metrics and "tower_balance_w2" in epoch_metrics:
+        w1 = epoch_metrics["tower_balance_w1"]
+        w2 = epoch_metrics["tower_balance_w2"]
+        gn1 = epoch_metrics.get("tower_grad_norm_1b", float("nan"))
+        gn2 = epoch_metrics.get("tower_grad_norm_8b", float("nan"))
+        print(
+            f"  tower grad balance: w_1b={w1:.4f} w_8b={w2:.4f} "
+            f"||g||_1b={gn1:.4f} ||g||_8b={gn2:.4f}"
+        )
     if "class_counts" in epoch_metrics:
         counts = epoch_metrics["class_counts"]
         pa1 = epoch_metrics.get("prop_active_neurons_1b_per_class")

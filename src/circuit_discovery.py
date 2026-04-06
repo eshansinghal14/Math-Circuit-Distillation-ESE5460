@@ -79,6 +79,13 @@ def _parse_args(argv=None):
         action="store_true",
         help="Inverse-frequency (add-one) weights for sim and KL; per-example weights for sparsity (mask cossim unchanged)",
     )
+    parser.add_argument(
+        "--no-balance-tower-grads",
+        dest="balance_tower_grads",
+        action="store_false",
+        help="Disable per-step inverse grad-norm weights between 1b and 8b tower losses",
+    )
+    parser.set_defaults(balance_tower_grads=True)
     return parser.parse_args(argv)
 
 
@@ -96,4 +103,5 @@ if __name__ == "__main__":
         mask_activate_threshold=args.mask_activate_threshold,
         grad_clip_norm=args.grad_clip_norm,
         class_reweight=args.class_reweight,
+        balance_tower_grads=args.balance_tower_grads,
     )
