@@ -82,6 +82,8 @@ def log_epoch_metrics(epoch_metrics):
         skip_keys.add("max_class_usage_entropy")
     if "class_counts" in epoch_metrics:
         skip_keys.add("class_counts")
+    for _k in ("prop_active_neurons_1b_per_class", "prop_active_neurons_8b_per_class"):
+        skip_keys.add(_k)
     skip_keys.add("loss")
     for key_1b, key_8b, label in _1B_8B_PAIRS:
         if key_1b in epoch_metrics and key_8b in epoch_metrics:
@@ -106,7 +108,19 @@ def log_epoch_metrics(epoch_metrics):
     print(" - ".join(parts))
     if "class_counts" in epoch_metrics:
         counts = epoch_metrics["class_counts"]
-        if isinstance(counts, (list, tuple)):
+        pa1 = epoch_metrics.get("prop_active_neurons_1b_per_class")
+        pa8 = epoch_metrics.get("prop_active_neurons_8b_per_class")
+        if (
+            isinstance(counts, (list, tuple))
+            and isinstance(pa1, (list, tuple))
+            and isinstance(pa8, (list, tuple))
+            and len(counts) == len(pa1) == len(pa8)
+        ):
+            parts_cc = []
+            for i, n in enumerate(counts):
+                parts_cc.append(f"c{i}: {int(n)}/{pa1[i]:.3f}/{pa8[i]:.3f}")
+            print("  class counts (n/act1b/act8b): " + " | ".join(parts_cc))
+        elif isinstance(counts, (list, tuple)):
             print("  class counts: " + " - ".join(str(c) for c in counts))
         else:
             print("  class counts:", counts)

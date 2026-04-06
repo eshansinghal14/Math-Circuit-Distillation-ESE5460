@@ -188,6 +188,15 @@ def train_circuit_discovery(
             # Number of problems assigned to each class using argmax over logits
             preds = logits.argmax(dim=-1)
             class_counts = torch.bincount(preds, minlength=k_classes).cpu().tolist()
+            thr_cls = mask_activate_threshold
+            cm1 = model.neuron_masks_1b.class_masks(T)
+            cm8 = model.neuron_masks_8b.class_masks(T)
+            prop_active_neurons_1b_per_class = [
+                float((cm1[c] > thr_cls).float().mean().item()) for c in range(k_classes)
+            ]
+            prop_active_neurons_8b_per_class = [
+                float((cm8[c] > thr_cls).float().mean().item()) for c in range(k_classes)
+            ]
 
         max_class_usage_entropy = math.log(k_classes) if k_classes > 0 else 0.0
         epoch_metrics = {
@@ -207,6 +216,8 @@ def train_circuit_discovery(
             "mask_cossim_1b_loss": float(mask_cossim_1b_loss),
             "mask_cossim_8b_loss": float(mask_cossim_8b_loss),
             "class_counts": class_counts,
+            "prop_active_neurons_1b_per_class": prop_active_neurons_1b_per_class,
+            "prop_active_neurons_8b_per_class": prop_active_neurons_8b_per_class,
         }
 
         log_epoch_metrics(epoch_metrics)
@@ -217,11 +228,13 @@ def train_circuit_discovery(
         else:
             metrics_log.append(epoch_metrics)
 
-        # Write metrics to JSON in real time (exclude class_counts)
-        metrics_for_json = [
-            {k: v for k, v in m.items() if k != "class_counts"}
-            for m in metrics_log
-        ]
+        # Write metrics to JSON in real time (exclude verbose per-class breakdown)
+        _skip_json = {
+            "class_counts",
+            "prop_active_neurons_1b_per_class",
+            "prop_active_neurons_8b_per_class",
+        }
+        metrics_for_json = [{k: v for k, v in m.items() if k not in _skip_json} for m in metrics_log]
         with open(metrics_path, "w") as f:
             json.dump(metrics_for_json, f, indent=4)
 
