@@ -52,30 +52,40 @@ class FFNDistillationConfig:
 
 
 class AddDataset(Dataset):
-    def __init__(self, path: str):
+    """Matches the notebook: tokenize at construction, right-pad to same length."""
+
+    def __init__(self, path: str, tokenizer):
         with open(path, "r") as f:
             data = json.load(f)
-        self.prompts = list(data.keys())
-        self.answers = [str(data[p]) for p in self.prompts]
+
+        self.samples = []
+        for prompt, answer in data.items():
+            answer = str(answer)
+            prompt_ids = tokenizer(
+                prompt, return_tensors="pt", padding=False, add_special_tokens=False,
+            )["input_ids"].squeeze(0)
+            answer_ids = tokenizer(
+                answer + tokenizer.eos_token,
+                return_tensors="pt", padding=False, add_special_tokens=False,
+            )["input_ids"].squeeze(0)
+            self.samples.append(torch.cat([prompt_ids, answer_ids]))
 
     def __len__(self):
-        return len(self.prompts)
+        return len(self.samples)
 
     def __getitem__(self, idx):
-        return {"prompt": self.prompts[idx], "answer": self.answers[idx]}
+        return self.samples[idx]
 
 
-def collate_fn(examples, tokenizer):
-    prompts = [ex["prompt"] for ex in examples]
-    answers = [ex["answer"] for ex in examples]
-    full_texts = [p + a for p, a in zip(prompts, answers)]
-
-    enc = tokenizer(full_texts, return_tensors="pt", padding=True, truncation=True)
-
-    return {
-        "input_ids": enc["input_ids"],
-        "attention_mask": enc["attention_mask"],
-    }
+def collate_fn(examples, pad_id: int):
+    """Right-pad variable-length token sequences."""
+    max_len = max(ids.size(0) for ids in examples)
+    B = len(examples)
+    input_ids = torch.full((B, max_len), pad_id, dtype=torch.long)
+    for i, ids in enumerate(examples):
+        input_ids[i, :ids.size(0)] = ids
+    attention_mask = (input_ids != pad_id).long()
+    return {"input_ids": input_ids, "attention_mask": attention_mask}
 
 
 class MLPActivationCache:
@@ -204,10 +214,10 @@ class FFNDistillationTrainer:
 
         self.optimizer = AdamW(self.student.parameters(), lr=config.learning_rate)
 
-        dataset = AddDataset(train_path)
+        dataset = AddDataset(train_path, self.tokenizer)
         self.loader = DataLoader(
             dataset, batch_size=config.batch_size, shuffle=True,
-            collate_fn=partial(collate_fn, tokenizer=self.tokenizer),
+            collate_fn=partial(collate_fn, pad_id=self.tokenizer.eos_token_id),
         )
 
         self.history: Dict[str, List] = defaultdict(list)

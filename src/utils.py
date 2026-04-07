@@ -18,9 +18,9 @@ from transformers import AutoTokenizer
 
 logged_in = False
 
-# Greedy eval on prompts ending in "=" (2-digit addition). Two new tokens match
-# typical Llama BPE for answers up to three digits; increase to 3 if you see truncation.
-EVAL_MAX_NEW_TOKENS = 2
+# 2-digit addition answers range from 20 (10+10) to 198 (99+99).
+# Llama BPE can tokenize 3-digit numbers like 143 as 2 tokens, so 3 is the safe cap.
+EVAL_MAX_NEW_TOKENS = 3
 
 
 def load_model(model_name):

@@ -508,7 +508,7 @@ def eval_accuracy(
     correct = total = 0
 
     original_side = tokenizer.padding_side
-    tokenizer.padding_side = "right"
+    tokenizer.padding_side = "left"
 
     for i in range(0, len(prompts), batch_size):
         batch_prompts = prompts[i : i + batch_size]

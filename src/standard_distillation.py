@@ -45,70 +45,55 @@ from utils import EVAL_MAX_NEW_TOKENS, load_model
 
 
 class AddDataset(Dataset):
-    def __init__(self, path: str):
+    """Matches the notebook: tokenize at construction, right-pad to same length."""
+
+    def __init__(self, path: str, tokenizer):
         with open(path, "r") as f:
             data = json.load(f)
-        self.prompts = list(data.keys())
-        self.answers = [str(data[p]) for p in self.prompts]
+
+        self.samples = []
+        for prompt, answer in data.items():
+            answer = str(answer)
+            prompt_ids = tokenizer(
+                prompt, return_tensors="pt", padding=False, add_special_tokens=False,
+            )["input_ids"].squeeze(0)
+            answer_ids = tokenizer(
+                answer + tokenizer.eos_token,
+                return_tensors="pt", padding=False, add_special_tokens=False,
+            )["input_ids"].squeeze(0)
+            input_ids = torch.cat([prompt_ids, answer_ids])
+            self.samples.append({
+                "input_ids": input_ids,
+                "prompt_len": len(prompt_ids),
+            })
 
     def __len__(self):
-        return len(self.prompts)
+        return len(self.samples)
 
     def __getitem__(self, idx):
-        return {"prompt": self.prompts[idx], "answer": self.answers[idx]}
+        return self.samples[idx]
 
 
-def _answer_token_start(prompt: str, full_text: str, tokenizer) -> int:
-    """Index in ``full`` token sequence of the first answer token (after shared prompt prefix)."""
-    p_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
-    f_ids = tokenizer(full_text, add_special_tokens=False)["input_ids"]
-    lcp = 0
-    while lcp < len(p_ids) and lcp < len(f_ids) and p_ids[lcp] == f_ids[lcp]:
-        lcp += 1
-    return lcp
+def collate_fn(examples, pad_id: int):
+    """Right-pad variable-length token sequences and build kl_mask."""
+    max_len = max(ex["input_ids"].size(0) for ex in examples)
+    B = len(examples)
 
+    input_ids = torch.full((B, max_len), pad_id, dtype=torch.long)
+    attention_mask = torch.zeros(B, max_len, dtype=torch.long)
+    kl_mask = torch.zeros(B, max_len, dtype=torch.float32)
 
-def _kl_mask_single_answer_logit(
-    attention_mask: torch.Tensor,
-    answer_starts: torch.Tensor,
-) -> torch.Tensor:
-    """One-hot mask: KL only at logits predicting the first answer token. Shape [B, L]."""
-    B, L = attention_mask.shape
-    kl = torch.zeros(B, L, dtype=torch.float32)
-    for b in range(B):
-        real_len = int(attention_mask[b].sum().item())
-        a0 = int(answer_starts[b].item())
-        if 0 < a0 < real_len:
-            i = a0 - 1
-            if i < L:
-                kl[b, i] = 1.0  
-    return kl
+    for i, ex in enumerate(examples):
+        ids = ex["input_ids"]
+        L = ids.size(0)
+        input_ids[i, :L] = ids
+        attention_mask[i, :L] = 1
+        # KL at the single logit position that predicts the first answer token
+        pos = ex["prompt_len"] - 1
+        if 0 <= pos < L:
+            kl_mask[i, pos] = 1.0
 
-
-def collate_fn(examples, tokenizer):
-    prompts = [ex["prompt"] for ex in examples]
-    answers = [ex["answer"] for ex in examples]
-    full_texts = [p + a for p, a in zip(prompts, answers)]
-
-    # Right-pad so token indices align with per-string tokenization (prompt + answer).
-    old_side = tokenizer.padding_side
-    tokenizer.padding_side = "right"
-    enc = tokenizer(full_texts, return_tensors="pt", padding=True, truncation=True)
-    tokenizer.padding_side = old_side
-
-    input_ids = enc["input_ids"]
-    attention_mask = enc["attention_mask"]
-    answer_starts = torch.tensor(
-        [_answer_token_start(p, f, tokenizer) for p, f in zip(prompts, full_texts)],
-        dtype=torch.long,
-    )
-    kl_mask = _kl_mask_single_answer_logit(attention_mask, answer_starts)
-
-    return {
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
-        "kl_mask": kl_mask,
-    }
+    return {"input_ids": input_ids, "attention_mask": attention_mask, "kl_mask": kl_mask}
 
 
 def _extract_int_after_equals(text: str) -> Optional[int]:
@@ -263,12 +248,12 @@ def train(args):
     for p in teacher.parameters():
         p.requires_grad = False
 
-    dataset = AddDataset(args.train_path)
+    dataset = AddDataset(args.train_path, tokenizer)
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
         shuffle=True,
-        collate_fn=partial(collate_fn, tokenizer=tokenizer),
+        collate_fn=partial(collate_fn, pad_id=tokenizer.eos_token_id),
     )
 
     optimizer = AdamW(student.parameters(), lr=args.lr)
