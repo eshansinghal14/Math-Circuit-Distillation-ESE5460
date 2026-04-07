@@ -191,7 +191,7 @@ def load_model(model_name):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.float16 if torch.cuda.is_available() else None,
+        dtype=torch.float16 if torch.cuda.is_available() else None,
     ).to(device)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.pad_token = tokenizer.eos_token

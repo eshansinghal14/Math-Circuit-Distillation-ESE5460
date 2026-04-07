@@ -620,7 +620,7 @@ class ClusterDistillationTrainer:
         else:
             print(f"Loading student: {config.student_model}")
             self.student = AutoModelForCausalLM.from_pretrained(
-                config.student_model, torch_dtype=student_dtype,
+                config.student_model, dtype=student_dtype,
             ).to(config.device)
 
         if teacher is not None:
@@ -628,7 +628,7 @@ class ClusterDistillationTrainer:
         else:
             print(f"Loading teacher: {config.teacher_model}")
             self.teacher = AutoModelForCausalLM.from_pretrained(
-                config.teacher_model, torch_dtype=teacher_dtype,
+                config.teacher_model, dtype=teacher_dtype,
             ).to(config.device)
         self.teacher.eval()
         for p in self.teacher.parameters():
