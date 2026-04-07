@@ -226,6 +226,34 @@ def _resolve_ckpt_path(checkpoint: str) -> str:
     )
 
 
+def _extract_circuit_model_state_dict(ckpt_data, ckpt_path: str):
+    """Resolve model weights from a .pt file saved in different layouts."""
+    if not isinstance(ckpt_data, dict):
+        raise TypeError(
+            f"Checkpoint {ckpt_path!r} must load to a dict, got {type(ckpt_data)}."
+        )
+    for key in ("model_state_dict", "state_dict"):
+        if key in ckpt_data:
+            return ckpt_data[key]
+    # torch.save(model.state_dict(), path) — weights only, no wrapper dict
+    if any(k.startswith("classifier.") for k in ckpt_data.keys()):
+        return ckpt_data
+    # Common mistake: neuron cluster / feature files
+    if "features_per_subclass" in ckpt_data or "cluster_to_indices" in ckpt_data:
+        raise ValueError(
+            f"{ckpt_path!r} is a neuron-cluster or feature file, not a circuit-discovery "
+            "checkpoint. Pass the circuit training checkpoint (e.g. epoch_*.pt with "
+            "model weights from circuit_discovery), not k*.pt under clusters/."
+        )
+    keys_preview = list(ckpt_data.keys())[:12]
+    extra = "..." if len(ckpt_data) > 12 else ""
+    raise ValueError(
+        "No model weights found: expected keys 'model_state_dict' or 'state_dict', "
+        "or a raw state_dict with 'classifier.*' keys (from circuit discovery). "
+        f"File has keys: {keys_preview}{extra}"
+    )
+
+
 def load_model_checkpoint(checkpoint, k_classes, lr):
     from circuit_discovery.models import CircuitDiscoveryModel
 
@@ -245,7 +273,7 @@ def load_model_checkpoint(checkpoint, k_classes, lr):
     ckpt_data = torch.load(ckpt_path, map_location=device)
 
     # Auto-detect k_classes from checkpoint weights
-    state = ckpt_data["model_state_dict"]
+    state = _extract_circuit_model_state_dict(ckpt_data, ckpt_path)
     ckpt_k = None
     if "classifier.classifier.4.weight" in state:
         ckpt_k = state["classifier.classifier.4.weight"].shape[0]
@@ -269,7 +297,9 @@ def load_model_checkpoint(checkpoint, k_classes, lr):
         print("Warning: checkpoint unexpected keys ignored:", incompatible.unexpected_keys)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    optimizer.load_state_dict(ckpt_data["optimizer_state_dict"])
+    opt_state = ckpt_data.get("optimizer_state_dict")
+    if opt_state is not None:
+        optimizer.load_state_dict(opt_state)
 
     epoch = ckpt_data.get("epoch", ckpt_data.get("step", 0))
     metrics_log = ckpt_data.get("metrics_log", [])
