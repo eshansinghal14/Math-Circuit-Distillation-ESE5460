@@ -18,9 +18,8 @@ from transformers import AutoTokenizer
 
 logged_in = False
 
-# 2-digit addition answers range from 20 (10+10) to 198 (99+99).
-# Llama BPE can tokenize 3-digit numbers like 143 as 2 tokens, so 3 is the safe cap.
-EVAL_MAX_NEW_TOKENS = 3
+# Prompts end with "=" and all 2-3 digit answers (20-198) are single tokens in Llama-3 BPE.
+EVAL_MAX_NEW_TOKENS = 1
 
 
 def load_model(model_name):
