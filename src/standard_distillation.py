@@ -326,23 +326,31 @@ def train(args):
             if key not in history:
                 history[key] = []
 
-        # If user asked to rewind to a specific epoch, truncate state and history
-        if override_epoch is not None and override_epoch < start_epoch:
+        # Determine rewind target:
+        #   --checkpoint-type latest  → snap down to floor multiple of 5
+        #   --checkpoint-type N       → explicit rewind to epoch N
+        #   --checkpoint-type best/final → trust training_state.pt as-is
+        ct = str(args.checkpoint_type).strip().lower()
+        if ct == "latest":
+            rewind_to = (start_epoch // 5) * 5  # e.g. 28 → 25, 30 → 30
+        elif override_epoch is not None:
+            rewind_to = override_epoch
+        else:
+            rewind_to = start_epoch  # no rewind
+
+        if rewind_to < start_epoch:
             print(
-                f"Rewinding from epoch {start_epoch} → {override_epoch} "
-                f"(truncating history and resetting optimizer state)"
+                f"Rewinding from epoch {start_epoch} → {rewind_to} "
+                f"(snapping history to nearest multiple of 5)"
             )
-            n = override_epoch  # keep only first n epochs of history
             for key in ("epoch", "kl_loss", "accuracy"):
-                history[key] = history[key][:n]
-            # Recompute best_acc from the truncated accuracy list
-            best_acc = max(history["accuracy"][:n]) if history["accuracy"][:n] else 0.0
-            start_epoch = override_epoch
-            # Overwrite history and state on disk to reflect the rewind
+                history[key] = history[key][:rewind_to]
+            best_acc = max(history["accuracy"]) if history["accuracy"] else 0.0
+            start_epoch = rewind_to
             with open(hist_path, "w") as f:
                 json.dump(dict(history), f, indent=2)
             save_training_state(run_dir, optimizer, start_epoch, best_acc)
-            print(f"  History truncated to {n} epochs. best_acc reset to {best_acc:.4f}")
+            print(f"  History truncated to {rewind_to} epochs. best_acc={best_acc:.4f}")
         else:
             print(
                 f"Resumed optimizer state (starting at global epoch {start_epoch + 1}, "
