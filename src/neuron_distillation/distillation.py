@@ -23,6 +23,7 @@ Pipeline prerequisites (run before this module):
 import json
 import os
 import re
+import shutil
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -78,7 +79,6 @@ class ClusterDistillationConfig:
     use_projection_heads: bool = False
 
     eval_every: int = 1
-    checkpoint_every: int = 5
     eval_max_new_tokens: int = EVAL_MAX_NEW_TOKENS
     save_dir: str = "results/cluster-distillation"
 
@@ -769,6 +769,9 @@ class ClusterDistillationTrainer:
                     best_acc = acc
                     self._save_checkpoint("best")
 
+            # Overwrite latest every epoch (single rolling checkpoint)
+            self._save_checkpoint("latest")
+
             self.history["epoch"].append(epoch + 1)
             for k, v in epoch_metrics.items():
                 self.history[k].append(v)
@@ -784,11 +787,13 @@ class ClusterDistillationTrainer:
                 f"Acc={acc:.3f}"
             )
 
-            # Periodic checkpoint
-            if cfg.checkpoint_every > 0 and (epoch + 1) % cfg.checkpoint_every == 0:
-                self._save_checkpoint(f"epoch_{epoch + 1}")
-
         self._save_checkpoint("final")
+
+        # Remove latest now that final is saved
+        latest_path = os.path.join(self.config.save_dir, "student_latest")
+        if os.path.isdir(latest_path):
+            shutil.rmtree(latest_path)
+
         self._save_history()
         self._save_curves()
 

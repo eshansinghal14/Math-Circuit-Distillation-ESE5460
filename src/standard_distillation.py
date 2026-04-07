@@ -31,6 +31,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 from collections import defaultdict
 from datetime import datetime
 from functools import partial
@@ -248,9 +249,10 @@ def _resolve_run_dir(args) -> tuple[str, Optional[str]]:
     if args.checkpoint_run:
         run_dir = os.path.join(args.save_dir, args.checkpoint_run)
         ct = str(args.checkpoint_type).strip().lower()
-        if ct == "best":
-            student_source = os.path.join(run_dir, "student_best")
+        if ct in ("best", "latest", "final"):
+            student_source = os.path.join(run_dir, f"student_{ct}")
         else:
+            # Legacy: integer epoch number from old runs
             student_source = os.path.join(run_dir, f"student_epoch_{ct}")
         if not os.path.isdir(student_source):
             raise SystemExit(
@@ -418,12 +420,10 @@ def train(args):
 
         if acc > best_acc:
             best_acc = acc
-            if not args.no_save_best:
-                save_checkpoint(student, tokenizer, run_dir, "best")
+            save_checkpoint(student, tokenizer, run_dir, "best")
 
-        if args.checkpoint_every > 0 and (epoch + 1) % args.checkpoint_every == 0:
-            save_checkpoint(student, tokenizer, run_dir, f"epoch_{epoch+1}")
-
+        # Overwrite latest every epoch (single rolling checkpoint)
+        save_checkpoint(student, tokenizer, run_dir, "latest")
         save_training_state(run_dir, optimizer, epoch + 1, best_acc)
 
     hist_out = dict(history)
@@ -431,6 +431,12 @@ def train(args):
     hist_out["teacher_baseline"] = teacher_base
 
     save_checkpoint(student, tokenizer, run_dir, "final")
+
+    # Remove latest now that final is saved
+    latest_path = os.path.join(run_dir, "student_latest")
+    if os.path.isdir(latest_path):
+        shutil.rmtree(latest_path)
+
     with open(hist_path, "w") as f:
         json.dump(hist_out, f, indent=2)
 
@@ -470,17 +476,6 @@ def main():
         default=EVAL_MAX_NEW_TOKENS,
         help=f"Greedy eval: max new tokens after prompt (default {EVAL_MAX_NEW_TOKENS})",
     )
-    parser.add_argument(
-        "--checkpoint-every",
-        type=int,
-        default=5,
-        help="Save a numbered checkpoint every N epochs (0 = disable)",
-    )
-    parser.add_argument(
-        "--no-save-best",
-        action="store_true",
-        help="Do not write student_best/ when eval accuracy improves (best_acc still tracked in history and training_state.pt)",
-    )
     # ---- Checkpoint / resume args ----
     parser.add_argument(
         "--save-dir",
@@ -506,10 +501,10 @@ def main():
     parser.add_argument(
         "--checkpoint-type",
         default="best",
-        metavar="best|N",
+        metavar="best|latest|final",
         help=(
-            "Which checkpoint to load from the run: 'best' → student_best, "
-            "or an integer N → student_epoch_N. (default: best)"
+            "Which checkpoint to load: 'best' → student_best, "
+            "'latest' → student_latest, 'final' → student_final. (default: best)"
         ),
     )
     parser.add_argument(

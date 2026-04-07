@@ -15,6 +15,7 @@ Usage (from src/):
 import json
 import os
 import re
+import shutil
 from collections import defaultdict
 from dataclasses import dataclass
 from functools import partial
@@ -44,7 +45,6 @@ class FFNDistillationConfig:
 
     lambda_cka: float = 0.01
     eval_every: int = 1
-    checkpoint_every: int = 5
     eval_max_new_tokens: int = EVAL_MAX_NEW_TOKENS
     save_dir: str = "results/ffn-distillation"
 
@@ -418,10 +418,16 @@ class FFNDistillationTrainer:
                 best_acc = acc
                 save_checkpoint(self.student, self.tokenizer, cfg.save_dir, "best")
 
-            if cfg.checkpoint_every > 0 and (epoch + 1) % cfg.checkpoint_every == 0:
-                save_checkpoint(self.student, self.tokenizer, cfg.save_dir, f"epoch_{epoch+1}")
+            # Overwrite latest every epoch (single rolling checkpoint)
+            save_checkpoint(self.student, self.tokenizer, cfg.save_dir, "latest")
 
         save_checkpoint(self.student, self.tokenizer, cfg.save_dir, "final")
+
+        # Remove latest now that final is saved
+        latest_path = os.path.join(cfg.save_dir, "student_latest")
+        if os.path.isdir(latest_path):
+            shutil.rmtree(latest_path)
+
         _save_curves(dict(self.history), cfg.save_dir)
         print(f"\nDone. Best accuracy: {best_acc:.4f}")
         print(f"Results saved to: {cfg.save_dir}")
