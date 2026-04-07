@@ -86,6 +86,7 @@ def run_ablation_if_needed(
     k: int,
     k_classes: int,
     results_dir: str,
+    ablation_batch_size: int = 50,
 ):
     """Run ablation for a model, or skip if results already exist under ``results_dir``."""
     os.makedirs(results_dir, exist_ok=True)
@@ -111,6 +112,7 @@ def run_ablation_if_needed(
         class_clusters=class_clusters,
         results_base_dir=results_dir,
         clusters_base_dir=clusters_dir,
+        batch_size=ablation_batch_size,
     )
     return ablation_path
 
@@ -245,6 +247,12 @@ def main():
     )
     parser.add_argument("--skip-ablation", action="store_true",
                         help="Skip ablation (expects ablation_performance.json under save-dir/ablation/...)")
+    parser.add_argument(
+        "--ablation-batch-size",
+        type=int,
+        default=50,
+        help="Batch size for Step 1 neuron-cluster ablation (HF forward passes)",
+    )
     args = parser.parse_args()
     eval_max_new_tokens = (
         args.eval_max_new_tokens
@@ -294,6 +302,7 @@ def main():
     print(f"  teacher_clusters:   {teacher_clusters}")
     print(f"  student_ablation:   {student_ablation_dir}")
     print(f"  teacher_ablation:   {teacher_ablation_dir}")
+    print(f"  ablation_batch:     {args.ablation_batch_size}")
     # ---- Step 1: Ablation -----------------------------------------------------------
     print("\n" + "=" * 60)
     print("Step 1: Neuron-cluster ablation")
@@ -310,11 +319,13 @@ def main():
         student_abl = run_ablation_if_needed(
             args.student_model, args.checkpoint, student_clusters,
             args.k, args.k_classes, student_ablation_dir,
+            ablation_batch_size=args.ablation_batch_size,
         )
         print(f"\n  Teacher: {args.teacher_model}")
         teacher_abl = run_ablation_if_needed(
             args.teacher_model, args.checkpoint, teacher_clusters,
             args.k, args.k_classes, teacher_ablation_dir,
+            ablation_batch_size=args.ablation_batch_size,
         )
     # ---- Step 2: Cluster pairing ----------------------------------------------------
     print("\n" + "=" * 60)
