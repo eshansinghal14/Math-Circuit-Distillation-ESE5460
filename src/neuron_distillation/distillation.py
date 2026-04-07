@@ -12,7 +12,8 @@ full outputs, this module:
   3. For each paired cluster (discovered via ablation-based importance
      matching), extracts the corresponding neuron subsets and computes
      CKA between student and teacher.
-  4. The total loss is:  L = T^2 * KL(student/T, teacher/T) + lambda * L_cluster_align
+  4. The total loss matches ``standard_distillation``: masked per-position KL at the first-answer
+     logit, plus ``lambda * L_cluster_align`` (CKA). No ``batchmean`` over the full vocab grid.
 
 Pipeline prerequisites (run before this module):
   - Neuron clustering  (clustering.py)
@@ -26,7 +27,8 @@ import re
 import shutil
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from functools import partial
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -85,6 +87,11 @@ class ClusterDistillationConfig:
     save_dir: str = "results/cluster-distillation"
 
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
+
+    @property
+    def checkpoint_every(self) -> int:
+        """Alias for ``save_every`` (older code / notebooks referenced this name)."""
+        return self.save_every
 
 
 # ---------------------------------------------------------------------------
@@ -399,44 +406,76 @@ class ProjectionHeadBank(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Dataset
+# Dataset & collate (aligned with ``standard_distillation``)
 # ---------------------------------------------------------------------------
 
 class AddDataset(Dataset):
-    """Two-digit addition dataset (matches the notebook implementation)."""
+    """Tokenize at construction; each sample is prompt+answer ids + ``prompt_len``."""
 
-    def __init__(self, json_data: Dict, tokenizer):
-        self.data = list(json_data.items())
-        self.tokenizer = tokenizer
+    def __init__(self, data: Union[str, Dict], tokenizer):
+        if isinstance(data, str):
+            with open(data, "r") as f:
+                data = json.load(f)
+        self.samples = []
+        for prompt, answer in data.items():
+            answer = str(answer)
+            prompt_ids = tokenizer(
+                prompt,
+                return_tensors="pt",
+                padding=False,
+                add_special_tokens=False,
+            )["input_ids"].squeeze(0)
+            answer_ids = tokenizer(
+                answer + tokenizer.eos_token,
+                return_tensors="pt",
+                padding=False,
+                add_special_tokens=False,
+            )["input_ids"].squeeze(0)
+            input_ids = torch.cat([prompt_ids, answer_ids])
+            self.samples.append(
+                {"input_ids": input_ids, "prompt_len": len(prompt_ids)}
+            )
 
     def __len__(self):
-        return len(self.data)
+        return len(self.samples)
 
     def __getitem__(self, idx):
-        prompt, answer = self.data[idx]
-        answer = str(answer)
+        return self.samples[idx]
 
-        prompt_ids = self.tokenizer(
-            prompt, return_tensors="pt", padding=False,
-        )["input_ids"].squeeze(0)
 
-        answer_ids = self.tokenizer(
-            answer + self.tokenizer.eos_token,
-            return_tensors="pt", padding=False,
-        )["input_ids"].squeeze(0)
+def collate_fn(examples, pad_id: int):
+    """Right-pad batch sequences and build ``kl_mask`` (first-answer logit only)."""
+    max_len = max(ex["input_ids"].size(0) for ex in examples)
+    B = len(examples)
 
-        input_ids = torch.cat([prompt_ids, answer_ids])
-        attention_mask = torch.ones_like(input_ids)
+    input_ids = torch.full((B, max_len), pad_id, dtype=torch.long)
+    attention_mask = torch.zeros(B, max_len, dtype=torch.long)
+    kl_mask = torch.zeros(B, max_len, dtype=torch.float32)
 
-        labels = torch.full_like(input_ids, -100)
-        labels[len(prompt_ids):] = answer_ids
+    for i, ex in enumerate(examples):
+        ids = ex["input_ids"]
+        L = ids.size(0)
+        input_ids[i, :L] = ids
+        attention_mask[i, :L] = 1
+        pos = ex["prompt_len"] - 1
+        if 0 <= pos < L:
+            kl_mask[i, pos] = 1.0
 
-        return {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "labels": labels,
-            "prompt_len": len(prompt_ids),
-        }
+    return {
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+        "kl_mask": kl_mask,
+    }
+
+
+def masked_mean_over_tokens(
+    acts: torch.Tensor, attention_mask: torch.Tensor
+) -> torch.Tensor:
+    """Pool ``(B, T, D)`` → ``(B, D)`` by averaging only real tokens (not padding)."""
+    m = attention_mask.to(dtype=acts.dtype).unsqueeze(-1)
+    num = (acts * m).sum(dim=1)
+    den = m.sum(dim=1).clamp_min(1.0)
+    return num / den
 
 
 # ---------------------------------------------------------------------------
@@ -606,10 +645,13 @@ class ClusterDistillationTrainer:
             params += list(self.proj_heads.parameters())
         self.optimizer = AdamW(params, lr=config.learning_rate)
 
-        # Dataset / loader
+        # Dataset / loader (same padding + kl_mask as ``standard_distillation``)
         self.dataset = AddDataset(train_data, self.tokenizer)
         self.loader = DataLoader(
-            self.dataset, batch_size=config.batch_size, shuffle=True,
+            self.dataset,
+            batch_size=config.batch_size,
+            shuffle=True,
+            collate_fn=partial(collate_fn, pad_id=self.tokenizer.eos_token_id),
         )
 
         # History
@@ -621,6 +663,7 @@ class ClusterDistillationTrainer:
         """One forward pass through student + teacher, returns composite loss."""
         input_ids = batch["input_ids"].to(self.device)
         attention_mask = batch["attention_mask"].to(self.device)
+        kl_mask = batch["kl_mask"].to(self.device)
         T = self.config.temperature
 
         self.teacher_cache.register_hooks(self.teacher, detach=True)
@@ -638,11 +681,15 @@ class ClusterDistillationTrainer:
             student_logits = student_out.logits
             student_acts = self.student_cache.get_flattened_per_token()
 
-            kl_loss = F.kl_div(
-                F.log_softmax(student_logits / T, dim=-1),
-                F.softmax(teacher_logits / T, dim=-1),
-                reduction="batchmean",
-            ) * (T ** 2)
+            # Masked KL at first-answer logit only (same as ``standard_distillation``).
+            log_p_s = F.log_softmax(student_logits / T, dim=-1)
+            p_t = F.softmax(teacher_logits / T, dim=-1)
+            kl_per_token = F.kl_div(log_p_s, p_t, reduction="none").sum(dim=-1)
+            kl_loss = (
+                (kl_per_token * kl_mask).sum()
+                / kl_mask.sum().clamp_min(1.0)
+                * (T**2)
+            )
 
             cluster_loss, cka_scores = self.cluster_loss_fn(
                 student_acts, teacher_acts, self.cluster_pairs,
@@ -652,8 +699,8 @@ class ClusterDistillationTrainer:
 
             proj_loss = torch.tensor(0.0, device=self.device)
             if self.proj_heads is not None and self.config.lambda_proj > 0:
-                s_pooled = student_acts.mean(dim=1)
-                t_pooled = teacher_acts.mean(dim=1)
+                s_pooled = masked_mean_over_tokens(student_acts, attention_mask)
+                t_pooled = masked_mean_over_tokens(teacher_acts, attention_mask)
                 proj_loss = self.proj_heads(
                     s_pooled, t_pooled, self.cluster_pairs,
                 )
@@ -749,7 +796,7 @@ class ClusterDistillationTrainer:
         print(f"  lambda_proj:      {cfg.lambda_proj}")
         print(f"  Cluster pairs:    {len(self.cluster_pairs)}")
         print(f"  Projection heads: {cfg.use_projection_heads}")
-        print(f"  Checkpoint every: {cfg.checkpoint_every}")
+        print(f"  Save every:         {cfg.save_every}")
         print("=" * 60)
 
         best_acc = 0.0
