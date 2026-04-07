@@ -244,14 +244,22 @@ def _latest_epoch_checkpoint(run_dir: str) -> tuple[Optional[str], Optional[int]
     best_n, best_path = None, None
     if not os.path.isdir(run_dir):
         return None, None
-    for entry in os.scandir(run_dir):
-        if entry.is_dir() and entry.name.startswith("student_epoch_"):
-            try:
-                n = int(entry.name[len("student_epoch_"):])
-                if best_n is None or n > best_n:
-                    best_n, best_path = n, entry.path
-            except ValueError:
-                pass
+    try:
+        entries = os.listdir(run_dir)
+    except OSError:
+        return None, None
+    for name in entries:
+        if not name.startswith("student_epoch_"):
+            continue
+        full = os.path.join(run_dir, name)
+        if not os.path.isdir(full):  # use isdir() — more reliable on Drive than entry.is_dir()
+            continue
+        try:
+            n = int(name[len("student_epoch_"):])
+            if best_n is None or n > best_n:
+                best_n, best_path = n, full
+        except ValueError:
+            pass
     return best_path, best_n
 
 
@@ -555,6 +563,11 @@ def main():
         type=int,
         default=5,
         help="Save student_epoch_N every N epochs; only the most recent is kept (0 = disable)",
+    )
+    parser.add_argument(
+        "--save-best",
+        action="store_true",
+        help="Also save student_best whenever eval accuracy improves (off by default — slows training)",
     )
     # ---- Checkpoint / resume args ----
     parser.add_argument(

@@ -44,6 +44,8 @@ def main():
     parser.add_argument("--temperature", type=float, default=2.0)
     parser.add_argument("--save-every", type=int, default=5,
                         help="Save student_epoch_N every N epochs; only most recent kept (0=off)")
+    parser.add_argument("--save-best", action="store_true",
+                        help="Save student_best whenever eval accuracy improves (off by default)")
     parser.add_argument(
         "--eval-max-new-tokens",
         type=int,
@@ -134,6 +136,7 @@ def main():
         temperature=args.temperature,
         lambda_cka=args.lambda_cka,
         save_every=args.save_every,
+        save_best=args.save_best,
         eval_max_new_tokens=eval_max_new_tokens,
         save_dir=args.save_dir,
     )

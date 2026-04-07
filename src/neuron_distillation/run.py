@@ -226,6 +226,8 @@ Example:
     parser.add_argument("--lambda-proj", type=float, default=0.0)
     parser.add_argument("--save-every", type=int, default=5,
                         help="Save student_epoch_N every N epochs; only most recent kept (0=off)")
+    parser.add_argument("--save-best", action="store_true",
+                        help="Save student_best whenever eval accuracy improves (off by default)")
     parser.add_argument("--use-projection", action="store_true")
     parser.add_argument("--save-dir", type=str,
                         default=os.path.join(os.path.dirname(__file__), "..", "..", "results", "cluster-distillation"))
@@ -366,6 +368,7 @@ Example:
         use_projection_heads=args.use_projection,
         top_k_clusters_per_subclass=args.top_k_pairs,
         save_every=args.save_every,
+        save_best=args.save_best,
         eval_max_new_tokens=eval_max_new_tokens,
         save_dir=args.save_dir,
     )

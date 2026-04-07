@@ -80,6 +80,7 @@ class ClusterDistillationConfig:
 
     eval_every: int = 1
     save_every: int = 5
+    save_best: bool = False
     eval_max_new_tokens: int = EVAL_MAX_NEW_TOKENS
     save_dir: str = "results/cluster-distillation"
 
@@ -768,7 +769,8 @@ class ClusterDistillationTrainer:
 
                 if acc > best_acc:
                     best_acc = acc
-                    self._save_checkpoint("best")
+                    if cfg.save_best:
+                        self._save_checkpoint("best")
 
             if cfg.save_every > 0 and (epoch + 1) % cfg.save_every == 0:
                 self._save_checkpoint(f"epoch_{epoch + 1}")
