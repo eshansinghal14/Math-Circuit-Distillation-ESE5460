@@ -199,6 +199,45 @@ def load_training_state(path: str, optimizer: torch.optim.Optimizer, map_locatio
     return int(chk["next_epoch"]), float(chk["best_acc"])
 
 
+def _save_curves(history: dict, run_dir: str) -> None:
+    """Save KL-loss and accuracy training curves as PNGs into run_dir."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("matplotlib not installed — skipping curve plots.")
+        return
+
+    epochs = history.get("epoch", [])
+    if not epochs:
+        return
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+
+    ax1.plot(epochs, history.get("kl_loss", []), marker="o", markersize=3, linewidth=1.5)
+    ax1.set_title("KL Loss")
+    ax1.set_xlabel("Epoch")
+    ax1.set_ylabel("KL Loss")
+    ax1.grid(True, alpha=0.3)
+
+    ax2.plot(epochs, history.get("accuracy", []), marker="o", markersize=3,
+             linewidth=1.5, color="tab:orange")
+    ax2.set_title("Test Accuracy")
+    ax2.set_xlabel("Epoch")
+    ax2.set_ylabel("Accuracy")
+    ax2.set_ylim(0, 1)
+    ax2.grid(True, alpha=0.3)
+
+    fig.suptitle("Standard KL Distillation", fontsize=13)
+    fig.tight_layout()
+
+    out = os.path.join(run_dir, "training_curves.png")
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"Saved training curves → {out}")
+
+
 def _resolve_run_dir(args) -> tuple[str, Optional[str]]:
     """Return (run_dir, student_source).
 
@@ -393,6 +432,9 @@ def train(args):
     save_checkpoint(student, tokenizer, run_dir, "final")
     with open(hist_path, "w") as f:
         json.dump(hist_out, f, indent=2)
+
+    _save_curves(hist_out, run_dir)
+
     print(f"\nDone. Best accuracy: {best_acc:.4f}")
     print(f"Results saved to: {run_dir}")
 

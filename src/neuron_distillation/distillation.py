@@ -790,11 +790,59 @@ class ClusterDistillationTrainer:
 
         self._save_checkpoint("final")
         self._save_history()
+        self._save_curves()
 
         print(f"\nTraining complete.  Best accuracy: {best_acc:.3f}")
         return dict(self.history)
 
     # ------------------------------------------------------------------
+
+    def _save_curves(self) -> None:
+        """Save KL-loss, cluster-loss, and accuracy curves as a PNG."""
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+        except ImportError:
+            print("matplotlib not installed — skipping curve plots.")
+            return
+
+        history = dict(self.history)
+        epochs = history.get("epoch", [])
+        if not epochs:
+            return
+
+        fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+
+        axes[0].plot(epochs, history.get("kl_loss", []), marker="o", markersize=3, linewidth=1.5)
+        axes[0].set_title("KL Loss")
+        axes[0].set_xlabel("Epoch")
+        axes[0].set_ylabel("KL Loss")
+        axes[0].grid(True, alpha=0.3)
+
+        axes[1].plot(epochs, history.get("cluster_loss", []), marker="o", markersize=3,
+                     linewidth=1.5, color="tab:green")
+        axes[1].set_title("Cluster CKA Loss")
+        axes[1].set_xlabel("Epoch")
+        axes[1].set_ylabel("Cluster Loss")
+        axes[1].grid(True, alpha=0.3)
+
+        axes[2].plot(epochs, history.get("accuracy", []), marker="o", markersize=3,
+                     linewidth=1.5, color="tab:orange")
+        axes[2].set_title("Test Accuracy")
+        axes[2].set_xlabel("Epoch")
+        axes[2].set_ylabel("Accuracy")
+        axes[2].set_ylim(0, 1)
+        axes[2].grid(True, alpha=0.3)
+
+        fig.suptitle("Neuron-Cluster KL + CKA Distillation", fontsize=13)
+        fig.tight_layout()
+
+        os.makedirs(self.config.save_dir, exist_ok=True)
+        out = os.path.join(self.config.save_dir, "training_curves.png")
+        fig.savefig(out, dpi=150)
+        plt.close(fig)
+        print(f"Saved training curves → {out}")
 
     def _save_checkpoint(self, tag: str):
         path = os.path.join(self.config.save_dir, f"student_{tag}")

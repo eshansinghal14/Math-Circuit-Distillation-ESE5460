@@ -170,6 +170,52 @@ def evaluate(
     return correct / max(total, 1)
 
 
+def _save_curves(history: dict, save_dir: str) -> None:
+    """Save KL-loss, CKA-loss, and accuracy curves as a PNG into save_dir."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("matplotlib not installed — skipping curve plots.")
+        return
+
+    epochs = history.get("epoch", [])
+    if not epochs:
+        return
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+
+    axes[0].plot(epochs, history.get("kl_loss", []), marker="o", markersize=3, linewidth=1.5)
+    axes[0].set_title("KL Loss")
+    axes[0].set_xlabel("Epoch")
+    axes[0].set_ylabel("KL Loss")
+    axes[0].grid(True, alpha=0.3)
+
+    axes[1].plot(epochs, history.get("cka_loss", []), marker="o", markersize=3,
+                 linewidth=1.5, color="tab:green")
+    axes[1].set_title("CKA Loss")
+    axes[1].set_xlabel("Epoch")
+    axes[1].set_ylabel("CKA Loss")
+    axes[1].grid(True, alpha=0.3)
+
+    axes[2].plot(epochs, history.get("accuracy", []), marker="o", markersize=3,
+                 linewidth=1.5, color="tab:orange")
+    axes[2].set_title("Test Accuracy")
+    axes[2].set_xlabel("Epoch")
+    axes[2].set_ylabel("Accuracy")
+    axes[2].set_ylim(0, 1)
+    axes[2].grid(True, alpha=0.3)
+
+    fig.suptitle("FFN Layer KL + CKA Distillation", fontsize=13)
+    fig.tight_layout()
+
+    out = os.path.join(save_dir, "training_curves.png")
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"Saved training curves → {out}")
+
+
 def save_checkpoint(model, tokenizer, save_dir: str, tag: str):
     path = os.path.join(save_dir, f"student_{tag}")
     os.makedirs(path, exist_ok=True)
@@ -376,6 +422,7 @@ class FFNDistillationTrainer:
                 save_checkpoint(self.student, self.tokenizer, cfg.save_dir, f"epoch_{epoch+1}")
 
         save_checkpoint(self.student, self.tokenizer, cfg.save_dir, "final")
+        _save_curves(dict(self.history), cfg.save_dir)
         print(f"\nDone. Best accuracy: {best_acc:.4f}")
         print(f"Results saved to: {cfg.save_dir}")
 
