@@ -1,24 +1,30 @@
 """Standard Knowledge Distillation (pure KL baseline).
 
-Assumes **one token per answer** (typical for 3-digit sums in Llama BPE). KL is only at
-the causal step whose logits predict that answer token (index ``answer_start - 1``).
-
-Eval defaults to ``--eval-max-new-tokens 1``.
-
-No internal alignment -- this is the baseline that other experiments compare against.
+KL is applied at the causal position that predicts the first answer token.
 Paper target: 63.6% accuracy on 2-digit addition.
 
-**Why the student can approach the teacher:** both ``load_model`` calls load **pretrained**
-HuggingFace weights, not random init. A 1B student that already speaks English/math will
-often land close to an 8B teacher after sequence-level KD on this task; that is not a bug
-in the loss unless you intended a different setup (e.g. random init).
+New runs: results go to  <save-dir>/standard-kl/<YYYY-MM-DD_HH-MM-SS>/
+Resume:   pass --checkpoint-run standard-kl/<datetime> and --checkpoint-type best|<N>
 
-Usage (from src/):
-  python standard_distillation.py --save-dir /path/to/drive/results/standard-kl
+Examples (from src/)::
 
-Resume (same ``--save-dir``, weights + optimizer state):
-  python standard_distillation.py --save-dir /path/.../standard-kl \\
-    --resume-from /path/.../standard-kl/student_best --epochs 20
+  # Fresh run, results auto-dated
+  python standard_distillation.py \\
+    --save-dir "/content/drive/MyDrive/Math Circuit Distillation (ESE 5460)/results"
+
+  # Resume from epoch-20 checkpoint, run 10 more epochs  (global 21-30)
+  python standard_distillation.py \\
+    --save-dir "/content/drive/MyDrive/Math Circuit Distillation (ESE 5460)/results" \\
+    --checkpoint-run "standard-kl/2025-04-07_14-30-00" \\
+    --checkpoint-type 20 \\
+    --epochs 10
+
+  # Resume from best checkpoint
+  python standard_distillation.py \\
+    --save-dir "/content/drive/MyDrive/Math Circuit Distillation (ESE 5460)/results" \\
+    --checkpoint-run "standard-kl/2025-04-07_14-30-00" \\
+    --checkpoint-type best \\
+    --epochs 10
 """
 
 import argparse
@@ -26,6 +32,7 @@ import json
 import os
 import re
 from collections import defaultdict
+from datetime import datetime
 from functools import partial
 from typing import Optional
 
@@ -74,7 +81,7 @@ def _kl_mask_single_answer_logit(
         if 0 < a0 < real_len:
             i = a0 - 1
             if i < L:
-                kl[b, i] = 1.0
+                kl[b, i] = 1.0  
     return kl
 
 
@@ -207,13 +214,46 @@ def load_training_state(path: str, optimizer: torch.optim.Optimizer, map_locatio
     return int(chk["next_epoch"]), float(chk["best_acc"])
 
 
+def _resolve_run_dir(args) -> tuple[str, Optional[str]]:
+    """Return (run_dir, student_source).
+
+    New run:  run_dir = <save_dir>/standard-kl/<datetime>/
+    Resume:   run_dir = <save_dir>/<checkpoint_run>/
+              student_source = run_dir/student_best  or  run_dir/student_epoch_<N>
+    """
+    if args.checkpoint_run:
+        run_dir = os.path.join(args.save_dir, args.checkpoint_run)
+        ct = str(args.checkpoint_type).strip().lower()
+        if ct == "best":
+            student_source = os.path.join(run_dir, "student_best")
+        else:
+            student_source = os.path.join(run_dir, f"student_epoch_{ct}")
+        if not os.path.isdir(student_source):
+            raise SystemExit(
+                f"Checkpoint folder not found: {student_source}\n"
+                "Check --checkpoint-run and --checkpoint-type."
+            )
+    else:
+        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        run_dir = os.path.join(args.save_dir, "standard-kl", ts)
+        student_source = None  # load from HF
+    return run_dir, student_source
+
+
 def train(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    os.makedirs(args.save_dir, exist_ok=True)
 
-    student_source = args.resume_from if args.resume_from else args.student_model
-    print(f"Loading student from {student_source!r}...")
-    student, tokenizer = load_model(student_source)
+    # ---- Resolve run directory and checkpoint source ----
+    run_dir, student_source = _resolve_run_dir(args)
+    os.makedirs(run_dir, exist_ok=True)
+    is_resume = student_source is not None
+
+    print(f"Run dir: {run_dir}")
+    if student_source:
+        print(f"Loading student from checkpoint: {student_source!r}")
+    else:
+        print(f"Loading student from HF: {args.student_model!r}")
+    student, tokenizer = load_model(student_source or args.student_model)
     student = student.to("cpu").float().to(device)
     tokenizer.padding_side = "left"
 
@@ -233,14 +273,17 @@ def train(args):
 
     optimizer = AdamW(student.parameters(), lr=args.lr)
     history: dict = {}
-    hist_path = os.path.join(args.save_dir, "training_history.json")
-    state_path = _training_state_path(args.save_dir)
+    hist_path = os.path.join(run_dir, "training_history.json")
+    state_path = _training_state_path(run_dir)
     start_epoch = 0
     best_acc = 0.0
 
-    if args.resume_from and os.path.isfile(state_path):
+    if is_resume and os.path.isfile(state_path):
         start_epoch, best_acc = load_training_state(state_path, optimizer, device)
-        print(f"Resumed optimizer state from {state_path} (starting at epoch {start_epoch + 1}, best_acc={best_acc:.4f})")
+        print(
+            f"Resumed optimizer state (starting at global epoch {start_epoch + 1}, "
+            f"best_acc={best_acc:.4f})"
+        )
         if os.path.isfile(hist_path):
             with open(hist_path, "r") as f:
                 history = json.load(f)
@@ -249,10 +292,10 @@ def train(args):
         for key in ("epoch", "kl_loss", "accuracy"):
             if key not in history:
                 history[key] = []
-    elif args.resume_from:
-        print(f"No {state_path} found — warm-starting weights only (new optimizer, epoch 1).")
+    elif is_resume:
+        print(f"No training_state.pt in {run_dir} — warm-starting weights only (new optimizer).")
 
-    if start_epoch == 0 and not history:
+    if not history:
         history = defaultdict(list)
 
     if start_epoch == 0:
@@ -280,17 +323,17 @@ def train(args):
         student_base = float(history.get("student_baseline", 0.0))
         teacher_base = float(history.get("teacher_baseline", 0.0))
 
+    end_epoch = start_epoch + args.epochs
     print("=" * 60)
     print("Standard KL Distillation")
-    end_epoch = start_epoch + args.epochs
-    print(f"  Epochs:    {args.epochs} (global epochs {start_epoch + 1}..{end_epoch})")
+    print(f"  Run dir:   {run_dir}")
+    print(f"  Epochs:    {args.epochs} (global {start_epoch + 1}..{end_epoch})")
     print(f"  Batch:     {args.batch_size}")
     print(f"  LR:        {args.lr}")
     print(f"  temp:      {args.temperature}")
     print(f"  eval max_new_tokens: {args.eval_max_new_tokens}")
-    print(f"  Save dir:  {args.save_dir}")
-    if args.resume_from:
-        print(f"  Resume:    {args.resume_from!r}")
+    if is_resume:
+        print(f"  Resumed from: {student_source!r}")
     print("=" * 60)
 
     T = args.temperature
@@ -345,45 +388,49 @@ def train(args):
 
         print(f"Epoch {epoch+1}/{end_epoch}: KL={avg_loss:.4f} Acc={acc:.4f}")
 
-        # Normalize history to a plain dict for JSON (handles resumed non-defaultdict).
-        if isinstance(history, defaultdict):
-            hist_out = dict(history)
-        else:
-            hist_out = dict(history)
+        hist_out = dict(history)
         with open(hist_path, "w") as f:
             json.dump(hist_out, f, indent=2)
 
         if acc > best_acc:
             best_acc = acc
-            save_checkpoint(student, tokenizer, args.save_dir, "best")
+            save_checkpoint(student, tokenizer, run_dir, "best")
 
         if args.checkpoint_every > 0 and (epoch + 1) % args.checkpoint_every == 0:
-            save_checkpoint(student, tokenizer, args.save_dir, f"epoch_{epoch+1}")
+            save_checkpoint(student, tokenizer, run_dir, f"epoch_{epoch+1}")
 
-        save_training_state(args.save_dir, optimizer, epoch + 1, best_acc)
+        save_training_state(run_dir, optimizer, epoch + 1, best_acc)
 
-    if isinstance(history, defaultdict):
-        hist_out = dict(history)
-    else:
-        hist_out = dict(history)
+    hist_out = dict(history)
     hist_out["student_baseline"] = student_base
     hist_out["teacher_baseline"] = teacher_base
 
-    save_checkpoint(student, tokenizer, args.save_dir, "final")
+    save_checkpoint(student, tokenizer, run_dir, "final")
     with open(hist_path, "w") as f:
         json.dump(hist_out, f, indent=2)
     print(f"\nDone. Best accuracy: {best_acc:.4f}")
-    print(f"Results saved to: {args.save_dir}")
+    print(f"Results saved to: {run_dir}")
 
 
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
+    default_base = os.path.join(script_dir, "..", "results")
 
-    parser = argparse.ArgumentParser(description="Standard KL distillation (baseline)")
+    parser = argparse.ArgumentParser(
+        description="Standard KL distillation (baseline)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
     parser.add_argument("--student-model", default="meta-llama/Llama-3.2-1B")
     parser.add_argument("--teacher-model", default="meta-llama/Meta-Llama-3-8B")
-    parser.add_argument("--train-path", default=os.path.join(script_dir, "..", "datasets", "2d_add_train_80.json"))
-    parser.add_argument("--test-path", default=os.path.join(script_dir, "..", "datasets", "2d_add_test_20.json"))
+    parser.add_argument(
+        "--train-path",
+        default=os.path.join(script_dir, "..", "datasets", "2d_add_train_80.json"),
+    )
+    parser.add_argument(
+        "--test-path",
+        default=os.path.join(script_dir, "..", "datasets", "2d_add_test_20.json"),
+    )
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -392,25 +439,53 @@ def main():
     parser.add_argument(
         "--eval-max-new-tokens",
         type=int,
-        default=1,
-        help="Greedy eval: max new tokens after prompt (default 1 for single-token answers)",
+        default=EVAL_MAX_NEW_TOKENS,
+        help=f"Greedy eval: max new tokens after prompt (default {EVAL_MAX_NEW_TOKENS})",
     )
-    parser.add_argument("--checkpoint-every", type=int, default=5)
     parser.add_argument(
-        "--resume-from",
-        default=None,
+        "--checkpoint-every",
+        type=int,
+        default=5,
+        help="Save a numbered checkpoint every N epochs (0 = disable)",
+    )
+    # ---- Checkpoint / resume args ----
+    parser.add_argument(
+        "--save-dir",
+        default=default_base,
         metavar="DIR",
-        help="Load student+tokenizer from this HF save dir (e.g. save_dir/student_best). "
-        "If save_dir/training_state.pt exists, optimizer and epoch resume; else weights only.",
+        help=(
+            "Base results directory. A new run creates standard-kl/<datetime>/ inside it. "
+            "When resuming, this is still the base dir; the run subfolder is given by "
+            "--checkpoint-run. "
+            f"Default: {default_base}"
+        ),
+    )
+    parser.add_argument(
+        "--checkpoint-run",
+        default=None,
+        metavar="SUBPATH",
+        help=(
+            "Relative path (under --save-dir) of the run to resume, "
+            "e.g. 'standard-kl/2025-04-07_14-30-00'. "
+            "If omitted, a fresh run is started."
+        ),
+    )
+    parser.add_argument(
+        "--checkpoint-type",
+        default="best",
+        metavar="best|N",
+        help=(
+            "Which checkpoint to load from the run: 'best' → student_best, "
+            "or an integer N → student_epoch_N. (default: best)"
+        ),
     )
     parser.add_argument(
         "--debug-decode",
         type=int,
         default=0,
         metavar="N",
-        help="Print N examples (gold, pred, decoded repr) from the first batch of each evaluate (0=off)",
+        help="Print N decode examples per evaluate call for debugging (0=off)",
     )
-    parser.add_argument("--save-dir", default=os.path.join(script_dir, "..", "results", "standard-kl"))
     args = parser.parse_args()
     train(args)
 
