@@ -274,11 +274,22 @@ def _resolve_run_dir(args) -> tuple[str, Optional[str], Optional[int]]:
         if ct == "latest":
             student_source, override_epoch = _latest_epoch_checkpoint(run_dir)
             if student_source is None:
-                raise SystemExit(
-                    f"No student_epoch_N checkpoints found in {run_dir}.\n"
-                    "Run with --checkpoint-type best or final instead."
-                )
-            print(f"Auto-detected latest checkpoint: {student_source} (epoch {override_epoch})")
+                # Fall back to student_latest (produced by older runs)
+                fallback = os.path.join(run_dir, "student_latest")
+                if os.path.isdir(fallback):
+                    print(
+                        f"No student_epoch_N checkpoints found — falling back to student_latest.\n"
+                        f"  (This run predates --save-every; history will not be truncated.)"
+                    )
+                    student_source = fallback
+                    override_epoch = None
+                else:
+                    raise SystemExit(
+                        f"No student_epoch_N or student_latest checkpoints found in {run_dir}.\n"
+                        "Use --checkpoint-type best or final instead."
+                    )
+            else:
+                print(f"Auto-detected latest checkpoint: {student_source} (epoch {override_epoch})")
         elif ct in ("best", "final"):
             student_source = os.path.join(run_dir, f"student_{ct}")
             override_epoch = None
