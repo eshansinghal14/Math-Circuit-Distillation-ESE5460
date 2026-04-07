@@ -411,6 +411,8 @@ class FFNDistillationTrainer:
 
             with open(os.path.join(cfg.save_dir, "training_history.json"), "w") as f:
                 json.dump(dict(self.history), f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
 
             print(f"Epoch {epoch+1}/{cfg.epochs}: "
                   f"KL={avg.get('kl_loss', 0):.4f} CKA_loss={avg.get('cka_loss', 0):.4f} "
@@ -423,20 +425,34 @@ class FFNDistillationTrainer:
 
             if cfg.save_every > 0 and (epoch + 1) % cfg.save_every == 0:
                 save_checkpoint(self.student, self.tokenizer, cfg.save_dir, f"epoch_{epoch + 1}")
+                print(f"  Saved student_epoch_{epoch + 1}")
                 prev = epoch + 1 - cfg.save_every
                 if prev > 0:
                     prev_path = os.path.join(cfg.save_dir, f"student_epoch_{prev}")
-                    if os.path.isdir(prev_path):
+                    try:
                         shutil.rmtree(prev_path)
+                        print(f"  Deleted student_epoch_{prev}")
+                    except FileNotFoundError:
+                        pass
+
+        # Write final history and curves BEFORE slow checkpoint save
+        _save_curves(dict(self.history), cfg.save_dir)
 
         save_checkpoint(self.student, self.tokenizer, cfg.save_dir, "final")
+        print("  Saved student_final")
 
-        # Remove the last epoch checkpoint now that final is saved
-        for entry in os.scandir(cfg.save_dir):
-            if entry.is_dir() and entry.name.startswith("student_epoch_"):
-                shutil.rmtree(entry.path)
-
-        _save_curves(dict(self.history), cfg.save_dir)
+        # Remove all remaining epoch checkpoints now that final is saved
+        try:
+            entries = os.listdir(cfg.save_dir)
+        except OSError:
+            entries = []
+        for name in entries:
+            if name.startswith("student_epoch_"):
+                try:
+                    shutil.rmtree(os.path.join(cfg.save_dir, name))
+                    print(f"  Deleted {name} (superseded by student_final)")
+                except FileNotFoundError:
+                    pass
         print(f"\nDone. Best accuracy: {best_acc:.4f}")
         print(f"Results saved to: {cfg.save_dir}")
 
