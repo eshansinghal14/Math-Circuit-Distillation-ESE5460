@@ -239,21 +239,29 @@ def _save_curves(history: dict, run_dir: str) -> None:
     print(f"Saved training curves → {out}")
 
 
-def _resolve_run_dir(args) -> tuple[str, Optional[str]]:
-    """Return (run_dir, student_source).
+def _resolve_run_dir(args) -> tuple[str, Optional[str], Optional[int]]:
+    """Return (run_dir, student_source, override_epoch).
 
     New run:  run_dir = <save_dir>/standard-kl/<datetime>/
     Resume:   run_dir = <save_dir>/<checkpoint_run>/
-              student_source = run_dir/student_best  or  run_dir/student_epoch_<N>
+              student_source = run_dir/student_best|latest|final|epoch_N
+              override_epoch = N when checkpoint_type is an integer, else None
+                               (when set, training history is truncated to N epochs
+                                so resuming from epoch 25 doesn't inherit epoch 28's history)
     """
     if args.checkpoint_run:
         run_dir = os.path.join(args.save_dir, args.checkpoint_run)
         ct = str(args.checkpoint_type).strip().lower()
         if ct in ("best", "latest", "final"):
             student_source = os.path.join(run_dir, f"student_{ct}")
+            override_epoch = None
         else:
-            # Legacy: integer epoch number from old runs
+            # Explicit epoch number — user wants to rewind to this point
             student_source = os.path.join(run_dir, f"student_epoch_{ct}")
+            try:
+                override_epoch = int(ct)
+            except ValueError:
+                override_epoch = None
         if not os.path.isdir(student_source):
             raise SystemExit(
                 f"Checkpoint folder not found: {student_source}\n"
@@ -262,15 +270,16 @@ def _resolve_run_dir(args) -> tuple[str, Optional[str]]:
     else:
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         run_dir = os.path.join(args.save_dir, "standard-kl", ts)
-        student_source = None  # load from HF
-    return run_dir, student_source
+        student_source = None
+        override_epoch = None
+    return run_dir, student_source, override_epoch
 
 
 def train(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # ---- Resolve run directory and checkpoint source ----
-    run_dir, student_source = _resolve_run_dir(args)
+    run_dir, student_source, override_epoch = _resolve_run_dir(args)
     os.makedirs(run_dir, exist_ok=True)
     is_resume = student_source is not None
 
@@ -306,10 +315,8 @@ def train(args):
 
     if is_resume and os.path.isfile(state_path):
         start_epoch, best_acc = load_training_state(state_path, optimizer, device)
-        print(
-            f"Resumed optimizer state (starting at global epoch {start_epoch + 1}, "
-            f"best_acc={best_acc:.4f})"
-        )
+
+        # Load existing history
         if os.path.isfile(hist_path):
             with open(hist_path, "r") as f:
                 history = json.load(f)
@@ -318,6 +325,29 @@ def train(args):
         for key in ("epoch", "kl_loss", "accuracy"):
             if key not in history:
                 history[key] = []
+
+        # If user asked to rewind to a specific epoch, truncate state and history
+        if override_epoch is not None and override_epoch < start_epoch:
+            print(
+                f"Rewinding from epoch {start_epoch} → {override_epoch} "
+                f"(truncating history and resetting optimizer state)"
+            )
+            n = override_epoch  # keep only first n epochs of history
+            for key in ("epoch", "kl_loss", "accuracy"):
+                history[key] = history[key][:n]
+            # Recompute best_acc from the truncated accuracy list
+            best_acc = max(history["accuracy"][:n]) if history["accuracy"][:n] else 0.0
+            start_epoch = override_epoch
+            # Overwrite history and state on disk to reflect the rewind
+            with open(hist_path, "w") as f:
+                json.dump(dict(history), f, indent=2)
+            save_training_state(run_dir, optimizer, start_epoch, best_acc)
+            print(f"  History truncated to {n} epochs. best_acc reset to {best_acc:.4f}")
+        else:
+            print(
+                f"Resumed optimizer state (starting at global epoch {start_epoch + 1}, "
+                f"best_acc={best_acc:.4f})"
+            )
     elif is_resume:
         print(f"No training_state.pt in {run_dir} — warm-starting weights only (new optimizer).")
 
