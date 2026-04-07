@@ -81,6 +81,8 @@ class ClusterDistillationConfig:
     use_projection_heads: bool = False
 
     eval_every: int = 1
+    # In-epoch step log every N batches (default matches standard_distillation).
+    step_log_interval: int = 50
     save_every: int = 5
     save_best: bool = False
     eval_max_new_tokens: int = EVAL_MAX_NEW_TOKENS
@@ -607,14 +609,17 @@ class ClusterDistillationTrainer:
             self.tokenizer = AutoTokenizer.from_pretrained(config.student_model)
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # Models
-        dtype = torch.float16 if config.device == "cuda" else torch.float32
+        # Models — student in float32 on CUDA matches ``standard_distillation`` (train loop
+        # uses .float() for stable KL + gradients). fp16 student + composite loss often goes
+        # non-finite after the first optimizer step.
+        student_dtype = torch.float32
+        teacher_dtype = torch.float16 if config.device == "cuda" else torch.float32
         if student is not None:
             self.student = student
         else:
             print(f"Loading student: {config.student_model}")
             self.student = AutoModelForCausalLM.from_pretrained(
-                config.student_model, torch_dtype=dtype,
+                config.student_model, torch_dtype=student_dtype,
             ).to(config.device)
 
         if teacher is not None:
@@ -622,7 +627,7 @@ class ClusterDistillationTrainer:
         else:
             print(f"Loading teacher: {config.teacher_model}")
             self.teacher = AutoModelForCausalLM.from_pretrained(
-                config.teacher_model, torch_dtype=dtype,
+                config.teacher_model, torch_dtype=teacher_dtype,
             ).to(config.device)
         self.teacher.eval()
         for p in self.teacher.parameters():
@@ -682,8 +687,8 @@ class ClusterDistillationTrainer:
             student_acts = self.student_cache.get_flattened_per_token()
 
             # Masked KL at first-answer logit only (same as ``standard_distillation``).
-            log_p_s = F.log_softmax(student_logits / T, dim=-1)
-            p_t = F.softmax(teacher_logits / T, dim=-1)
+            log_p_s = F.log_softmax(student_logits.float() / T, dim=-1)
+            p_t = F.softmax(teacher_logits.float() / T, dim=-1)
             kl_per_token = F.kl_div(log_p_s, p_t, reduction="none").sum(dim=-1)
             kl_loss = (
                 (kl_per_token * kl_mask).sum()
@@ -733,13 +738,15 @@ class ClusterDistillationTrainer:
         self.student.train()
         agg = defaultdict(float)
         n = 0
+        skipped_nonfinite = 0
 
         for step, batch in enumerate(self.loader):
             loss, metrics = self._forward_and_loss(batch)
             if loss is None:
                 continue
 
-            if torch.isnan(loss):
+            if not torch.isfinite(loss).item():
+                skipped_nonfinite += 1
                 continue
 
             self.optimizer.zero_grad()
@@ -753,7 +760,7 @@ class ClusterDistillationTrainer:
                 agg[k] += v
             n += 1
 
-            if step % 5 == 0:
+            if step % max(1, self.config.step_log_interval) == 0:
                 print(
                     f"  step {step:04d} | "
                     f"KL {metrics['kl_loss']:.4f} | "
@@ -761,6 +768,13 @@ class ClusterDistillationTrainer:
                     f"CKA {metrics['mean_cka']:.4f}"
                 )
 
+        if n == 0:
+            print(
+                f"  WARNING: no valid optimizer steps this epoch "
+                f"({skipped_nonfinite} batch(es) had non-finite loss; "
+                f"{len(self.loader)} batches total). "
+                f"Epoch metrics below are undefined (not zero loss)."
+            )
         return {k: v / max(n, 1) for k, v in agg.items()}
 
     # ------------------------------------------------------------------
@@ -797,13 +811,12 @@ class ClusterDistillationTrainer:
         print(f"  Cluster pairs:    {len(self.cluster_pairs)}")
         print(f"  Projection heads: {cfg.use_projection_heads}")
         print(f"  Save every:         {cfg.save_every}")
+        print(f"  Step log interval:  {cfg.step_log_interval}")
         print("=" * 60)
 
         best_acc = 0.0
 
         for epoch in range(cfg.epochs):
-            print(f"\nEpoch {epoch + 1}/{cfg.epochs}")
-
             epoch_metrics = self.train_epoch(epoch)
 
             acc = 0.0
@@ -838,13 +851,20 @@ class ClusterDistillationTrainer:
             # Incremental history save after each epoch
             self._save_history()
 
-            print(
-                f"  Epoch {epoch + 1}: "
-                f"KL={epoch_metrics.get('kl_loss', 0):.4f}, "
-                f"Cluster={epoch_metrics.get('cluster_loss', 0):.4f}, "
-                f"CKA={epoch_metrics.get('mean_cka', 0):.4f}, "
-                f"Acc={acc:.3f}"
-            )
+            # Same order as ``standard_distillation``: in-epoch steps above, then this line.
+            if epoch_metrics:
+                print(
+                    f"Epoch {epoch + 1}/{cfg.epochs}: "
+                    f"KL={epoch_metrics.get('kl_loss', float('nan')):.4f}, "
+                    f"Cluster={epoch_metrics.get('cluster_loss', float('nan')):.4f}, "
+                    f"CKA={epoch_metrics.get('mean_cka', float('nan')):.4f}, "
+                    f"Acc={acc:.4f}"
+                )
+            else:
+                print(
+                    f"Epoch {epoch + 1}/{cfg.epochs}: "
+                    f"KL/Cluster/CKA=n/a (no valid steps), Acc={acc:.4f}"
+                )
 
         # Write history and curves BEFORE slow checkpoint save
         self._save_history()

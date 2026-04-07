@@ -225,6 +225,12 @@ def main():
     parser.add_argument("--top-k-pairs", type=int, default=5)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument(
+        "--step-log-interval",
+        type=int,
+        default=50,
+        help="Print in-epoch step loss every N batches (default 50, same as standard distillation)",
+    )
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--temperature", type=float, default=2.0)
     parser.add_argument(
@@ -360,6 +366,7 @@ def main():
         student_model=args.student_model,
         epochs=args.epochs,
         batch_size=args.batch_size,
+        step_log_interval=args.step_log_interval,
         learning_rate=args.lr,
         temperature=args.temperature,
         lambda_cluster=args.lambda_cluster,
