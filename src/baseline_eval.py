@@ -4,15 +4,15 @@ Same protocol as training logs: left padding, greedy decode, integer after ``=``
 
 From ``src/``::
 
-  # Default: Llama-3.2-1B and Meta-Llama-3-8B (HF)
-  python baseline_eval.py
+  # Default: Llama-3.2-1B and Meta-Llama-3-8B (HF); pass --dataset (or get prompted)
+  python baseline_eval.py --dataset 2d_add
 
   # Local save_pretrained folder
-  python baseline_eval.py /path/to/student_best
+  python baseline_eval.py --dataset 2d_add /path/to/student_best
 
   # Any HF id and/or paths (each arg is one model)
-  python baseline_eval.py meta-llama/Llama-3.2-1B
-  python baseline_eval.py ./student_best meta-llama/Meta-Llama-3-8B
+  python baseline_eval.py --dataset 2d_add meta-llama/Llama-3.2-1B
+  python baseline_eval.py --dataset 2d_add ./student_best meta-llama/Meta-Llama-3-8B
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
 from standard_distillation import evaluate  # noqa: E402
-from utils import EVAL_MAX_NEW_TOKENS, load_model  # noqa: E402
+from utils import EVAL_MAX_NEW_TOKENS, load_model, resolve_test_path  # noqa: E402
 
 _DEFAULT_MODELS = (
     "meta-llama/Llama-3.2-1B",
@@ -38,8 +38,6 @@ _DEFAULT_MODELS = (
 
 
 def main() -> None:
-    default_test = os.path.join(_SCRIPT_DIR, "..", "datasets", "2d_add_test_20.json")
-
     parser = argparse.ArgumentParser(
         description="Baseline eval on addition test JSON (prints only)",
     )
@@ -50,7 +48,17 @@ def main() -> None:
         help="Local save_pretrained directory and/or Hugging Face model id "
         "(omit for default 1B + 8B)",
     )
-    parser.add_argument("--test-path", default=default_test, help="Test JSON path")
+    parser.add_argument(
+        "--dataset",
+        default=None,
+        metavar="PREFIX",
+        help="e.g. 2d_add → <PREFIX>_test_20.json (prompted if omitted)",
+    )
+    parser.add_argument(
+        "--datasets-dir",
+        default=None,
+        help="Directory containing *_test_20.json (default: repo datasets/)",
+    )
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument(
         "--max-new-tokens",
@@ -60,9 +68,16 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    try:
+        test_path, _ = resolve_test_path(
+            dataset=args.dataset,
+            datasets_dir=args.datasets_dir,
+        )
+    except FileNotFoundError as e:
+        raise SystemExit(str(e)) from e
+
     specs = [os.path.expanduser(s) for s in args.models] if args.models else list(_DEFAULT_MODELS)
 
-    test_path = os.path.abspath(os.path.expanduser(args.test_path))
     if not os.path.isfile(test_path):
         raise SystemExit(f"Test file not found: {test_path}")
 

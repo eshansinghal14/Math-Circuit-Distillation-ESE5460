@@ -10,17 +10,23 @@ Resume:    add --resume; give just the datetime in --checkpoint-run (standard-kl
 
 Examples (from src/)::
 
+  # Dataset prefix (see ``utils``): 2d_add -> datasets/2d_add_train_80.json and _test_20.json
+  # Omit --dataset to be prompted (interactive TTY).
+
   # Fresh run, auto-dated folder
   python standard_distillation.py \\
+    --dataset 2d_add \\
     --save-dir "/content/drive/MyDrive/Math Circuit Distillation (ESE 5460)/results"
 
   # Fresh run with a custom folder name
   python standard_distillation.py \\
+    --dataset 2d_add \\
     --save-dir "/content/drive/MyDrive/Math Circuit Distillation (ESE 5460)/results" \\
     --run-name my_run
 
   # Resume from epoch-5 of a specific run, add 45 more epochs (global 6..50, 50 total)
   python standard_distillation.py \\
+    --dataset 2d_add \\
     --save-dir "/content/drive/MyDrive/Math Circuit Distillation (ESE 5460)/results" \\
     --resume \\
     --checkpoint-run "2026-04-07_22-15-56" \\
@@ -29,6 +35,7 @@ Examples (from src/)::
 
   # Resume from most recently modified run, continue from latest epoch checkpoint
   python standard_distillation.py \\
+    --dataset 2d_add \\
     --save-dir "/content/drive/MyDrive/Math Circuit Distillation (ESE 5460)/results" \\
     --resume \\
     --epochs 20
@@ -49,7 +56,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
 
-from utils import EVAL_MAX_NEW_TOKENS, load_model
+from utils import EVAL_MAX_NEW_TOKENS, load_model, resolve_train_test_paths
 
 
 class AddDataset(Dataset):
@@ -615,12 +622,15 @@ def main():
     parser.add_argument("--student-model", default="meta-llama/Llama-3.2-1B")
     parser.add_argument("--teacher-model", default="meta-llama/Meta-Llama-3-8B")
     parser.add_argument(
-        "--train-path",
-        default=os.path.join(script_dir, "..", "datasets", "2d_add_train_80.json"),
+        "--dataset",
+        default=None,
+        metavar="PREFIX",
+        help="e.g. 2d_add → datasets/<PREFIX>_train_80.json and _test_20.json (prompted if omitted)",
     )
     parser.add_argument(
-        "--test-path",
-        default=os.path.join(script_dir, "..", "datasets", "2d_add_test_20.json"),
+        "--datasets-dir",
+        default=None,
+        help="Directory containing *_train_80.json (default: repo datasets/)",
     )
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=32)
@@ -696,6 +706,15 @@ def main():
         help="Print N decode examples per evaluate call for debugging (0=off)",
     )
     args = parser.parse_args()
+    try:
+        train_p, test_p, _ = resolve_train_test_paths(
+            dataset=args.dataset,
+            datasets_dir=args.datasets_dir,
+        )
+    except FileNotFoundError as e:
+        raise SystemExit(str(e)) from e
+    args.train_path = train_p
+    args.test_path = test_p
     train(args)
 
 

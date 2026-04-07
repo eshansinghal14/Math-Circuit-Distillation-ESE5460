@@ -3,7 +3,10 @@
 Runs the full pipeline:  layer ablation -> layer pairing -> distillation training.
 
 Usage (from src/):
-  python -m ffn_distillation.run --save-dir /content/drive/MyDrive/.../results/ffn-layer
+  python -m ffn_distillation.run --dataset 2d_add --save-dir /path/to/results/ffn-layer
+
+``--dataset PREFIX`` resolves train/test and ``<PREFIX>_all.json`` for ablation (see ``utils``).
+Omit ``--dataset`` to be prompted (interactive TTY), or set ``--ablation-dataset`` to override the ``*_all.json`` path.
 """
 
 import argparse
@@ -19,24 +22,33 @@ from ffn_distillation.distillation import (
     FFNDistillationConfig,
     FFNDistillationTrainer,
 )
-from utils import EVAL_MAX_NEW_TOKENS
+from utils import EVAL_MAX_NEW_TOKENS, resolve_ablation_all_path, resolve_train_test_paths
 
 
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    default_dataset = os.path.join(script_dir, "..", "..", "datasets", "2d_add_all.json")
-    default_train = os.path.join(script_dir, "..", "..", "datasets", "2d_add_train_80.json")
-    default_test = os.path.join(script_dir, "..", "..", "datasets", "2d_add_test_20.json")
 
     parser = argparse.ArgumentParser(
         description="FFN layer-level CKA distillation (end-to-end)",
     )
     parser.add_argument("--student-model", default="meta-llama/Llama-3.2-1B")
     parser.add_argument("--teacher-model", default="meta-llama/Meta-Llama-3-8B")
-    parser.add_argument("--ablation-dataset", default=default_dataset,
-                        help="Dataset for ablation eval (2d_add_all.json)")
-    parser.add_argument("--train-path", default=default_train)
-    parser.add_argument("--test-path", default=default_test)
+    parser.add_argument(
+        "--dataset",
+        default=None,
+        metavar="PREFIX",
+        help="e.g. 2d_add → train/test JSON and <PREFIX>_all.json for ablation (prompted if omitted)",
+    )
+    parser.add_argument(
+        "--datasets-dir",
+        default=None,
+        help="Directory containing dataset JSONs (default: repo datasets/)",
+    )
+    parser.add_argument(
+        "--ablation-dataset",
+        default=None,
+        help="Override full JSON for layer ablation (default: <PREFIX>_all.json from --dataset)",
+    )
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -56,6 +68,24 @@ def main():
     parser.add_argument("--skip-ablation", action="store_true",
                         help="Skip ablation (assumes layer_ablation_performance.json exists)")
     args = parser.parse_args()
+
+    try:
+        train_path, test_path, prefix = resolve_train_test_paths(
+            dataset=args.dataset,
+            datasets_dir=args.datasets_dir,
+        )
+        ablation_dataset = resolve_ablation_all_path(
+            dataset=args.dataset,
+            ablation_path=args.ablation_dataset,
+            datasets_dir=args.datasets_dir,
+            prefix=prefix,
+        )
+    except FileNotFoundError as e:
+        raise SystemExit(str(e)) from e
+
+    args.train_path = train_path
+    args.test_path = test_path
+    args.ablation_dataset = ablation_dataset
 
     eval_max_new_tokens = (
         args.eval_max_new_tokens

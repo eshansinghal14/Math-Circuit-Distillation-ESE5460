@@ -2,8 +2,10 @@ import random
 import json
 import re
 import os
+import sys
 import glob
 import torch
+from typing import List, Optional, Tuple
 
 try:
     import constants as _constants
@@ -21,8 +23,129 @@ logged_in = False
 # Prompts end with "=" and all 2-3 digit answers (20-198) are single tokens in Llama-3 BPE.
 EVAL_MAX_NEW_TOKENS = 1
 
+# --- Dataset file naming: ``{prefix}_train_80.json``, ``{prefix}_test_20.json``, ``{prefix}_all.json`` ---
+DATASET_TRAIN_SUFFIX = "_train_80"
+DATASET_TEST_SUFFIX = "_test_20"
+DATASET_ALL_SUFFIX = "_all.json"  # ``{prefix}_all.json``
+
+
+def default_datasets_dir() -> str:
+    """Absolute path to the repo ``datasets/`` directory (sibling of ``src/``)."""
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datasets"))
+
+
+def dataset_train_json_path(prefix: str, datasets_dir: Optional[str] = None) -> str:
+    d = os.path.abspath(datasets_dir) if datasets_dir else default_datasets_dir()
+    return os.path.join(d, f"{prefix}{DATASET_TRAIN_SUFFIX}.json")
+
+
+def dataset_test_json_path(prefix: str, datasets_dir: Optional[str] = None) -> str:
+    d = os.path.abspath(datasets_dir) if datasets_dir else default_datasets_dir()
+    return os.path.join(d, f"{prefix}{DATASET_TEST_SUFFIX}.json")
+
+
+def dataset_all_json_path(prefix: str, datasets_dir: Optional[str] = None) -> str:
+    d = os.path.abspath(datasets_dir) if datasets_dir else default_datasets_dir()
+    return os.path.join(d, f"{prefix}{DATASET_ALL_SUFFIX}")
+
+
+def list_dataset_prefixes(datasets_dir: Optional[str] = None) -> List[str]:
+    """Prefixes found from existing ``*_train_80.json`` files under ``datasets_dir``."""
+    d = os.path.abspath(datasets_dir) if datasets_dir else default_datasets_dir()
+    if not os.path.isdir(d):
+        return []
+    pat = os.path.join(d, f"*{DATASET_TRAIN_SUFFIX}.json")
+    out: List[str] = []
+    for p in glob.glob(pat):
+        base = os.path.basename(p)
+        suf = f"{DATASET_TRAIN_SUFFIX}.json"
+        if base.endswith(suf):
+            out.append(base[: -len(suf)])
+    return sorted(set(out))
+
+
+def prompt_dataset_prefix(datasets_dir: Optional[str] = None) -> str:
+    """Interactive prompt when ``--dataset`` is omitted (requires a TTY)."""
+    d = os.path.abspath(datasets_dir) if datasets_dir else default_datasets_dir()
+    if not os.path.isdir(d):
+        raise FileNotFoundError(f"Datasets directory not found: {d}")
+    if not sys.stdin.isatty():
+        raise SystemExit(
+            "No dataset specified. Pass --dataset PREFIX (e.g. 2d_add). "
+            f"Expected files: <prefix>{DATASET_TRAIN_SUFFIX}.json and <prefix>{DATASET_TEST_SUFFIX}.json under {d}."
+        )
+    choices = list_dataset_prefixes(d)
+    print(f"Datasets directory: {d}")
+    if choices:
+        print("Available prefixes (from existing *_train_80.json files):")
+        for c in choices:
+            print(f"  {c}")
+    else:
+        print("No *_train_80.json files found in that directory; enter a prefix anyway (e.g. 2d_add).")
+    prefix = input("Enter dataset prefix: ").strip()
+    if not prefix:
+        raise SystemExit("Empty dataset prefix.")
+    return prefix
+
+
+def resolve_train_test_paths(
+    *,
+    dataset: Optional[str],
+    datasets_dir: Optional[str],
+) -> Tuple[str, str, str]:
+    """Resolve train/test JSON paths from ``--dataset PREFIX`` (or interactive prompt).
+
+    Returns:
+        ``(train_path, test_path, prefix)`` with absolute paths.
+    """
+    d = os.path.abspath(datasets_dir) if datasets_dir else default_datasets_dir()
+    prefix = (dataset or "").strip() or prompt_dataset_prefix(d)
+    train = dataset_train_json_path(prefix, d)
+    test = dataset_test_json_path(prefix, d)
+    for label, p in (("train", train), ("test", test)):
+        if not os.path.isfile(p):
+            raise FileNotFoundError(
+                f"Dataset {label} file not found for prefix {prefix!r}: {p}",
+            )
+    return train, test, prefix
+
+
+def resolve_test_path(
+    *,
+    dataset: Optional[str],
+    datasets_dir: Optional[str],
+) -> Tuple[str, str]:
+    """Resolve test JSON for eval-only scripts. Returns ``(test_path, prefix)``."""
+    d = os.path.abspath(datasets_dir) if datasets_dir else default_datasets_dir()
+    prefix = (dataset or "").strip() or prompt_dataset_prefix(d)
+    p = dataset_test_json_path(prefix, d)
+    if not os.path.isfile(p):
+        raise FileNotFoundError(f"Test file not found for prefix {prefix!r}: {p}")
+    return p, prefix
+
+
+def resolve_ablation_all_path(
+    *,
+    dataset: Optional[str],
+    ablation_path: Optional[str],
+    datasets_dir: Optional[str],
+    prefix: Optional[str] = None,
+) -> str:
+    """Full ``*_all.json`` for ablation: ``--ablation-dataset`` path, or ``{prefix}_all.json``."""
+    if ablation_path:
+        return os.path.abspath(ablation_path)
+    d = os.path.abspath(datasets_dir) if datasets_dir else default_datasets_dir()
+    pre = (prefix or "").strip() or (dataset or "").strip() or prompt_dataset_prefix(d)
+    p = dataset_all_json_path(pre, d)
+    if not os.path.isfile(p):
+        raise FileNotFoundError(
+            f"Ablation/all-in-one dataset not found for prefix {pre!r}: {p}",
+        )
+    return p
+
 
 def load_model(model_name):
+
     hf_logging.set_verbosity_error()
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -314,7 +437,8 @@ def _stack_layer_activations(batch_activations):
     return torch.cat(tensors, dim=-1)
 
 if __name__ == "__main__":
-    # tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
+    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
     # gen_2d1d_mult_dataset("datasets/2d1d_mult_all.json", None, tokenizer) 
     # gen_mix_dataset("datasets/add_mult_all.json", ["datasets/2d_add_all.json", "datasets/2d1d_mult_all.json"])
-    split_dataset("datasets/2d1d_mult_all.json", test_frac=0.2)
+    # split_dataset("datasets/2d1d_mult_all.json", test_frac=0.2)
+    split_dataset("datasets/2d_add_all.json", test_frac=0.2)

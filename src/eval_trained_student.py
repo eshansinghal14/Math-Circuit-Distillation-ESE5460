@@ -5,10 +5,11 @@ default max_new_tokens matches utils.EVAL_MAX_NEW_TOKENS).
 
 Examples:
   cd src
-  python eval_trained_student.py --checkpoint ../results/standard-kl/student_best
+  python eval_trained_student.py --dataset 2d_add --checkpoint ../results/standard-kl/student_best
 
   # Colab / Drive:
   python eval_trained_student.py \\
+    --dataset 2d_add \\
     --checkpoint "/content/drive/MyDrive/Math Circuit Distillation (ESE 5460)/results/standard-kl/student_best"
 """
 
@@ -25,7 +26,7 @@ if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
 from standard_distillation import evaluate  # noqa: E402
-from utils import EVAL_MAX_NEW_TOKENS  # noqa: E402
+from utils import EVAL_MAX_NEW_TOKENS, resolve_test_path  # noqa: E402
 
 
 def main():
@@ -36,9 +37,15 @@ def main():
         help="Folder from save_pretrained (e.g. .../standard-kl/student_best or student_final)",
     )
     parser.add_argument(
-        "--test-path",
-        default=os.path.join(_SCRIPT_DIR, "..", "datasets", "2d_add_test_20.json"),
-        help="Test JSON (dict prompt->int or list of q_str/a_str)",
+        "--dataset",
+        default=None,
+        metavar="PREFIX",
+        help="e.g. 2d_add → datasets/<PREFIX>_test_20.json (prompted if omitted)",
+    )
+    parser.add_argument(
+        "--datasets-dir",
+        default=None,
+        help="Directory containing *_test_20.json (default: repo datasets/)",
     )
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument(
@@ -48,6 +55,13 @@ def main():
         help="Greedy decode cap after prompt (default: utils.EVAL_MAX_NEW_TOKENS)",
     )
     args = parser.parse_args()
+    try:
+        test_path, _ = resolve_test_path(
+            dataset=args.dataset,
+            datasets_dir=args.datasets_dir,
+        )
+    except FileNotFoundError as e:
+        raise SystemExit(str(e)) from e
 
     ckpt = os.path.expanduser(args.checkpoint)
     if not os.path.isdir(ckpt):
@@ -64,7 +78,6 @@ def main():
     model.to(device)
     model.eval()
 
-    test_path = os.path.abspath(os.path.expanduser(args.test_path))
     acc = evaluate(
         model,
         tokenizer,

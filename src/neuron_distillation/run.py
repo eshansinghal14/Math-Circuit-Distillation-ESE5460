@@ -13,9 +13,15 @@ Ablation outputs (``ablation_performance.json`` and related) are written under::
 
 Distillation checkpoints and training history use ``--save-dir`` directly.
 
+Training/eval JSON paths come from ``--dataset PREFIX`` (e.g. ``2d_add`` →
+``datasets/2d_add_train_80.json`` and ``2d_add_test_20.json``). If ``--dataset``
+is omitted, you are prompted (interactive TTY only).
+
 Usage (from src/)::
 
   python -m neuron_distillation.run \\
+
+      --dataset 2d_add \\
 
       --save-dir "/path/to/results/my-neuron-run"
 
@@ -34,9 +40,9 @@ Usage (from src/)::
 import argparse
 import json
 import os
-import random
 import re
 import sys
+from typing import Dict
 
 import torch
 
@@ -51,27 +57,21 @@ from neuron_distillation.distillation import (
     ClusterDistillationConfig,
     ClusterDistillationTrainer,
     ClusterPairInfo,
-    eval_accuracy,
 )
 from utils import (
     EVAL_MAX_NEW_TOKENS,
     _extract_circuit_model_state_dict,
     load_model,
     load_model_checkpoint,
+    resolve_train_test_paths,
 )
 
 
-def build_train_test_split(dataset_path: str, test_frac: float = 0.1, seed: int = 42):
-    """Load 2d_add_all.json and split into {prompt: answer} dicts."""
-    with open(dataset_path, "r") as f:
-        raw = json.load(f)
-    pairs = [(r["q_str"], int(r["a_str"])) for r in raw]
-    random.seed(seed)
-    random.shuffle(pairs)
-    split = int(len(pairs) * (1 - test_frac))
-    train = dict(pairs[:split])
-    test = dict(pairs[split:])
-    return train, test
+def _load_prompt_answer_dict(path: str) -> Dict[str, int]:
+    """Load ``{prompt: answer}`` JSON (same format as ``standard_distillation``)."""
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return {str(k): int(v) for k, v in data.items()}
 
 
 def _ablation_dir_for_model(save_dir: str, model_name: str) -> str:
@@ -210,14 +210,25 @@ def main():
     parser.add_argument(
         "--checkpoint", type=str, default=None,
         help="Path to circuit-discovery model checkpoint (.pt). "
-             "If omitted, searches --save-dir/neuron-clustering (then save-dir) for a .pt file.",
+             "If omitted, uses a single *.pt in the root of --save-dir (prefers highest epoch_*.pt).",
     )
     parser.add_argument("--student-model", type=str,
                         default="meta-llama/Llama-3.2-1B")
     parser.add_argument("--teacher-model", type=str,
                         default="meta-llama/Meta-Llama-3-8B")
-    parser.add_argument("--dataset", type=str,
-                        default=os.path.join(os.path.dirname(__file__), "..", "..", "datasets", "2d_add_all.json"))
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default=None,
+        metavar="PREFIX",
+        help="Dataset family, e.g. 2d_add → <datasets>/<PREFIX>_train_80.json and _test_20.json",
+    )
+    parser.add_argument(
+        "--datasets-dir",
+        type=str,
+        default=None,
+        help="Directory containing *_train_80.json (default: repo datasets/)",
+    )
     parser.add_argument("--k", type=int, default=7,
                         help="Number of clusters per subclass")
     parser.add_argument("--k-classes", type=int, default=None,
@@ -260,6 +271,16 @@ def main():
         help="Batch size for Step 1 neuron-cluster ablation (HF forward passes)",
     )
     args = parser.parse_args()
+    try:
+        train_path, test_path, dataset_prefix = resolve_train_test_paths(
+            dataset=args.dataset,
+            datasets_dir=args.datasets_dir,
+        )
+    except FileNotFoundError as e:
+        raise SystemExit(str(e)) from e
+    args.train_path = train_path
+    args.test_path = test_path
+    args.dataset_prefix = dataset_prefix
     eval_max_new_tokens = (
         args.eval_max_new_tokens
         if args.eval_max_new_tokens is not None
@@ -309,6 +330,9 @@ def main():
     print(f"  student_ablation:   {student_ablation_dir}")
     print(f"  teacher_ablation:   {teacher_ablation_dir}")
     print(f"  ablation_batch:     {args.ablation_batch_size}")
+    print(f"  dataset (prefix):   {args.dataset_prefix}")
+    print(f"  train_path:         {args.train_path}")
+    print(f"  test_path:          {args.test_path}")
     # ---- Step 1: Ablation -----------------------------------------------------------
     print("\n" + "=" * 60)
     print("Step 1: Neuron-cluster ablation")
@@ -354,9 +378,10 @@ def main():
     print("\n" + "=" * 60)
     print("Step 3: Loading dataset")
     print("=" * 60)
-    train_data, test_data = build_train_test_split(args.dataset)
-    print(f"  Train: {len(train_data)} examples")
-    print(f"  Test:  {len(test_data)} examples")
+    train_data = _load_prompt_answer_dict(args.train_path)
+    test_data = _load_prompt_answer_dict(args.test_path)
+    print(f"  Train: {len(train_data)} examples ({args.train_path})")
+    print(f"  Test:  {len(test_data)} examples ({args.test_path})")
     # ---- Step 4: Distillation training -----------------------------------------------
     print("\n" + "=" * 60)
     print("Step 4: Distillation training")
