@@ -418,7 +418,8 @@ def train(args):
 
         if acc > best_acc:
             best_acc = acc
-            save_checkpoint(student, tokenizer, run_dir, "best")
+            if not args.no_save_best:
+                save_checkpoint(student, tokenizer, run_dir, "best")
 
         if args.checkpoint_every > 0 and (epoch + 1) % args.checkpoint_every == 0:
             save_checkpoint(student, tokenizer, run_dir, f"epoch_{epoch+1}")
@@ -474,6 +475,11 @@ def main():
         type=int,
         default=5,
         help="Save a numbered checkpoint every N epochs (0 = disable)",
+    )
+    parser.add_argument(
+        "--no-save-best",
+        action="store_true",
+        help="Do not write student_best/ when eval accuracy improves (best_acc still tracked in history and training_state.pt)",
     )
     # ---- Checkpoint / resume args ----
     parser.add_argument(
