@@ -1,6 +1,9 @@
 """Single entry-point for the neuron-cluster distillation pipeline.
 
-Cluster files and circuit checkpoints are expected under::
+Circuit discovery weights: place ``epoch_*.pt`` (or any ``*.pt``) in the **root**
+of ``--save-dir``; auto-detection only looks there (not under subfolders).
+
+Cluster files are expected under::
 
     <save-dir>/neuron-clustering/<model-id>/clusters/
 
@@ -32,6 +35,7 @@ import argparse
 import json
 import os
 import random
+import re
 import sys
 
 import torch
@@ -49,7 +53,12 @@ from neuron_distillation.distillation import (
     ClusterPairInfo,
     eval_accuracy,
 )
-from utils import EVAL_MAX_NEW_TOKENS, load_model, load_model_checkpoint
+from utils import (
+    EVAL_MAX_NEW_TOKENS,
+    _extract_circuit_model_state_dict,
+    load_model,
+    load_model_checkpoint,
+)
 
 
 def build_train_test_split(dataset_path: str, test_frac: float = 0.1, seed: int = 42):
@@ -170,16 +179,23 @@ def build_cluster_pairs(
     return pairs, mappings
 
 
-def _find_checkpoint_pt(search_roots):
-    """Collect .pt paths under given roots (order: first walk order)."""
+def _find_circuit_checkpoint_pt(save_dir: str) -> list[str]:
+    """``*.pt`` files in ``save_dir`` root only; ``epoch_N.pt`` sorted by highest N first."""
+    if not save_dir or not os.path.isdir(save_dir):
+        return []
     candidates = []
-    for base in search_roots:
-        if not base or not os.path.isdir(base):
-            continue
-        for root, _, files in os.walk(base):
-            for f in files:
-                if f.endswith(".pt"):
-                    candidates.append(os.path.join(root, f))
+    for name in os.listdir(save_dir):
+        path = os.path.join(save_dir, name)
+        if name.endswith(".pt") and os.path.isfile(path):
+            candidates.append(path)
+
+    def sort_key(p: str) -> tuple:
+        m = re.search(r"epoch_(\d+)\.pt$", os.path.basename(p), re.IGNORECASE)
+        if m:
+            return (0, -int(m.group(1)))
+        return (1, p)
+
+    candidates.sort(key=sort_key)
     return candidates
 
 
@@ -242,22 +258,22 @@ def main():
     teacher_clusters = os.path.join(neuron_clustering_root, args.teacher_model, "clusters")
     student_ablation_dir = _ablation_dir_for_model(save_dir, args.student_model)
     teacher_ablation_dir = _ablation_dir_for_model(save_dir, args.teacher_model)
-    # ---- Auto-detect checkpoint .pt ------------------------------------------------
+    # ---- Auto-detect checkpoint .pt (save-dir root only) ----------------------------
     if args.checkpoint is None:
-        candidates = _find_checkpoint_pt([neuron_clustering_root, save_dir])
+        candidates = _find_circuit_checkpoint_pt(save_dir)
         if candidates:
             args.checkpoint = candidates[0]
             print(f"Auto-detected checkpoint: {args.checkpoint}")
         else:
             print(
-                "ERROR: No --checkpoint provided and no .pt file found under:\n"
-                f"  {neuron_clustering_root}\n  {save_dir}"
+                "ERROR: No --checkpoint provided and no *.pt file in --save-dir root:\n"
+                f"  {save_dir}"
             )
             sys.exit(1)
     # ---- Auto-detect k_classes from checkpoint --------------------------------------
     if args.k_classes is None:
         ckpt_data = torch.load(args.checkpoint, map_location="cpu")
-        state = ckpt_data.get("model_state_dict", {})
+        state = _extract_circuit_model_state_dict(ckpt_data, args.checkpoint)
         if "classifier.classifier.4.weight" in state:
             args.k_classes = state["classifier.classifier.4.weight"].shape[0]
             print(f"Auto-detected k_classes={args.k_classes} from checkpoint")
