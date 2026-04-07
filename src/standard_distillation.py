@@ -443,7 +443,15 @@ def train(args):
                 f"best_acc={best_acc:.4f})"
             )
     elif is_resume:
-        print(f"No training_state.pt in {run_dir} — warm-starting weights only (new optimizer).")
+        if override_epoch is not None:
+            # No training_state.pt but we know exactly which epoch the weights come from
+            start_epoch = override_epoch
+            print(
+                f"No training_state.pt found — inferred start_epoch={start_epoch} "
+                f"from --checkpoint-type {override_epoch} (new optimizer)."
+            )
+        else:
+            print(f"No training_state.pt in {run_dir} — warm-starting weights only (new optimizer, epoch 1).")
 
     if not history:
         history = defaultdict(list)
