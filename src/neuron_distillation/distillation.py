@@ -799,6 +799,10 @@ class ClusterDistillationTrainer:
                 f"Acc={acc:.3f}"
             )
 
+        # Write history and curves BEFORE slow checkpoint save
+        self._save_history()
+        self._save_curves()
+
         self._save_checkpoint("final")
         print("  Saved student_final")
 
@@ -814,9 +818,6 @@ class ClusterDistillationTrainer:
                     print(f"  Deleted {name} (superseded by student_final)")
                 except FileNotFoundError:
                     pass
-
-        self._save_history()
-        self._save_curves()
 
         print(f"\nTraining complete.  Best accuracy: {best_acc:.3f}")
         return dict(self.history)
@@ -881,4 +882,6 @@ class ClusterDistillationTrainer:
         path = os.path.join(self.config.save_dir, "training_history.json")
         with open(path, "w") as f:
             json.dump(dict(self.history), f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
         print(f"  Saved training history to {path}")

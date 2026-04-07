@@ -445,6 +445,8 @@ def train(args):
             start_epoch = override_epoch
             with open(hist_path, "w") as f:
                 json.dump(dict(history), f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
             save_training_state(run_dir, optimizer, start_epoch, best_acc)
             print(f"  History truncated to {override_epoch} epochs. best_acc={best_acc:.4f}")
         elif os.path.isfile(state_path):
@@ -551,6 +553,8 @@ def train(args):
         hist_out = dict(history)
         with open(hist_path, "w") as f:
             json.dump(hist_out, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
 
         if acc > best_acc:
             best_acc = acc
@@ -575,6 +579,14 @@ def train(args):
     hist_out["student_baseline"] = student_base
     hist_out["teacher_baseline"] = teacher_base
 
+    # Write history BEFORE the slow checkpoint save so a Ctrl+C can't lose it
+    with open(hist_path, "w") as f:
+        json.dump(hist_out, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+
+    _save_curves(hist_out, run_dir)
+
     save_checkpoint(student, tokenizer, run_dir, "final")
     print("  Saved student_final")
 
@@ -586,11 +598,6 @@ def train(args):
             print(f"  Deleted student_epoch_{last_n} (superseded by student_final)")
         except FileNotFoundError:
             pass
-
-    with open(hist_path, "w") as f:
-        json.dump(hist_out, f, indent=2)
-
-    _save_curves(hist_out, run_dir)
 
     print(f"\nDone. Best accuracy: {best_acc:.4f}")
     print(f"Results saved to: {run_dir}")

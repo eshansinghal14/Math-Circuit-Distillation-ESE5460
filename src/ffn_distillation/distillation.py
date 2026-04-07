@@ -411,6 +411,8 @@ class FFNDistillationTrainer:
 
             with open(os.path.join(cfg.save_dir, "training_history.json"), "w") as f:
                 json.dump(dict(self.history), f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
 
             print(f"Epoch {epoch+1}/{cfg.epochs}: "
                   f"KL={avg.get('kl_loss', 0):.4f} CKA_loss={avg.get('cka_loss', 0):.4f} "
@@ -433,6 +435,9 @@ class FFNDistillationTrainer:
                     except FileNotFoundError:
                         pass
 
+        # Write final history and curves BEFORE slow checkpoint save
+        _save_curves(dict(self.history), cfg.save_dir)
+
         save_checkpoint(self.student, self.tokenizer, cfg.save_dir, "final")
         print("  Saved student_final")
 
@@ -448,8 +453,6 @@ class FFNDistillationTrainer:
                     print(f"  Deleted {name} (superseded by student_final)")
                 except FileNotFoundError:
                     pass
-
-        _save_curves(dict(self.history), cfg.save_dir)
         print(f"\nDone. Best accuracy: {best_acc:.4f}")
         print(f"Results saved to: {cfg.save_dir}")
 
