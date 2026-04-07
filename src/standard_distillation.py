@@ -56,15 +56,16 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
 
-from utils import EVAL_MAX_NEW_TOKENS, load_model, resolve_train_test_paths
+from utils import EVAL_MAX_NEW_TOKENS, json_to_prompt_answer_dict, load_model, resolve_train_test_paths
 
 
 class AddDataset(Dataset):
     """Matches the notebook: tokenize at construction, right-pad to same length."""
 
     def __init__(self, path: str, tokenizer):
-        with open(path, "r") as f:
-            data = json.load(f)
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        data = json_to_prompt_answer_dict(raw)
 
         self.samples = []
         for prompt, answer in data.items():
@@ -128,15 +129,10 @@ def evaluate(
 ) -> float:
     if max_new_tokens is None:
         max_new_tokens = EVAL_MAX_NEW_TOKENS
-    with open(test_path, "r") as f:
-        data = json.load(f)
-
-    if isinstance(data, dict):
-        prompts = list(data.keys())
-        answers = [int(data[p]) for p in prompts]
-    else:
-        prompts = [d["q_str"] for d in data]
-        answers = [int(d["a_str"]) for d in data]
+    with open(test_path, "r", encoding="utf-8") as f:
+        data = json_to_prompt_answer_dict(json.load(f))
+    prompts = list(data.keys())
+    answers = list(data.values())
 
     model.eval()
     correct = total = 0

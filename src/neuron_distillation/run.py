@@ -38,12 +38,9 @@ Usage (from src/)::
 """
 
 import argparse
-import json
 import os
 import re
 import sys
-from typing import Dict
-
 import torch
 
 from neuron_distillation.ablation import classify_problems, ablation
@@ -63,15 +60,9 @@ from utils import (
     _extract_circuit_model_state_dict,
     load_model,
     load_model_checkpoint,
+    load_prompt_answer_json,
     resolve_train_test_paths,
 )
-
-
-def _load_prompt_answer_dict(path: str) -> Dict[str, int]:
-    """Load ``{prompt: answer}`` JSON (same format as ``standard_distillation``)."""
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    return {str(k): int(v) for k, v in data.items()}
 
 
 def _ablation_dir_for_model(save_dir: str, model_name: str) -> str:
@@ -378,8 +369,8 @@ def main():
     print("\n" + "=" * 60)
     print("Step 3: Loading dataset")
     print("=" * 60)
-    train_data = _load_prompt_answer_dict(args.train_path)
-    test_data = _load_prompt_answer_dict(args.test_path)
+    train_data = load_prompt_answer_json(args.train_path)
+    test_data = load_prompt_answer_json(args.test_path)
     print(f"  Train: {len(train_data)} examples ({args.train_path})")
     print(f"  Test:  {len(test_data)} examples ({args.test_path})")
     # ---- Step 4: Distillation training -----------------------------------------------

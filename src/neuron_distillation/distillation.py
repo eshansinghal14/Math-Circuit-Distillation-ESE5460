@@ -44,7 +44,7 @@ from neuron_distillation.pairing import (
     _load_single_ablation_performance,
     create_cluster_mapping,
 )
-from utils import EVAL_MAX_NEW_TOKENS
+from utils import EVAL_MAX_NEW_TOKENS, json_to_prompt_answer_dict
 
 
 # ---------------------------------------------------------------------------
@@ -416,8 +416,9 @@ class AddDataset(Dataset):
 
     def __init__(self, data: Union[str, Dict], tokenizer):
         if isinstance(data, str):
-            with open(data, "r") as f:
-                data = json.load(f)
+            with open(data, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            data = json_to_prompt_answer_dict(raw)
         self.samples = []
         for prompt, answer in data.items():
             answer = str(answer)
