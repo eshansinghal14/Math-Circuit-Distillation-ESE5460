@@ -408,10 +408,8 @@ def train(args):
     start_epoch = 0
     best_acc = 0.0
 
-    if is_resume and os.path.isfile(state_path):
-        start_epoch, best_acc = load_training_state(state_path, optimizer, device)
-
-        # Load existing history
+    if is_resume:
+        # Always load existing history first (regardless of whether training_state.pt exists)
         if os.path.isfile(hist_path):
             with open(hist_path, "r") as f:
                 history = json.load(f)
@@ -421,9 +419,21 @@ def train(args):
             if key not in history:
                 history[key] = []
 
-        # When resuming from an epoch-based checkpoint (latest or explicit N),
-        # override_epoch is the exact epoch those weights represent.
-        # Truncate history to that epoch so it's consistent with the weights.
+        if os.path.isfile(state_path):
+            start_epoch, best_acc = load_training_state(state_path, optimizer, device)
+        elif override_epoch is not None:
+            # No training_state.pt but we know the exact epoch from --checkpoint-type N
+            start_epoch = override_epoch
+            best_acc = max(history["accuracy"]) if history["accuracy"] else 0.0
+            print(
+                f"No training_state.pt found — inferred start_epoch={start_epoch} "
+                f"from --checkpoint-type {override_epoch} (new optimizer)."
+            )
+        else:
+            print(f"No training_state.pt in {run_dir} — warm-starting weights only (new optimizer, epoch 1).")
+
+        # When resuming from an explicit epoch N (or auto-detected latest),
+        # truncate history to match the weights exactly.
         if override_epoch is not None and override_epoch < start_epoch:
             print(
                 f"Rewinding history from epoch {start_epoch} → {override_epoch} "
@@ -437,21 +447,11 @@ def train(args):
                 json.dump(dict(history), f, indent=2)
             save_training_state(run_dir, optimizer, start_epoch, best_acc)
             print(f"  History truncated to {override_epoch} epochs. best_acc={best_acc:.4f}")
-        else:
+        elif os.path.isfile(state_path):
             print(
                 f"Resumed optimizer state (starting at global epoch {start_epoch + 1}, "
                 f"best_acc={best_acc:.4f})"
             )
-    elif is_resume:
-        if override_epoch is not None:
-            # No training_state.pt but we know exactly which epoch the weights come from
-            start_epoch = override_epoch
-            print(
-                f"No training_state.pt found — inferred start_epoch={start_epoch} "
-                f"from --checkpoint-type {override_epoch} (new optimizer)."
-            )
-        else:
-            print(f"No training_state.pt in {run_dir} — warm-starting weights only (new optimizer, epoch 1).")
 
     if not history:
         history = defaultdict(list)
