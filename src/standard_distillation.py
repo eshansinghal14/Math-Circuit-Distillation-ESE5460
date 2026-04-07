@@ -4,7 +4,7 @@ KL is applied at the causal position that predicts the first answer token.
 Paper target: 63.6% accuracy on 2-digit addition.
 
 New runs: results go to  <save-dir>/standard-kl/<YYYY-MM-DD_HH-MM-SS>/
-Resume:   pass --checkpoint-run standard-kl/<datetime> and --checkpoint-type best|<N>
+Resume:   pass --checkpoint-run standard-kl/<datetime> and --checkpoint-type latest|final|<N>
 
 Examples (from src/)::
 
@@ -19,11 +19,11 @@ Examples (from src/)::
     --checkpoint-type 20 \\
     --epochs 10
 
-  # Resume from best checkpoint
+  # Resume from final weights (or use --checkpoint-type latest / an epoch number)
   python standard_distillation.py \\
     --save-dir "/content/drive/MyDrive/Math Circuit Distillation (ESE 5460)/results" \\
     --checkpoint-run "standard-kl/2025-04-07_14-30-00" \\
-    --checkpoint-type best \\
+    --checkpoint-type final \\
     --epochs 10
 """
 
@@ -286,7 +286,7 @@ def _resolve_run_dir(args) -> tuple[str, Optional[str], Optional[int]]:
                 else:
                     raise SystemExit(
                         f"No student_epoch_N or student_latest checkpoints found in {run_dir}.\n"
-                        "Use --checkpoint-type best or final instead."
+                        "Use --checkpoint-type final, or best if this is an older run with student_best/."
                     )
             else:
                 print(f"Auto-detected latest checkpoint: {student_source} (epoch {override_epoch})")
@@ -487,7 +487,6 @@ def train(args):
 
         if acc > best_acc:
             best_acc = acc
-            save_checkpoint(student, tokenizer, run_dir, "best")
 
         # Save a rolling epoch checkpoint every save_every epochs.
         # Delete the previous one so only the most recent epoch survives on disk.
@@ -585,8 +584,8 @@ def main():
         metavar="latest|best|final|N",
         help=(
             "'latest' → auto-detect highest student_epoch_N (exact weights, exact history), "
-            "'best' → student_best, 'final' → student_final, "
-            "or an integer N → student_epoch_N. (default: latest)"
+            "'best' → student_best (legacy runs only; new runs do not save student_best), "
+            "'final' → student_final, or an integer N → student_epoch_N. (default: latest)"
         ),
     )
     parser.add_argument(
