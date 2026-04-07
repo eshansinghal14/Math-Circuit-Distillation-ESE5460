@@ -42,6 +42,8 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--lambda-cka", type=float, default=0.01)
     parser.add_argument("--temperature", type=float, default=2.0)
+    parser.add_argument("--save-every", type=int, default=5,
+                        help="Save student_epoch_N every N epochs; only most recent kept (0=off)")
     parser.add_argument(
         "--eval-max-new-tokens",
         type=int,
@@ -131,6 +133,7 @@ def main():
         learning_rate=args.lr,
         temperature=args.temperature,
         lambda_cka=args.lambda_cka,
+        save_every=args.save_every,
         eval_max_new_tokens=eval_max_new_tokens,
         save_dir=args.save_dir,
     )

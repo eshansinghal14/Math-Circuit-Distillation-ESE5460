@@ -45,6 +45,7 @@ class FFNDistillationConfig:
 
     lambda_cka: float = 0.01
     eval_every: int = 1
+    save_every: int = 5
     eval_max_new_tokens: int = EVAL_MAX_NEW_TOKENS
     save_dir: str = "results/ffn-distillation"
 
@@ -418,15 +419,20 @@ class FFNDistillationTrainer:
                 best_acc = acc
                 save_checkpoint(self.student, self.tokenizer, cfg.save_dir, "best")
 
-            # Overwrite latest every epoch (single rolling checkpoint)
-            save_checkpoint(self.student, self.tokenizer, cfg.save_dir, "latest")
+            if cfg.save_every > 0 and (epoch + 1) % cfg.save_every == 0:
+                save_checkpoint(self.student, self.tokenizer, cfg.save_dir, f"epoch_{epoch + 1}")
+                prev = epoch + 1 - cfg.save_every
+                if prev > 0:
+                    prev_path = os.path.join(cfg.save_dir, f"student_epoch_{prev}")
+                    if os.path.isdir(prev_path):
+                        shutil.rmtree(prev_path)
 
         save_checkpoint(self.student, self.tokenizer, cfg.save_dir, "final")
 
-        # Remove latest now that final is saved
-        latest_path = os.path.join(cfg.save_dir, "student_latest")
-        if os.path.isdir(latest_path):
-            shutil.rmtree(latest_path)
+        # Remove the last epoch checkpoint now that final is saved
+        for entry in os.scandir(cfg.save_dir):
+            if entry.is_dir() and entry.name.startswith("student_epoch_"):
+                shutil.rmtree(entry.path)
 
         _save_curves(dict(self.history), cfg.save_dir)
         print(f"\nDone. Best accuracy: {best_acc:.4f}")

@@ -79,6 +79,7 @@ class ClusterDistillationConfig:
     use_projection_heads: bool = False
 
     eval_every: int = 1
+    save_every: int = 5
     eval_max_new_tokens: int = EVAL_MAX_NEW_TOKENS
     save_dir: str = "results/cluster-distillation"
 
@@ -769,8 +770,13 @@ class ClusterDistillationTrainer:
                     best_acc = acc
                     self._save_checkpoint("best")
 
-            # Overwrite latest every epoch (single rolling checkpoint)
-            self._save_checkpoint("latest")
+            if cfg.save_every > 0 and (epoch + 1) % cfg.save_every == 0:
+                self._save_checkpoint(f"epoch_{epoch + 1}")
+                prev = epoch + 1 - cfg.save_every
+                if prev > 0:
+                    prev_path = os.path.join(cfg.save_dir, f"student_epoch_{prev}")
+                    if os.path.isdir(prev_path):
+                        shutil.rmtree(prev_path)
 
             self.history["epoch"].append(epoch + 1)
             for k, v in epoch_metrics.items():
@@ -789,10 +795,10 @@ class ClusterDistillationTrainer:
 
         self._save_checkpoint("final")
 
-        # Remove latest now that final is saved
-        latest_path = os.path.join(self.config.save_dir, "student_latest")
-        if os.path.isdir(latest_path):
-            shutil.rmtree(latest_path)
+        # Remove the last epoch checkpoint now that final is saved
+        for entry in os.scandir(self.config.save_dir):
+            if entry.is_dir() and entry.name.startswith("student_epoch_"):
+                shutil.rmtree(entry.path)
 
         self._save_history()
         self._save_curves()

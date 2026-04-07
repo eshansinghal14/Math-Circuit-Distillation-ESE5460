@@ -239,29 +239,56 @@ def _save_curves(history: dict, run_dir: str) -> None:
     print(f"Saved training curves → {out}")
 
 
+def _latest_epoch_checkpoint(run_dir: str) -> tuple[Optional[str], Optional[int]]:
+    """Scan run_dir for student_epoch_N folders and return (path, N) of the highest N."""
+    best_n, best_path = None, None
+    if not os.path.isdir(run_dir):
+        return None, None
+    for entry in os.scandir(run_dir):
+        if entry.is_dir() and entry.name.startswith("student_epoch_"):
+            try:
+                n = int(entry.name[len("student_epoch_"):])
+                if best_n is None or n > best_n:
+                    best_n, best_path = n, entry.path
+            except ValueError:
+                pass
+    return best_path, best_n
+
+
 def _resolve_run_dir(args) -> tuple[str, Optional[str], Optional[int]]:
     """Return (run_dir, student_source, override_epoch).
 
     New run:  run_dir = <save_dir>/standard-kl/<datetime>/
     Resume:   run_dir = <save_dir>/<checkpoint_run>/
-              student_source = run_dir/student_best|latest|final|epoch_N
-              override_epoch = N when checkpoint_type is an integer, else None
-                               (when set, training history is truncated to N epochs
-                                so resuming from epoch 25 doesn't inherit epoch 28's history)
+              checkpoint_type:
+                latest → auto-detect highest student_epoch_N in the run dir
+                best   → student_best
+                final  → student_final
+                N      → student_epoch_N  (explicit)
+              override_epoch = N for epoch-based resumes so history is truncated
     """
     if args.checkpoint_run:
         run_dir = os.path.join(args.save_dir, args.checkpoint_run)
         ct = str(args.checkpoint_type).strip().lower()
-        if ct in ("best", "latest", "final"):
+
+        if ct == "latest":
+            student_source, override_epoch = _latest_epoch_checkpoint(run_dir)
+            if student_source is None:
+                raise SystemExit(
+                    f"No student_epoch_N checkpoints found in {run_dir}.\n"
+                    "Run with --checkpoint-type best or final instead."
+                )
+            print(f"Auto-detected latest checkpoint: {student_source} (epoch {override_epoch})")
+        elif ct in ("best", "final"):
             student_source = os.path.join(run_dir, f"student_{ct}")
             override_epoch = None
         else:
-            # Explicit epoch number — user wants to rewind to this point
-            student_source = os.path.join(run_dir, f"student_epoch_{ct}")
             try:
                 override_epoch = int(ct)
             except ValueError:
-                override_epoch = None
+                raise SystemExit(f"Unknown --checkpoint-type {ct!r}. Use latest, best, final, or an integer.")
+            student_source = os.path.join(run_dir, f"student_epoch_{override_epoch}")
+
         if not os.path.isdir(student_source):
             raise SystemExit(
                 f"Checkpoint folder not found: {student_source}\n"
@@ -326,31 +353,22 @@ def train(args):
             if key not in history:
                 history[key] = []
 
-        # Determine rewind target:
-        #   --checkpoint-type latest  → snap down to floor multiple of 5
-        #   --checkpoint-type N       → explicit rewind to epoch N
-        #   --checkpoint-type best/final → trust training_state.pt as-is
-        ct = str(args.checkpoint_type).strip().lower()
-        if ct == "latest":
-            rewind_to = (start_epoch // 5) * 5  # e.g. 28 → 25, 30 → 30
-        elif override_epoch is not None:
-            rewind_to = override_epoch
-        else:
-            rewind_to = start_epoch  # no rewind
-
-        if rewind_to < start_epoch:
+        # When resuming from an epoch-based checkpoint (latest or explicit N),
+        # override_epoch is the exact epoch those weights represent.
+        # Truncate history to that epoch so it's consistent with the weights.
+        if override_epoch is not None and override_epoch < start_epoch:
             print(
-                f"Rewinding from epoch {start_epoch} → {rewind_to} "
-                f"(snapping history to nearest multiple of 5)"
+                f"Rewinding history from epoch {start_epoch} → {override_epoch} "
+                f"to match checkpoint weights"
             )
             for key in ("epoch", "kl_loss", "accuracy"):
-                history[key] = history[key][:rewind_to]
+                history[key] = history[key][:override_epoch]
             best_acc = max(history["accuracy"]) if history["accuracy"] else 0.0
-            start_epoch = rewind_to
+            start_epoch = override_epoch
             with open(hist_path, "w") as f:
                 json.dump(dict(history), f, indent=2)
             save_training_state(run_dir, optimizer, start_epoch, best_acc)
-            print(f"  History truncated to {rewind_to} epochs. best_acc={best_acc:.4f}")
+            print(f"  History truncated to {override_epoch} epochs. best_acc={best_acc:.4f}")
         else:
             print(
                 f"Resumed optimizer state (starting at global epoch {start_epoch + 1}, "
@@ -460,8 +478,16 @@ def train(args):
             best_acc = acc
             save_checkpoint(student, tokenizer, run_dir, "best")
 
-        # Overwrite latest every epoch (single rolling checkpoint)
-        save_checkpoint(student, tokenizer, run_dir, "latest")
+        # Save a rolling epoch checkpoint every save_every epochs.
+        # Delete the previous one so only the most recent epoch survives on disk.
+        if args.save_every > 0 and (epoch + 1) % args.save_every == 0:
+            save_checkpoint(student, tokenizer, run_dir, f"epoch_{epoch + 1}")
+            prev = epoch + 1 - args.save_every
+            if prev > 0:
+                prev_path = os.path.join(run_dir, f"student_epoch_{prev}")
+                if os.path.isdir(prev_path):
+                    shutil.rmtree(prev_path)
+
         save_training_state(run_dir, optimizer, epoch + 1, best_acc)
 
     hist_out = dict(history)
@@ -470,10 +496,10 @@ def train(args):
 
     save_checkpoint(student, tokenizer, run_dir, "final")
 
-    # Remove latest now that final is saved
-    latest_path = os.path.join(run_dir, "student_latest")
-    if os.path.isdir(latest_path):
-        shutil.rmtree(latest_path)
+    # Remove the last epoch checkpoint now that final is saved
+    last_epoch_ckpt, _ = _latest_epoch_checkpoint(run_dir)
+    if last_epoch_ckpt and os.path.isdir(last_epoch_ckpt):
+        shutil.rmtree(last_epoch_ckpt)
 
     with open(hist_path, "w") as f:
         json.dump(hist_out, f, indent=2)
@@ -514,6 +540,12 @@ def main():
         default=EVAL_MAX_NEW_TOKENS,
         help=f"Greedy eval: max new tokens after prompt (default {EVAL_MAX_NEW_TOKENS})",
     )
+    parser.add_argument(
+        "--save-every",
+        type=int,
+        default=5,
+        help="Save student_epoch_N every N epochs; only the most recent is kept (0 = disable)",
+    )
     # ---- Checkpoint / resume args ----
     parser.add_argument(
         "--save-dir",
@@ -538,11 +570,12 @@ def main():
     )
     parser.add_argument(
         "--checkpoint-type",
-        default="best",
-        metavar="best|latest|final",
+        default="latest",
+        metavar="latest|best|final|N",
         help=(
-            "Which checkpoint to load: 'best' → student_best, "
-            "'latest' → student_latest, 'final' → student_final. (default: best)"
+            "'latest' → auto-detect highest student_epoch_N (exact weights, exact history), "
+            "'best' → student_best, 'final' → student_final, "
+            "or an integer N → student_epoch_N. (default: latest)"
         ),
     )
     parser.add_argument(
