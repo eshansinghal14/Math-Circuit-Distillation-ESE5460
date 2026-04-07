@@ -3,28 +3,35 @@
 KL is applied at the causal position that predicts the first answer token.
 Paper target: 63.6% accuracy on 2-digit addition.
 
-New runs: results go to  <save-dir>/standard-kl/<YYYY-MM-DD_HH-MM-SS>/
-Resume:   pass --checkpoint-run standard-kl/<datetime> and --checkpoint-type latest|final|<N>
+New runs:  results go to  <save-dir>/standard-kl/<run-name|datetime>/
+Resume:    add --resume; give just the datetime in --checkpoint-run (standard-kl/ is
+           prepended automatically).  If --checkpoint-run is omitted the most recently
+           modified folder in standard-kl/ is used.
 
 Examples (from src/)::
 
-  # Fresh run, results auto-dated
+  # Fresh run, auto-dated folder
   python standard_distillation.py \\
     --save-dir "/content/drive/MyDrive/Math Circuit Distillation (ESE 5460)/results"
 
-  # Resume from epoch-20 checkpoint, run 10 more epochs  (global 21-30)
+  # Fresh run with a custom folder name
   python standard_distillation.py \\
     --save-dir "/content/drive/MyDrive/Math Circuit Distillation (ESE 5460)/results" \\
-    --checkpoint-run "standard-kl/2025-04-07_14-30-00" \\
-    --checkpoint-type 20 \\
-    --epochs 10
+    --run-name my_run
 
-  # Resume from final weights (or use --checkpoint-type latest / an epoch number)
+  # Resume from epoch-5 of a specific run, add 45 more epochs (global 6..50, 50 total)
   python standard_distillation.py \\
     --save-dir "/content/drive/MyDrive/Math Circuit Distillation (ESE 5460)/results" \\
-    --checkpoint-run "standard-kl/2025-04-07_14-30-00" \\
-    --checkpoint-type final \\
-    --epochs 10
+    --resume \\
+    --checkpoint-run "2026-04-07_22-15-56" \\
+    --checkpoint-type 5 \\
+    --epochs 45
+
+  # Resume from most recently modified run, continue from latest epoch checkpoint
+  python standard_distillation.py \\
+    --save-dir "/content/drive/MyDrive/Math Circuit Distillation (ESE 5460)/results" \\
+    --resume \\
+    --epochs 20
 """
 
 import argparse
@@ -239,6 +246,28 @@ def _save_curves(history: dict, run_dir: str) -> None:
     print(f"Saved training curves → {out}")
 
 
+def _most_recent_run(parent_dir: str) -> Optional[str]:
+    """Return the most recently modified subdirectory of parent_dir."""
+    if not os.path.isdir(parent_dir):
+        return None
+    try:
+        entries = os.listdir(parent_dir)
+    except OSError:
+        return None
+    best_mtime, best_path = None, None
+    for name in entries:
+        full = os.path.join(parent_dir, name)
+        if not os.path.isdir(full):
+            continue
+        try:
+            mtime = os.path.getmtime(full)
+            if best_mtime is None or mtime > best_mtime:
+                best_mtime, best_path = mtime, full
+        except OSError:
+            pass
+    return best_path
+
+
 def _latest_epoch_checkpoint(run_dir: str) -> tuple[Optional[str], Optional[int]]:
     """Scan run_dir for student_epoch_N folders and return (path, N) of the highest N."""
     best_n, best_path = None, None
@@ -266,8 +295,11 @@ def _latest_epoch_checkpoint(run_dir: str) -> tuple[Optional[str], Optional[int]
 def _resolve_run_dir(args) -> tuple[str, Optional[str], Optional[int]]:
     """Return (run_dir, student_source, override_epoch).
 
-    New run:  run_dir = <save_dir>/standard-kl/<datetime>/
-    Resume:   run_dir = <save_dir>/<checkpoint_run>/
+    New run:  run_dir = <save_dir>/standard-kl/<run-name|datetime>/
+    Resume:   --resume flag required.
+              --checkpoint-run accepts just the datetime; standard-kl/ is prepended.
+              If --checkpoint-run is omitted, the most recently modified folder in
+              <save_dir>/standard-kl/ is used automatically.
               checkpoint_type:
                 latest → auto-detect highest student_epoch_N in the run dir
                 best   → student_best
@@ -275,49 +307,66 @@ def _resolve_run_dir(args) -> tuple[str, Optional[str], Optional[int]]:
                 N      → student_epoch_N  (explicit)
               override_epoch = N for epoch-based resumes so history is truncated
     """
+    if not args.resume:
+        # Fresh run
+        folder = args.run_name or datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        run_dir = os.path.join(args.save_dir, "standard-kl", folder)
+        return run_dir, None, None
+
+    # ---- Resuming ----
+    skl_dir = os.path.join(args.save_dir, "standard-kl")
+
     if args.checkpoint_run:
-        run_dir = os.path.join(args.save_dir, args.checkpoint_run)
-        ct = str(args.checkpoint_type).strip().lower()
-
-        if ct == "latest":
-            student_source, override_epoch = _latest_epoch_checkpoint(run_dir)
-            if student_source is None:
-                # Fall back to student_latest (produced by older runs)
-                fallback = os.path.join(run_dir, "student_latest")
-                if os.path.isdir(fallback):
-                    print(
-                        f"No student_epoch_N checkpoints found — falling back to student_latest.\n"
-                        f"  (This run predates --save-every; history will not be truncated.)"
-                    )
-                    student_source = fallback
-                    override_epoch = None
-                else:
-                    raise SystemExit(
-                        f"No student_epoch_N or student_latest checkpoints found in {run_dir}.\n"
-                        "Use --checkpoint-type final, or best if this is an older run with student_best/."
-                    )
-            else:
-                print(f"Auto-detected latest checkpoint: {student_source} (epoch {override_epoch})")
-        elif ct in ("best", "final"):
-            student_source = os.path.join(run_dir, f"student_{ct}")
-            override_epoch = None
-        else:
-            try:
-                override_epoch = int(ct)
-            except ValueError:
-                raise SystemExit(f"Unknown --checkpoint-type {ct!r}. Use latest, best, final, or an integer.")
-            student_source = os.path.join(run_dir, f"student_epoch_{override_epoch}")
-
-        if not os.path.isdir(student_source):
-            raise SystemExit(
-                f"Checkpoint folder not found: {student_source}\n"
-                "Check --checkpoint-run and --checkpoint-type."
-            )
+        cr = args.checkpoint_run
+        # Auto-prepend standard-kl/ if user gave just the datetime
+        if not cr.startswith("standard-kl/"):
+            cr = f"standard-kl/{cr}"
+        run_dir = os.path.join(args.save_dir, cr)
     else:
-        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        run_dir = os.path.join(args.save_dir, "standard-kl", ts)
-        student_source = None
+        # Auto-detect the most recently modified run folder
+        run_dir = _most_recent_run(skl_dir)
+        if run_dir is None:
+            raise SystemExit(
+                f"No run folders found in {skl_dir}.\n"
+                "Provide --checkpoint-run <datetime> explicitly."
+            )
+        print(f"Auto-detected most recent run: {run_dir}")
+
+    ct = str(args.checkpoint_type).strip().lower()
+
+    if ct == "latest":
+        student_source, override_epoch = _latest_epoch_checkpoint(run_dir)
+        if student_source is None:
+            fallback = os.path.join(run_dir, "student_latest")
+            if os.path.isdir(fallback):
+                print(
+                    "No student_epoch_N checkpoints found — falling back to student_latest.\n"
+                    "  (This run predates --save-every; history will not be truncated.)"
+                )
+                student_source = fallback
+                override_epoch = None
+            else:
+                raise SystemExit(
+                    f"No student_epoch_N or student_latest checkpoints found in {run_dir}.\n"
+                    "Use --checkpoint-type best or final instead."
+                )
+        else:
+            print(f"Auto-detected latest checkpoint: {student_source} (epoch {override_epoch})")
+    elif ct in ("best", "final"):
+        student_source = os.path.join(run_dir, f"student_{ct}")
         override_epoch = None
+    else:
+        try:
+            override_epoch = int(ct)
+        except ValueError:
+            raise SystemExit(f"Unknown --checkpoint-type {ct!r}. Use latest, best, final, or an integer.")
+        student_source = os.path.join(run_dir, f"student_epoch_{override_epoch}")
+
+    if not os.path.isdir(student_source):
+        raise SystemExit(
+            f"Checkpoint folder not found: {student_source}\n"
+            "Check --checkpoint-run and --checkpoint-type."
+        )
     return run_dir, student_source, override_epoch
 
 
@@ -428,13 +477,15 @@ def train(args):
     print("=" * 60)
     print("Standard KL Distillation")
     print(f"  Run dir:   {run_dir}")
-    print(f"  Epochs:    {args.epochs} (global {start_epoch + 1}..{end_epoch})")
+    if is_resume:
+        print(f"  Epochs:    +{args.epochs} this run  (epochs {start_epoch + 1}..{end_epoch}, {end_epoch} total)")
+        print(f"  Resumed from: {student_source!r}")
+    else:
+        print(f"  Epochs:    {args.epochs}")
     print(f"  Batch:     {args.batch_size}")
     print(f"  LR:        {args.lr}")
     print(f"  temp:      {args.temperature}")
     print(f"  eval max_new_tokens: {args.eval_max_new_tokens}")
-    if is_resume:
-        print(f"  Resumed from: {student_source!r}")
     print("=" * 60)
 
     T = args.temperature
@@ -569,26 +620,38 @@ def main():
         action="store_true",
         help="Also save student_best whenever eval accuracy improves (off by default — slows training)",
     )
-    # ---- Checkpoint / resume args ----
+    # ---- Save / resume args ----
     parser.add_argument(
         "--save-dir",
         default=default_base,
         metavar="DIR",
         help=(
-            "Base results directory. A new run creates standard-kl/<datetime>/ inside it. "
-            "When resuming, this is still the base dir; the run subfolder is given by "
-            "--checkpoint-run. "
+            "Base results directory. New runs create standard-kl/<run-name|datetime>/ inside it. "
             f"Default: {default_base}"
+        ),
+    )
+    parser.add_argument(
+        "--run-name",
+        default=None,
+        metavar="NAME",
+        help="Custom folder name for a new run (default: YYYY-MM-DD_HH-MM-SS timestamp).",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Resume an existing run. Use --checkpoint-run to pick a specific run "
+            "(just the datetime, e.g. '2026-04-07_22-15-56'); if omitted the most recently "
+            "modified folder in standard-kl/ is used automatically."
         ),
     )
     parser.add_argument(
         "--checkpoint-run",
         default=None,
-        metavar="SUBPATH",
+        metavar="DATETIME",
         help=(
-            "Relative path (under --save-dir) of the run to resume, "
-            "e.g. 'standard-kl/2025-04-07_14-30-00'. "
-            "If omitted, a fresh run is started."
+            "Datetime folder of the run to resume (e.g. '2026-04-07_22-15-56'). "
+            "'standard-kl/' is prepended automatically. Only used with --resume."
         ),
     )
     parser.add_argument(
@@ -596,9 +659,9 @@ def main():
         default="latest",
         metavar="latest|best|final|N",
         help=(
-            "'latest' → auto-detect highest student_epoch_N (exact weights, exact history), "
-            "'best' → student_best (legacy runs only; new runs do not save student_best), "
-            "'final' → student_final, or an integer N → student_epoch_N. (default: latest)"
+            "'latest' → auto-detect highest student_epoch_N, "
+            "'best' → student_best, 'final' → student_final, "
+            "or an integer N → student_epoch_N. (default: latest)"
         ),
     )
     parser.add_argument(
