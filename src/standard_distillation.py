@@ -559,11 +559,15 @@ def train(args):
         # Delete the previous one so only the most recent epoch survives on disk.
         if args.save_every > 0 and (epoch + 1) % args.save_every == 0:
             save_checkpoint(student, tokenizer, run_dir, f"epoch_{epoch + 1}")
+            print(f"  Saved student_epoch_{epoch + 1}")
             prev = epoch + 1 - args.save_every
             if prev > 0:
                 prev_path = os.path.join(run_dir, f"student_epoch_{prev}")
-                if os.path.isdir(prev_path):
+                try:
                     shutil.rmtree(prev_path)
+                    print(f"  Deleted student_epoch_{prev}")
+                except FileNotFoundError:
+                    pass
 
         save_training_state(run_dir, optimizer, epoch + 1, best_acc)
 
@@ -572,11 +576,16 @@ def train(args):
     hist_out["teacher_baseline"] = teacher_base
 
     save_checkpoint(student, tokenizer, run_dir, "final")
+    print("  Saved student_final")
 
     # Remove the last epoch checkpoint now that final is saved
-    last_epoch_ckpt, _ = _latest_epoch_checkpoint(run_dir)
-    if last_epoch_ckpt and os.path.isdir(last_epoch_ckpt):
-        shutil.rmtree(last_epoch_ckpt)
+    last_epoch_ckpt, last_n = _latest_epoch_checkpoint(run_dir)
+    if last_epoch_ckpt:
+        try:
+            shutil.rmtree(last_epoch_ckpt)
+            print(f"  Deleted student_epoch_{last_n} (superseded by student_final)")
+        except FileNotFoundError:
+            pass
 
     with open(hist_path, "w") as f:
         json.dump(hist_out, f, indent=2)

@@ -774,11 +774,15 @@ class ClusterDistillationTrainer:
 
             if cfg.save_every > 0 and (epoch + 1) % cfg.save_every == 0:
                 self._save_checkpoint(f"epoch_{epoch + 1}")
+                print(f"  Saved student_epoch_{epoch + 1}")
                 prev = epoch + 1 - cfg.save_every
                 if prev > 0:
                     prev_path = os.path.join(cfg.save_dir, f"student_epoch_{prev}")
-                    if os.path.isdir(prev_path):
+                    try:
                         shutil.rmtree(prev_path)
+                        print(f"  Deleted student_epoch_{prev}")
+                    except FileNotFoundError:
+                        pass
 
             self.history["epoch"].append(epoch + 1)
             for k, v in epoch_metrics.items():
@@ -796,11 +800,20 @@ class ClusterDistillationTrainer:
             )
 
         self._save_checkpoint("final")
+        print("  Saved student_final")
 
-        # Remove the last epoch checkpoint now that final is saved
-        for entry in os.scandir(self.config.save_dir):
-            if entry.is_dir() and entry.name.startswith("student_epoch_"):
-                shutil.rmtree(entry.path)
+        # Remove all remaining epoch checkpoints now that final is saved
+        try:
+            entries = os.listdir(self.config.save_dir)
+        except OSError:
+            entries = []
+        for name in entries:
+            if name.startswith("student_epoch_"):
+                try:
+                    shutil.rmtree(os.path.join(self.config.save_dir, name))
+                    print(f"  Deleted {name} (superseded by student_final)")
+                except FileNotFoundError:
+                    pass
 
         self._save_history()
         self._save_curves()
