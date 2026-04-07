@@ -46,6 +46,7 @@ class FFNDistillationConfig:
     lambda_cka: float = 0.01
     eval_every: int = 1
     save_every: int = 5
+    save_best: bool = False
     eval_max_new_tokens: int = EVAL_MAX_NEW_TOKENS
     save_dir: str = "results/ffn-distillation"
 
@@ -417,7 +418,8 @@ class FFNDistillationTrainer:
 
             if acc > best_acc:
                 best_acc = acc
-                save_checkpoint(self.student, self.tokenizer, cfg.save_dir, "best")
+                if cfg.save_best:
+                    save_checkpoint(self.student, self.tokenizer, cfg.save_dir, "best")
 
             if cfg.save_every > 0 and (epoch + 1) % cfg.save_every == 0:
                 save_checkpoint(self.student, self.tokenizer, cfg.save_dir, f"epoch_{epoch + 1}")

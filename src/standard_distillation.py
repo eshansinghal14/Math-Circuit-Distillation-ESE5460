@@ -495,7 +495,8 @@ def train(args):
 
         if acc > best_acc:
             best_acc = acc
-            save_checkpoint(student, tokenizer, run_dir, "best")
+            if args.save_best:
+                save_checkpoint(student, tokenizer, run_dir, "best")
 
         # Save a rolling epoch checkpoint every save_every epochs.
         # Delete the previous one so only the most recent epoch survives on disk.
@@ -564,6 +565,11 @@ def main():
         type=int,
         default=5,
         help="Save student_epoch_N every N epochs; only the most recent is kept (0 = disable)",
+    )
+    parser.add_argument(
+        "--save-best",
+        action="store_true",
+        help="Also save student_best whenever eval accuracy improves (off by default — slows training)",
     )
     # ---- Checkpoint / resume args ----
     parser.add_argument(
