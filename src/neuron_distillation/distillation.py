@@ -923,12 +923,12 @@ class ClusterDistillationTrainer:
                 if acc > best_acc:
                     best_acc = acc
                     if cfg.save_best:
-                        self._save_checkpoint()
-                        print(f"  Saved {STUDENT_MODEL_DIR}/ (new best accuracy)")
+                        self._save_weights_fast()
+                        print(f"  Saved {STUDENT_WEIGHTS_FILE} (new best accuracy)")
 
             if cfg.save_every > 0 and (epoch + 1) % cfg.save_every == 0:
-                self._save_checkpoint()
-                print(f"  Saved {STUDENT_MODEL_DIR}/ (epoch {epoch + 1})")
+                self._save_weights_fast()
+                print(f"  Saved {STUDENT_WEIGHTS_FILE} (epoch {epoch + 1})")
 
             self.history["epoch"].append(epoch + 1)
             for k, v in epoch_metrics.items():
@@ -966,6 +966,13 @@ class ClusterDistillationTrainer:
 
         self._save_checkpoint()
         print(f"  Saved {STUDENT_MODEL_DIR}/ (final)")
+
+        # Clean up fast weights file (superseded by full checkpoint)
+        wt_path = os.path.join(cfg.save_dir, STUDENT_WEIGHTS_FILE)
+        try:
+            os.remove(wt_path)
+        except FileNotFoundError:
+            pass
 
         print(f"\nDone. Best accuracy: {best_acc:.4f}")
         print(f"Results saved to: {cfg.save_dir}")
@@ -1032,8 +1039,14 @@ class ClusterDistillationTrainer:
         plt.close(fig)
         print(f"Saved training curves → {out}")
 
+    def _save_weights_fast(self) -> None:
+        """Save only state_dict to a single .pt — 10-20x faster than save_pretrained."""
+        path = os.path.join(self.config.save_dir, STUDENT_WEIGHTS_FILE)
+        torch.save(self.student.state_dict(), path)
+
     def _save_checkpoint(self) -> None:
-        """Overwrite ``save_dir/student_model/`` with current student + tokenizer."""
+        """Overwrite ``save_dir/student_model/`` with current student + tokenizer.
+        Used for the final save at end of training."""
         path = os.path.join(self.config.save_dir, STUDENT_MODEL_DIR)
         rm_dir_tree(path)
         os.makedirs(path, exist_ok=True)
