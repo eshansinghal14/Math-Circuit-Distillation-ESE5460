@@ -27,7 +27,7 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass
 from functools import partial
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -36,6 +36,11 @@ from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+try:
+    from torch.utils.flop_counter import FlopCounterMode
+except ImportError:
+    FlopCounterMode = None  # type: ignore[misc, assignment]
 
 from cka_loss import linear_cka_efficient
 from neuron_distillation.pairing import (
@@ -96,6 +101,9 @@ class ClusterDistillationConfig:
     save_best: bool = False
     eval_max_new_tokens: int = EVAL_MAX_NEW_TOKENS
     save_dir: str = "results/cluster-distillation"
+    # Count FLOPs (FlopCounterMode) only on epochs where ``epoch_index % N == 0`` (0-based).
+    # 1 = every epoch; 0 = never; N>1 = every Nth epoch (0, N, 2N, …). ~10% step overhead when active.
+    count_flops_every: int = 1
 
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -589,6 +597,21 @@ def eval_accuracy(
     return correct / max(total, 1)
 
 
+def format_flops(n: float) -> str:
+    """Human-readable FLOPs string (SI prefixes)."""
+    if n <= 0:
+        return "0"
+    if n >= 1e15:
+        return f"{n / 1e15:.3f} PFLOP"
+    if n >= 1e12:
+        return f"{n / 1e12:.3f} TFLOP"
+    if n >= 1e9:
+        return f"{n / 1e9:.3f} GFLOP"
+    if n >= 1e6:
+        return f"{n / 1e6:.3f} MFLOP"
+    return f"{n:.0f} FLOP"
+
+
 # ---------------------------------------------------------------------------
 # Trainer
 # ---------------------------------------------------------------------------
@@ -678,6 +701,18 @@ class ClusterDistillationTrainer:
 
         # History
         self.history: Dict[str, List] = defaultdict(list)
+
+    def _align_epoch_flops_with_epoch(self) -> None:
+        """Pad ``epoch_flops`` so length matches ``epoch`` (resume from old JSON)."""
+        n = len(self.history.get("epoch", []))
+        if n == 0:
+            return
+        if "epoch_flops" not in self.history:
+            self.history["epoch_flops"] = [None] * n
+        elif len(self.history["epoch_flops"]) < n:
+            self.history["epoch_flops"].extend(
+                [None] * (n - len(self.history["epoch_flops"])),
+            )
 
     # ------------------------------------------------------------------
 
@@ -777,41 +812,73 @@ class ClusterDistillationTrainer:
 
     # ------------------------------------------------------------------
 
-    def train_epoch(self, epoch: int) -> Dict[str, float]:
+    def train_epoch(self, epoch: int) -> Dict[str, Any]:
         self.student.train()
         agg = defaultdict(float)
         n = 0
         skipped_nonfinite = 0
+        epoch_flops = 0
+        cfg = self.config
+        count_flops_this_epoch = (
+            cfg.count_flops_every > 0
+            and FlopCounterMode is not None
+            and (epoch % cfg.count_flops_every == 0)
+        )
 
         for step, batch in enumerate(self.loader):
-            loss, metrics = self._forward_and_loss(batch)
-            if loss is None:
-                continue
+            if count_flops_this_epoch:
+                assert FlopCounterMode is not None
+                fcm = FlopCounterMode(display=False)
+                with fcm:
+                    loss, metrics = self._forward_and_loss(batch)
+                    if loss is None:
+                        pass
+                    elif torch.isfinite(loss).item():
+                        self.optimizer.zero_grad()
+                        loss.backward()
+                        torch.nn.utils.clip_grad_norm_(
+                            self.student.parameters(), self.config.grad_clip,
+                        )
+                        self.optimizer.step()
+                epoch_flops += int(fcm.get_total_flops())
+                if loss is None:
+                    continue
+            else:
+                loss, metrics = self._forward_and_loss(batch)
+                if loss is None:
+                    continue
+                if not torch.isfinite(loss).item():
+                    skipped_nonfinite += 1
+                    continue
+                self.optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    self.student.parameters(), self.config.grad_clip,
+                )
+                self.optimizer.step()
 
             if not torch.isfinite(loss).item():
                 skipped_nonfinite += 1
                 continue
-
-            self.optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                self.student.parameters(), self.config.grad_clip,
-            )
-            self.optimizer.step()
 
             for k, v in metrics.items():
                 agg[k] += v
             n += 1
 
             if step % max(1, self.config.step_log_interval) == 0:
+                flop_s = (
+                    f" | cum {format_flops(epoch_flops)}"
+                    if count_flops_this_epoch
+                    else ""
+                )
                 if self._standard:
-                    print(f"  step {step:04d} | KL {metrics['kl_loss']:.4f}")
+                    print(f"  step {step:04d} | KL {metrics['kl_loss']:.4f}{flop_s}")
                 else:
                     print(
                         f"  step {step:04d} | "
                         f"KL {metrics['kl_loss']:.4f} | "
                         f"Cluster {metrics['cluster_loss']:.4f} | "
-                        f"CKA {metrics['mean_cka']:.4f}"
+                        f"CKA {metrics['mean_cka']:.4f}{flop_s}"
                     )
 
         if n == 0:
@@ -821,7 +888,9 @@ class ClusterDistillationTrainer:
                 f"{len(self.loader)} batches total). "
                 f"Epoch metrics below are undefined (not zero loss)."
             )
-        return {k: v / max(n, 1) for k, v in agg.items()}
+        out: Dict[str, Any] = {k: v / max(n, 1) for k, v in agg.items()}
+        out["epoch_flops"] = float(epoch_flops) if count_flops_this_epoch else None
+        return out
 
     # ------------------------------------------------------------------
 
@@ -883,6 +952,8 @@ class ClusterDistillationTrainer:
             self.history["student_baseline"] = student_base
             self.history["teacher_baseline"] = teacher_base
 
+        self._align_epoch_flops_with_epoch()
+
         end_epoch = start_epoch + cfg.epochs
         print("=" * 60)
         if self._standard:
@@ -908,6 +979,17 @@ class ClusterDistillationTrainer:
             print(f"  Projection heads: {cfg.use_projection_heads}")
         print(f"  Save every:       {cfg.save_every}")
         print(f"  Step log interval:{cfg.step_log_interval}")
+        if cfg.count_flops_every <= 0:
+            print("  FLOP counting:    off (--count-flops-every 0)")
+        elif FlopCounterMode is None:
+            print("  FLOP counting:    unavailable (PyTorch flop_counter missing)")
+        elif cfg.count_flops_every == 1:
+            print("  FLOP counting:    every epoch (FlopCounterMode; ~10% step overhead when on)")
+        else:
+            print(
+                f"  FLOP counting:    every {cfg.count_flops_every} epochs "
+                f"(0-based indices 0, {cfg.count_flops_every}, …)"
+            )
         print("=" * 60)
 
         for epoch in range(start_epoch, end_epoch):
@@ -940,11 +1022,15 @@ class ClusterDistillationTrainer:
             save_training_state(cfg.save_dir, self.optimizer, epoch + 1, best_acc)
 
             if epoch_metrics:
+                ef = epoch_metrics.get("epoch_flops")
+                flop_s = ""
+                if ef is not None:
+                    flop_s = f", FLOPs={format_flops(float(ef))}"
                 if self._standard:
                     print(
                         f"Epoch {epoch + 1}/{end_epoch}: "
                         f"KL={epoch_metrics.get('kl_loss', float('nan')):.4f}, "
-                        f"Acc={acc:.4f}"
+                        f"Acc={acc:.4f}{flop_s}"
                     )
                 else:
                     print(
@@ -952,7 +1038,7 @@ class ClusterDistillationTrainer:
                         f"KL={epoch_metrics.get('kl_loss', float('nan')):.4f}, "
                         f"Cluster={epoch_metrics.get('cluster_loss', float('nan')):.4f}, "
                         f"CKA={epoch_metrics.get('mean_cka', float('nan')):.4f}, "
-                        f"Acc={acc:.4f}"
+                        f"Acc={acc:.4f}{flop_s}"
                     )
             else:
                 tag = "KL=n/a" if self._standard else "KL/Cluster/CKA=n/a"

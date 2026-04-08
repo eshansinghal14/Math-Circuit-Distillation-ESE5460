@@ -9,7 +9,8 @@
 ``student_weights.pt``). Use ``--checkpoint-run <path>`` only for a legacy nested run folder;
 otherwise omit if checkpoints live in ``--save-dir``.
 
-Outputs per run: ``student_model/``, ``training_history.json``, ``training_state.pt``,
+Outputs per run: ``student_model/``, ``training_history.json`` (``epoch_flops``: floats when
+measured, ``null`` when skipped by ``--count-flops-every``), ``training_state.pt``,
 ``training_curves.png``. Circuit runs also use ``ablation/``, ``cluster_mapping.json``,
 and global ``neuron-clustering/``.
 
@@ -272,6 +273,16 @@ def main():
         help=f"Greedy eval during training (default: {EVAL_MAX_NEW_TOKENS})",
     )
     parser.add_argument(
+        "--count-flops-every",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "Count training FLOPs every N epochs (0-based: epochs 0, N, 2N, …). "
+            "1=all epochs; 0=never. Default 0."
+        ),
+    )
+    parser.add_argument(
         "--save-dir", type=str,
         default=os.path.join(os.path.dirname(__file__), "..", "..", "results", "cluster-distillation"),
         help="Directory for ablation/, student_model/, training_history.json, training_state.pt, etc.",
@@ -292,6 +303,8 @@ def main():
     parser.add_argument("--ablation-batch-size", type=int, default=50,
                         help="Circuit: batch size for neuron-cluster ablation")
     args = parser.parse_args()
+    if args.count_flops_every < 0:
+        raise SystemExit("--count-flops-every must be >= 0 (use 0 to disable FLOP counting)")
 
     try:
         train_path, test_path, dataset_prefix = resolve_train_test_paths(
@@ -494,6 +507,7 @@ def main():
         save_best=args.save_best,
         eval_max_new_tokens=eval_max_new_tokens,
         save_dir=run_dir,
+        count_flops_every=args.count_flops_every,
     )
     trainer = ClusterDistillationTrainer(
         config=config,
