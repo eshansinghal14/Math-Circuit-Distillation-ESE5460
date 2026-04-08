@@ -27,6 +27,8 @@ EVAL_MAX_NEW_TOKENS = 1
 
 # --- Distillation run dirs / checkpoints (used by ``neuron_distillation``) ------------
 STUDENT_MODEL_DIR = "student_model"
+# Fast mid-training snapshot (state_dict only); final artifact is ``student_model/`` (HF format).
+STUDENT_WEIGHTS_FILE = "student_weights.pt"
 
 
 def rm_dir_tree(path: str) -> None:
