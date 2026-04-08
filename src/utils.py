@@ -112,17 +112,21 @@ def resolve_distillation_run_dir(
     resume: bool,
     run_name: Optional[str],
     checkpoint_run: Optional[str],
-    runs_subdir: str,
+    runs_subdir: Optional[str] = None,
 ) -> Tuple[str, Optional[str]]:
     """Return ``(run_dir, student_source)``.
 
-    New run: ``<save_dir>/<runs_subdir>/<run-name|timestamp>/``, ``student_source`` is None.
+    If ``runs_subdir`` is None or empty, new runs use ``<save_dir>/<run-name|timestamp>/``.
+    Otherwise ``<save_dir>/<runs_subdir>/<run-name|timestamp>/``. ``student_source`` is None
+    for a fresh run.
 
     Resume: load weights from ``<run_dir>/student_model/``. Pass ``checkpoint_run`` as the
-    datetime folder name, or None to use the most recently modified folder under ``runs_subdir``.
+    run folder (optionally including ``runs_subdir/``), or None to use the most recently
+    modified folder under the runs base directory.
     """
     save_dir = os.path.abspath(save_dir)
-    base = os.path.join(save_dir, runs_subdir)
+    sub = (runs_subdir or "").strip().strip("/").strip("\\")
+    base = os.path.join(save_dir, sub) if sub else save_dir
 
     if not resume:
         folder = run_name or datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -130,9 +134,9 @@ def resolve_distillation_run_dir(
         return run_dir, None
 
     if checkpoint_run:
-        cr = checkpoint_run
-        if not cr.startswith(f"{runs_subdir}/"):
-            cr = f"{runs_subdir}/{cr}"
+        cr = checkpoint_run.replace("\\", "/").strip("/")
+        if sub and not cr.startswith(f"{sub}/"):
+            cr = f"{sub}/{cr}"
         run_dir = os.path.join(save_dir, cr)
     else:
         run_dir = most_recent_subdirectory(base)

@@ -1,4 +1,4 @@
-"""Single entry-point for KL distillation under ``<save-dir>/neuron-cluster/<run>/``.
+"""Single entry-point for KL distillation under ``<save-dir>/<run-name|timestamp>/``.
 
 **Modes**
 
@@ -7,7 +7,7 @@
 
 **Resume**: ``--resume`` loads weights from
 ``<run>/student_model/``. Use ``--checkpoint-run <datetime>`` or omit to use the most
-recent run under ``neuron-cluster/``.
+recent run folder directly under ``--save-dir``.
 
 Outputs per run: ``student_model/``, ``training_history.json``, ``training_state.pt``,
 ``training_curves.png``. Circuit runs also use ``ablation/``, ``cluster_mapping.json``,
@@ -222,7 +222,7 @@ def main():
         "--mode",
         choices=["circuit", "standard"],
         default="circuit",
-        help="circuit: ablation + CKA + KL; standard: KL only (same run layout under neuron-cluster/)",
+        help="circuit: ablation + CKA + KL; standard: KL only (same run layout under --save-dir)",
     )
     parser.add_argument("--student-model", type=str, default="meta-llama/Llama-3.2-1B")
     parser.add_argument("--teacher-model", type=str, default="meta-llama/Meta-Llama-3-8B")
@@ -274,7 +274,7 @@ def main():
     parser.add_argument(
         "--save-dir", type=str,
         default=os.path.join(os.path.dirname(__file__), "..", "..", "results", "cluster-distillation"),
-        help="Base directory; runs live under <save-dir>/neuron-cluster/<run-name|timestamp>/",
+        help="Base directory; each run is <save-dir>/<run-name|timestamp>/",
     )
     parser.add_argument(
         "--run-name",
@@ -285,13 +285,13 @@ def main():
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="Resume from <run>/student_model/; use --checkpoint-run or latest neuron-cluster run",
+        help="Resume from <run>/student_model/; use --checkpoint-run or latest run under --save-dir",
     )
     parser.add_argument(
         "--checkpoint-run",
         default=None,
         metavar="DATETIME",
-        help="Run folder under neuron-cluster/ (datetime). Prepends neuron-cluster/ if needed.",
+        help="Run folder name or path under --save-dir (e.g. datetime). For legacy layouts, pass neuron-cluster/<run> if needed.",
     )
     parser.add_argument("--skip-ablation", action="store_true",
                         help="Circuit: skip ablation (expects cached ablation JSON under run dir)")
@@ -318,7 +318,6 @@ def main():
         resume=args.resume,
         run_name=args.run_name,
         checkpoint_run=args.checkpoint_run,
-        runs_subdir="neuron-cluster",
     )
     os.makedirs(run_dir, exist_ok=True)
     is_resume = student_source is not None

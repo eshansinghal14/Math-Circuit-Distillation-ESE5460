@@ -4,12 +4,12 @@ Uses :func:`utils.evaluate` (left padding, greedy decode; default ``max_new_toke
 
 Examples:
   cd src
-  python eval_trained_student.py --dataset 2d_add --checkpoint ../results/neuron-cluster/2026-04-07_22-15-56/student_model
+  python eval_trained_student.py --dataset 2d_add --checkpoint ../results/2026-04-07_22-15-56/student_model
 
   # Colab / Drive:
   python eval_trained_student.py \\
     --dataset 2d_add \\
-    --checkpoint "/path/to/results/neuron-cluster/2026-04-07_22-15-56/student_model"
+    --checkpoint "/path/to/results/2026-04-07_22-15-56/student_model"
 """
 
 import argparse
@@ -32,7 +32,7 @@ def main():
     parser.add_argument(
         "--checkpoint",
         required=True,
-        help="Folder from save_pretrained (e.g. .../neuron-cluster/<run-datetime>/student_model)",
+        help="Folder from save_pretrained (e.g. .../results/<run-datetime>/student_model)",
     )
     parser.add_argument(
         "--dataset",
