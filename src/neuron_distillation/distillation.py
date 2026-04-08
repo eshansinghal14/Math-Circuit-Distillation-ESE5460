@@ -135,7 +135,6 @@ class ClusterDistillationConfig:
 
     lambda_cluster: float = 0.01
     lambda_proj: float = 0.0
-    top_k_clusters_per_subclass: Optional[int] = 5
     importance_weighting: bool = True
 
     use_projection_heads: bool = False

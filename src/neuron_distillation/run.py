@@ -214,11 +214,13 @@ def build_cluster_pairs(
     teacher_clusters_dir: str,
     k: int,
     k_classes: int = 8,
-    top_k_per_subclass: int = 5,
     mapping_cache_path: Optional[str] = None,
 ):
     """Load ablation results, pair clusters, attach neuron indices.
-    If mapping_cache_path exists, load pairs from that JSON instead."""
+
+    Uses all student clusters per subclass (no top-k truncation) for CKA.
+    If ``mapping_cache_path`` exists, load pairs from that JSON instead.
+    """
     if mapping_cache_path and os.path.isfile(mapping_cache_path):
         print(f"  Found cached cluster mapping: {mapping_cache_path}")
         with open(mapping_cache_path, "r") as f:
@@ -261,7 +263,7 @@ def build_cluster_pairs(
 
     delta_s = _load_single_ablation_performance(student_ablation_path)
     delta_t = _load_single_ablation_performance(teacher_ablation_path)
-    mappings = create_cluster_mapping(delta_s, delta_t, top_k_student=top_k_per_subclass)
+    mappings = create_cluster_mapping(delta_s, delta_t, top_k_student=None)
     stats = analyze_mapping(mappings)
     print("\n  Cluster mapping statistics:")
     for key, val in stats.items():
@@ -348,7 +350,6 @@ def main():
     )
     parser.add_argument("--k-classes", type=int, default=None,
                         help="Number of latent subclasses (auto-detected from checkpoint if omitted)")
-    parser.add_argument("--top-k-pairs", type=int, default=5)
     parser.add_argument("--checkpoint", type=str, default=None,
                         help="Path to circuit-discovery checkpoint (.pt). "
                              "Auto-detected from --save-dir root if omitted.")
@@ -539,7 +540,6 @@ def main():
         teacher_clusters_dir=teacher_clusters,
         k=args.k,
         k_classes=args.k_classes,
-        top_k_per_subclass=args.top_k_pairs,
         mapping_cache_path=mapping_cache,
     )
     if not cluster_pairs:
@@ -587,7 +587,6 @@ def main():
         lambda_cluster=args.lambda_cluster,
         lambda_proj=args.lambda_proj,
         use_projection_heads=args.use_projection,
-        top_k_clusters_per_subclass=args.top_k_pairs,
         save_every=args.save_every,
         save_best=args.save_best,
         eval_max_new_tokens=eval_max_new_tokens,
