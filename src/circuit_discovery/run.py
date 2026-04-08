@@ -1,18 +1,22 @@
+"""Command-line entry for circuit discovery training.
+
+Run from ``src/``::
+
+  python -m circuit_discovery.run --k-classes 8
+
+Or::
+
+  python -m circuit_discovery --k-classes 8
+"""
+
+from __future__ import annotations
+
 import argparse
 
-from circuit_discovery import (  # noqa: F401
-    ProblemEncoder,
-    ProblemClassifier,
-    NeuronMask,
-    CircuitDiscoveryModel,
-    CircuitLoss,
-    parse_equation,
-    _stack_layer_activations,
-    train_circuit_discovery,
-)
+from .main import train_circuit_discovery
 
 
-def _parse_args(argv=None):
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Circuit discovery training")
     parser.add_argument(
         "--k-classes",
@@ -82,8 +86,8 @@ def _parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-if __name__ == "__main__":
-    args = _parse_args()
+def main(argv: list[str] | None = None) -> None:
+    args = _parse_args(argv)
     train_circuit_discovery(
         k_classes=args.k_classes,
         epochs=args.epochs,
@@ -97,3 +101,7 @@ if __name__ == "__main__":
         grad_clip_norm=args.grad_clip_norm,
         class_reweight=args.class_reweight,
     )
+
+
+if __name__ == "__main__":
+    main()
