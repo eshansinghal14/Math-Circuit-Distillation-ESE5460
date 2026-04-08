@@ -255,10 +255,17 @@ def main():
     )
     parser.add_argument("--lambda-cluster", type=float, default=0.01)
     parser.add_argument("--lambda-proj", type=float, default=0.0)
-    parser.add_argument("--save-every", type=int, default=5,
-                        help="Save student_epoch_N every N epochs; only most recent kept (0=off)")
-    parser.add_argument("--save-best", action="store_true",
-                        help="Save student_best whenever eval accuracy improves (off by default)")
+    parser.add_argument(
+        "--save-every",
+        type=int,
+        default=5,
+        help="Overwrite student_model/ every N epochs (0=disable periodic save)",
+    )
+    parser.add_argument(
+        "--save-best",
+        action="store_true",
+        help="Overwrite student_model/ when eval accuracy improves (off by default)",
+    )
     parser.add_argument("--use-projection", action="store_true")
     parser.add_argument(
         "--save-dir", type=str,

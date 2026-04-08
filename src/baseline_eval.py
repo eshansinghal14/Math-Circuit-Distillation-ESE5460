@@ -8,11 +8,11 @@ From ``src/``::
   python baseline_eval.py --dataset 2d_add
 
   # Local save_pretrained folder
-  python baseline_eval.py --dataset 2d_add /path/to/student_best
+  python baseline_eval.py --dataset 2d_add /path/to/student_model
 
   # Any HF id and/or paths (each arg is one model)
   python baseline_eval.py --dataset 2d_add meta-llama/Llama-3.2-1B
-  python baseline_eval.py --dataset 2d_add ./student_best meta-llama/Meta-Llama-3-8B
+  python baseline_eval.py --dataset 2d_add ./student_model meta-llama/Meta-Llama-3-8B
 """
 
 from __future__ import annotations

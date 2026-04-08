@@ -47,6 +47,8 @@ from neuron_distillation.pairing import (
 )
 from utils import EVAL_MAX_NEW_TOKENS, json_to_prompt_answer_dict
 
+STUDENT_MODEL_DIR = "student_model"
+
 
 def _rm_dir(path: str) -> None:
     """Delete a directory tree via shell rm -rf (reliable on Drive FUSE for large dirs)."""
@@ -845,16 +847,12 @@ class ClusterDistillationTrainer:
                 if acc > best_acc:
                     best_acc = acc
                     if cfg.save_best:
-                        self._save_checkpoint("best")
+                        self._save_checkpoint()
+                        print(f"  Saved {STUDENT_MODEL_DIR}/ (new best accuracy)")
 
             if cfg.save_every > 0 and (epoch + 1) % cfg.save_every == 0:
-                self._save_checkpoint(f"epoch_{epoch + 1}")
-                print(f"  Saved student_epoch_{epoch + 1}")
-                prev = epoch + 1 - cfg.save_every
-                if prev > 0:
-                    prev_path = os.path.join(cfg.save_dir, f"student_epoch_{prev}")
-                    _rm_dir(prev_path)
-                    print(f"  Deleted student_epoch_{prev}")
+                self._save_checkpoint()
+                print(f"  Saved {STUDENT_MODEL_DIR}/ (epoch {epoch + 1})")
 
             self.history["epoch"].append(epoch + 1)
             for k, v in epoch_metrics.items():
@@ -882,18 +880,8 @@ class ClusterDistillationTrainer:
         self._save_history()
         self._save_curves()
 
-        self._save_checkpoint("final")
-        print("  Saved student_final")
-
-        # Remove all remaining epoch checkpoints now that final is saved
-        try:
-            entries = os.listdir(self.config.save_dir)
-        except OSError:
-            entries = []
-        for name in entries:
-            if name.startswith("student_epoch_"):
-                _rm_dir(os.path.join(self.config.save_dir, name))
-                print(f"  Deleted {name} (superseded by student_final)")
+        self._save_checkpoint()
+        print(f"  Saved {STUDENT_MODEL_DIR}/ (final)")
 
         print(f"\nTraining complete.  Best accuracy: {best_acc:.3f}")
         return dict(self.history)
@@ -947,8 +935,10 @@ class ClusterDistillationTrainer:
         plt.close(fig)
         print(f"Saved training curves → {out}")
 
-    def _save_checkpoint(self, tag: str):
-        path = os.path.join(self.config.save_dir, f"student_{tag}")
+    def _save_checkpoint(self) -> None:
+        """Overwrite ``save_dir/student_model/`` with current student + tokenizer."""
+        path = os.path.join(self.config.save_dir, STUDENT_MODEL_DIR)
+        _rm_dir(path)
         os.makedirs(path, exist_ok=True)
         self.student.save_pretrained(path)
         self.tokenizer.save_pretrained(path)

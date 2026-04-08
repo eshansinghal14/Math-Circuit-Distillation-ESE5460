@@ -5,12 +5,12 @@ default max_new_tokens matches utils.EVAL_MAX_NEW_TOKENS).
 
 Examples:
   cd src
-  python eval_trained_student.py --dataset 2d_add --checkpoint ../results/standard-kl/student_best
+  python eval_trained_student.py --dataset 2d_add --checkpoint ../results/standard-kl/2026-04-07_22-15-56/student_model
 
   # Colab / Drive:
   python eval_trained_student.py \\
     --dataset 2d_add \\
-    --checkpoint "/content/drive/MyDrive/Math Circuit Distillation (ESE 5460)/results/standard-kl/student_best"
+    --checkpoint "/content/drive/MyDrive/Math Circuit Distillation (ESE 5460)/results/standard-kl/2026-04-07_22-15-56/student_model"
 """
 
 import argparse
@@ -34,7 +34,7 @@ def main():
     parser.add_argument(
         "--checkpoint",
         required=True,
-        help="Folder from save_pretrained (e.g. .../standard-kl/student_best or student_final)",
+        help="Folder from save_pretrained (e.g. .../standard-kl/<run-datetime>/student_model)",
     )
     parser.add_argument(
         "--dataset",

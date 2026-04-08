@@ -4,9 +4,9 @@ KL is applied at the causal position that predicts the first answer token.
 Paper target: 63.6% accuracy on 2-digit addition.
 
 New runs:  results go to  <save-dir>/standard-kl/<run-name|datetime>/
-Resume:    add --resume; give just the datetime in --checkpoint-run (standard-kl/ is
-           prepended automatically).  If --checkpoint-run is omitted the most recently
-           modified folder in standard-kl/ is used.
+Resume:    add ``--resume``; weights load from ``<run>/student_model/``. Give
+           ``--checkpoint-run`` (datetime folder) or omit it to use the most recently
+           modified run under ``standard-kl/``. Optimizer state is in ``training_state.pt``.
 
 Examples (from src/)::
 
@@ -24,16 +24,15 @@ Examples (from src/)::
     --save-dir "/content/drive/MyDrive/Math Circuit Distillation (ESE 5460)/results" \\
     --run-name my_run
 
-  # Resume from epoch-5 of a specific run, add 45 more epochs (global 6..50, 50 total)
+  # Resume a specific run (loads student_model/ + training_state.pt when present)
   python standard_distillation.py \\
     --dataset 2d_add \\
     --save-dir "/content/drive/MyDrive/Math Circuit Distillation (ESE 5460)/results" \\
     --resume \\
     --checkpoint-run "2026-04-07_22-15-56" \\
-    --checkpoint-type 5 \\
     --epochs 45
 
-  # Resume from most recently modified run, continue from latest epoch checkpoint
+  # Resume from most recently modified run
   python standard_distillation.py \\
     --dataset 2d_add \\
     --save-dir "/content/drive/MyDrive/Math Circuit Distillation (ESE 5460)/results" \\
@@ -59,6 +58,9 @@ from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
 
 from utils import EVAL_MAX_NEW_TOKENS, json_to_prompt_answer_dict, load_model, resolve_train_test_paths
+
+# HuggingFace student weights + tokenizer (overwritten each save)
+STUDENT_MODEL_DIR = "student_model"
 
 
 def _rm_dir(path: str) -> None:
@@ -187,8 +189,10 @@ def evaluate(
     return correct / max(total, 1)
 
 
-def save_checkpoint(model, tokenizer, save_dir: str, tag: str):
-    path = os.path.join(save_dir, f"student_{tag}")
+def save_student_checkpoint(model, tokenizer, run_dir: str) -> None:
+    """Write student + tokenizer under ``run_dir/student_model/`` (replaces any previous save)."""
+    path = os.path.join(run_dir, STUDENT_MODEL_DIR)
+    _rm_dir(path)
     os.makedirs(path, exist_ok=True)
     model.save_pretrained(path)
     tokenizer.save_pretrained(path)
@@ -287,62 +291,28 @@ def _most_recent_run(parent_dir: str) -> Optional[str]:
     return best_path
 
 
-def _latest_epoch_checkpoint(run_dir: str) -> tuple[Optional[str], Optional[int]]:
-    """Scan run_dir for student_epoch_N folders and return (path, N) of the highest N."""
-    best_n, best_path = None, None
-    if not os.path.isdir(run_dir):
-        return None, None
-    try:
-        entries = os.listdir(run_dir)
-    except OSError:
-        return None, None
-    for name in entries:
-        if not name.startswith("student_epoch_"):
-            continue
-        full = os.path.join(run_dir, name)
-        if not os.path.isdir(full):  # use isdir() — more reliable on Drive than entry.is_dir()
-            continue
-        try:
-            n = int(name[len("student_epoch_"):])
-            if best_n is None or n > best_n:
-                best_n, best_path = n, full
-        except ValueError:
-            pass
-    return best_path, best_n
+def _resolve_run_dir(args) -> tuple[str, Optional[str]]:
+    """Return ``(run_dir, student_source)``.
 
+    New run: ``run_dir = <save_dir>/standard-kl/<run-name|datetime>/``, ``student_source`` is None.
 
-def _resolve_run_dir(args) -> tuple[str, Optional[str], Optional[int]]:
-    """Return (run_dir, student_source, override_epoch).
-
-    New run:  run_dir = <save_dir>/standard-kl/<run-name|datetime>/
-    Resume:   --resume flag required.
-              --checkpoint-run accepts just the datetime; standard-kl/ is prepended.
-              If --checkpoint-run is omitted, the most recently modified folder in
-              <save_dir>/standard-kl/ is used automatically.
-              checkpoint_type:
-                latest → auto-detect highest student_epoch_N in the run dir
-                best   → student_best
-                final  → student_final
-                N      → student_epoch_N  (explicit)
-              override_epoch = N for epoch-based resumes so history is truncated
+    Resume: ``--resume`` loads weights from ``<run_dir>/student_model/`` (constant path).
+    ``--checkpoint-run`` is the datetime folder (``standard-kl/`` prepended if omitted);
+    if omitted, the most recently modified folder under ``<save_dir>/standard-kl/`` is used.
     """
     if not args.resume:
-        # Fresh run
         folder = args.run_name or datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         run_dir = os.path.join(args.save_dir, "standard-kl", folder)
-        return run_dir, None, None
+        return run_dir, None
 
-    # ---- Resuming ----
     skl_dir = os.path.join(args.save_dir, "standard-kl")
 
     if args.checkpoint_run:
         cr = args.checkpoint_run
-        # Auto-prepend standard-kl/ if user gave just the datetime
         if not cr.startswith("standard-kl/"):
             cr = f"standard-kl/{cr}"
         run_dir = os.path.join(args.save_dir, cr)
     else:
-        # Auto-detect the most recently modified run folder
         run_dir = _most_recent_run(skl_dir)
         if run_dir is None:
             raise SystemExit(
@@ -351,56 +321,26 @@ def _resolve_run_dir(args) -> tuple[str, Optional[str], Optional[int]]:
             )
         print(f"Auto-detected most recent run: {run_dir}")
 
-    ct = str(args.checkpoint_type).strip().lower()
-
-    if ct == "latest":
-        student_source, override_epoch = _latest_epoch_checkpoint(run_dir)
-        if student_source is None:
-            fallback = os.path.join(run_dir, "student_latest")
-            if os.path.isdir(fallback):
-                print(
-                    "No student_epoch_N checkpoints found — falling back to student_latest.\n"
-                    "  (This run predates --save-every; history will not be truncated.)"
-                )
-                student_source = fallback
-                override_epoch = None
-            else:
-                raise SystemExit(
-                    f"No student_epoch_N or student_latest checkpoints found in {run_dir}.\n"
-                    "Use --checkpoint-type best or final instead."
-                )
-        else:
-            print(f"Auto-detected latest checkpoint: {student_source} (epoch {override_epoch})")
-    elif ct in ("best", "final"):
-        student_source = os.path.join(run_dir, f"student_{ct}")
-        override_epoch = None
-    else:
-        try:
-            override_epoch = int(ct)
-        except ValueError:
-            raise SystemExit(f"Unknown --checkpoint-type {ct!r}. Use latest, best, final, or an integer.")
-        student_source = os.path.join(run_dir, f"student_epoch_{override_epoch}")
-
+    student_source = os.path.join(run_dir, STUDENT_MODEL_DIR)
     if not os.path.isdir(student_source):
         raise SystemExit(
-            f"Checkpoint folder not found: {student_source}\n"
-            "Check --checkpoint-run and --checkpoint-type."
+            f"Resume expected saved weights at {student_source}. "
+            "Train a run first (or place a save_pretrained tree there)."
         )
-    return run_dir, student_source, override_epoch
+    print(f"Loading student from {student_source}")
+    return run_dir, student_source
 
 
 def train(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # ---- Resolve run directory and checkpoint source ----
-    run_dir, student_source, override_epoch = _resolve_run_dir(args)
+    run_dir, student_source = _resolve_run_dir(args)
     os.makedirs(run_dir, exist_ok=True)
     is_resume = student_source is not None
 
     print(f"Run dir: {run_dir}")
-    if student_source:
-        print(f"Loading student from checkpoint: {student_source!r}")
-    else:
+    if not student_source:
         print(f"Loading student from HF: {args.student_model!r}")
     student, tokenizer = load_model(student_source or args.student_model)
     student = student.to("cpu").float().to(device)
@@ -440,38 +380,16 @@ def train(args):
 
         if os.path.isfile(state_path):
             start_epoch, best_acc = load_training_state(state_path, optimizer, device)
-        elif override_epoch is not None:
-            # No training_state.pt but we know the exact epoch from --checkpoint-type N
-            start_epoch = override_epoch
-            best_acc = max(history["accuracy"]) if history["accuracy"] else 0.0
-            print(
-                f"No training_state.pt found — inferred start_epoch={start_epoch} "
-                f"from --checkpoint-type {override_epoch} (new optimizer)."
-            )
-        else:
-            print(f"No training_state.pt in {run_dir} — warm-starting weights only (new optimizer, epoch 1).")
-
-        # When resuming from an explicit epoch N (or auto-detected latest),
-        # truncate history to match the weights exactly.
-        if override_epoch is not None and override_epoch < start_epoch:
-            print(
-                f"Rewinding history from epoch {start_epoch} → {override_epoch} "
-                f"to match checkpoint weights"
-            )
-            for key in ("epoch", "kl_loss", "accuracy"):
-                history[key] = history[key][:override_epoch]
-            best_acc = max(history["accuracy"]) if history["accuracy"] else 0.0
-            start_epoch = override_epoch
-            with open(hist_path, "w") as f:
-                json.dump(dict(history), f, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            save_training_state(run_dir, optimizer, start_epoch, best_acc)
-            print(f"  History truncated to {override_epoch} epochs. best_acc={best_acc:.4f}")
-        elif os.path.isfile(state_path):
             print(
                 f"Resumed optimizer state (starting at global epoch {start_epoch + 1}, "
                 f"best_acc={best_acc:.4f})"
+            )
+        else:
+            start_epoch = len(history.get("epoch", [])) if history else 0
+            best_acc = max(history["accuracy"]) if history.get("accuracy") else 0.0
+            print(
+                f"No training_state.pt in {run_dir} — warm-starting from student_model "
+                f"with new optimizer (continuing from epoch {start_epoch + 1})."
             )
 
     if not history:
@@ -577,17 +495,13 @@ def train(args):
 
         if acc > best_acc:
             best_acc = acc
+            if args.save_best:
+                save_student_checkpoint(student, tokenizer, run_dir)
+                print(f"  Saved {STUDENT_MODEL_DIR}/ (new best accuracy)")
 
-        # Save a rolling epoch checkpoint every save_every epochs.
-        # Delete the previous one so only the most recent epoch survives on disk.
         if args.save_every > 0 and (epoch + 1) % args.save_every == 0:
-            save_checkpoint(student, tokenizer, run_dir, f"epoch_{epoch + 1}")
-            print(f"  Saved student_epoch_{epoch + 1}")
-            prev = epoch + 1 - args.save_every
-            if prev > 0:
-                prev_path = os.path.join(run_dir, f"student_epoch_{prev}")
-                _rm_dir(prev_path)
-                print(f"  Deleted student_epoch_{prev}")
+            save_student_checkpoint(student, tokenizer, run_dir)
+            print(f"  Saved {STUDENT_MODEL_DIR}/ (epoch {epoch + 1})")
 
         save_training_state(run_dir, optimizer, epoch + 1, best_acc)
 
@@ -603,14 +517,8 @@ def train(args):
 
     _save_curves(hist_out, run_dir)
 
-    save_checkpoint(student, tokenizer, run_dir, "final")
-    print("  Saved student_final")
-
-    # Remove the last epoch checkpoint now that final is saved
-    last_epoch_ckpt, last_n = _latest_epoch_checkpoint(run_dir)
-    if last_epoch_ckpt:
-        _rm_dir(last_epoch_ckpt)
-        print(f"  Deleted student_epoch_{last_n} (superseded by student_final)")
+    save_student_checkpoint(student, tokenizer, run_dir)
+    print(f"  Saved {STUDENT_MODEL_DIR}/ (final)")
 
     print(f"\nDone. Best accuracy: {best_acc:.4f}")
     print(f"Results saved to: {run_dir}")
@@ -653,12 +561,12 @@ def main():
         "--save-every",
         type=int,
         default=5,
-        help="Save student_epoch_N every N epochs; only the most recent is kept (0 = disable)",
+        help=f"Overwrite {STUDENT_MODEL_DIR}/ every N epochs (0 = disable periodic save)",
     )
     parser.add_argument(
         "--save-best",
         action="store_true",
-        help="Also save student_best whenever eval accuracy improves (off by default — slows training)",
+        help=f"Also overwrite {STUDENT_MODEL_DIR}/ when eval accuracy improves (off by default)",
     )
     # ---- Save / resume args ----
     parser.add_argument(
@@ -680,9 +588,9 @@ def main():
         "--resume",
         action="store_true",
         help=(
-            "Resume an existing run. Use --checkpoint-run to pick a specific run "
-            "(just the datetime, e.g. '2026-04-07_22-15-56'); if omitted the most recently "
-            "modified folder in standard-kl/ is used automatically."
+            "Resume an existing run; load weights from <run>/student_model/. "
+            "Use --checkpoint-run for the datetime folder, or omit to use the most "
+            "recent run under standard-kl/."
         ),
     )
     parser.add_argument(
@@ -691,17 +599,8 @@ def main():
         metavar="DATETIME",
         help=(
             "Datetime folder of the run to resume (e.g. '2026-04-07_22-15-56'). "
+            "Loads weights from that run's student_model/. "
             "'standard-kl/' is prepended automatically. Only used with --resume."
-        ),
-    )
-    parser.add_argument(
-        "--checkpoint-type",
-        default="latest",
-        metavar="latest|best|final|N",
-        help=(
-            "'latest' → auto-detect highest student_epoch_N, "
-            "'best' → student_best, 'final' → student_final, "
-            "or an integer N → student_epoch_N. (default: latest)"
         ),
     )
     parser.add_argument(
