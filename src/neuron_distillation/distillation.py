@@ -829,18 +829,40 @@ class ClusterDistillationTrainer:
             if count_flops_this_epoch:
                 assert FlopCounterMode is not None
                 fcm = FlopCounterMode(display=False)
-                with fcm:
+                try:
+                    with fcm:
+                        loss, metrics = self._forward_and_loss(batch)
+                        if loss is None:
+                            pass
+                        elif torch.isfinite(loss).item():
+                            self.optimizer.zero_grad()
+                            loss.backward()
+                            torch.nn.utils.clip_grad_norm_(
+                                self.student.parameters(), self.config.grad_clip,
+                            )
+                            self.optimizer.step()
+                    epoch_flops += int(fcm.get_total_flops())
+                except AssertionError:
+                    # PyTorch FlopCounterMode doesn't support GQA (Llama-3 KV heads ≠ Q heads).
+                    # Fall back to normal forward pass without FLOP counting.
+                    count_flops_this_epoch = False
                     loss, metrics = self._forward_and_loss(batch)
                     if loss is None:
-                        pass
-                    elif torch.isfinite(loss).item():
-                        self.optimizer.zero_grad()
-                        loss.backward()
-                        torch.nn.utils.clip_grad_norm_(
-                            self.student.parameters(), self.config.grad_clip,
+                        continue
+                    if not torch.isfinite(loss).item():
+                        skipped_nonfinite += 1
+                        continue
+                    self.optimizer.zero_grad()
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(
+                        self.student.parameters(), self.config.grad_clip,
+                    )
+                    self.optimizer.step()
+                    if step == 0:
+                        print(
+                            "  [warn] FlopCounterMode hit an AssertionError (GQA not supported). "
+                            "FLOP counting disabled for this run."
                         )
-                        self.optimizer.step()
-                epoch_flops += int(fcm.get_total_flops())
                 if loss is None:
                     continue
             else:
