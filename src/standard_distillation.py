@@ -573,8 +573,9 @@ def train(args):
                 try:
                     shutil.rmtree(prev_path)
                     print(f"  Deleted student_epoch_{prev}")
-                except FileNotFoundError:
-                    pass
+                except OSError as e:
+                    if not isinstance(e, FileNotFoundError):
+                        print(f"  Warning: could not delete student_epoch_{prev}: {e}")
 
         save_training_state(run_dir, optimizer, epoch + 1, best_acc)
 
@@ -599,8 +600,9 @@ def train(args):
         try:
             shutil.rmtree(last_epoch_ckpt)
             print(f"  Deleted student_epoch_{last_n} (superseded by student_final)")
-        except FileNotFoundError:
-            pass
+        except OSError as e:
+            if not isinstance(e, FileNotFoundError):
+                print(f"  Warning: could not delete student_epoch_{last_n}: {e}")
 
     print(f"\nDone. Best accuracy: {best_acc:.4f}")
     print(f"Results saved to: {run_dir}")

@@ -428,8 +428,9 @@ class FFNDistillationTrainer:
                     try:
                         shutil.rmtree(prev_path)
                         print(f"  Deleted student_epoch_{prev}")
-                    except FileNotFoundError:
-                        pass
+                    except OSError as e:
+                        if not isinstance(e, FileNotFoundError):
+                            print(f"  Warning: could not delete student_epoch_{prev}: {e}")
 
         # Write final history and curves BEFORE slow checkpoint save
         _save_curves(dict(self.history), cfg.save_dir)
@@ -447,8 +448,9 @@ class FFNDistillationTrainer:
                 try:
                     shutil.rmtree(os.path.join(cfg.save_dir, name))
                     print(f"  Deleted {name} (superseded by student_final)")
-                except FileNotFoundError:
-                    pass
+                except OSError as e:
+                    if not isinstance(e, FileNotFoundError):
+                        print(f"  Warning: could not delete {name}: {e}")
         print(f"\nDone. Best accuracy: {best_acc:.4f}")
         print(f"Results saved to: {cfg.save_dir}")
 
