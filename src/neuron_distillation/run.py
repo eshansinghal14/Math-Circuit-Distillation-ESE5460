@@ -1,44 +1,25 @@
-"""Single entry-point for the neuron-cluster distillation pipeline.
+"""Single entry-point for KL distillation under ``<save-dir>/neuron-cluster/<run>/``.
 
-Folder layout (mirrors standard_distillation.py):
+**Modes**
 
-  New run:   <save-dir>/neuron-cluster/<run-name|datetime>/
-  Resume:    same folder; pass --resume with --checkpoint-run <datetime> or
-             let it auto-detect the most recently modified run folder.
+- ``--mode circuit`` (default): neuron-cluster ablation, pairing, KL + cluster CKA (same as before).
+- ``--mode standard``: pure KL distillation (no circuit checkpoint, ablation, or CKA).
 
-Within each run folder:
-  ablation/<model>/ablation_performance.json  – cached after first run
-  cluster_mapping.json                        – cached after first run
-  student_epoch_N/                            – rolling checkpoint (only latest kept)
-  student_final/                              – saved at end of training
-  training_history.json
-  training_state.pt
-  training_curves.png
+**Resume**: ``--resume`` loads weights from
+``<run>/student_model/``. Use ``--checkpoint-run <datetime>`` or omit to use the most
+recent run under ``neuron-cluster/``.
 
-Usage (from src/)::
+Outputs per run: ``student_model/``, ``training_history.json``, ``training_state.pt``,
+``training_curves.png``. Circuit runs also use ``ablation/``, ``cluster_mapping.json``,
+and global ``neuron-clustering/``.
 
-  # Fresh run
-  python -m neuron_distillation.run \\
-      --dataset 2d_add \\
-      --save-dir "/content/drive/MyDrive/.../results" \\
-      --run-name neuron-run-1 \\
-      --k 7
+Usage (from ``src/``)::
 
-  # Resume from latest epoch checkpoint (auto-detect most recent run)
-  python -m neuron_distillation.run \\
-      --dataset 2d_add \\
-      --save-dir "/content/drive/MyDrive/.../results" \\
-      --resume \\
-      --epochs 20
+  python -m neuron_distillation.run --dataset 2d_add --save-dir /path/to/results --k 7
 
-  # Resume from epoch 10 of a specific run
-  python -m neuron_distillation.run \\
-      --dataset 2d_add \\
-      --save-dir "/content/drive/MyDrive/.../results" \\
-      --resume \\
-      --checkpoint-run "2026-04-07_22-15-56" \\
-      --checkpoint-type 10 \\
-      --epochs 40
+  python -m neuron_distillation.run --mode standard --dataset 2d_add --save-dir /path/to/results
+
+  python -m neuron_distillation.run --resume --dataset 2d_add --save-dir /path/to/results --epochs 20
 """
 
 import argparse
@@ -46,7 +27,6 @@ import json
 import os
 import re
 import sys
-from datetime import datetime
 from typing import Optional
 
 import torch
@@ -56,7 +36,6 @@ from neuron_distillation.distillation import (
     ClusterDistillationConfig,
     ClusterDistillationTrainer,
     ClusterPairInfo,
-    _latest_epoch_checkpoint,
 )
 from neuron_distillation.pairing import (
     _load_single_ablation_performance,
@@ -70,104 +49,10 @@ from utils import (
     load_model,
     load_model_checkpoint,
     load_prompt_answer_json,
+    resolve_distillation_run_dir,
     resolve_train_test_paths,
 )
 
-
-# ---------------------------------------------------------------------------
-# Path helpers (mirror standard_distillation.py)
-# ---------------------------------------------------------------------------
-
-def _most_recent_run(parent_dir: str) -> Optional[str]:
-    """Return the most recently modified subdirectory of parent_dir."""
-    if not os.path.isdir(parent_dir):
-        return None
-    try:
-        entries = os.listdir(parent_dir)
-    except OSError:
-        return None
-    best_mtime, best_path = None, None
-    for name in entries:
-        full = os.path.join(parent_dir, name)
-        if not os.path.isdir(full):
-            continue
-        try:
-            mtime = os.path.getmtime(full)
-            if best_mtime is None or mtime > best_mtime:
-                best_mtime, best_path = mtime, full
-        except OSError:
-            pass
-    return best_path
-
-
-def _resolve_run_dir(args) -> tuple[str, Optional[str], Optional[int]]:
-    """Return (run_dir, student_source, override_epoch).
-
-    New run:  run_dir = <save_dir>/neuron-cluster/<run-name|datetime>/
-    Resume:   --resume flag required.
-              --checkpoint-run accepts just the datetime; neuron-cluster/ is prepended.
-              If --checkpoint-run is omitted the most recently modified folder is used.
-    """
-    nc_dir = os.path.join(args.save_dir, "neuron-cluster")
-
-    if not args.resume:
-        folder = args.run_name or datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        run_dir = os.path.join(nc_dir, folder)
-        return run_dir, None, None
-
-    # ---- Resuming ----
-    if args.checkpoint_run:
-        cr = args.checkpoint_run
-        if not cr.startswith("neuron-cluster/"):
-            cr = f"neuron-cluster/{cr}"
-        run_dir = os.path.join(args.save_dir, cr)
-    else:
-        run_dir = _most_recent_run(nc_dir)
-        if run_dir is None:
-            raise SystemExit(
-                f"No run folders found in {nc_dir}.\n"
-                "Provide --checkpoint-run <datetime> explicitly."
-            )
-        print(f"Auto-detected most recent run: {run_dir}")
-
-    ct = str(args.checkpoint_type).strip().lower()
-
-    if ct == "latest":
-        student_source, override_epoch = _latest_epoch_checkpoint(run_dir)
-        if student_source is None:
-            fallback = os.path.join(run_dir, "student_latest")
-            if os.path.isdir(fallback):
-                print("No student_epoch_N found — falling back to student_latest.")
-                student_source = fallback
-                override_epoch = None
-            else:
-                raise SystemExit(
-                    f"No student_epoch_N or student_latest found in {run_dir}.\n"
-                    "Use --checkpoint-type best or final instead."
-                )
-        else:
-            print(f"Auto-detected latest checkpoint: {student_source} (epoch {override_epoch})")
-    elif ct in ("best", "final"):
-        student_source = os.path.join(run_dir, f"student_{ct}")
-        override_epoch = None
-    else:
-        try:
-            override_epoch = int(ct)
-        except ValueError:
-            raise SystemExit(f"Unknown --checkpoint-type {ct!r}. Use latest, best, final, or an integer.")
-        student_source = os.path.join(run_dir, f"student_epoch_{override_epoch}")
-
-    if not os.path.isdir(student_source):
-        raise SystemExit(
-            f"Checkpoint folder not found: {student_source}\n"
-            "Check --checkpoint-run and --checkpoint-type."
-        )
-    return run_dir, student_source, override_epoch
-
-
-# ---------------------------------------------------------------------------
-# Ablation helpers
-# ---------------------------------------------------------------------------
 
 def _ablation_dir_for_model(run_dir: str, model_name: str) -> str:
     return os.path.join(run_dir, "ablation", *model_name.split("/"))
@@ -190,7 +75,9 @@ def run_ablation_if_needed(
         return ablation_path
     print(f"  Running ablation for {model_name}...")
     _, tokenizer = load_model(model_name)
-    circuit_model, _, _, _ = load_model_checkpoint(checkpoint_path, k_classes=k_classes, lr=1e-3)
+    circuit_model, _, _, _ = load_model_checkpoint(
+        checkpoint_path, k_classes=k_classes, lr=1e-3,
+    )
     circuit_model.eval()
     class_to_problems = classify_problems(circuit_model, tokenizer)
     del circuit_model
@@ -225,7 +112,6 @@ def build_cluster_pairs(
         print(f"  Found cached cluster mapping: {mapping_cache_path}")
         with open(mapping_cache_path, "r") as f:
             raw = json.load(f)
-        # Reconstruct minimal pairs from cached mapping
         pairs = []
         for item in raw:
             sc = item["subclass"]
@@ -326,15 +212,17 @@ def _find_circuit_checkpoint_pt(save_dir: str) -> list[str]:
     return candidates
 
 
-# ---------------------------------------------------------------------------
-# main
-# ---------------------------------------------------------------------------
-
 def main():
     parser = argparse.ArgumentParser(
-        description="Neuron-cluster circuit distillation (end-to-end)",
+        description="Neuron-distillation pipeline (circuit or standard KL)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["circuit", "standard"],
+        default="circuit",
+        help="circuit: ablation + CKA + KL; standard: KL only (same run layout under neuron-cluster/)",
     )
     parser.add_argument("--student-model", type=str, default="meta-llama/Llama-3.2-1B")
     parser.add_argument("--teacher-model", type=str, default="meta-llama/Meta-Llama-3-8B")
@@ -346,14 +234,12 @@ def main():
                         help="Directory containing *_train_80.json (default: repo datasets/)")
     parser.add_argument(
         "--k", type=int, default=None, metavar="INT",
-        help="Clusters per subclass (required for new runs). Inspect k-vs-loss plots.",
+        help="Clusters per subclass (circuit mode only; required for new circuit runs).",
     )
     parser.add_argument("--k-classes", type=int, default=None,
-                        help="Number of latent subclasses (auto-detected from checkpoint if omitted)")
+                        help="Number of latent subclasses (circuit; auto-detected from checkpoint if omitted)")
     parser.add_argument("--checkpoint", type=str, default=None,
-                        help="Path to circuit-discovery checkpoint (.pt). "
-                             "Auto-detected from --save-dir root if omitted.")
-    # Training hyperparams
+                        help="Path to circuit-discovery checkpoint .pt (circuit mode; auto-detected from --save-dir root if omitted)")
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -374,17 +260,45 @@ def main():
     )
     parser.add_argument("--use-projection", action="store_true")
     parser.add_argument(
+        "--step-log-interval",
+        type=int,
+        default=50,
+        help="Print in-epoch metrics every N batches",
+    )
+    parser.add_argument(
+        "--eval-max-new-tokens",
+        type=int,
+        default=None,
+        help=f"Greedy eval during training (default: {EVAL_MAX_NEW_TOKENS})",
+    )
+    parser.add_argument(
         "--save-dir", type=str,
         default=os.path.join(os.path.dirname(__file__), "..", "..", "results", "cluster-distillation"),
-        help="All outputs: neuron-clustering/, ablation/, distillation checkpoints, history, cluster_mapping.json",
+        help="Base directory; runs live under <save-dir>/neuron-cluster/<run-name|timestamp>/",
+    )
+    parser.add_argument(
+        "--run-name",
+        default=None,
+        metavar="NAME",
+        help="Folder name for a new run (default: timestamp).",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from <run>/student_model/; use --checkpoint-run or latest neuron-cluster run",
+    )
+    parser.add_argument(
+        "--checkpoint-run",
+        default=None,
+        metavar="DATETIME",
+        help="Run folder under neuron-cluster/ (datetime). Prepends neuron-cluster/ if needed.",
     )
     parser.add_argument("--skip-ablation", action="store_true",
-                        help="Skip ablation (expects cached ablation_performance.json in run folder)")
+                        help="Circuit: skip ablation (expects cached ablation JSON under run dir)")
     parser.add_argument("--ablation-batch-size", type=int, default=50,
-                        help="Batch size for neuron-cluster ablation")
+                        help="Circuit: batch size for neuron-cluster ablation")
     args = parser.parse_args()
 
-    # ---- Resolve paths ----------------------------------------------------------
     try:
         train_path, test_path, dataset_prefix = resolve_train_test_paths(
             dataset=args.dataset, datasets_dir=args.datasets_dir,
@@ -392,15 +306,24 @@ def main():
     except FileNotFoundError as e:
         raise SystemExit(str(e)) from e
 
-    eval_max_new_tokens = args.eval_max_new_tokens or EVAL_MAX_NEW_TOKENS
+    eval_max_new_tokens = (
+        args.eval_max_new_tokens
+        if args.eval_max_new_tokens is not None
+        else EVAL_MAX_NEW_TOKENS
+    )
     args.save_dir = os.path.abspath(args.save_dir)
 
-    # ---- Resolve run dir + checkpoint (mirrors standard_distillation) -----------
-    run_dir, student_source, override_epoch = _resolve_run_dir(args)
+    run_dir, student_source = resolve_distillation_run_dir(
+        args.save_dir,
+        resume=args.resume,
+        run_name=args.run_name,
+        checkpoint_run=args.checkpoint_run,
+        runs_subdir="neuron-cluster",
+    )
     os.makedirs(run_dir, exist_ok=True)
     is_resume = student_source is not None
 
-    # Paths within run_dir
+    circuit = args.mode == "circuit"
     neuron_clustering_root = os.path.join(args.save_dir, "neuron-clustering")
     student_clusters = os.path.join(neuron_clustering_root, args.student_model, "clusters")
     teacher_clusters = os.path.join(neuron_clustering_root, args.teacher_model, "clusters")
@@ -409,189 +332,169 @@ def main():
     mapping_cache = os.path.join(run_dir, "cluster_mapping.json")
 
     print(f"Run dir: {run_dir}")
+    print(f"  mode: {args.mode}")
 
-    # ---- Step 0: Determine start_epoch + history rewind (when resuming) ---------
-    start_epoch = 0
-    if is_resume:
-        if override_epoch is not None:
-            start_epoch = override_epoch
-            # Rewind history to override_epoch if needed
-            hist_path = os.path.join(run_dir, "training_history.json")
-            if os.path.isfile(hist_path):
-                with open(hist_path, "r") as f:
-                    history = json.load(f)
-                if isinstance(history, dict):
-                    recorded = len(history.get("epoch", []))
-                    if override_epoch < recorded:
-                        print(f"Rewinding history from epoch {recorded} → {override_epoch}")
-                        for key in ("epoch", "kl_loss", "accuracy", "cluster_loss", "mean_cka"):
-                            if key in history:
-                                history[key] = history[key][:override_epoch]
-                        with open(hist_path, "w") as f:
-                            json.dump(history, f, indent=2)
-                            f.flush()
-                            os.fsync(f.fileno())
-                        print(f"  History truncated to {override_epoch} epochs.")
-        else:
-            # Load start_epoch from training_state.pt if present
-            state_path = os.path.join(run_dir, "training_state.pt")
-            if os.path.isfile(state_path):
-                try:
-                    chk = torch.load(state_path, map_location="cpu", weights_only=False)
-                except TypeError:
-                    chk = torch.load(state_path, map_location="cpu")
-                start_epoch = int(chk.get("next_epoch", 0))
+    cluster_pairs: list = []
 
-    # ---- Auto-detect circuit checkpoint ----------------------------------------
-    if not is_resume or args.checkpoint:
-        if args.checkpoint is None:
-            candidates = _find_circuit_checkpoint_pt(args.save_dir)
-            if candidates:
-                args.checkpoint = candidates[0]
-                print(f"Auto-detected circuit checkpoint: {args.checkpoint}")
-            else:
-                print(
-                    "ERROR: No --checkpoint provided and no *.pt file in --save-dir root:\n"
-                    f"  {args.save_dir}"
-                )
-                sys.exit(1)
+    if circuit:
+        if is_resume and args.k_classes is None:
+            pts = _find_circuit_checkpoint_pt(args.save_dir)
+            if pts:
+                ckpt_data = torch.load(pts[0], map_location="cpu")
+                state = _extract_circuit_model_state_dict(ckpt_data, pts[0])
+                if "classifier.classifier.4.weight" in state:
+                    args.k_classes = state["classifier.classifier.4.weight"].shape[0]
+                    print(f"Auto-detected k_classes={args.k_classes} from checkpoint")
+                del ckpt_data
+        if not is_resume or args.checkpoint:
+            if args.checkpoint is None:
+                candidates = _find_circuit_checkpoint_pt(args.save_dir)
+                if candidates:
+                    args.checkpoint = candidates[0]
+                    print(f"Auto-detected circuit checkpoint: {args.checkpoint}")
+                else:
+                    print(
+                        "ERROR: No --checkpoint and no *.pt in --save-dir root:\n"
+                        f"  {args.save_dir}"
+                    )
+                    sys.exit(1)
+            if args.k_classes is None:
+                ckpt_data = torch.load(args.checkpoint, map_location="cpu")
+                state = _extract_circuit_model_state_dict(ckpt_data, args.checkpoint)
+                if "classifier.classifier.4.weight" in state:
+                    args.k_classes = state["classifier.classifier.4.weight"].shape[0]
+                    print(f"Auto-detected k_classes={args.k_classes} from checkpoint")
+                else:
+                    print("ERROR: Could not detect k_classes from checkpoint. Pass --k-classes explicitly.")
+                    sys.exit(1)
+                del ckpt_data
+
         if args.k_classes is None:
-            ckpt_data = torch.load(args.checkpoint, map_location="cpu")
-            state = _extract_circuit_model_state_dict(ckpt_data, args.checkpoint)
-            if "classifier.classifier.4.weight" in state:
-                args.k_classes = state["classifier.classifier.4.weight"].shape[0]
-                print(f"Auto-detected k_classes={args.k_classes} from checkpoint")
-            else:
-                print("ERROR: Could not detect k_classes from checkpoint. Pass --k-classes explicitly.")
-                sys.exit(1)
-            del ckpt_data
+            raise SystemExit(
+                "ERROR: Could not determine k_classes for circuit mode. "
+                "Pass --k-classes or place a circuit-discovery .pt under --save-dir.",
+            )
 
-    if args.k is None and not is_resume:
-        sp = os.path.join(neuron_clustering_root, args.student_model, "plots")
-        tp = os.path.join(neuron_clustering_root, args.teacher_model, "plots")
-        raise SystemExit(
-            "ERROR: --k INT is required (clusters per subclass). "
-            "Inspect k-means loss vs k plots, then pass --k.\n"
-            f"  {sp}\n  {tp}"
-        )
+        if args.k is None and not is_resume:
+            sp = os.path.join(neuron_clustering_root, args.student_model, "plots")
+            tp = os.path.join(neuron_clustering_root, args.teacher_model, "plots")
+            raise SystemExit(
+                "ERROR: --k INT is required for circuit mode (clusters per subclass).\n"
+                f"  {sp}\n  {tp}"
+            )
 
-    # If k/k_classes not provided on resume, try to load from cached mapping
-    if is_resume and args.k is None:
-        if os.path.isfile(mapping_cache):
+        if is_resume and args.k is None and os.path.isfile(mapping_cache):
             with open(mapping_cache) as f:
                 raw = json.load(f)
             if raw:
                 args.k = raw[0].get("k", None) or 7
                 print(f"Inferred k={args.k} from cached mapping")
-        if args.k is None:
-            raise SystemExit("--k is required (could not infer from cache).")
 
-    # ---- Print configuration -----------------------------------------------
-    print("=" * 60)
-    print("Configuration")
-    print("=" * 60)
-    print(f"  run_dir:            {run_dir}")
-    if is_resume:
-        print(f"  Resuming from:      {student_source}")
-        print(f"  start_epoch:        {start_epoch}")
-    print(f"  k_classes:          {args.k_classes}")
-    print(f"  k (clusters):       {args.k}")
-    print(f"  student_clusters:   {student_clusters}")
-    print(f"  teacher_clusters:   {teacher_clusters}")
-    print(f"  dataset (prefix):   {dataset_prefix}")
-    print(f"  train_path:         {train_path}")
-    print(f"  test_path:          {test_path}")
+        if is_resume and args.k is None:
+            raise SystemExit("ERROR: --k is required for circuit resume (could not infer from cache).")
 
-    # ---- Step 1: Ablation ---------------------------------------------------
-    print("\n" + "=" * 60)
-    print("Step 1: Neuron-cluster ablation")
-    print("=" * 60)
-    if args.skip_ablation:
-        student_abl = os.path.join(student_ablation_dir, "ablation_performance.json")
-        teacher_abl = os.path.join(teacher_ablation_dir, "ablation_performance.json")
-        print(f"  --skip-ablation: expecting\n    {student_abl}\n    {teacher_abl}")
-        if not os.path.isfile(student_abl) or not os.path.isfile(teacher_abl):
-            print("ERROR: --skip-ablation but ablation JSON missing.")
+        print("=" * 60)
+        print("Configuration (circuit)")
+        print("=" * 60)
+        print(f"  k_classes:          {args.k_classes}")
+        print(f"  k (clusters):       {args.k}")
+        print(f"  student_clusters:   {student_clusters}")
+        print(f"  teacher_clusters:   {teacher_clusters}")
+        print(f"  dataset (prefix):   {dataset_prefix}")
+        print(f"  train_path:         {train_path}")
+        print(f"  test_path:          {test_path}")
+        print("=" * 60)
+
+        print("\n" + "=" * 60)
+        print("Step 1: Neuron-cluster ablation")
+        print("=" * 60)
+        if args.skip_ablation:
+            student_abl = os.path.join(student_ablation_dir, "ablation_performance.json")
+            teacher_abl = os.path.join(teacher_ablation_dir, "ablation_performance.json")
+            print(f"  --skip-ablation: expecting\n    {student_abl}\n    {teacher_abl}")
+            if not os.path.isfile(student_abl) or not os.path.isfile(teacher_abl):
+                print("ERROR: --skip-ablation but ablation JSON missing.")
+                sys.exit(1)
+        elif args.checkpoint:
+            print(f"\n  Student: {args.student_model}")
+            student_abl = run_ablation_if_needed(
+                args.student_model, args.checkpoint, student_clusters,
+                args.k, args.k_classes, student_ablation_dir,
+                ablation_batch_size=args.ablation_batch_size,
+            )
+            print(f"\n  Teacher: {args.teacher_model}")
+            teacher_abl = run_ablation_if_needed(
+                args.teacher_model, args.checkpoint, teacher_clusters,
+                args.k, args.k_classes, teacher_ablation_dir,
+                ablation_batch_size=args.ablation_batch_size,
+            )
+        else:
+            raise SystemExit("No circuit checkpoint provided. Cannot run ablation.")
+
+        print("\n" + "=" * 60)
+        print("Step 2: Cluster pairing")
+        print("=" * 60)
+        cluster_pairs = build_cluster_pairs(
+            student_ablation_path=student_abl,
+            teacher_ablation_path=teacher_abl,
+            student_clusters_dir=student_clusters,
+            teacher_clusters_dir=teacher_clusters,
+            k=args.k,
+            k_classes=args.k_classes,
+            mapping_cache_path=mapping_cache,
+        )
+        if not cluster_pairs:
+            print("No cluster pairs found. Check ablation results and cluster files.")
             sys.exit(1)
-    elif args.checkpoint:
-        print(f"\n  Student: {args.student_model}")
-        student_abl = run_ablation_if_needed(
-            args.student_model, args.checkpoint, student_clusters,
-            args.k, args.k_classes, student_ablation_dir,
-            ablation_batch_size=args.ablation_batch_size,
-        )
-        print(f"\n  Teacher: {args.teacher_model}")
-        teacher_abl = run_ablation_if_needed(
-            args.teacher_model, args.checkpoint, teacher_clusters,
-            args.k, args.k_classes, teacher_ablation_dir,
-            ablation_batch_size=args.ablation_batch_size,
-        )
     else:
-        raise SystemExit("No circuit checkpoint provided. Cannot run ablation.")
+        print("=" * 60)
+        print("Configuration (standard KL)")
+        print("=" * 60)
+        print(f"  dataset (prefix):   {dataset_prefix}")
+        print(f"  train_path:         {train_path}")
+        print(f"  test_path:          {test_path}")
+        print("=" * 60)
 
-    # ---- Step 2: Cluster pairing -------------------------------------------
     print("\n" + "=" * 60)
-    print("Step 2: Cluster pairing")
-    print("=" * 60)
-    cluster_pairs = build_cluster_pairs(
-        student_ablation_path=student_abl,
-        teacher_ablation_path=teacher_abl,
-        student_clusters_dir=student_clusters,
-        teacher_clusters_dir=teacher_clusters,
-        k=args.k,
-        k_classes=args.k_classes,
-        mapping_cache_path=mapping_cache,
-    )
-    if not cluster_pairs:
-        print("No cluster pairs found. Check ablation results and cluster files.")
-        sys.exit(1)
-
-    # ---- Step 3: Dataset ---------------------------------------------------
-    print("\n" + "=" * 60)
-    print("Step 3: Loading dataset")
+    print("Loading dataset")
     print("=" * 60)
     train_data = load_prompt_answer_json(train_path)
     test_data = load_prompt_answer_json(test_path)
     print(f"  Train: {len(train_data)} examples")
     print(f"  Test:  {len(test_data)} examples")
 
-    # ---- Step 4: Load student (HF or checkpoint) ---------------------------
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     print("\n" + "=" * 60)
-    print("Step 4: Loading models")
+    print("Loading student")
     print("=" * 60)
     if student_source:
-        print(f"Loading student from checkpoint: {student_source!r}")
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-        import torch as _torch
-        tokenizer = AutoTokenizer.from_pretrained(student_source)
-        tokenizer.pad_token = tokenizer.eos_token
-        student = AutoModelForCausalLM.from_pretrained(
-            student_source, dtype=_torch.float32,
-        ).to("cuda" if _torch.cuda.is_available() else "cpu")
+        print(f"  From checkpoint: {student_source!r}")
     else:
-        tokenizer = None
-        student = None
+        print(f"  From Hugging Face: {args.student_model!r}")
+    student, tokenizer = load_model(student_source or args.student_model)
+    student = student.to("cpu").float().to(device)
+    tokenizer.padding_side = "left"
 
-    # ---- Step 5: Distillation training ------------------------------------
     print("\n" + "=" * 60)
-    print("Step 5: Distillation training")
+    print("Distillation training")
     print("=" * 60)
     config = ClusterDistillationConfig(
         teacher_model=args.teacher_model,
         student_model=args.student_model,
+        distillation_mode="standard" if not circuit else "circuit",
         epochs=args.epochs,
         batch_size=args.batch_size,
         step_log_interval=args.step_log_interval,
         learning_rate=args.lr,
         temperature=args.temperature,
+        grad_clip=args.grad_clip,
         lambda_cluster=args.lambda_cluster,
         lambda_proj=args.lambda_proj,
-        use_projection_heads=args.use_projection,
+        use_projection_heads=args.use_projection if circuit else False,
         save_every=args.save_every,
         save_best=args.save_best,
         eval_max_new_tokens=eval_max_new_tokens,
         save_dir=run_dir,
-        start_epoch=start_epoch,
     )
     trainer = ClusterDistillationTrainer(
         config=config,
@@ -600,6 +503,7 @@ def main():
         test_data=test_data,
         tokenizer=tokenizer,
         student=student,
+        resume=is_resume,
     )
     history = trainer.train()
 

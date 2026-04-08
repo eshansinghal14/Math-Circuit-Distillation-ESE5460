@@ -1,16 +1,15 @@
-"""Load a saved standard-KL student checkpoint and score the addition test set.
+"""Load a saved student checkpoint and score the math test set.
 
-Uses the same decoding/eval as standard_distillation.py (left padding, greedy;
-default max_new_tokens matches utils.EVAL_MAX_NEW_TOKENS).
+Uses :func:`utils.evaluate` (left padding, greedy decode; default ``max_new_tokens`` from utils).
 
 Examples:
   cd src
-  python eval_trained_student.py --dataset 2d_add --checkpoint ../results/standard-kl/2026-04-07_22-15-56/student_model
+  python eval_trained_student.py --dataset 2d_add --checkpoint ../results/neuron-cluster/2026-04-07_22-15-56/student_model
 
   # Colab / Drive:
   python eval_trained_student.py \\
     --dataset 2d_add \\
-    --checkpoint "/content/drive/MyDrive/Math Circuit Distillation (ESE 5460)/results/standard-kl/2026-04-07_22-15-56/student_model"
+    --checkpoint "/path/to/results/neuron-cluster/2026-04-07_22-15-56/student_model"
 """
 
 import argparse
@@ -25,8 +24,7 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
-from standard_distillation import evaluate  # noqa: E402
-from utils import EVAL_MAX_NEW_TOKENS, resolve_test_path  # noqa: E402
+from utils import EVAL_MAX_NEW_TOKENS, evaluate, resolve_test_path  # noqa: E402
 
 
 def main():
@@ -34,7 +32,7 @@ def main():
     parser.add_argument(
         "--checkpoint",
         required=True,
-        help="Folder from save_pretrained (e.g. .../standard-kl/<run-datetime>/student_model)",
+        help="Folder from save_pretrained (e.g. .../neuron-cluster/<run-datetime>/student_model)",
     )
     parser.add_argument(
         "--dataset",

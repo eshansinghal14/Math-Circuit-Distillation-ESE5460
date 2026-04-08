@@ -12,7 +12,7 @@ full outputs, this module:
   3. For each paired cluster (discovered via ablation-based importance
      matching), extracts the corresponding neuron subsets and computes
      CKA between student and teacher.
-  4. The total loss matches ``standard_distillation``: masked per-position KL at the first-answer
+  4. The total loss uses masked per-position KL at the first-answer
      logit, plus ``lambda * L_cluster_align`` (CKA). No ``batchmean`` over the full vocab grid.
 
 Pipeline prerequisites (run before this module):
@@ -24,8 +24,6 @@ Pipeline prerequisites (run before this module):
 import json
 import os
 import re
-import shutil
-import subprocess
 from collections import defaultdict
 from dataclasses import dataclass
 from functools import partial
@@ -45,66 +43,15 @@ from neuron_distillation.pairing import (
     _load_single_ablation_performance,
     create_cluster_mapping,
 )
-from utils import EVAL_MAX_NEW_TOKENS, json_to_prompt_answer_dict
-
-STUDENT_MODEL_DIR = "student_model"
-
-
-def _rm_dir(path: str) -> None:
-    """Delete a directory tree via shell rm -rf (reliable on Drive FUSE for large dirs)."""
-    try:
-        result = subprocess.run(["rm", "-rf", path], capture_output=True)
-        if result.returncode != 0:
-            raise OSError(result.stderr.decode().strip())
-    except Exception:
-        try:
-            shutil.rmtree(path)
-        except FileNotFoundError:
-            pass
-
-
-def _training_state_path(save_dir: str) -> str:
-    return os.path.join(save_dir, "training_state.pt")
-
-
-def _save_training_state(save_dir: str, optimizer, next_epoch: int, best_acc: float) -> None:
-    torch.save(
-        {"optimizer": optimizer.state_dict(), "next_epoch": next_epoch, "best_acc": best_acc},
-        _training_state_path(save_dir),
-    )
-
-
-def _load_training_state(path: str, optimizer, map_location) -> Tuple[int, float]:
-    try:
-        chk = torch.load(path, map_location=map_location, weights_only=False)
-    except TypeError:
-        chk = torch.load(path, map_location=map_location)
-    optimizer.load_state_dict(chk["optimizer"])
-    return int(chk["next_epoch"]), float(chk["best_acc"])
-
-
-def _latest_epoch_checkpoint(run_dir: str) -> Tuple[Optional[str], Optional[int]]:
-    """Return (path, N) for the highest-numbered student_epoch_N folder in run_dir."""
-    best_n, best_path = None, None
-    if not os.path.isdir(run_dir):
-        return None, None
-    try:
-        entries = os.listdir(run_dir)
-    except OSError:
-        return None, None
-    for name in entries:
-        if not name.startswith("student_epoch_"):
-            continue
-        full = os.path.join(run_dir, name)
-        if not os.path.isdir(full):
-            continue
-        try:
-            n = int(name[len("student_epoch_"):])
-            if best_n is None or n > best_n:
-                best_n, best_path = n, full
-        except ValueError:
-            pass
-    return best_path, best_n
+from utils import (
+    EVAL_MAX_NEW_TOKENS,
+    STUDENT_MODEL_DIR,
+    json_to_prompt_answer_dict,
+    load_training_state,
+    rm_dir_tree,
+    save_training_state,
+    training_state_path,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +73,8 @@ class ClusterPairInfo:
 class ClusterDistillationConfig:
     teacher_model: str = "meta-llama/Meta-Llama-3-8B"
     student_model: str = "meta-llama/Llama-3.2-1B"
+    # ``circuit``: KL + cluster CKA (hooks). ``standard``: KL only (no hooks / no ablation).
+    distillation_mode: str = "circuit"
 
     epochs: int = 50
     batch_size: int = 32
@@ -140,14 +89,12 @@ class ClusterDistillationConfig:
     use_projection_heads: bool = False
 
     eval_every: int = 1
-    # In-epoch step log every N batches (default matches standard_distillation).
+    # In-epoch step log every N batches.
     step_log_interval: int = 50
     save_every: int = 5
     save_best: bool = False
     eval_max_new_tokens: int = EVAL_MAX_NEW_TOKENS
     save_dir: str = "results/cluster-distillation"
-    # Set by run.py when resuming from a checkpoint
-    start_epoch: int = 0
 
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -469,7 +416,7 @@ class ProjectionHeadBank(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Dataset & collate (aligned with ``standard_distillation``)
+# Dataset & collate (masked KL at first answer token)
 # ---------------------------------------------------------------------------
 
 class AddDataset(Dataset):
@@ -657,8 +604,11 @@ class ClusterDistillationTrainer:
         tokenizer=None,
         student=None,
         teacher=None,
+        resume: bool = False,
     ):
         self.config = config
+        self._resume = resume
+        self._standard = config.distillation_mode == "standard"
         self.cluster_pairs = cluster_pairs
         self.train_data = train_data
         self.test_data = test_data
@@ -671,8 +621,8 @@ class ClusterDistillationTrainer:
             self.tokenizer = AutoTokenizer.from_pretrained(config.student_model)
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # Models — student in float32 on CUDA matches ``standard_distillation`` (train loop
-        # uses .float() for stable KL + gradients). fp16 student + composite loss often goes
+        # Models — student in float32 on CUDA for stable KL + gradients (train loop uses
+        # .float()). fp16 student + composite loss often goes
         # non-finite after the first optimizer step.
         student_dtype = torch.float32
         teacher_dtype = torch.float16 if config.device == "cuda" else torch.float32
@@ -703,7 +653,11 @@ class ClusterDistillationTrainer:
         self.cluster_loss_fn = ClusterAlignmentLoss()
 
         self.proj_heads: Optional[ProjectionHeadBank] = None
-        if config.use_projection_heads and cluster_pairs:
+        if (
+            not self._standard
+            and config.use_projection_heads
+            and cluster_pairs
+        ):
             self.proj_heads = ProjectionHeadBank(cluster_pairs).to(self.device)
 
         # Optimizer
@@ -712,7 +666,7 @@ class ClusterDistillationTrainer:
             params += list(self.proj_heads.parameters())
         self.optimizer = AdamW(params, lr=config.learning_rate)
 
-        # Dataset / loader (same padding + kl_mask as ``standard_distillation``)
+        # Dataset / loader (padding + kl_mask at answer position)
         self.dataset = AddDataset(train_data, self.tokenizer)
         self.loader = DataLoader(
             self.dataset,
@@ -733,10 +687,36 @@ class ClusterDistillationTrainer:
         kl_mask = batch["kl_mask"].to(self.device)
         T = self.config.temperature
 
-        self.teacher_cache.register_hooks(self.teacher, detach=True)
-        self.student_cache.register_hooks(self.student, detach=False)
-
         try:
+            if self._standard:
+                with torch.no_grad():
+                    teacher_logits = self.teacher(
+                        input_ids=input_ids, attention_mask=attention_mask,
+                    ).logits
+                student_logits = self.student(
+                    input_ids=input_ids, attention_mask=attention_mask,
+                ).logits
+                log_p_s = F.log_softmax(student_logits.float() / T, dim=-1)
+                p_t = F.softmax(teacher_logits.float() / T, dim=-1)
+                kl_per_token = F.kl_div(log_p_s, p_t, reduction="none").sum(dim=-1)
+                kl_loss = (
+                    (kl_per_token * kl_mask).sum()
+                    / kl_mask.sum().clamp_min(1.0)
+                    * (T**2)
+                )
+                total = kl_loss
+                metrics = {
+                    "kl_loss": kl_loss.item(),
+                    "cluster_loss": 0.0,
+                    "proj_loss": 0.0,
+                    "total_loss": total.item(),
+                    "mean_cka": 0.0,
+                }
+                return total, metrics
+
+            self.teacher_cache.register_hooks(self.teacher, detach=True)
+            self.student_cache.register_hooks(self.student, detach=False)
+
             with torch.no_grad():
                 teacher_out = self.teacher(input_ids=input_ids, attention_mask=attention_mask)
                 teacher_logits = teacher_out.logits
@@ -748,7 +728,7 @@ class ClusterDistillationTrainer:
             student_logits = student_out.logits
             student_acts = self.student_cache.get_flattened_per_token()
 
-            # Masked KL at first-answer logit only (same as ``standard_distillation``).
+            # Masked KL at first-answer logit only.
             log_p_s = F.log_softmax(student_logits.float() / T, dim=-1)
             p_t = F.softmax(teacher_logits.float() / T, dim=-1)
             kl_per_token = F.kl_div(log_p_s, p_t, reduction="none").sum(dim=-1)
@@ -823,12 +803,15 @@ class ClusterDistillationTrainer:
             n += 1
 
             if step % max(1, self.config.step_log_interval) == 0:
-                print(
-                    f"  step {step:04d} | "
-                    f"KL {metrics['kl_loss']:.4f} | "
-                    f"Cluster {metrics['cluster_loss']:.4f} | "
-                    f"CKA {metrics['mean_cka']:.4f}"
-                )
+                if self._standard:
+                    print(f"  step {step:04d} | KL {metrics['kl_loss']:.4f}")
+                else:
+                    print(
+                        f"  step {step:04d} | "
+                        f"KL {metrics['kl_loss']:.4f} | "
+                        f"Cluster {metrics['cluster_loss']:.4f} | "
+                        f"CKA {metrics['mean_cka']:.4f}"
+                    )
 
         if n == 0:
             print(
@@ -846,13 +829,11 @@ class ClusterDistillationTrainer:
         cfg = self.config
 
         hist_path = os.path.join(cfg.save_dir, "training_history.json")
-        state_path = _training_state_path(cfg.save_dir)
-        start_epoch = cfg.start_epoch
+        state_path = training_state_path(cfg.save_dir)
+        start_epoch = 0
         best_acc = 0.0
-        is_resume = start_epoch > 0
 
-        if is_resume:
-            # Load existing history
+        if self._resume:
             if os.path.isfile(hist_path):
                 with open(hist_path, "r") as f:
                     loaded = json.load(f)
@@ -864,12 +845,24 @@ class ClusterDistillationTrainer:
                     self.history[key] = []
 
             if os.path.isfile(state_path):
-                start_epoch, best_acc = _load_training_state(state_path, self.optimizer, self.device)
-                print(f"Resumed optimizer state (starting at global epoch {start_epoch + 1}, best_acc={best_acc:.4f})")
-            elif cfg.start_epoch > 0:
-                start_epoch = cfg.start_epoch
-                best_acc = max(self.history.get("accuracy", [0.0])) if self.history.get("accuracy") else 0.0
-                print(f"No training_state.pt found — inferred start_epoch={start_epoch} from config (new optimizer).")
+                start_epoch, best_acc = load_training_state(
+                    state_path, self.optimizer, self.device,
+                )
+                print(
+                    f"Resumed optimizer state (starting at global epoch {start_epoch + 1}, "
+                    f"best_acc={best_acc:.4f})"
+                )
+            else:
+                start_epoch = len(self.history.get("epoch", []))
+                best_acc = (
+                    max(self.history["accuracy"])
+                    if self.history.get("accuracy")
+                    else 0.0
+                )
+                print(
+                    f"No training_state.pt in {cfg.save_dir} — warm-starting from student_model "
+                    f"with new optimizer (continuing from epoch {start_epoch + 1})."
+                )
 
             print("Skipping baseline eval (resumed run).")
             student_base = float(self.history.get("student_baseline", 0.0))
@@ -891,20 +884,27 @@ class ClusterDistillationTrainer:
 
         end_epoch = start_epoch + cfg.epochs
         print("=" * 60)
-        print("Neuron-Cluster KL + CKA Distillation")
+        if self._standard:
+            print("Standard KL Distillation (neuron-distillation entry)")
+        else:
+            print("Neuron-Cluster KL + CKA Distillation")
         print(f"  Run dir:          {cfg.save_dir}")
-        if is_resume:
-            print(f"  Epochs:           +{cfg.epochs} this run  (epochs {start_epoch + 1}..{end_epoch}, {end_epoch} total)")
+        if self._resume:
+            print(
+                f"  Epochs:           +{cfg.epochs} this run  "
+                f"(epochs {start_epoch + 1}..{end_epoch}, {end_epoch} total)"
+            )
         else:
             print(f"  Epochs:           {cfg.epochs}")
         print(f"  Batch size:       {cfg.batch_size}")
         print(f"  LR:               {cfg.learning_rate}")
         print(f"  Temperature:      {cfg.temperature}")
         print(f"  eval max_new_tokens: {cfg.eval_max_new_tokens}")
-        print(f"  lambda_cluster:   {cfg.lambda_cluster}")
-        print(f"  lambda_proj:      {cfg.lambda_proj}")
-        print(f"  Cluster pairs:    {len(self.cluster_pairs)}")
-        print(f"  Projection heads: {cfg.use_projection_heads}")
+        if not self._standard:
+            print(f"  lambda_cluster:   {cfg.lambda_cluster}")
+            print(f"  lambda_proj:      {cfg.lambda_proj}")
+            print(f"  Cluster pairs:    {len(self.cluster_pairs)}")
+            print(f"  Projection heads: {cfg.use_projection_heads}")
         print(f"  Save every:       {cfg.save_every}")
         print(f"  Step log interval:{cfg.step_log_interval}")
         print("=" * 60)
@@ -936,20 +936,28 @@ class ClusterDistillationTrainer:
 
             # Per-epoch history save (fsynced) + training state
             self._save_history()
-            _save_training_state(cfg.save_dir, self.optimizer, epoch + 1, best_acc)
+            save_training_state(cfg.save_dir, self.optimizer, epoch + 1, best_acc)
 
             if epoch_metrics:
-                print(
-                    f"Epoch {epoch + 1}/{end_epoch}: "
-                    f"KL={epoch_metrics.get('kl_loss', float('nan')):.4f}, "
-                    f"Cluster={epoch_metrics.get('cluster_loss', float('nan')):.4f}, "
-                    f"CKA={epoch_metrics.get('mean_cka', float('nan')):.4f}, "
-                    f"Acc={acc:.4f}"
-                )
+                if self._standard:
+                    print(
+                        f"Epoch {epoch + 1}/{end_epoch}: "
+                        f"KL={epoch_metrics.get('kl_loss', float('nan')):.4f}, "
+                        f"Acc={acc:.4f}"
+                    )
+                else:
+                    print(
+                        f"Epoch {epoch + 1}/{end_epoch}: "
+                        f"KL={epoch_metrics.get('kl_loss', float('nan')):.4f}, "
+                        f"Cluster={epoch_metrics.get('cluster_loss', float('nan')):.4f}, "
+                        f"CKA={epoch_metrics.get('mean_cka', float('nan')):.4f}, "
+                        f"Acc={acc:.4f}"
+                    )
             else:
+                tag = "KL=n/a" if self._standard else "KL/Cluster/CKA=n/a"
                 print(
                     f"Epoch {epoch + 1}/{end_epoch}: "
-                    f"KL/Cluster/CKA=n/a (no valid steps), Acc={acc:.4f}"
+                    f"{tag} (no valid steps), Acc={acc:.4f}"
                 )
 
         # Write history and curves BEFORE slow checkpoint save
@@ -980,30 +988,42 @@ class ClusterDistillationTrainer:
         if not epochs:
             return
 
-        fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-
-        axes[0].plot(epochs, history.get("kl_loss", []), marker="o", markersize=3, linewidth=1.5)
-        axes[0].set_title("KL Loss")
-        axes[0].set_xlabel("Epoch")
-        axes[0].set_ylabel("KL Loss")
-        axes[0].grid(True, alpha=0.3)
-
-        axes[1].plot(epochs, history.get("cluster_loss", []), marker="o", markersize=3,
-                     linewidth=1.5, color="tab:green")
-        axes[1].set_title("Cluster CKA Loss")
-        axes[1].set_xlabel("Epoch")
-        axes[1].set_ylabel("Cluster Loss")
-        axes[1].grid(True, alpha=0.3)
-
-        axes[2].plot(epochs, history.get("accuracy", []), marker="o", markersize=3,
-                     linewidth=1.5, color="tab:orange")
-        axes[2].set_title("Test Accuracy")
-        axes[2].set_xlabel("Epoch")
-        axes[2].set_ylabel("Accuracy")
-        axes[2].set_ylim(0, 1)
-        axes[2].grid(True, alpha=0.3)
-
-        fig.suptitle("Neuron-Cluster KL + CKA Distillation", fontsize=13)
+        if self._standard:
+            fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+            axes[0].plot(epochs, history.get("kl_loss", []), marker="o", markersize=3, linewidth=1.5)
+            axes[0].set_title("KL Loss")
+            axes[0].set_xlabel("Epoch")
+            axes[0].set_ylabel("KL Loss")
+            axes[0].grid(True, alpha=0.3)
+            axes[1].plot(epochs, history.get("accuracy", []), marker="o", markersize=3,
+                         linewidth=1.5, color="tab:orange")
+            axes[1].set_title("Test Accuracy")
+            axes[1].set_xlabel("Epoch")
+            axes[1].set_ylabel("Accuracy")
+            axes[1].set_ylim(0, 1)
+            axes[1].grid(True, alpha=0.3)
+            fig.suptitle("Standard KL Distillation", fontsize=13)
+        else:
+            fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+            axes[0].plot(epochs, history.get("kl_loss", []), marker="o", markersize=3, linewidth=1.5)
+            axes[0].set_title("KL Loss")
+            axes[0].set_xlabel("Epoch")
+            axes[0].set_ylabel("KL Loss")
+            axes[0].grid(True, alpha=0.3)
+            axes[1].plot(epochs, history.get("cluster_loss", []), marker="o", markersize=3,
+                         linewidth=1.5, color="tab:green")
+            axes[1].set_title("Cluster CKA Loss")
+            axes[1].set_xlabel("Epoch")
+            axes[1].set_ylabel("Cluster Loss")
+            axes[1].grid(True, alpha=0.3)
+            axes[2].plot(epochs, history.get("accuracy", []), marker="o", markersize=3,
+                         linewidth=1.5, color="tab:orange")
+            axes[2].set_title("Test Accuracy")
+            axes[2].set_xlabel("Epoch")
+            axes[2].set_ylabel("Accuracy")
+            axes[2].set_ylim(0, 1)
+            axes[2].grid(True, alpha=0.3)
+            fig.suptitle("Neuron-Cluster KL + CKA Distillation", fontsize=13)
         fig.tight_layout()
 
         os.makedirs(self.config.save_dir, exist_ok=True)
@@ -1015,7 +1035,7 @@ class ClusterDistillationTrainer:
     def _save_checkpoint(self) -> None:
         """Overwrite ``save_dir/student_model/`` with current student + tokenizer."""
         path = os.path.join(self.config.save_dir, STUDENT_MODEL_DIR)
-        _rm_dir(path)
+        rm_dir_tree(path)
         os.makedirs(path, exist_ok=True)
         self.student.save_pretrained(path)
         self.tokenizer.save_pretrained(path)

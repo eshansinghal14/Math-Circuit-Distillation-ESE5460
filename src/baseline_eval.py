@@ -28,8 +28,7 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
-from standard_distillation import evaluate  # noqa: E402
-from utils import EVAL_MAX_NEW_TOKENS, load_model, resolve_test_path  # noqa: E402
+from utils import EVAL_MAX_NEW_TOKENS, evaluate, load_model, resolve_test_path  # noqa: E402
 
 _DEFAULT_MODELS = (
     "meta-llama/Llama-3.2-1B",

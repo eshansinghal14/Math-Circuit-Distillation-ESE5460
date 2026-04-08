@@ -3,7 +3,10 @@ import json
 import re
 import os
 import glob
+import shutil
+import subprocess
 import torch
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 try:
@@ -21,6 +24,133 @@ logged_in = False
 
 # Prompts end with "=" and all 2-3 digit answers (20-198) are single tokens in Llama-3 BPE.
 EVAL_MAX_NEW_TOKENS = 1
+
+# --- Distillation run dirs / checkpoints (used by ``neuron_distillation``) ------------
+STUDENT_MODEL_DIR = "student_model"
+
+
+def rm_dir_tree(path: str) -> None:
+    """Delete a directory tree (shell ``rm -rf`` on Unix, :func:`shutil.rmtree` fallback)."""
+    try:
+        result = subprocess.run(["rm", "-rf", path], capture_output=True)
+        if result.returncode != 0:
+            raise OSError(result.stderr.decode().strip())
+    except Exception:
+        try:
+            shutil.rmtree(path)
+        except FileNotFoundError:
+            pass
+
+
+def training_state_path(save_dir: str) -> str:
+    return os.path.join(save_dir, "training_state.pt")
+
+
+def save_training_state(
+    save_dir: str,
+    optimizer: torch.optim.Optimizer,
+    next_epoch: int,
+    best_acc: float,
+) -> None:
+    """``next_epoch`` = number of epochs already completed (resume starts at this index)."""
+    path = training_state_path(save_dir)
+    torch.save(
+        {
+            "optimizer": optimizer.state_dict(),
+            "next_epoch": next_epoch,
+            "best_acc": best_acc,
+        },
+        path,
+    )
+
+
+def load_training_state(
+    path: str, optimizer: torch.optim.Optimizer, map_location,
+) -> Tuple[int, float]:
+    try:
+        chk = torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        chk = torch.load(path, map_location=map_location)
+    optimizer.load_state_dict(chk["optimizer"])
+    return int(chk["next_epoch"]), float(chk["best_acc"])
+
+
+def save_student_checkpoint(model, tokenizer, run_dir: str) -> None:
+    """Write student + tokenizer under ``run_dir/student_model/`` (replaces previous save)."""
+    path = os.path.join(run_dir, STUDENT_MODEL_DIR)
+    rm_dir_tree(path)
+    os.makedirs(path, exist_ok=True)
+    model.save_pretrained(path)
+    tokenizer.save_pretrained(path)
+
+
+def most_recent_subdirectory(parent_dir: str) -> Optional[str]:
+    """Most recently modified immediate subdirectory of ``parent_dir``."""
+    if not os.path.isdir(parent_dir):
+        return None
+    try:
+        entries = os.listdir(parent_dir)
+    except OSError:
+        return None
+    best_mtime, best_path = None, None
+    for name in entries:
+        full = os.path.join(parent_dir, name)
+        if not os.path.isdir(full):
+            continue
+        try:
+            mtime = os.path.getmtime(full)
+            if best_mtime is None or mtime > best_mtime:
+                best_mtime, best_path = mtime, full
+        except OSError:
+            pass
+    return best_path
+
+
+def resolve_distillation_run_dir(
+    save_dir: str,
+    *,
+    resume: bool,
+    run_name: Optional[str],
+    checkpoint_run: Optional[str],
+    runs_subdir: str,
+) -> Tuple[str, Optional[str]]:
+    """Return ``(run_dir, student_source)``.
+
+    New run: ``<save_dir>/<runs_subdir>/<run-name|timestamp>/``, ``student_source`` is None.
+
+    Resume: load weights from ``<run_dir>/student_model/``. Pass ``checkpoint_run`` as the
+    datetime folder name, or None to use the most recently modified folder under ``runs_subdir``.
+    """
+    save_dir = os.path.abspath(save_dir)
+    base = os.path.join(save_dir, runs_subdir)
+
+    if not resume:
+        folder = run_name or datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        run_dir = os.path.join(base, folder)
+        return run_dir, None
+
+    if checkpoint_run:
+        cr = checkpoint_run
+        if not cr.startswith(f"{runs_subdir}/"):
+            cr = f"{runs_subdir}/{cr}"
+        run_dir = os.path.join(save_dir, cr)
+    else:
+        run_dir = most_recent_subdirectory(base)
+        if run_dir is None:
+            raise SystemExit(
+                f"No run folders found in {base}.\n"
+                "Provide --checkpoint-run <datetime> explicitly."
+            )
+        print(f"Auto-detected most recent run: {run_dir}")
+
+    student_source = os.path.join(run_dir, STUDENT_MODEL_DIR)
+    if not os.path.isdir(student_source):
+        raise SystemExit(
+            f"Resume expected saved weights at {student_source}. "
+            "Train a run first (or place a save_pretrained tree there)."
+        )
+    print(f"Loading student from {student_source}")
+    return run_dir, student_source
 
 
 def json_to_prompt_answer_dict(raw: object) -> Dict[str, int]:
@@ -52,6 +182,66 @@ def load_prompt_answer_json(path: str) -> Dict[str, int]:
     """Load train/test JSON from disk into ``{prompt: int answer}``."""
     with open(path, "r", encoding="utf-8") as f:
         return json_to_prompt_answer_dict(json.load(f))
+
+
+def _extract_int_after_equals(text: str) -> Optional[int]:
+    m = re.search(r"=\s*(\d+)", text)
+    return int(m.group(1)) if m else None
+
+
+@torch.no_grad()
+def evaluate(
+    model,
+    tokenizer,
+    test_path: str,
+    batch_size: int = 32,
+    max_new_tokens: Optional[int] = None,
+    debug_decode: int = 0,
+    debug_tag: Optional[str] = None,
+) -> float:
+    """Greedy generation accuracy on a math test JSON (left padding; int after ``=``)."""
+    if max_new_tokens is None:
+        max_new_tokens = EVAL_MAX_NEW_TOKENS
+    with open(test_path, "r", encoding="utf-8") as f:
+        data = json_to_prompt_answer_dict(json.load(f))
+    prompts = list(data.keys())
+    answers = list(data.values())
+
+    model.eval()
+    correct = total = 0
+    original_side = tokenizer.padding_side
+    tokenizer.padding_side = "left"
+
+    for i in range(0, len(prompts), batch_size):
+        batch_p = prompts[i : i + batch_size]
+        batch_a = answers[i : i + batch_size]
+        inputs = tokenizer(batch_p, return_tensors="pt", padding=True).to(model.device)
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            pad_token_id=tokenizer.eos_token_id,
+        )
+        decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+        if debug_decode > 0 and i == 0:
+            n = min(debug_decode, len(decoded))
+            tag = f" [{debug_tag}]" if debug_tag else ""
+            print(f"--- decode debug{tag} (first batch, max_new_tokens={max_new_tokens}) ---")
+            for j in range(n):
+                text = decoded[j]
+                gold = batch_a[j]
+                pred = _extract_int_after_equals(text)
+                print(f"  gold={gold}  pred={pred}  decoded={text!r}")
+            print("---")
+
+        for text, gold in zip(decoded, batch_a):
+            pred = _extract_int_after_equals(text)
+            if pred == gold:
+                correct += 1
+            total += 1
+
+    tokenizer.padding_side = original_side
+    return correct / max(total, 1)
 
 
 # --- Dataset file naming: ``{prefix}_train_80.json``, ``{prefix}_test_20.json``, ``{prefix}_all.json`` ---
