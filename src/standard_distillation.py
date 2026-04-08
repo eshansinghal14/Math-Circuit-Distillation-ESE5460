@@ -3,28 +3,22 @@
 KL is applied at the causal position that predicts the first answer token.
 Paper target: 63.6% accuracy on 2-digit addition.
 
-New runs:  results go to  <save-dir>/standard-kl/<run-name|datetime>/
-Resume:    add ``--resume``; weights load from ``<run>/student_model/``. Give
-           ``--checkpoint-run`` (datetime folder) or omit it to use the most recently
-           modified run under ``standard-kl/``. Optimizer state is in ``training_state.pt``.
+New runs:  results go directly to ``<save-dir>/standard-kl/`` (no timestamp subfolder).
+Resume:    ``--resume`` loads ``standard-kl/student_model/`` (or ``student_weights.pt``).
+           Use ``--checkpoint-run`` only for a legacy nested path; otherwise omit if
+           checkpoints are in ``standard-kl/``. Optimizer state is in ``training_state.pt``.
 
 Examples (from src/)::
 
   # Dataset prefix (see ``utils``): 2d_add -> datasets/2d_add_train_80.json and _test_20.json
   # --dataset is required.
 
-  # Fresh run, auto-dated folder
+  # Fresh run
   python standard_distillation.py \\
     --dataset 2d_add \\
     --save-dir "/content/drive/MyDrive/Math Circuit Distillation (ESE 5460)/results"
 
-  # Fresh run with a custom folder name
-  python standard_distillation.py \\
-    --dataset 2d_add \\
-    --save-dir "/content/drive/MyDrive/Math Circuit Distillation (ESE 5460)/results" \\
-    --run-name my_run
-
-  # Resume a specific run (loads student_model/ + training_state.pt when present)
+  # Resume a legacy nested run (loads student_model/ + training_state.pt when present)
   python standard_distillation.py \\
     --dataset 2d_add \\
     --save-dir "/content/drive/MyDrive/Math Circuit Distillation (ESE 5460)/results" \\
@@ -32,7 +26,7 @@ Examples (from src/)::
     --checkpoint-run "2026-04-07_22-15-56" \\
     --epochs 45
 
-  # Resume from most recently modified run
+  # Resume when checkpoints live in standard-kl directly
   python standard_distillation.py \\
     --dataset 2d_add \\
     --save-dir "/content/drive/MyDrive/Math Circuit Distillation (ESE 5460)/results" \\
@@ -228,7 +222,6 @@ def _resolve_run_dir(args) -> tuple[str, Optional[str]]:
     return resolve_distillation_run_dir(
         args.save_dir,
         resume=args.resume,
-        run_name=args.run_name,
         checkpoint_run=args.checkpoint_run,
         runs_subdir="standard-kl",
     )
@@ -498,15 +491,9 @@ def main():
         default=default_base,
         metavar="DIR",
         help=(
-            "Base results directory. New runs create standard-kl/<run-name|datetime>/ inside it. "
+            "Base results directory; outputs go directly under standard-kl/ inside it. "
             f"Default: {default_base}"
         ),
-    )
-    parser.add_argument(
-        "--run-name",
-        default=None,
-        metavar="NAME",
-        help="Custom folder name for a new run (default: YYYY-MM-DD_HH-MM-SS timestamp).",
     )
     parser.add_argument(
         "--resume",

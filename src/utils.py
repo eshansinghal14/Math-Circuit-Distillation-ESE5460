@@ -6,7 +6,6 @@ import glob
 import shutil
 import subprocess
 import torch
-from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 try:
@@ -120,28 +119,28 @@ def resolve_distillation_run_dir(
     save_dir: str,
     *,
     resume: bool,
-    run_name: Optional[str],
     checkpoint_run: Optional[str],
     runs_subdir: Optional[str] = None,
 ) -> Tuple[str, Optional[str]]:
     """Return ``(run_dir, student_source)``.
 
-    If ``runs_subdir`` is None or empty, new runs use ``<save_dir>/<run-name|timestamp>/``.
-    Otherwise ``<save_dir>/<runs_subdir>/<run-name|timestamp>/``. ``student_source`` is None
-    for a fresh run.
+    All training outputs go **directly** under ``<save_dir>`` (or ``<save_dir>/<runs_subdir>``
+    if set). There is no timestamp or extra run subfolder.
 
-    Resume: load weights from ``<run_dir>/student_model/``. Pass ``checkpoint_run`` as the
-    run folder (optionally including ``runs_subdir/``), or None to use the most recently
-    modified folder under the runs base directory.
+    New run: ``run_dir`` is that directory; ``student_source`` is None.
+
+    Resume: load from ``<run_dir>/student_model/`` or ``<run_dir>/student_weights.pt``.
+    Pass ``checkpoint_run`` as a path relative to ``save_dir`` to resume a **legacy** nested
+    run (e.g. ``2026-04-07_22-15-56`` or ``neuron-cluster/2026-04-07_22-15-56``). If omitted,
+    uses ``save_dir`` (or the ``runs_subdir`` base) when checkpoints exist there; otherwise
+    picks the most recently modified subfolder under that base (legacy multi-run layouts).
     """
     save_dir = os.path.abspath(save_dir)
     sub = (runs_subdir or "").strip().strip("/").strip("\\")
     base = os.path.join(save_dir, sub) if sub else save_dir
 
     if not resume:
-        folder = run_name or datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        run_dir = os.path.join(base, folder)
-        return run_dir, None
+        return base, None
 
     if checkpoint_run:
         cr = checkpoint_run.replace("\\", "/").strip("/")
@@ -149,13 +148,18 @@ def resolve_distillation_run_dir(
             cr = f"{sub}/{cr}"
         run_dir = os.path.join(save_dir, cr)
     else:
-        run_dir = most_recent_subdirectory(base)
-        if run_dir is None:
-            raise SystemExit(
-                f"No run folders found in {base}.\n"
-                "Provide --checkpoint-run <datetime> explicitly."
-            )
-        print(f"Auto-detected most recent run: {run_dir}")
+        hf_here = os.path.join(base, STUDENT_MODEL_DIR)
+        wt_here = os.path.join(base, STUDENT_WEIGHTS_FILE)
+        if os.path.isdir(hf_here) or os.path.isfile(wt_here):
+            run_dir = base
+        else:
+            run_dir = most_recent_subdirectory(base)
+            if run_dir is None:
+                raise SystemExit(
+                    f"No checkpoints in {base} and no run subfolders.\n"
+                    "Train here first or pass --checkpoint-run <path under --save-dir>."
+                )
+            print(f"Auto-detected most recent run folder: {run_dir}")
 
     hf_path = os.path.join(run_dir, STUDENT_MODEL_DIR)
     wt_path = os.path.join(run_dir, STUDENT_WEIGHTS_FILE)

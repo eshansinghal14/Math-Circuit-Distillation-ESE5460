@@ -1,13 +1,13 @@
-"""Single entry-point for KL distillation under ``<save-dir>/<run-name|timestamp>/``.
+"""Single entry-point for KL distillation; all outputs go **directly** under ``--save-dir``.
 
 **Modes**
 
 - ``--mode circuit`` (default): neuron-cluster ablation, pairing, KL + cluster CKA (same as before).
 - ``--mode standard``: pure KL distillation (no circuit checkpoint, ablation, or CKA).
 
-**Resume**: ``--resume`` loads weights from
-``<run>/student_model/``. Use ``--checkpoint-run <datetime>`` or omit to use the most
-recent run folder directly under ``--save-dir``.
+**Resume**: ``--resume`` loads weights from ``<save-dir>/student_model/`` (or
+``student_weights.pt``). Use ``--checkpoint-run <path>`` only for a legacy nested run folder;
+otherwise omit if checkpoints live in ``--save-dir``.
 
 Outputs per run: ``student_model/``, ``training_history.json``, ``training_state.pt``,
 ``training_curves.png``. Circuit runs also use ``ablation/``, ``cluster_mapping.json``,
@@ -274,24 +274,18 @@ def main():
     parser.add_argument(
         "--save-dir", type=str,
         default=os.path.join(os.path.dirname(__file__), "..", "..", "results", "cluster-distillation"),
-        help="Base directory; each run is <save-dir>/<run-name|timestamp>/",
-    )
-    parser.add_argument(
-        "--run-name",
-        default=None,
-        metavar="NAME",
-        help="Folder name for a new run (default: timestamp).",
+        help="Directory for ablation/, student_model/, training_history.json, training_state.pt, etc.",
     )
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="Resume from <run>/student_model/; use --checkpoint-run or latest run under --save-dir",
+        help="Resume from save-dir/student_model/ (or student_weights.pt); --checkpoint-run for nested legacy path",
     )
     parser.add_argument(
         "--checkpoint-run",
         default=None,
-        metavar="DATETIME",
-        help="Run folder name or path under --save-dir (e.g. datetime). For legacy layouts, pass neuron-cluster/<run> if needed.",
+        metavar="PATH",
+        help="Optional path under --save-dir for an older nested run (e.g. timestamp subfolder).",
     )
     parser.add_argument("--skip-ablation", action="store_true",
                         help="Circuit: skip ablation (expects cached ablation JSON under run dir)")
@@ -316,7 +310,6 @@ def main():
     run_dir, student_source = resolve_distillation_run_dir(
         args.save_dir,
         resume=args.resume,
-        run_name=args.run_name,
         checkpoint_run=args.checkpoint_run,
     )
     os.makedirs(run_dir, exist_ok=True)
