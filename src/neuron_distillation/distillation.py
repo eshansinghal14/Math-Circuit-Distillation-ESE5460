@@ -39,6 +39,24 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 try:
     from torch.utils.flop_counter import FlopCounterMode
+    import torch.utils.flop_counter as _flop_counter_mod
+
+    def _gqa_sdpa_flop_count(query_shape, key_shape, value_shape, **kwargs):
+        """GQA-aware replacement for sdpa_flop_count.
+
+        PyTorch's built-in asserts q_heads == kv_heads, which breaks on models
+        using grouped-query attention (e.g. Llama-3-8B: 32 Q heads, 8 KV heads).
+        We use q_heads for the FLOP formula since KV is broadcast to match Q.
+        """
+        b, h_q, s_q, d_q = query_shape
+        _b, _h_kv, s_kv, d_k = key_shape
+        _b2, _h_kv2, _s_kv, d_v = value_shape
+        # QK^T: 2 * b * h_q * s_q * s_kv * d_q
+        # softmax(QK^T) @ V: 2 * b * h_q * s_q * d_v * s_kv
+        return 2 * b * h_q * s_q * s_kv * (d_q + d_v)
+
+    _flop_counter_mod.sdpa_flop_count = _gqa_sdpa_flop_count
+
 except ImportError:
     FlopCounterMode = None  # type: ignore[misc, assignment]
 
