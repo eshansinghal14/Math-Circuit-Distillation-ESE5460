@@ -4,7 +4,7 @@ Same protocol as training logs: left padding, greedy decode, integer after ``=``
 
 From ``src/``::
 
-  # Default: Llama-3.2-1B and Meta-Llama-3-8B (HF); pass --dataset (or get prompted)
+  # Default: Llama-3.2-1B and Meta-Llama-3-8B (HF); --dataset is required
   python baseline_eval.py --dataset 2d_add
 
   # Local save_pretrained folder
@@ -52,7 +52,7 @@ def main() -> None:
         "--dataset",
         default=None,
         metavar="PREFIX",
-        help="e.g. 2d_add → <PREFIX>_test_20.json (prompted if omitted)",
+        help="e.g. 2d_add -> <PREFIX>_test_20.json (required)",
     )
     parser.add_argument(
         "--datasets-dir",

@@ -5,8 +5,8 @@ Runs the full pipeline:  layer ablation -> layer pairing -> distillation trainin
 Usage (from src/):
   python -m ffn_distillation.run --dataset 2d_add --save-dir /path/to/results/ffn-layer
 
-``--dataset PREFIX`` resolves train/test and ``<PREFIX>_all.json`` for ablation (see ``utils``).
-Omit ``--dataset`` to be prompted (interactive TTY), or set ``--ablation-dataset`` to override the ``*_all.json`` path.
+``--dataset PREFIX`` is required: it resolves train/test JSON and, unless ``--ablation-dataset`` is set,
+``<PREFIX>_all.json`` for ablation (see ``utils``). ``--ablation-dataset`` overrides only the ``*_all.json`` path.
 """
 
 import argparse
@@ -37,7 +37,7 @@ def main():
         "--dataset",
         default=None,
         metavar="PREFIX",
-        help="e.g. 2d_add → train/test JSON and <PREFIX>_all.json for ablation (prompted if omitted)",
+        help="e.g. 2d_add -> train/test JSON and <PREFIX>_all.json for ablation (required)",
     )
     parser.add_argument(
         "--datasets-dir",

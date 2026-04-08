@@ -40,7 +40,7 @@ def main():
         "--dataset",
         default=None,
         metavar="PREFIX",
-        help="e.g. 2d_add → datasets/<PREFIX>_test_20.json (prompted if omitted)",
+        help="e.g. 2d_add -> datasets/<PREFIX>_test_20.json (required)",
     )
     parser.add_argument(
         "--datasets-dir",

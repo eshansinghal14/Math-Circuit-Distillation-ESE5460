@@ -2,7 +2,6 @@ import random
 import json
 import re
 import os
-import sys
 import glob
 import torch
 from typing import Dict, List, Optional, Tuple
@@ -96,28 +95,20 @@ def list_dataset_prefixes(datasets_dir: Optional[str] = None) -> List[str]:
     return sorted(set(out))
 
 
-def prompt_dataset_prefix(datasets_dir: Optional[str] = None) -> str:
-    """Interactive prompt when ``--dataset`` is omitted (requires a TTY)."""
+def require_dataset_prefix(
+    dataset: Optional[str],
+    datasets_dir: Optional[str],
+) -> str:
+    """Return stripped ``--dataset`` PREFIX or exit with an error (no interactive prompt)."""
+    prefix = (dataset or "").strip()
+    if prefix:
+        return prefix
     d = os.path.abspath(datasets_dir) if datasets_dir else default_datasets_dir()
-    if not os.path.isdir(d):
-        raise FileNotFoundError(f"Datasets directory not found: {d}")
-    if not sys.stdin.isatty():
-        raise SystemExit(
-            "No dataset specified. Pass --dataset PREFIX (e.g. 2d_add). "
-            f"Expected files: <prefix>{DATASET_TRAIN_SUFFIX}.json and <prefix>{DATASET_TEST_SUFFIX}.json under {d}."
-        )
-    choices = list_dataset_prefixes(d)
-    print(f"Datasets directory: {d}")
-    if choices:
-        print("Available prefixes (from existing *_train_80.json files):")
-        for c in choices:
-            print(f"  {c}")
-    else:
-        print("No *_train_80.json files found in that directory; enter a prefix anyway (e.g. 2d_add).")
-    prefix = input("Enter dataset prefix: ").strip()
-    if not prefix:
-        raise SystemExit("Empty dataset prefix.")
-    return prefix
+    raise SystemExit(
+        "ERROR: --dataset PREFIX is required. "
+        f"Example: --dataset 2d_add for <PREFIX>{DATASET_TRAIN_SUFFIX}.json and "
+        f"<PREFIX>{DATASET_TEST_SUFFIX}.json under {d}."
+    )
 
 
 def resolve_train_test_paths(
@@ -125,13 +116,13 @@ def resolve_train_test_paths(
     dataset: Optional[str],
     datasets_dir: Optional[str],
 ) -> Tuple[str, str, str]:
-    """Resolve train/test JSON paths from ``--dataset PREFIX`` (or interactive prompt).
+    """Resolve train/test JSON paths from ``--dataset PREFIX``.
 
     Returns:
         ``(train_path, test_path, prefix)`` with absolute paths.
     """
+    prefix = require_dataset_prefix(dataset, datasets_dir)
     d = os.path.abspath(datasets_dir) if datasets_dir else default_datasets_dir()
-    prefix = (dataset or "").strip() or prompt_dataset_prefix(d)
     train = dataset_train_json_path(prefix, d)
     test = dataset_test_json_path(prefix, d)
     for label, p in (("train", train), ("test", test)):
@@ -148,8 +139,8 @@ def resolve_test_path(
     datasets_dir: Optional[str],
 ) -> Tuple[str, str]:
     """Resolve test JSON for eval-only scripts. Returns ``(test_path, prefix)``."""
+    prefix = require_dataset_prefix(dataset, datasets_dir)
     d = os.path.abspath(datasets_dir) if datasets_dir else default_datasets_dir()
-    prefix = (dataset or "").strip() or prompt_dataset_prefix(d)
     p = dataset_test_json_path(prefix, d)
     if not os.path.isfile(p):
         raise FileNotFoundError(f"Test file not found for prefix {prefix!r}: {p}")
@@ -166,8 +157,14 @@ def resolve_ablation_all_path(
     """Full ``*_all.json`` for ablation: ``--ablation-dataset`` path, or ``{prefix}_all.json``."""
     if ablation_path:
         return os.path.abspath(ablation_path)
+    pre = (prefix or "").strip() or (dataset or "").strip()
+    if not pre:
+        d = os.path.abspath(datasets_dir) if datasets_dir else default_datasets_dir()
+        raise SystemExit(
+            "ERROR: --dataset PREFIX or --ablation-dataset PATH is required. "
+            f"For the default ablation file, pass --dataset PREFIX (expects <PREFIX>_all.json under {d})."
+        )
     d = os.path.abspath(datasets_dir) if datasets_dir else default_datasets_dir()
-    pre = (prefix or "").strip() or (dataset or "").strip() or prompt_dataset_prefix(d)
     p = dataset_all_json_path(pre, d)
     if not os.path.isfile(p):
         raise FileNotFoundError(

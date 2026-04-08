@@ -11,7 +11,7 @@ Resume:    add --resume; give just the datetime in --checkpoint-run (standard-kl
 Examples (from src/)::
 
   # Dataset prefix (see ``utils``): 2d_add -> datasets/2d_add_train_80.json and _test_20.json
-  # Omit --dataset to be prompted (interactive TTY).
+  # --dataset is required.
 
   # Fresh run, auto-dated folder
   python standard_distillation.py \\
@@ -621,7 +621,7 @@ def main():
         "--dataset",
         default=None,
         metavar="PREFIX",
-        help="e.g. 2d_add → datasets/<PREFIX>_train_80.json and _test_20.json (prompted if omitted)",
+        help="e.g. 2d_add -> datasets/<PREFIX>_train_80.json and _test_20.json (required)",
     )
     parser.add_argument(
         "--datasets-dir",

@@ -14,8 +14,8 @@ Ablation outputs (``ablation_performance.json`` and related) are written under::
 Distillation checkpoints and training history use ``--save-dir`` directly.
 
 Training/eval JSON paths come from ``--dataset PREFIX`` (e.g. ``2d_add`` →
-``datasets/2d_add_train_80.json`` and ``2d_add_test_20.json``). If ``--dataset``
-is omitted, you are prompted (interactive TTY only).
+``datasets/2d_add_train_80.json`` and ``2d_add_test_20.json``). ``--dataset`` and
+``--k`` are required (no prompts).
 
 Usage (from src/)::
 
@@ -23,7 +23,9 @@ Usage (from src/)::
 
       --dataset 2d_add \\
 
-      --save-dir "/path/to/results/my-neuron-run"
+      --save-dir "/path/to/results/my-neuron-run" \\
+
+      --k 7
 
   # Optional: explicit checkpoint and k_classes
 
@@ -33,7 +35,11 @@ Usage (from src/)::
 
       --checkpoint /path/to/epoch_4000.pt \\
 
-      --k-classes 2
+      --k-classes 2 \\
+
+      --k 7
+
+  # Choose --k from k-vs-loss plots under save-dir/neuron-clustering/<model>/plots/.
 
 """
 
@@ -212,7 +218,7 @@ def main():
         type=str,
         default=None,
         metavar="PREFIX",
-        help="Dataset family, e.g. 2d_add → <datasets>/<PREFIX>_train_80.json and _test_20.json",
+        help="Dataset family (required), e.g. 2d_add -> <datasets>/<PREFIX>_train_80.json and _test_20.json",
     )
     parser.add_argument(
         "--datasets-dir",
@@ -220,8 +226,14 @@ def main():
         default=None,
         help="Directory containing *_train_80.json (default: repo datasets/)",
     )
-    parser.add_argument("--k", type=int, default=7,
-                        help="Number of clusters per subclass")
+    parser.add_argument(
+        "--k",
+        type=int,
+        default=None,
+        metavar="INT",
+        help="Clusters per subclass (required). Use k vs loss plots under "
+             "<save-dir>/neuron-clustering/<model>/plots/",
+    )
     parser.add_argument("--k-classes", type=int, default=None,
                         help="Number of latent subclasses (auto-detected from checkpoint if omitted)")
     parser.add_argument("--top-k-pairs", type=int, default=5)
@@ -280,6 +292,14 @@ def main():
     save_dir = os.path.abspath(args.save_dir)
     os.makedirs(save_dir, exist_ok=True)
     neuron_clustering_root = os.path.join(save_dir, "neuron-clustering")
+    if args.k is None:
+        sp = os.path.join(neuron_clustering_root, args.student_model, "plots")
+        tp = os.path.join(neuron_clustering_root, args.teacher_model, "plots")
+        raise SystemExit(
+            "ERROR: --k INT is required (clusters per subclass). "
+            "Inspect k-means loss vs k plots (e.g. k_vs_loss_subclass_*.png), then pass --k. "
+            f"Example locations:\n  {sp}\n  {tp}"
+        )
     student_clusters = os.path.join(neuron_clustering_root, args.student_model, "clusters")
     teacher_clusters = os.path.join(neuron_clustering_root, args.teacher_model, "clusters")
     student_ablation_dir = _ablation_dir_for_model(save_dir, args.student_model)
