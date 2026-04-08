@@ -952,4 +952,3 @@ class ClusterDistillationTrainer:
             json.dump(dict(self.history), f, indent=2)
             f.flush()
             os.fsync(f.fileno())
-        print(f"  Saved training history to {path}")
