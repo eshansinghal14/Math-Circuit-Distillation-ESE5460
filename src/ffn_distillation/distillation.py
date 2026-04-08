@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 from collections import defaultdict
 from dataclasses import dataclass
 from functools import partial
@@ -30,6 +31,19 @@ from torch.optim import AdamW
 from cka_loss import CKALoss
 from ffn_distillation.layer_pairing import LayerPairInfo
 from utils import EVAL_MAX_NEW_TOKENS, json_to_prompt_answer_dict
+
+
+def _rm_dir(path: str) -> None:
+    """Delete a directory tree via shell rm -rf (reliable on Drive FUSE for large dirs)."""
+    try:
+        result = subprocess.run(["rm", "-rf", path], capture_output=True)
+        if result.returncode != 0:
+            raise OSError(result.stderr.decode().strip())
+    except Exception:
+        try:
+            shutil.rmtree(path)
+        except FileNotFoundError:
+            pass
 
 
 @dataclass
@@ -425,12 +439,8 @@ class FFNDistillationTrainer:
                 prev = epoch + 1 - cfg.save_every
                 if prev > 0:
                     prev_path = os.path.join(cfg.save_dir, f"student_epoch_{prev}")
-                    try:
-                        shutil.rmtree(prev_path)
-                        print(f"  Deleted student_epoch_{prev}")
-                    except OSError as e:
-                        if not isinstance(e, FileNotFoundError):
-                            print(f"  Warning: could not delete student_epoch_{prev}: {e}")
+                    _rm_dir(prev_path)
+                    print(f"  Deleted student_epoch_{prev}")
 
         # Write final history and curves BEFORE slow checkpoint save
         _save_curves(dict(self.history), cfg.save_dir)
@@ -445,12 +455,8 @@ class FFNDistillationTrainer:
             entries = []
         for name in entries:
             if name.startswith("student_epoch_"):
-                try:
-                    shutil.rmtree(os.path.join(cfg.save_dir, name))
-                    print(f"  Deleted {name} (superseded by student_final)")
-                except OSError as e:
-                    if not isinstance(e, FileNotFoundError):
-                        print(f"  Warning: could not delete {name}: {e}")
+                _rm_dir(os.path.join(cfg.save_dir, name))
+                print(f"  Deleted {name} (superseded by student_final)")
         print(f"\nDone. Best accuracy: {best_acc:.4f}")
         print(f"Results saved to: {cfg.save_dir}")
 
