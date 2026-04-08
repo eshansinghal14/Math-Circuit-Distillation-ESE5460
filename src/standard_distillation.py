@@ -497,6 +497,9 @@ def train(args):
         )
         print(f"  Student baseline accuracy: {student_base:.4f}")
         print(f"  Teacher baseline accuracy: {teacher_base:.4f}")
+        # Persist baselines into the history dict immediately so they survive resumes
+        history["student_baseline"] = student_base
+        history["teacher_baseline"] = teacher_base
     else:
         print("Skipping baseline eval (resumed run).")
         student_base = float(history.get("student_baseline", 0.0))
@@ -569,7 +572,10 @@ def train(args):
 
         print(f"Epoch {epoch+1}/{end_epoch}: KL={avg_loss:.4f} Acc={acc:.4f}")
 
+        # Always include baselines so the file is self-contained even mid-run
         hist_out = dict(history)
+        hist_out.setdefault("student_baseline", student_base)
+        hist_out.setdefault("teacher_baseline", teacher_base)
         with open(hist_path, "w") as f:
             json.dump(hist_out, f, indent=2)
             f.flush()
