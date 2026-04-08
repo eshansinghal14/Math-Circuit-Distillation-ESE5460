@@ -27,6 +27,7 @@ EVAL_MAX_NEW_TOKENS = 1
 
 # --- Distillation run dirs / checkpoints (used by ``neuron_distillation``) ------------
 STUDENT_MODEL_DIR = "student_model"
+STUDENT_WEIGHTS_FILE = "student_weights.pt"
 
 
 def rm_dir_tree(path: str) -> None:
@@ -75,8 +76,16 @@ def load_training_state(
     return int(chk["next_epoch"]), float(chk["best_acc"])
 
 
+def save_student_weights(model, run_dir: str) -> None:
+    """Save only the state_dict as a single .pt file — much faster than
+    save_pretrained on Drive FUSE. Used for periodic mid-training saves."""
+    path = os.path.join(run_dir, STUDENT_WEIGHTS_FILE)
+    torch.save(model.state_dict(), path)
+
+
 def save_student_checkpoint(model, tokenizer, run_dir: str) -> None:
-    """Write student + tokenizer under ``run_dir/student_model/`` (replaces previous save)."""
+    """Write student + tokenizer under ``run_dir/student_model/`` (replaces previous save).
+    Used for the final save at end of training."""
     path = os.path.join(run_dir, STUDENT_MODEL_DIR)
     rm_dir_tree(path)
     os.makedirs(path, exist_ok=True)
@@ -147,13 +156,19 @@ def resolve_distillation_run_dir(
             )
         print(f"Auto-detected most recent run: {run_dir}")
 
-    student_source = os.path.join(run_dir, STUDENT_MODEL_DIR)
-    if not os.path.isdir(student_source):
+    hf_path = os.path.join(run_dir, STUDENT_MODEL_DIR)
+    wt_path = os.path.join(run_dir, STUDENT_WEIGHTS_FILE)
+    if os.path.isdir(hf_path):
+        student_source = hf_path
+        print(f"Loading student from {student_source}")
+    elif os.path.isfile(wt_path):
+        student_source = wt_path
+        print(f"Loading student weights from {student_source} (fast checkpoint)")
+    else:
         raise SystemExit(
-            f"Resume expected saved weights at {student_source}. "
-            "Train a run first (or place a save_pretrained tree there)."
+            f"Resume expected saved weights at {hf_path} or {wt_path}. "
+            "Train a run first."
         )
-    print(f"Loading student from {student_source}")
     return run_dir, student_source
 
 

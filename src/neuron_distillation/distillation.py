@@ -46,6 +46,7 @@ from neuron_distillation.pairing import (
 from utils import (
     EVAL_MAX_NEW_TOKENS,
     STUDENT_MODEL_DIR,
+    STUDENT_WEIGHTS_FILE,
     json_to_prompt_answer_dict,
     load_training_state,
     rm_dir_tree,

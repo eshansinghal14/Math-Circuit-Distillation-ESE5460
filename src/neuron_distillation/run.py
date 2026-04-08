@@ -466,11 +466,18 @@ def main():
     print("\n" + "=" * 60)
     print("Loading student")
     print("=" * 60)
-    if student_source:
-        print(f"  From checkpoint: {student_source!r}")
+    if student_source and student_source.endswith(".pt"):
+        print(f"  Loading base model + fast weights from: {student_source!r}")
+        student, tokenizer = load_model(args.student_model)
+        state_dict = torch.load(student_source, map_location="cpu", weights_only=True)
+        student.load_state_dict(state_dict)
+        del state_dict
+    elif student_source:
+        print(f"  From checkpoint dir: {student_source!r}")
+        student, tokenizer = load_model(student_source)
     else:
         print(f"  From Hugging Face: {args.student_model!r}")
-    student, tokenizer = load_model(student_source or args.student_model)
+        student, tokenizer = load_model(args.student_model)
     student = student.to("cpu").float().to(device)
     tokenizer.padding_side = "left"
 
