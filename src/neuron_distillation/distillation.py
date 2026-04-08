@@ -63,6 +63,50 @@ def _rm_dir(path: str) -> None:
             pass
 
 
+def _training_state_path(save_dir: str) -> str:
+    return os.path.join(save_dir, "training_state.pt")
+
+
+def _save_training_state(save_dir: str, optimizer, next_epoch: int, best_acc: float) -> None:
+    torch.save(
+        {"optimizer": optimizer.state_dict(), "next_epoch": next_epoch, "best_acc": best_acc},
+        _training_state_path(save_dir),
+    )
+
+
+def _load_training_state(path: str, optimizer, map_location) -> Tuple[int, float]:
+    try:
+        chk = torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        chk = torch.load(path, map_location=map_location)
+    optimizer.load_state_dict(chk["optimizer"])
+    return int(chk["next_epoch"]), float(chk["best_acc"])
+
+
+def _latest_epoch_checkpoint(run_dir: str) -> Tuple[Optional[str], Optional[int]]:
+    """Return (path, N) for the highest-numbered student_epoch_N folder in run_dir."""
+    best_n, best_path = None, None
+    if not os.path.isdir(run_dir):
+        return None, None
+    try:
+        entries = os.listdir(run_dir)
+    except OSError:
+        return None, None
+    for name in entries:
+        if not name.startswith("student_epoch_"):
+            continue
+        full = os.path.join(run_dir, name)
+        if not os.path.isdir(full):
+            continue
+        try:
+            n = int(name[len("student_epoch_"):])
+            if best_n is None or n > best_n:
+                best_n, best_path = n, full
+        except ValueError:
+            pass
+    return best_path, best_n
+
+
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
@@ -103,6 +147,8 @@ class ClusterDistillationConfig:
     save_best: bool = False
     eval_max_new_tokens: int = EVAL_MAX_NEW_TOKENS
     save_dir: str = "results/cluster-distillation"
+    # Set by run.py when resuming from a checkpoint
+    start_epoch: int = 0
 
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -800,25 +846,58 @@ class ClusterDistillationTrainer:
         """Run the full training loop."""
         cfg = self.config
 
-        # Baseline accuracy before training
-        print("Evaluating baselines...")
-        student_base = eval_accuracy(
-            self.student, self.tokenizer, self.test_data,
-            max_new_tokens=cfg.eval_max_new_tokens,
-        )
-        teacher_base = eval_accuracy(
-            self.teacher, self.tokenizer, self.test_data,
-            max_new_tokens=cfg.eval_max_new_tokens,
-        )
-        print(f"  Student baseline accuracy: {student_base:.4f}")
-        print(f"  Teacher baseline accuracy: {teacher_base:.4f}")
-        self.history["student_baseline"] = student_base
-        self.history["teacher_baseline"] = teacher_base
+        hist_path = os.path.join(cfg.save_dir, "training_history.json")
+        state_path = _training_state_path(cfg.save_dir)
+        start_epoch = cfg.start_epoch
+        best_acc = 0.0
+        is_resume = start_epoch > 0
 
+        if is_resume:
+            # Load existing history
+            if os.path.isfile(hist_path):
+                with open(hist_path, "r") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    for k, v in loaded.items():
+                        self.history[k] = v
+            for key in ("epoch", "kl_loss", "accuracy", "cluster_loss", "mean_cka"):
+                if key not in self.history:
+                    self.history[key] = []
+
+            if os.path.isfile(state_path):
+                start_epoch, best_acc = _load_training_state(state_path, self.optimizer, self.device)
+                print(f"Resumed optimizer state (starting at global epoch {start_epoch + 1}, best_acc={best_acc:.4f})")
+            elif cfg.start_epoch > 0:
+                start_epoch = cfg.start_epoch
+                best_acc = max(self.history.get("accuracy", [0.0])) if self.history.get("accuracy") else 0.0
+                print(f"No training_state.pt found — inferred start_epoch={start_epoch} from config (new optimizer).")
+
+            print("Skipping baseline eval (resumed run).")
+            student_base = float(self.history.get("student_baseline", 0.0))
+            teacher_base = float(self.history.get("teacher_baseline", 0.0))
+        else:
+            print("Evaluating baselines...")
+            student_base = eval_accuracy(
+                self.student, self.tokenizer, self.test_data,
+                max_new_tokens=cfg.eval_max_new_tokens,
+            )
+            teacher_base = eval_accuracy(
+                self.teacher, self.tokenizer, self.test_data,
+                max_new_tokens=cfg.eval_max_new_tokens,
+            )
+            print(f"  Student baseline accuracy: {student_base:.4f}")
+            print(f"  Teacher baseline accuracy: {teacher_base:.4f}")
+            self.history["student_baseline"] = student_base
+            self.history["teacher_baseline"] = teacher_base
+
+        end_epoch = start_epoch + cfg.epochs
         print("=" * 60)
         print("Neuron-Cluster KL + CKA Distillation")
-        print("=" * 60)
-        print(f"  Epochs:           {cfg.epochs}")
+        print(f"  Run dir:          {cfg.save_dir}")
+        if is_resume:
+            print(f"  Epochs:           +{cfg.epochs} this run  (epochs {start_epoch + 1}..{end_epoch}, {end_epoch} total)")
+        else:
+            print(f"  Epochs:           {cfg.epochs}")
         print(f"  Batch size:       {cfg.batch_size}")
         print(f"  LR:               {cfg.learning_rate}")
         print(f"  Temperature:      {cfg.temperature}")
@@ -827,13 +906,11 @@ class ClusterDistillationTrainer:
         print(f"  lambda_proj:      {cfg.lambda_proj}")
         print(f"  Cluster pairs:    {len(self.cluster_pairs)}")
         print(f"  Projection heads: {cfg.use_projection_heads}")
-        print(f"  Save every:         {cfg.save_every}")
-        print(f"  Step log interval:  {cfg.step_log_interval}")
+        print(f"  Save every:       {cfg.save_every}")
+        print(f"  Step log interval:{cfg.step_log_interval}")
         print("=" * 60)
 
-        best_acc = 0.0
-
-        for epoch in range(cfg.epochs):
+        for epoch in range(start_epoch, end_epoch):
             epoch_metrics = self.train_epoch(epoch)
 
             acc = 0.0
@@ -858,13 +935,13 @@ class ClusterDistillationTrainer:
             for k, v in epoch_metrics.items():
                 self.history[k].append(v)
 
-            # Incremental history save after each epoch
+            # Per-epoch history save (fsynced) + training state
             self._save_history()
+            _save_training_state(cfg.save_dir, self.optimizer, epoch + 1, best_acc)
 
-            # Same order as ``standard_distillation``: in-epoch steps above, then this line.
             if epoch_metrics:
                 print(
-                    f"Epoch {epoch + 1}/{cfg.epochs}: "
+                    f"Epoch {epoch + 1}/{end_epoch}: "
                     f"KL={epoch_metrics.get('kl_loss', float('nan')):.4f}, "
                     f"Cluster={epoch_metrics.get('cluster_loss', float('nan')):.4f}, "
                     f"CKA={epoch_metrics.get('mean_cka', float('nan')):.4f}, "
@@ -872,7 +949,7 @@ class ClusterDistillationTrainer:
                 )
             else:
                 print(
-                    f"Epoch {epoch + 1}/{cfg.epochs}: "
+                    f"Epoch {epoch + 1}/{end_epoch}: "
                     f"KL/Cluster/CKA=n/a (no valid steps), Acc={acc:.4f}"
                 )
 
@@ -883,7 +960,8 @@ class ClusterDistillationTrainer:
         self._save_checkpoint()
         print(f"  Saved {STUDENT_MODEL_DIR}/ (final)")
 
-        print(f"\nTraining complete.  Best accuracy: {best_acc:.3f}")
+        print(f"\nDone. Best accuracy: {best_acc:.4f}")
+        print(f"Results saved to: {cfg.save_dir}")
         return dict(self.history)
 
     # ------------------------------------------------------------------
