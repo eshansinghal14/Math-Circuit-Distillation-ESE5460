@@ -1,14 +1,15 @@
 """
 Compute per-neuron mean pairwise cosine similarity of (pooled) activations across all
-problems in ``datasets/2d_add_all.json`` for 1B and 8B, save to JSON, and optionally
-build a :class:`~circuit_discovery.models.CircuitDiscoveryModel` using standard
-:class:`~circuit_discovery.models.NeuronMask` modules initialized from a binary top-k mask
-(checkpoint format matches training runs so ``load_model_checkpoint`` / ``clustering.py``
-work with ``--k-classes 1``).
+problems in ``datasets/<PREFIX>_all.json`` (default prefix ``2d_add``) for 1B and 8B, save
+to JSON, and optionally build a :class:`~circuit_discovery.models.CircuitDiscoveryModel`
+using standard :class:`~circuit_discovery.models.NeuronMask` modules initialized from a
+binary top-k mask (checkpoint format matches training runs so ``load_model_checkpoint`` /
+``clustering.py`` work with ``--k-classes 1``).
 
 Run from ``src`` (always builds a **single-class** ``k_classes=1`` model)::
 
     python -m circuit_discovery.neuron_cossim_topk
+    python -m circuit_discovery.neuron_cossim_topk --dataset 2d1d_mult
     python -m circuit_discovery.neuron_cossim_topk --frac-activated 0.05
 
 Gated Llama weights use ``HF_TOKEN`` from ``constants.py`` (see ``circuit_discovery.utils``), same as elsewhere in this repo.
@@ -39,8 +40,9 @@ def _results_dir() -> str:
     return os.path.join(os.path.dirname(__file__), "..", "..", "results", "circuit-discovery")
 
 
-def default_cossim_json_path() -> str:
-    return os.path.join(_results_dir(), "neuron_mean_pairwise_cossim.json")
+def default_cossim_json_path(dataset_prefix: str) -> str:
+    safe = dataset_prefix.replace(os.sep, "_").replace("/", "_")
+    return os.path.join(_results_dir(), f"neuron_mean_pairwise_cossim_{safe}.json")
 
 
 def mean_pairwise_cossim_per_neuron(pooled: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
@@ -65,11 +67,20 @@ def mean_pairwise_cossim_per_neuron(pooled: torch.Tensor, eps: float = 1e-8) -> 
     return pair_sum / num_pairs
 
 
-def collect_pooled_activations_all_batches(model_name: str, batch_size: int) -> torch.Tensor:
+def collect_pooled_activations_all_batches(
+    model_name: str,
+    batch_size: int,
+    *,
+    dataset_prefix: str,
+) -> torch.Tensor:
     """Returns ``[N, D]`` float32 CPU tensor (mean over sequence positions per problem)."""
     from neuron_distillation.activations import NeuronActivationsGenerator
 
-    gen = NeuronActivationsGenerator(model_name, batch_size=batch_size)
+    gen = NeuronActivationsGenerator(
+        model_name,
+        batch_size=batch_size,
+        dataset_prefix=dataset_prefix,
+    )
     n_ex = gen.ids.shape[0]
     num_batches = (n_ex + batch_size - 1) // batch_size
     chunks: List[torch.Tensor] = []
@@ -82,11 +93,16 @@ def collect_pooled_activations_all_batches(model_name: str, batch_size: int) -> 
     return torch.cat(chunks, dim=0)
 
 
-def build_cossim_record(pooled_1b: torch.Tensor, pooled_8b: torch.Tensor) -> Dict[str, Any]:
+def build_cossim_record(
+    pooled_1b: torch.Tensor,
+    pooled_8b: torch.Tensor,
+    dataset_prefix: str,
+) -> Dict[str, Any]:
     c1 = mean_pairwise_cossim_per_neuron(pooled_1b)
     c2 = mean_pairwise_cossim_per_neuron(pooled_8b)
     return {
         "schema": "neuron_mean_pairwise_cossim_v1",
+        "dataset_prefix": dataset_prefix,
         "num_problems": int(pooled_1b.size(0)),
         "1b": {
             "dim": int(pooled_1b.size(1)),
@@ -153,17 +169,26 @@ def ensure_cossim_file(
     out_path: str,
     batch_size: int,
     force: bool,
+    *,
+    dataset_prefix: str,
 ) -> Dict[str, Any]:
     if os.path.isfile(out_path) and not force:
         print(f"Using existing cossim file (skip recompute): {out_path}")
         return load_cossim_record(out_path)
 
-    print("Computing pooled activations and per-neuron mean pairwise cossim (1b, 8b)...")
-    p1 = collect_pooled_activations_all_batches(llama_1b, batch_size)
-    p8 = collect_pooled_activations_all_batches(llama_8b, batch_size)
+    print(
+        f"Computing pooled activations and per-neuron mean pairwise cossim "
+        f"(1b, 8b) on dataset prefix {dataset_prefix!r}..."
+    )
+    p1 = collect_pooled_activations_all_batches(
+        llama_1b, batch_size, dataset_prefix=dataset_prefix,
+    )
+    p8 = collect_pooled_activations_all_batches(
+        llama_8b, batch_size, dataset_prefix=dataset_prefix,
+    )
     if p1.size(0) != p8.size(0):
         raise RuntimeError(f"Problem count mismatch 1b={p1.size(0)} vs 8b={p8.size(0)}")
-    record = build_cossim_record(p1, p8)
+    record = build_cossim_record(p1, p8, dataset_prefix)
     save_cossim_record(out_path, record)
     print(f"Wrote {out_path}")
     return record
@@ -174,9 +199,16 @@ def run(
     batch_size: int,
     frac_activated: Optional[float],
     force_recompute_cossim: bool,
+    *,
+    dataset_prefix: str,
 ) -> None:
     os.makedirs(_results_dir(), exist_ok=True)
-    record = ensure_cossim_file(cossim_json, batch_size, force=force_recompute_cossim)
+    record = ensure_cossim_file(
+        cossim_json,
+        batch_size,
+        force=force_recompute_cossim,
+        dataset_prefix=dataset_prefix,
+    )
 
     c1 = record["1b"]["mean_pairwise_cossim"]
     c2 = record["8b"]["mean_pairwise_cossim"]
@@ -206,7 +238,8 @@ def run(
         mask_temperature=1.0,
     )
 
-    tag = f"sparse_binary_frac{frac_activated:g}_k1b{k1}_k8b{k8}.pt"
+    safe_ds = dataset_prefix.replace(os.sep, "_").replace("/", "_")
+    tag = f"sparse_binary_{safe_ds}_frac{frac_activated:g}_k1b{k1}_k8b{k8}.pt"
     out_pt = os.path.join(_results_dir(), tag)
     # Same keys as training checkpoints so ``utils.load_model_checkpoint`` / clustering work.
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
@@ -218,6 +251,7 @@ def run(
             "metrics_log": [],
             "sparse_binary_metadata": {
                 "k_classes": K_CLASSES,
+                "dataset_prefix": dataset_prefix,
                 "frac_activated": frac_activated,
                 "k_1b": k1,
                 "k_8b": k8,
@@ -247,10 +281,20 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         description="Neuron pairwise cossim stats + optional sparse binary circuit model (k_classes=1 only).",
     )
     p.add_argument(
+        "--dataset",
+        type=str,
+        default="2d_add",
+        metavar="PREFIX",
+        help="Dataset family prefix: loads repo datasets/<PREFIX>_all.json (default: 2d_add)",
+    )
+    p.add_argument(
         "--cossim-json",
         type=str,
         default=None,
-        help=f"Path for neuron cossim JSON (default: {default_cossim_json_path()})",
+        help=(
+            "Path for neuron cossim JSON "
+            "(default: results/circuit-discovery/neuron_mean_pairwise_cossim_<PREFIX>.json)"
+        ),
     )
     p.add_argument(
         "-b",
@@ -276,12 +320,16 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[List[str]] = None) -> None:
     args = _parse_args(argv)
-    cossim_path = args.cossim_json or default_cossim_json_path()
+    ds = args.dataset.strip()
+    if not ds:
+        raise SystemExit("ERROR: --dataset PREFIX must be non-empty (e.g. 2d_add, 2d1d_mult).")
+    cossim_path = args.cossim_json or default_cossim_json_path(ds)
     run(
         cossim_json=cossim_path,
         batch_size=args.batch_size,
         frac_activated=args.frac_activated,
         force_recompute_cossim=args.force_recompute_cossim,
+        dataset_prefix=ds,
     )
 
 

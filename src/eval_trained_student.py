@@ -40,11 +40,6 @@ def main():
         metavar="PREFIX",
         help="e.g. 2d_add -> datasets/<PREFIX>_test_20.json (required)",
     )
-    parser.add_argument(
-        "--datasets-dir",
-        default=None,
-        help="Directory containing *_test_20.json (default: repo datasets/)",
-    )
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument(
         "--max-new-tokens",
@@ -54,10 +49,7 @@ def main():
     )
     args = parser.parse_args()
     try:
-        test_path, _ = resolve_test_path(
-            dataset=args.dataset,
-            datasets_dir=args.datasets_dir,
-        )
+        test_path, _ = resolve_test_path(dataset=args.dataset)
     except FileNotFoundError as e:
         raise SystemExit(str(e)) from e
 

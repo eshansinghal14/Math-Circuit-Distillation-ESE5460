@@ -231,8 +231,6 @@ def main():
         "--dataset", type=str, default=None, metavar="PREFIX",
         help="Dataset family prefix, e.g. 2d_add → datasets/2d_add_train_80.json + _test_20.json",
     )
-    parser.add_argument("--datasets-dir", type=str, default=None,
-                        help="Directory containing *_train_80.json (default: repo datasets/)")
     parser.add_argument(
         "--k", type=int, default=None, metavar="INT",
         help="Clusters per subclass (circuit mode only; required for new circuit runs).",
@@ -308,7 +306,7 @@ def main():
 
     try:
         train_path, test_path, dataset_prefix = resolve_train_test_paths(
-            dataset=args.dataset, datasets_dir=args.datasets_dir,
+            dataset=args.dataset,
         )
     except FileNotFoundError as e:
         raise SystemExit(str(e)) from e

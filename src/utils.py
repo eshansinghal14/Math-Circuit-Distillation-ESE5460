@@ -311,7 +311,7 @@ def list_dataset_prefixes(datasets_dir: Optional[str] = None) -> List[str]:
 
 def require_dataset_prefix(
     dataset: Optional[str],
-    datasets_dir: Optional[str],
+    datasets_dir: Optional[str] = None,
 ) -> str:
     """Return stripped ``--dataset`` PREFIX or exit with an error (no interactive prompt)."""
     prefix = (dataset or "").strip()
@@ -328,7 +328,7 @@ def require_dataset_prefix(
 def resolve_train_test_paths(
     *,
     dataset: Optional[str],
-    datasets_dir: Optional[str],
+    datasets_dir: Optional[str] = None,
 ) -> Tuple[str, str, str]:
     """Resolve train/test JSON paths from ``--dataset PREFIX``.
 
@@ -350,7 +350,7 @@ def resolve_train_test_paths(
 def resolve_test_path(
     *,
     dataset: Optional[str],
-    datasets_dir: Optional[str],
+    datasets_dir: Optional[str] = None,
 ) -> Tuple[str, str]:
     """Resolve test JSON for eval-only scripts. Returns ``(test_path, prefix)``."""
     prefix = require_dataset_prefix(dataset, datasets_dir)
@@ -365,7 +365,7 @@ def resolve_ablation_all_path(
     *,
     dataset: Optional[str],
     ablation_path: Optional[str],
-    datasets_dir: Optional[str],
+    datasets_dir: Optional[str] = None,
     prefix: Optional[str] = None,
 ) -> str:
     """Full ``*_all.json`` for ablation: ``--ablation-dataset`` path, or ``{prefix}_all.json``."""

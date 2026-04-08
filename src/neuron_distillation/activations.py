@@ -1,17 +1,28 @@
 import json
 import os
+
 import torch
-from utils import load_model
+from utils import dataset_all_json_path, load_model
 
 class NeuronActivationsGenerator:
 
-    def __init__(self, model_name, batch_size=50):
+    def __init__(
+        self,
+        model_name,
+        batch_size=50,
+        *,
+        dataset_prefix: str = "2d_add",
+    ):
         self.model, self.tokenizer = load_model(model_name)
         self.model.eval()
         self.model_name = model_name
         self.batch_size = batch_size
 
-        dataset_path = os.path.join(os.path.dirname(__file__), '..', '..', 'datasets', '2d_add_all.json')
+        dataset_path = dataset_all_json_path(dataset_prefix, None)
+        if not os.path.isfile(dataset_path):
+            raise FileNotFoundError(
+                f"Dataset not found for prefix {dataset_prefix!r}: {dataset_path}",
+            )
         with open(dataset_path, 'r') as f:
             dataset = json.load(f)
 
