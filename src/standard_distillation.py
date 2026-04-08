@@ -44,37 +44,31 @@ import argparse
 import json
 import os
 import re
-import shutil
 from collections import defaultdict
-from datetime import datetime
 from functools import partial
 from typing import Optional
-
-import subprocess
 
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
 
-from utils import EVAL_MAX_NEW_TOKENS, json_to_prompt_answer_dict, load_model, resolve_train_test_paths
+from utils import (
+    EVAL_MAX_NEW_TOKENS,
+    STUDENT_MODEL_DIR,
+    STUDENT_WEIGHTS_FILE,
+    json_to_prompt_answer_dict,
+    load_model,
+    load_training_state,
+    resolve_distillation_run_dir,
+    resolve_train_test_paths,
+    rm_dir_tree,
+    save_student_checkpoint,
+    save_student_weights,
+    save_training_state,
+    training_state_path,
+)
 
-# HuggingFace student weights + tokenizer (overwritten each save)
-STUDENT_MODEL_DIR = "student_model"
-
-
-def _rm_dir(path: str) -> None:
-    """Delete a directory tree. Uses shell rm -rf (more reliable on Drive FUSE for large dirs)
-    with shutil.rmtree as fallback. Silently ignores missing paths."""
-    try:
-        result = subprocess.run(["rm", "-rf", path], capture_output=True)
-        if result.returncode != 0:
-            raise OSError(result.stderr.decode().strip())
-    except Exception:
-        try:
-            shutil.rmtree(path)
-        except FileNotFoundError:
-            pass
 
 
 class AddDataset(Dataset):
@@ -189,57 +183,6 @@ def evaluate(
     return correct / max(total, 1)
 
 
-STUDENT_WEIGHTS_FILE = "student_weights.pt"
-
-
-def save_student_weights(model, run_dir: str) -> None:
-    """Save only the state_dict as a single .pt file — 10-20x faster than
-    save_pretrained on Drive FUSE. Used for periodic mid-training saves."""
-    path = os.path.join(run_dir, STUDENT_WEIGHTS_FILE)
-    torch.save(model.state_dict(), path)
-
-
-def save_student_checkpoint(model, tokenizer, run_dir: str) -> None:
-    """Write student + tokenizer under ``run_dir/student_model/`` (replaces any previous save).
-    Used for the final save at end of training."""
-    path = os.path.join(run_dir, STUDENT_MODEL_DIR)
-    _rm_dir(path)
-    os.makedirs(path, exist_ok=True)
-    model.save_pretrained(path)
-    tokenizer.save_pretrained(path)
-
-
-def _training_state_path(save_dir: str) -> str:
-    return os.path.join(save_dir, "training_state.pt")
-
-
-def save_training_state(
-    save_dir: str,
-    optimizer: torch.optim.Optimizer,
-    next_epoch: int,
-    best_acc: float,
-) -> None:
-    """next_epoch = number of epochs already completed (resume will start training at this index)."""
-    path = _training_state_path(save_dir)
-    torch.save(
-        {
-            "optimizer": optimizer.state_dict(),
-            "next_epoch": next_epoch,
-            "best_acc": best_acc,
-        },
-        path,
-    )
-
-
-def load_training_state(path: str, optimizer: torch.optim.Optimizer, map_location) -> tuple[int, float]:
-    # Optimizer dicts are not loadable with weights_only=True (PyTorch 2.6+).
-    try:
-        chk = torch.load(path, map_location=map_location, weights_only=False)
-    except TypeError:
-        chk = torch.load(path, map_location=map_location)
-    optimizer.load_state_dict(chk["optimizer"])
-    return int(chk["next_epoch"]), float(chk["best_acc"])
-
 
 def _save_curves(history: dict, run_dir: str) -> None:
     """Save KL-loss and accuracy training curves as PNGs into run_dir."""
@@ -280,73 +223,15 @@ def _save_curves(history: dict, run_dir: str) -> None:
     print(f"Saved training curves → {out}")
 
 
-def _most_recent_run(parent_dir: str) -> Optional[str]:
-    """Return the most recently modified subdirectory of parent_dir."""
-    if not os.path.isdir(parent_dir):
-        return None
-    try:
-        entries = os.listdir(parent_dir)
-    except OSError:
-        return None
-    best_mtime, best_path = None, None
-    for name in entries:
-        full = os.path.join(parent_dir, name)
-        if not os.path.isdir(full):
-            continue
-        try:
-            mtime = os.path.getmtime(full)
-            if best_mtime is None or mtime > best_mtime:
-                best_mtime, best_path = mtime, full
-        except OSError:
-            pass
-    return best_path
-
-
 def _resolve_run_dir(args) -> tuple[str, Optional[str]]:
-    """Return ``(run_dir, student_source)``.
-
-    New run: ``run_dir = <save_dir>/standard-kl/<run-name|datetime>/``, ``student_source`` is None.
-
-    Resume: ``--resume`` loads weights from ``<run_dir>/student_model/`` (constant path).
-    ``--checkpoint-run`` is the datetime folder (``standard-kl/`` prepended if omitted);
-    if omitted, the most recently modified folder under ``<save_dir>/standard-kl/`` is used.
-    """
-    if not args.resume:
-        folder = args.run_name or datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        run_dir = os.path.join(args.save_dir, "standard-kl", folder)
-        return run_dir, None
-
-    skl_dir = os.path.join(args.save_dir, "standard-kl")
-
-    if args.checkpoint_run:
-        cr = args.checkpoint_run
-        if not cr.startswith("standard-kl/"):
-            cr = f"standard-kl/{cr}"
-        run_dir = os.path.join(args.save_dir, cr)
-    else:
-        run_dir = _most_recent_run(skl_dir)
-        if run_dir is None:
-            raise SystemExit(
-                f"No run folders found in {skl_dir}.\n"
-                "Provide --checkpoint-run <datetime> explicitly."
-            )
-        print(f"Auto-detected most recent run: {run_dir}")
-
-    # Prefer full HF checkpoint (student_model/); fall back to fast weights file
-    hf_path = os.path.join(run_dir, STUDENT_MODEL_DIR)
-    wt_path = os.path.join(run_dir, STUDENT_WEIGHTS_FILE)
-    if os.path.isdir(hf_path):
-        student_source = hf_path
-        print(f"Loading student from {student_source}")
-    elif os.path.isfile(wt_path):
-        student_source = wt_path
-        print(f"Loading student weights from {student_source} (fast checkpoint)")
-    else:
-        raise SystemExit(
-            f"Resume expected saved weights at {hf_path} or {wt_path}. "
-            "Train a run first."
-        )
-    return run_dir, student_source
+    """Thin wrapper around the centralized resolver in ``utils``."""
+    return resolve_distillation_run_dir(
+        args.save_dir,
+        resume=args.resume,
+        run_name=args.run_name,
+        checkpoint_run=args.checkpoint_run,
+        runs_subdir="standard-kl",
+    )
 
 
 def train(args):
@@ -389,7 +274,7 @@ def train(args):
     optimizer = AdamW(student.parameters(), lr=args.lr)
     history: dict = {}
     hist_path = os.path.join(run_dir, "training_history.json")
-    state_path = _training_state_path(run_dir)
+    state_path = training_state_path(run_dir)
     start_epoch = 0
     best_acc = 0.0
 
