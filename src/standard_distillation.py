@@ -51,12 +51,28 @@ from datetime import datetime
 from functools import partial
 from typing import Optional
 
+import subprocess
+
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
 
 from utils import EVAL_MAX_NEW_TOKENS, json_to_prompt_answer_dict, load_model, resolve_train_test_paths
+
+
+def _rm_dir(path: str) -> None:
+    """Delete a directory tree. Uses shell rm -rf (more reliable on Drive FUSE for large dirs)
+    with shutil.rmtree as fallback. Silently ignores missing paths."""
+    try:
+        result = subprocess.run(["rm", "-rf", path], capture_output=True)
+        if result.returncode != 0:
+            raise OSError(result.stderr.decode().strip())
+    except Exception:
+        try:
+            shutil.rmtree(path)
+        except FileNotFoundError:
+            pass
 
 
 class AddDataset(Dataset):
@@ -570,11 +586,8 @@ def train(args):
             prev = epoch + 1 - args.save_every
             if prev > 0:
                 prev_path = os.path.join(run_dir, f"student_epoch_{prev}")
-                try:
-                    shutil.rmtree(prev_path)
-                    print(f"  Deleted student_epoch_{prev}")
-                except FileNotFoundError:
-                    pass
+                _rm_dir(prev_path)
+                print(f"  Deleted student_epoch_{prev}")
 
         save_training_state(run_dir, optimizer, epoch + 1, best_acc)
 
@@ -596,11 +609,8 @@ def train(args):
     # Remove the last epoch checkpoint now that final is saved
     last_epoch_ckpt, last_n = _latest_epoch_checkpoint(run_dir)
     if last_epoch_ckpt:
-        try:
-            shutil.rmtree(last_epoch_ckpt)
-            print(f"  Deleted student_epoch_{last_n} (superseded by student_final)")
-        except FileNotFoundError:
-            pass
+        _rm_dir(last_epoch_ckpt)
+        print(f"  Deleted student_epoch_{last_n} (superseded by student_final)")
 
     print(f"\nDone. Best accuracy: {best_acc:.4f}")
     print(f"Results saved to: {run_dir}")
