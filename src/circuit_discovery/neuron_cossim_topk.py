@@ -14,6 +14,8 @@ Run from ``src`` (always builds a **single-class** ``k_classes=1`` model)::
     python -m circuit_discovery.neuron_cossim_topk --frac-activated 0.05
 
 Gated Llama weights use ``HF_TOKEN`` from ``constants.py`` (see ``circuit_discovery.utils``), same as elsewhere in this repo.
+
+Activations are accumulated in one pass per model with **streaming** (only the ``[T, D]`` sum tensor is kept, not full ``[N, T, D]``), so RAM scales as ``O(T \\cdot D)`` plus one batch. Use a smaller ``--batch-size`` if GPU memory is tight.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ import argparse
 import json
 import os
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -47,36 +49,55 @@ def default_cossim_json_path(dataset_prefix: str) -> str:
     return os.path.join(_results_dir(), f"neuron_mean_pairwise_cossim_{safe}.json")
 
 
-def mean_pairwise_cossim_per_neuron(per_problem: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    """Mean pairwise cosine similarity across problems, per neuron.
+def mean_pairwise_cossim_from_normalized_sum(
+    sum_v: torch.Tensor,
+    n: int,
+    *,
+    chunk_d: int = 65536,
+) -> torch.Tensor:
+    """Per-neuron mean pairwise cosine from ``s = \\sum_i v_i`` with ``v_i`` unit-norm in ``ℝ^T``.
 
-    ``per_problem`` has shape ``[N, T, D]``. For neuron ``d`` and problem ``i``, let
-    ``v_{i,d} ∈ ℝ^T`` be the post-activation MLP activations at all token positions.
-    We L2-normalize each ``v_{i,d}`` along the token dimension, then define
-    ``cos(i,j) = ⟨v_{i,d}, v_{j,d}⟩`` (cosine between full trajectories), and average over
-    all pairs ``i < j``.
-
-    For unit-norm rows, ``∑_{i<j} cos(i,j) = (‖∑_i v_{i,d}‖² - N) / 2`` in ``ℝ^T``.
+    ``sum_v`` has shape ``[T, D]``. Computes ``((‖s_d‖^2 - N)/2) / \\binom{N}{2}`` per neuron ``d``.
+    Processes columns in ``chunk_d`` blocks to limit peak memory.
     """
+    if n < 2:
+        raise ValueError("Need at least two problems for pairwise statistics")
+    if sum_v.dim() != 2:
+        raise ValueError(f"Expected [T, D] sum tensor, got {tuple(sum_v.shape)}")
+    num_pairs = n * (n - 1) / 2.0
+    _, d = sum_v.shape
+    out = torch.empty(d, dtype=torch.float32)
+    sum_v = sum_v.float()
+    for start in range(0, d, chunk_d):
+        end = min(start + chunk_d, d)
+        sl = sum_v[:, start:end]
+        pair_sum = ((sl * sl).sum(dim=0) - n) / 2.0
+        out[start:end] = (pair_sum / num_pairs).to(torch.float32)
+    return out
+
+
+def mean_pairwise_cossim_per_neuron(per_problem: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """Same statistic as streaming path, but materializes ``[N, T, D]`` (for tests / small runs)."""
     if per_problem.dim() != 3:
         raise ValueError(f"Expected [N, T, D], got {tuple(per_problem.shape)}")
     n = per_problem.size(0)
-    if n < 2:
-        raise ValueError("Need at least two problems for pairwise statistics")
     vn = F.normalize(per_problem, p=2, dim=1, eps=eps)
-    s = vn.sum(dim=0)  # [T, D]
-    pair_sum = ((s * s).sum(dim=0) - n) / 2.0
-    num_pairs = n * (n - 1) / 2.0
-    return pair_sum / num_pairs
+    s = vn.sum(dim=0)
+    return mean_pairwise_cossim_from_normalized_sum(s, n)
 
 
-def collect_token_activations_all_batches(
+def stream_normalized_sum_token_activations(
     model_name: str,
     batch_size: int,
     *,
     dataset_prefix: str,
-) -> torch.Tensor:
-    """Returns ``[N, T, D]`` float32 CPU tensor (full sequence per problem, no pooling over ``T``)."""
+    eps: float = 1e-8,
+) -> Tuple[torch.Tensor, int, int, int]:
+    """Accumulate ``\\sum_i v_i`` where ``v_i`` is the token-wise L2-normalized trajectory for problem ``i``.
+
+    Returns ``(sum_v, n, T, D)`` with ``sum_v`` on **CPU float32**, shape ``[T, D]``. Memory is
+    ``O(T \\cdot D)`` instead of ``O(N \\cdot T \\cdot D)`` for the full activation tensor.
+    """
     from neuron_distillation.activations import NeuronActivationsGenerator
 
     gen = NeuronActivationsGenerator(
@@ -84,38 +105,71 @@ def collect_token_activations_all_batches(
         batch_size=batch_size,
         dataset_prefix=dataset_prefix,
     )
-    n_ex = gen.ids.shape[0]
+    n_ex = int(gen.ids.shape[0])
+    if n_ex < 2:
+        gen.remove_handles()
+        raise ValueError("Need at least two problems for pairwise statistics")
     num_batches = (n_ex + batch_size - 1) // batch_size
-    chunks: List[torch.Tensor] = []
-    for b in range(num_batches):
+    acc: Optional[torch.Tensor] = None
+    n_total = 0
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    for b in range((n_ex + batch_size - 1) // batch_size):
         batch = gen.generate_batch_activations(b, log=False)
-        stacked = _stack_layer_activations(batch["activations"])
-        chunks.append(stacked.float().cpu())
+        stacked = _stack_layer_activations(batch["activations"]).float()
+        if stacked.device != dev:
+            stacked = stacked.to(dev)
+        vn = F.normalize(stacked, p=2, dim=1, eps=eps)
+        chunk_sum = vn.sum(dim=0)
+        if acc is None:
+            acc = chunk_sum.cpu().to(torch.float32)
+            t0, d0 = acc.shape
+        else:
+            if chunk_sum.shape != (t0, d0):
+                gen.remove_handles()
+                raise RuntimeError(
+                    f"Inconsistent activation shape across batches: expected {(t0, d0)}, got {tuple(chunk_sum.shape)}"
+                )
+            acc.add_(chunk_sum.cpu().to(torch.float32))
+        n_total += stacked.size(0)
+        del batch, stacked, vn, chunk_sum
+        if dev.type == "cuda":
+            torch.cuda.empty_cache()
+
     gen.remove_handles()
-    return torch.cat(chunks, dim=0)
+    assert acc is not None
+    if n_total != n_ex:
+        raise RuntimeError(f"Internal error: counted {n_total} problems but dataset has {n_ex}")
+    return acc, n_total, int(acc.size(0)), int(acc.size(1))
 
 
 def build_cossim_record(
-    activations_1b: torch.Tensor,
-    activations_8b: torch.Tensor,
+    *,
+    sum_norm_1b: torch.Tensor,
+    n_1b: int,
+    sum_norm_8b: torch.Tensor,
+    n_8b: int,
     dataset_prefix: str,
 ) -> Dict[str, Any]:
-    c1 = mean_pairwise_cossim_per_neuron(activations_1b)
-    c2 = mean_pairwise_cossim_per_neuron(activations_8b)
+    if n_1b != n_8b:
+        raise RuntimeError(f"Problem count mismatch 1b={n_1b} vs 8b={n_8b}")
+    c1 = mean_pairwise_cossim_from_normalized_sum(sum_norm_1b, n_1b)
+    c2 = mean_pairwise_cossim_from_normalized_sum(sum_norm_8b, n_8b)
     return {
         "schema": "neuron_mean_pairwise_cossim_v2",
         "dataset_prefix": dataset_prefix,
-        "num_problems": int(activations_1b.size(0)),
+        "num_problems": int(n_1b),
+        "streaming_sum_accumulator": True,
         "1b": {
-            "dim": int(activations_1b.size(-1)),
-            "seq_len": int(activations_1b.size(1)),
+            "dim": int(sum_norm_1b.size(-1)),
+            "seq_len": int(sum_norm_1b.size(0)),
             "intermediate_size": int(config["1b"].intermediate_size),
             "num_hidden_layers": int(config["1b"].num_hidden_layers),
             "mean_pairwise_cossim": c1.tolist(),
         },
         "8b": {
-            "dim": int(activations_8b.size(-1)),
-            "seq_len": int(activations_8b.size(1)),
+            "dim": int(sum_norm_8b.size(-1)),
+            "seq_len": int(sum_norm_8b.size(0)),
             "intermediate_size": int(config["8b"].intermediate_size),
             "num_hidden_layers": int(config["8b"].num_hidden_layers),
             "mean_pairwise_cossim": c2.tolist(),
@@ -181,18 +235,22 @@ def ensure_cossim_file(
         return load_cossim_record(out_path)
 
     print(
-        f"Computing per-token activations and per-neuron mean pairwise cossim "
-        f"(full trajectories, 1b, 8b) on dataset prefix {dataset_prefix!r}..."
+        f"Streaming per-token activations (O(T·D) RAM) and per-neuron mean pairwise cossim "
+        f"(full trajectories, 1b then 8b) on dataset prefix {dataset_prefix!r}..."
     )
-    p1 = collect_token_activations_all_batches(
+    sum1, n1, _, _ = stream_normalized_sum_token_activations(
         llama_1b, batch_size, dataset_prefix=dataset_prefix,
     )
-    p8 = collect_token_activations_all_batches(
+    sum8, n8, _, _ = stream_normalized_sum_token_activations(
         llama_8b, batch_size, dataset_prefix=dataset_prefix,
     )
-    if p1.size(0) != p8.size(0):
-        raise RuntimeError(f"Problem count mismatch 1b={p1.size(0)} vs 8b={p8.size(0)}")
-    record = build_cossim_record(p1, p8, dataset_prefix)
+    record = build_cossim_record(
+        sum_norm_1b=sum1,
+        n_1b=n1,
+        sum_norm_8b=sum8,
+        n_8b=n8,
+        dataset_prefix=dataset_prefix,
+    )
     save_cossim_record(out_path, record)
     print(f"Wrote {out_path}")
     return record
@@ -306,7 +364,7 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         type=int,
         default=50,
         metavar="N",
-        help="Batch size for activation generation (default: 50)",
+        help="Batch size for forward passes (smaller uses less GPU memory per batch; default: 50)",
     )
     p.add_argument(
         "--frac-activated",
