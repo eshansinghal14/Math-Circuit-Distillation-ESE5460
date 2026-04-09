@@ -57,7 +57,7 @@ def _parse_args(argv):
         type=int,
         default=500,
         metavar="N",
-        help="Batch size for forward passes when collecting neuron features (default: 5)",
+        help="Batch size for forward passes when collecting neuron features (default: 500)",
     )
     return parser.parse_args(argv)
 
@@ -213,11 +213,11 @@ def _collect_neuron_features_per_subclass(batch_size=5, save_path=None):
             ex_mask = subclass == c
             if not ex_mask.any():
                 continue
-            # activations: [B, T, D]. Pool *after* token-wise comparisons:
-            # first aggregate examples, keep token positions distinct.
+            # activations: [B, T, D]. Concatenate every (example, token) for this subclass
+            # in batch order: rows are [ex0 tok0..tokT-1, ex1 tok0.., ...].
             acts_c = activations[ex_mask][:, :, idx]  # [n_c, T, |idx|]
-            file_feature_c = acts_c.mean(dim=0)  # [T, |idx|]
-            features_lists[c].append(file_feature_c)
+            flat_c = acts_c.reshape(-1, acts_c.size(-1))  # [n_c * T, |idx|]
+            features_lists[c].append(flat_c)
 
     activations_generator.remove_handles()
 
@@ -225,10 +225,9 @@ def _collect_neuron_features_per_subclass(batch_size=5, save_path=None):
     for c, feats in features_lists.items():
         if not feats:
             continue
-        # feats_tensor: [num_files, T, |idx|]
-        feats_tensor = torch.stack(feats, dim=0).to(device)
-        # Arrange as [|idx|, num_files*T] so downstream kmeans stays 2D.
-        feats_flat = feats_tensor.permute(2, 0, 1).reshape(feats_tensor.size(-1), -1)
+        # feats: list of [n_b*T, |idx|] per batch; cat -> [N_c*T, |idx|] for all examples in c.
+        combined = torch.cat(feats, dim=0).to(device)
+        feats_flat = combined.T.contiguous()  # [|idx|, N_c*T]
         features_per_subclass[c] = feats_flat
 
     if save_path is not None:
