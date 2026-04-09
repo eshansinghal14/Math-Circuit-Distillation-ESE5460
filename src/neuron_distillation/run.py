@@ -10,7 +10,8 @@
 otherwise omit if checkpoints live in ``--save-dir``.
 
 Outputs per run: ``student_model/``, ``training_history.json`` (``epoch_flops``: floats when
-measured, ``null`` when skipped by ``--count-flops-every``), ``training_state.pt``,
+measured, ``null`` when skipped by ``--count-flops-every``), ``training_state.pt`` (written
+when ``student_weights.pt`` is saved or at the final ``student_model/`` save),
 ``training_curves.png``. Circuit runs also use ``ablation/``, ``cluster_mapping.json``,
 and global ``neuron-clustering/``.
 

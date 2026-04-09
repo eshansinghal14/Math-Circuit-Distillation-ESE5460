@@ -969,6 +969,7 @@ class ClusterDistillationTrainer:
             epoch_metrics = self.train_epoch(epoch)
 
             acc = 0.0
+            saved_fast_weights = False
             if (epoch + 1) % cfg.eval_every == 0:
                 acc = eval_accuracy(
                     self.student, self.tokenizer, self.test_data,
@@ -980,20 +981,30 @@ class ClusterDistillationTrainer:
                 if acc > best_acc:
                     best_acc = acc
                     if cfg.save_best:
-                        self._save_weights_fast()
-                        print(f"  Saved {STUDENT_WEIGHTS_FILE} (new best accuracy)")
+                        self._save_fast_weights_and_training_state(epoch + 1, best_acc)
+                        print(
+                            f"  Saved {STUDENT_WEIGHTS_FILE} + training_state.pt "
+                            f"(new best accuracy)",
+                        )
+                        saved_fast_weights = True
 
-            if cfg.save_every > 0 and (epoch + 1) % cfg.save_every == 0:
-                self._save_weights_fast()
-                print(f"  Saved {STUDENT_WEIGHTS_FILE} (epoch {epoch + 1})")
+            if (
+                cfg.save_every > 0
+                and (epoch + 1) % cfg.save_every == 0
+                and not saved_fast_weights
+            ):
+                self._save_fast_weights_and_training_state(epoch + 1, best_acc)
+                print(
+                    f"  Saved {STUDENT_WEIGHTS_FILE} + training_state.pt "
+                    f"(epoch {epoch + 1})",
+                )
 
             self.history["epoch"].append(epoch + 1)
             for k, v in epoch_metrics.items():
                 self.history[k].append(v)
 
-            # Per-epoch history save (fsynced) + training state
+            # Per-epoch history only (training_state.pt matches fast weights / final save)
             self._save_history()
-            save_training_state(cfg.save_dir, self.optimizer, epoch + 1, best_acc)
 
             if epoch_metrics:
                 ef = epoch_metrics.get("epoch_flops")
@@ -1026,7 +1037,8 @@ class ClusterDistillationTrainer:
         self._save_curves()
 
         self._save_checkpoint()
-        print(f"  Saved {STUDENT_MODEL_DIR}/ (final)")
+        save_training_state(cfg.save_dir, self.optimizer, end_epoch, best_acc)
+        print(f"  Saved {STUDENT_MODEL_DIR}/ + training_state.pt (final)")
 
         # Clean up fast weights file (superseded by full checkpoint)
         wt_path = os.path.join(cfg.save_dir, STUDENT_WEIGHTS_FILE)
@@ -1104,6 +1116,15 @@ class ClusterDistillationTrainer:
         """Save only state_dict to a single .pt — 10-20x faster than save_pretrained."""
         path = os.path.join(self.config.save_dir, STUDENT_WEIGHTS_FILE)
         torch.save(self.student.state_dict(), path)
+
+    def _save_fast_weights_and_training_state(
+        self, completed_epochs: int, best_acc: float,
+    ) -> None:
+        """``student_weights.pt`` plus matching ``training_state.pt`` (resume pair)."""
+        self._save_weights_fast()
+        save_training_state(
+            self.config.save_dir, self.optimizer, completed_epochs, best_acc,
+        )
 
     def _save_checkpoint(self) -> None:
         """Overwrite ``save_dir/student_model/`` with current student + tokenizer.
