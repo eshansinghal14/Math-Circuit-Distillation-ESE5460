@@ -732,6 +732,34 @@ class ClusterDistillationTrainer:
                 [None] * (n - len(self.history["epoch_flops"])),
             )
 
+    def _truncate_history_to_resume_checkpoint(self, start_epoch: int) -> None:
+        """If ``training_history.json`` has more rows than ``training_state.pt`` says were
+        completed, truncate lists so appending does not duplicate epoch indices.
+
+        ``start_epoch`` is ``next_epoch`` from the checkpoint (number of finished epochs;
+        next loop index).
+        """
+        ep = self.history.get("epoch")
+        if not isinstance(ep, list) or not ep:
+            return
+        n_hist = len(ep)
+        if n_hist <= start_epoch:
+            if n_hist < start_epoch:
+                print(
+                    f"WARN: training_history.json has {n_hist} epoch rows but checkpoint "
+                    f"next_epoch={start_epoch}; optimizer is ahead of saved metrics "
+                    "(epoch indices may jump until history catches up)."
+                )
+            return
+        print(
+            f"WARN: training_history.json has {n_hist} epoch rows but checkpoint "
+            f"next_epoch={start_epoch}; truncating history to {start_epoch} rows to "
+            "match the checkpoint (fixes duplicate epoch entries on resume)."
+        )
+        for k, v in list(self.history.items()):
+            if isinstance(v, list) and len(v) > start_epoch:
+                self.history[k] = v[:start_epoch]
+
     # ------------------------------------------------------------------
 
     def _forward_and_loss(self, batch: Dict) -> Tuple[torch.Tensor, Dict]:
@@ -940,6 +968,7 @@ class ClusterDistillationTrainer:
                     f"Resumed optimizer state (starting at global epoch {start_epoch + 1}, "
                     f"best_acc={best_acc:.4f})"
                 )
+                self._truncate_history_to_resume_checkpoint(start_epoch)
             else:
                 start_epoch = len(self.history.get("epoch", []))
                 best_acc = (
@@ -1009,6 +1038,14 @@ class ClusterDistillationTrainer:
                 f"(0-based indices 0, {cfg.count_flops_every}, …)"
             )
         print("=" * 60)
+
+        if start_epoch >= end_epoch:
+            print(
+                f"Nothing to train: resume starts at epoch index {start_epoch}, "
+                f"end index {end_epoch}. Increase --epochs."
+            )
+            self._save_history()
+            return dict(self.history)
 
         for epoch in range(start_epoch, end_epoch):
             epoch_metrics = self.train_epoch(epoch)
