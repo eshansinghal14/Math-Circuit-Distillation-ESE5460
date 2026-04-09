@@ -53,7 +53,7 @@ def save_training_state(
     next_epoch: int,
     best_acc: float,
 ) -> None:
-    """``next_epoch`` = number of epochs already completed (resume starts at this index)."""
+    """``next_epoch`` = finished epochs (resume starts at this index). Overwrites ``training_state.pt`` in place."""
     path = training_state_path(save_dir)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     payload = {
@@ -61,9 +61,7 @@ def save_training_state(
         "next_epoch": next_epoch,
         "best_acc": best_acc,
     }
-    tmp = path + ".tmp"
-    torch.save(payload, tmp)
-    os.replace(tmp, path)
+    torch.save(payload, path)
 
 
 def load_training_state(
