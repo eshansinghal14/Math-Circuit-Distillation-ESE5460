@@ -245,7 +245,6 @@ def main():
     parser.add_argument("--temperature", type=float, default=2.0)
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--lambda-cluster", type=float, default=0.01)
-    parser.add_argument("--lambda-proj", type=float, default=0.0)
     parser.add_argument(
         "--save-every",
         type=int,
@@ -257,7 +256,6 @@ def main():
         action="store_true",
         help="Overwrite student_model/ when eval accuracy improves (off by default)",
     )
-    parser.add_argument("--use-projection", action="store_true")
     parser.add_argument(
         "--step-log-interval",
         type=int,
@@ -508,8 +506,6 @@ def main():
         temperature=args.temperature,
         grad_clip=args.grad_clip,
         lambda_cluster=args.lambda_cluster,
-        lambda_proj=args.lambda_proj,
-        use_projection_heads=args.use_projection if circuit else False,
         save_every=args.save_every,
         save_best=args.save_best,
         eval_max_new_tokens=eval_max_new_tokens,

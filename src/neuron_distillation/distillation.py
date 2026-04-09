@@ -107,10 +107,7 @@ class ClusterDistillationConfig:
     grad_clip: float = 1.0
 
     lambda_cluster: float = 0.01
-    lambda_proj: float = 0.0
     importance_weighting: bool = True
-
-    use_projection_heads: bool = False
 
     eval_every: int = 1
     # Greedy test accuracy: prompts batched for ``generate`` (independent of training batch size).
@@ -398,53 +395,6 @@ class ClusterAlignmentLoss(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Optional: Projection-based alignment
-# ---------------------------------------------------------------------------
-
-class ProjectionHeadBank(nn.Module):
-    """Lightweight learned linear projections for direct cluster alignment.
-
-    For each cluster pair, maps student cluster activations into the
-    teacher's cluster dimensionality and applies an MSE loss.
-    """
-
-    def __init__(self, cluster_pairs: List[ClusterPairInfo]):
-        super().__init__()
-        self.projections = nn.ModuleDict()
-        self._pair_keys: List[str] = []
-
-        for pair in cluster_pairs:
-            key = f"s{pair.subclass}_c{pair.student_cluster_idx}"
-            s_dim = pair.student_neuron_indices.numel()
-            t_dim = pair.teacher_neuron_indices.numel()
-            self.projections[key] = nn.Linear(s_dim, t_dim, bias=False)
-            self._pair_keys.append(key)
-
-    def forward(
-        self,
-        student_flat: torch.Tensor,
-        teacher_flat: torch.Tensor,
-        cluster_pairs: List[ClusterPairInfo],
-    ) -> torch.Tensor:
-        device = student_flat.device
-        losses = []
-
-        for pair, key in zip(cluster_pairs, self._pair_keys):
-            s_idx = pair.student_neuron_indices.to(device)
-            t_idx = pair.teacher_neuron_indices.to(device)
-
-            s_act = student_flat[:, s_idx]
-            t_act = teacher_flat[:, t_idx].detach()
-
-            projected = self.projections[key](s_act)
-            losses.append(F.mse_loss(projected, t_act))
-
-        if not losses:
-            return torch.tensor(0.0, device=device, requires_grad=True)
-        return torch.stack(losses).mean()
-
-
-# ---------------------------------------------------------------------------
 # Dataset & collate (masked KL at first answer token)
 # ---------------------------------------------------------------------------
 
@@ -506,16 +456,6 @@ def collate_fn(examples, pad_id: int):
         "attention_mask": attention_mask,
         "kl_mask": kl_mask,
     }
-
-
-def masked_mean_over_tokens(
-    acts: torch.Tensor, attention_mask: torch.Tensor
-) -> torch.Tensor:
-    """Pool ``(B, T, D)`` → ``(B, D)`` by averaging only real tokens (not padding)."""
-    m = attention_mask.to(dtype=acts.dtype).unsqueeze(-1)
-    num = (acts * m).sum(dim=1)
-    den = m.sum(dim=1).clamp_min(1.0)
-    return num / den
 
 
 # ---------------------------------------------------------------------------
@@ -696,19 +636,8 @@ class ClusterDistillationTrainer:
         # Losses
         self.cluster_loss_fn = ClusterAlignmentLoss()
 
-        self.proj_heads: Optional[ProjectionHeadBank] = None
-        if (
-            not self._standard
-            and config.use_projection_heads
-            and cluster_pairs
-        ):
-            self.proj_heads = ProjectionHeadBank(cluster_pairs).to(self.device)
-
         # Optimizer
-        params = list(self.student.parameters())
-        if self.proj_heads is not None:
-            params += list(self.proj_heads.parameters())
-        self.optimizer = AdamW(params, lr=config.learning_rate)
+        self.optimizer = AdamW(params=self.student.parameters(), lr=config.learning_rate)
 
         # Dataset / loader (padding + kl_mask at answer position)
         self.dataset = AddDataset(train_data, self.tokenizer)
@@ -792,7 +721,6 @@ class ClusterDistillationTrainer:
                 metrics = {
                     "kl_loss": kl_loss.item(),
                     "cluster_loss": 0.0,
-                    "proj_loss": 0.0,
                     "total_loss": total.item(),
                     "mean_cka": 0.0,
                 }
@@ -828,24 +756,11 @@ class ClusterDistillationTrainer:
                 importance_weighting=self.config.importance_weighting,
             )
 
-            proj_loss = torch.tensor(0.0, device=self.device)
-            if self.proj_heads is not None and self.config.lambda_proj > 0:
-                s_pooled = masked_mean_over_tokens(student_acts, attention_mask)
-                t_pooled = masked_mean_over_tokens(teacher_acts, attention_mask)
-                proj_loss = self.proj_heads(
-                    s_pooled, t_pooled, self.cluster_pairs,
-                )
-
-            total = (
-                kl_loss
-                + self.config.lambda_cluster * cluster_loss
-                + self.config.lambda_proj * proj_loss
-            )
+            total = kl_loss + self.config.lambda_cluster * cluster_loss
 
             metrics = {
                 "kl_loss": kl_loss.item(),
                 "cluster_loss": cluster_loss.item(),
-                "proj_loss": proj_loss.item(),
                 "total_loss": total.item(),
                 "mean_cka": (
                     sum(cka_scores.values()) / len(cka_scores)
@@ -1026,9 +941,7 @@ class ClusterDistillationTrainer:
         print(f"  eval max_new_tokens: {cfg.eval_max_new_tokens}")
         if not self._standard:
             print(f"  lambda_cluster:   {cfg.lambda_cluster}")
-            print(f"  lambda_proj:      {cfg.lambda_proj}")
             print(f"  Cluster pairs:    {len(self.cluster_pairs)}")
-            print(f"  Projection heads: {cfg.use_projection_heads}")
         print(f"  Save every:       {cfg.save_every}")
         print(f"  Step log interval:{cfg.step_log_interval}")
         if cfg.count_flops_every <= 0:
