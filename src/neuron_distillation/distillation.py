@@ -113,6 +113,8 @@ class ClusterDistillationConfig:
     use_projection_heads: bool = False
 
     eval_every: int = 1
+    # Greedy test accuracy: prompts batched for ``generate`` (independent of training batch size).
+    eval_batch_size: int = 50
     # In-epoch step log every N batches.
     step_log_interval: int = 50
     save_every: int = 5
@@ -988,10 +990,12 @@ class ClusterDistillationTrainer:
             print("Evaluating baselines...")
             student_base = eval_accuracy(
                 self.student, self.tokenizer, self.test_data,
+                batch_size=cfg.eval_batch_size,
                 max_new_tokens=cfg.eval_max_new_tokens,
             )
             teacher_base = eval_accuracy(
                 self.teacher, self.tokenizer, self.test_data,
+                batch_size=cfg.eval_batch_size,
                 max_new_tokens=cfg.eval_max_new_tokens,
             )
             print(f"  Student baseline accuracy: {student_base:.4f}")
@@ -1018,6 +1022,7 @@ class ClusterDistillationTrainer:
         print(f"  Batch size:       {cfg.batch_size}")
         print(f"  LR:               {cfg.learning_rate}")
         print(f"  Temperature:      {cfg.temperature}")
+        print(f"  eval batch size:  {cfg.eval_batch_size}")
         print(f"  eval max_new_tokens: {cfg.eval_max_new_tokens}")
         if not self._standard:
             print(f"  lambda_cluster:   {cfg.lambda_cluster}")
@@ -1054,6 +1059,7 @@ class ClusterDistillationTrainer:
             if (epoch + 1) % cfg.eval_every == 0:
                 acc = eval_accuracy(
                     self.student, self.tokenizer, self.test_data,
+                    batch_size=cfg.eval_batch_size,
                     max_new_tokens=cfg.eval_max_new_tokens,
                 )
                 epoch_metrics["accuracy"] = acc

@@ -271,6 +271,13 @@ def main():
         help=f"Greedy eval during training (default: {EVAL_MAX_NEW_TOKENS})",
     )
     parser.add_argument(
+        "--eval-batch-size",
+        type=int,
+        default=50,
+        metavar="N",
+        help="Batch size for greedy test accuracy during training (default: 50)",
+    )
+    parser.add_argument(
         "--count-flops-every",
         type=int,
         default=0,
@@ -303,6 +310,8 @@ def main():
     args = parser.parse_args()
     if args.count_flops_every < 0:
         raise SystemExit("--count-flops-every must be >= 0 (use 0 to disable FLOP counting)")
+    if args.eval_batch_size < 1:
+        raise SystemExit("--eval-batch-size must be >= 1")
 
     try:
         train_path, test_path, dataset_prefix = resolve_train_test_paths(
@@ -504,6 +513,7 @@ def main():
         save_every=args.save_every,
         save_best=args.save_best,
         eval_max_new_tokens=eval_max_new_tokens,
+        eval_batch_size=args.eval_batch_size,
         save_dir=run_dir,
         count_flops_every=args.count_flops_every,
     )
