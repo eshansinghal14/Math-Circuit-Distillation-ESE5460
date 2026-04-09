@@ -51,6 +51,14 @@ def _parse_args(argv):
         default=0.99,
         help="Mask probability above this counts as neuron active (hard threshold)",
     )
+    parser.add_argument(
+        "-b",
+        "--batch-size",
+        type=int,
+        default=500,
+        metavar="N",
+        help="Batch size for forward passes when collecting neuron features (default: 5)",
+    )
     return parser.parse_args(argv)
 
 
@@ -340,6 +348,8 @@ def print_problem_counts_per_class(model, tokenizer, k_classes, device, batch_si
 if __name__ == "__main__":
 
     args = _parse_args(sys.argv[1:])
+    if args.batch_size < 1:
+        raise SystemExit("ERROR: --batch-size must be a positive integer")
 
     model_name = args.model_name
     k_classes = args.k_classes
@@ -376,7 +386,9 @@ if __name__ == "__main__":
             print(f"Processing subclass {subclass}")
             k_gs_testing[subclass] = {}
             for k in range(1, 20, 2):
-                _, _, loss = run_neuron_kmeans(k, subclass=subclass, log=False)
+                _, _, loss = run_neuron_kmeans(
+                    k, subclass=subclass, log=False, batch_size=args.batch_size
+                )
                 k_gs_testing[subclass][k] = loss
                 print(f"Subclass {subclass}, k={k}, loss={loss}")
 
