@@ -1,7 +1,8 @@
 """
-Compute per-neuron mean pairwise cosine similarity of (pooled) activations across all
-problems in ``datasets/<PREFIX>_all.json`` (default prefix ``2d_add``) for 1B and 8B, save
-to JSON, and optionally build a :class:`~circuit_discovery.models.CircuitDiscoveryModel`
+Compute per-neuron mean pairwise cosine similarity of **full token trajectories** (no
+mean-pooling over sequence length) across all problems in ``datasets/<PREFIX>_all.json``
+(default prefix ``2d_add``) for 1B and 8B, save to JSON, and optionally build a
+:class:`~circuit_discovery.models.CircuitDiscoveryModel`
 using standard :class:`~circuit_discovery.models.NeuronMask` modules initialized from a
 binary top-k mask (checkpoint format matches training runs so ``load_model_checkpoint`` /
 ``clustering.py`` work with ``--k-classes 1``).
@@ -27,6 +28,7 @@ import sys
 from typing import Any, Dict, List, Optional
 
 import torch
+import torch.nn.functional as F
 
 _src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 if _src not in sys.path:
@@ -45,35 +47,36 @@ def default_cossim_json_path(dataset_prefix: str) -> str:
     return os.path.join(_results_dir(), f"neuron_mean_pairwise_cossim_{safe}.json")
 
 
-def mean_pairwise_cossim_per_neuron(pooled: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+def mean_pairwise_cossim_per_neuron(per_problem: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     """Mean pairwise cosine similarity across problems, per neuron.
 
-    ``pooled`` has shape ``[N, D]`` (one pooled activation vector per problem). For column
-    ``d``, let ``v_i`` be the scalar activation of neuron ``d`` on problem ``i``. We use
-    ``cos(i,j) = v_i v_j / (|v_i||v_j|)`` and report the mean over all pairs ``i < j``.
+    ``per_problem`` has shape ``[N, T, D]``. For neuron ``d`` and problem ``i``, let
+    ``v_{i,d} ∈ ℝ^T`` be the post-activation MLP activations at all token positions.
+    We L2-normalize each ``v_{i,d}`` along the token dimension, then define
+    ``cos(i,j) = ⟨v_{i,d}, v_{j,d}⟩`` (cosine between full trajectories), and average over
+    all pairs ``i < j``.
 
-    Vectorized: with ``vn_i = v_i / |v_i|``, ``sum_{i<j} vn_i vn_j = ((sum vn)^2 - sum vn^2) / 2``.
+    For unit-norm rows, ``∑_{i<j} cos(i,j) = (‖∑_i v_{i,d}‖² - N) / 2`` in ``ℝ^T``.
     """
-    if pooled.dim() != 2:
-        raise ValueError(f"Expected [N, D], got {tuple(pooled.shape)}")
-    n = pooled.size(0)
+    if per_problem.dim() != 3:
+        raise ValueError(f"Expected [N, T, D], got {tuple(per_problem.shape)}")
+    n = per_problem.size(0)
     if n < 2:
         raise ValueError("Need at least two problems for pairwise statistics")
-    vn = pooled / pooled.abs().clamp(min=eps)
-    s = vn.sum(dim=0)
-    ss = (vn**2).sum(dim=0)
-    pair_sum = (s * s - ss) / 2.0
+    vn = F.normalize(per_problem, p=2, dim=1, eps=eps)
+    s = vn.sum(dim=0)  # [T, D]
+    pair_sum = ((s * s).sum(dim=0) - n) / 2.0
     num_pairs = n * (n - 1) / 2.0
     return pair_sum / num_pairs
 
 
-def collect_pooled_activations_all_batches(
+def collect_token_activations_all_batches(
     model_name: str,
     batch_size: int,
     *,
     dataset_prefix: str,
 ) -> torch.Tensor:
-    """Returns ``[N, D]`` float32 CPU tensor (mean over sequence positions per problem)."""
+    """Returns ``[N, T, D]`` float32 CPU tensor (full sequence per problem, no pooling over ``T``)."""
     from neuron_distillation.activations import NeuronActivationsGenerator
 
     gen = NeuronActivationsGenerator(
@@ -87,31 +90,32 @@ def collect_pooled_activations_all_batches(
     for b in range(num_batches):
         batch = gen.generate_batch_activations(b, log=False)
         stacked = _stack_layer_activations(batch["activations"])
-        pooled = stacked.mean(dim=1).float().cpu()
-        chunks.append(pooled)
+        chunks.append(stacked.float().cpu())
     gen.remove_handles()
     return torch.cat(chunks, dim=0)
 
 
 def build_cossim_record(
-    pooled_1b: torch.Tensor,
-    pooled_8b: torch.Tensor,
+    activations_1b: torch.Tensor,
+    activations_8b: torch.Tensor,
     dataset_prefix: str,
 ) -> Dict[str, Any]:
-    c1 = mean_pairwise_cossim_per_neuron(pooled_1b)
-    c2 = mean_pairwise_cossim_per_neuron(pooled_8b)
+    c1 = mean_pairwise_cossim_per_neuron(activations_1b)
+    c2 = mean_pairwise_cossim_per_neuron(activations_8b)
     return {
-        "schema": "neuron_mean_pairwise_cossim_v1",
+        "schema": "neuron_mean_pairwise_cossim_v2",
         "dataset_prefix": dataset_prefix,
-        "num_problems": int(pooled_1b.size(0)),
+        "num_problems": int(activations_1b.size(0)),
         "1b": {
-            "dim": int(pooled_1b.size(1)),
+            "dim": int(activations_1b.size(-1)),
+            "seq_len": int(activations_1b.size(1)),
             "intermediate_size": int(config["1b"].intermediate_size),
             "num_hidden_layers": int(config["1b"].num_hidden_layers),
             "mean_pairwise_cossim": c1.tolist(),
         },
         "8b": {
-            "dim": int(pooled_8b.size(1)),
+            "dim": int(activations_8b.size(-1)),
+            "seq_len": int(activations_8b.size(1)),
             "intermediate_size": int(config["8b"].intermediate_size),
             "num_hidden_layers": int(config["8b"].num_hidden_layers),
             "mean_pairwise_cossim": c2.tolist(),
@@ -177,13 +181,13 @@ def ensure_cossim_file(
         return load_cossim_record(out_path)
 
     print(
-        f"Computing pooled activations and per-neuron mean pairwise cossim "
-        f"(1b, 8b) on dataset prefix {dataset_prefix!r}..."
+        f"Computing per-token activations and per-neuron mean pairwise cossim "
+        f"(full trajectories, 1b, 8b) on dataset prefix {dataset_prefix!r}..."
     )
-    p1 = collect_pooled_activations_all_batches(
+    p1 = collect_token_activations_all_batches(
         llama_1b, batch_size, dataset_prefix=dataset_prefix,
     )
-    p8 = collect_pooled_activations_all_batches(
+    p8 = collect_token_activations_all_batches(
         llama_8b, batch_size, dataset_prefix=dataset_prefix,
     )
     if p1.size(0) != p8.size(0):
