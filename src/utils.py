@@ -691,7 +691,7 @@ def _stack_layer_activations(batch_activations):
     tensors = [batch_activations[i] for i in layers]
     return torch.cat(tensors, dim=-1)
 
-if __name__ == "__main__":
+# if __name__ == "__main__":
     # from transformers import AutoTokenizer
 
     # tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
