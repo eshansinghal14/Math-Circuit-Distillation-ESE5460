@@ -10,11 +10,16 @@ from typing import Dict, List, Optional, Tuple, Union
 
 try:
     import constants as _constants
-    HF_TOKEN = getattr(_constants, "HF_TOKEN", "")
+    HF_READ_TOKEN = getattr(_constants, "HF_READ_TOKEN", "") or getattr(
+        _constants, "HF_TOKEN", ""
+    )
     CIRCUIT_DISCOVERY_CKPT_DIR = getattr(_constants, "CIRCUIT_DISCOVERY_CKPT_DIR", "")
 except ModuleNotFoundError:
-    HF_TOKEN = os.environ.get("HF_TOKEN", "")
+    HF_READ_TOKEN = ""
     CIRCUIT_DISCOVERY_CKPT_DIR = os.environ.get("CIRCUIT_DISCOVERY_CKPT_DIR", "")
+
+if not HF_READ_TOKEN:
+    HF_READ_TOKEN = os.environ.get("HF_READ_TOKEN", "") or os.environ.get("HF_TOKEN", "")
 
 from transformers.utils import logging as hf_logging
 
@@ -347,8 +352,8 @@ def load_model(model_name):
     from huggingface_hub import login
 
     global logged_in
-    if not logged_in:
-        login(HF_TOKEN)
+    if not logged_in and HF_READ_TOKEN:
+        login(HF_READ_TOKEN)
         logged_in = True
 
     device = "cuda" if torch.cuda.is_available() else "cpu"

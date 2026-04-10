@@ -4,12 +4,19 @@ from transformers import AutoConfig
 from huggingface_hub import login
 
 try:
-    from constants import HF_TOKEN
-except ModuleNotFoundError:
-    HF_TOKEN = os.environ.get("HF_TOKEN", "")
+    import constants as _constants
 
-if HF_TOKEN:
-    login(HF_TOKEN)
+    HF_READ_TOKEN = getattr(_constants, "HF_READ_TOKEN", "") or getattr(
+        _constants, "HF_TOKEN", ""
+    )
+except ModuleNotFoundError:
+    HF_READ_TOKEN = ""
+
+if not HF_READ_TOKEN:
+    HF_READ_TOKEN = os.environ.get("HF_READ_TOKEN", "") or os.environ.get("HF_TOKEN", "")
+
+if HF_READ_TOKEN:
+    login(HF_READ_TOKEN)
 llama_1b = "meta-llama/Llama-3.2-1B"
 llama_8b = "meta-llama/Meta-Llama-3-8B"
 

@@ -13,7 +13,7 @@ Run from ``src`` (always builds a **single-class** ``k_classes=1`` model)::
     python -m circuit_discovery.neuron_cossim_topk --dataset 2d1d_mult
     python -m circuit_discovery.neuron_cossim_topk --frac-activated 0.05
 
-Gated Llama weights use ``HF_TOKEN`` from ``constants.py`` (see ``circuit_discovery.utils``), same as elsewhere in this repo.
+Gated Llama weights use ``HF_READ_TOKEN`` from ``constants.py`` (see ``circuit_discovery.utils``), same as elsewhere in this repo.
 
 Activations are accumulated in one pass per model with **streaming** (only the ``[T, D]`` sum tensor is kept, not full ``[N, T, D]``), so RAM scales as ``O(T \\cdot D)`` plus one batch. Use a smaller ``--batch-size`` if GPU memory is tight.
 """
