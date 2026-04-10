@@ -1,4 +1,3 @@
-import random
 import json
 import re
 import os
@@ -17,7 +16,6 @@ except ModuleNotFoundError:
     CIRCUIT_DISCOVERY_CKPT_DIR = os.environ.get("CIRCUIT_DISCOVERY_CKPT_DIR", "")
 
 from transformers.utils import logging as hf_logging
-from transformers import AutoTokenizer
 
 logged_in = False
 
@@ -73,23 +71,6 @@ def load_training_state(
         chk = torch.load(path, map_location=map_location)
     optimizer.load_state_dict(chk["optimizer"])
     return int(chk["next_epoch"]), float(chk["best_acc"])
-
-
-def save_student_weights(model, run_dir: str) -> None:
-    """Save only the state_dict as a single .pt file — much faster than
-    save_pretrained on Drive FUSE. Used for periodic mid-training saves."""
-    path = os.path.join(run_dir, STUDENT_WEIGHTS_FILE)
-    torch.save(model.state_dict(), path)
-
-
-def save_student_checkpoint(model, tokenizer, run_dir: str) -> None:
-    """Write student + tokenizer under ``run_dir/student_model/`` (replaces previous save).
-    Used for the final save at end of training."""
-    path = os.path.join(run_dir, STUDENT_MODEL_DIR)
-    rm_dir_tree(path)
-    os.makedirs(path, exist_ok=True)
-    model.save_pretrained(path)
-    tokenizer.save_pretrained(path)
 
 
 def most_recent_subdirectory(parent_dir: str) -> Optional[str]:
@@ -293,21 +274,6 @@ def dataset_all_json_path(prefix: str, datasets_dir: Optional[str] = None) -> st
     return os.path.join(d, f"{prefix}{DATASET_ALL_SUFFIX}")
 
 
-def list_dataset_prefixes(datasets_dir: Optional[str] = None) -> List[str]:
-    """Prefixes found from existing ``*_train_80.json`` files under ``datasets_dir``."""
-    d = os.path.abspath(datasets_dir) if datasets_dir else default_datasets_dir()
-    if not os.path.isdir(d):
-        return []
-    pat = os.path.join(d, f"*{DATASET_TRAIN_SUFFIX}.json")
-    out: List[str] = []
-    for p in glob.glob(pat):
-        base = os.path.basename(p)
-        suf = f"{DATASET_TRAIN_SUFFIX}.json"
-        if base.endswith(suf):
-            out.append(base[: -len(suf)])
-    return sorted(set(out))
-
-
 def require_dataset_prefix(
     dataset: Optional[str],
     datasets_dir: Optional[str] = None,
@@ -358,32 +324,6 @@ def resolve_test_path(
     if not os.path.isfile(p):
         raise FileNotFoundError(f"Test file not found for prefix {prefix!r}: {p}")
     return p, prefix
-
-
-def resolve_ablation_all_path(
-    *,
-    dataset: Optional[str],
-    ablation_path: Optional[str],
-    datasets_dir: Optional[str] = None,
-    prefix: Optional[str] = None,
-) -> str:
-    """Full ``*_all.json`` for ablation: ``--ablation-dataset`` path, or ``{prefix}_all.json``."""
-    if ablation_path:
-        return os.path.abspath(ablation_path)
-    pre = (prefix or "").strip() or (dataset or "").strip()
-    if not pre:
-        d = os.path.abspath(datasets_dir) if datasets_dir else default_datasets_dir()
-        raise SystemExit(
-            "ERROR: --dataset PREFIX or --ablation-dataset PATH is required. "
-            f"For the default ablation file, pass --dataset PREFIX (expects <PREFIX>_all.json under {d})."
-        )
-    d = os.path.abspath(datasets_dir) if datasets_dir else default_datasets_dir()
-    p = dataset_all_json_path(pre, d)
-    if not os.path.isfile(p):
-        raise FileNotFoundError(
-            f"Ablation/all-in-one dataset not found for prefix {pre!r}: {p}",
-        )
-    return p
 
 
 def load_model(model_name):
@@ -449,109 +389,6 @@ def eval_model(results_fname):
     print('Accuracy: ', correct / len(results))
     return correct / len(results)
 
-# samples=None means all 2-digit addition pairs are added; otherwise sample without replacement
-def gen_2d_add_dataset(dataset_fname, samples, tokenizer):
-    all_pairs = [(f'{num1}+{num2}=', num1 + num2) for num1 in range(100) for num2 in range(100)]
-
-    if samples is None or samples >= len(all_pairs):
-        selected = all_pairs
-        random.shuffle(selected)
-    else:
-        selected = random.sample(all_pairs, samples)
-
-    dataset = []
-    for prompt, answer in selected:
-        q_str = prompt
-        a_str = str(answer)
-        ids = tokenizer.encode(q_str + a_str, add_special_tokens=False)
-        dataset.append(
-            {
-                "q_str": q_str,
-                "a_str": a_str,
-                "ids": ids,
-            }
-        )
-
-    with open(dataset_fname, 'w') as f:
-        json.dump(dataset, f, indent=4)
-
-def gen_3d_add_dataset(dataset_fname, samples, tokenizer):
-    all_pairs = [(f'{num1}+{num2}=', num1 + num2) for num1 in range(1000) for num2 in range(1000)]
-
-    if samples is None or samples >= len(all_pairs):
-        selected = all_pairs
-        random.shuffle(selected)
-    else:
-        selected = random.sample(all_pairs, samples)
-
-    dataset = []
-    for prompt, answer in selected:
-        q_str = prompt
-        a_str = str(answer)
-        ids = tokenizer.encode(q_str + a_str, add_special_tokens=False)
-        dataset.append(
-            {
-                "q_str": q_str,
-                "a_str": a_str,
-                "ids": ids,
-            }
-        )
-
-    with open(dataset_fname, 'w') as f:
-        json.dump(dataset, f, indent=4)
-
-def gen_2d1d_mult_dataset(dataset_fname, samples, tokenizer):
-    all_pairs = [(f'{num1}*{num2}=', num1 * num2) for num1 in range(100) for num2 in range(10)]
-    all_pairs += [(f'{num1}*{num2}=', num1 * num2) for num1 in range(10) for num2 in range(100)]
-
-    if samples is None or samples >= len(all_pairs):
-        selected = all_pairs
-        random.shuffle(selected)
-    else:
-        selected = random.sample(all_pairs, samples)
-
-    dataset = []
-    for prompt, answer in selected:
-        q_str = prompt
-        a_str = str(answer)
-        ids = tokenizer.encode(q_str + a_str, add_special_tokens=False)
-        dataset.append(
-            {
-                "q_str": q_str,
-                "a_str": a_str,
-                "ids": ids,
-            }
-        )
-
-    with open(dataset_fname, 'w') as f:
-        json.dump(dataset, f, indent=4)
-
-def gen_mix_dataset(dataset_fname, files):
-    dataset = []
-    for file in files:
-        with open(file, 'r') as f:
-            dataset.extend(json.load(f))
-    
-    random.shuffle(dataset)
-    
-    with open(dataset_fname, 'w') as f:
-        json.dump(dataset, f, indent=4)
-
-def split_dataset(dataset_fname, test_frac=0.1):
-    with open(dataset_fname, 'r') as f:
-        dataset = json.load(f)
-
-    split = int(len(dataset) * (1 - test_frac))
-    train = dataset[:split]
-    test = dataset[split:]
-    
-    with open(f"{dataset_fname.replace('_all.json', f'_train_{100 - int(test_frac * 100)}.json')}", 'w') as f:
-        json.dump(train, f, indent=4)
-    with open(f"{dataset_fname.replace('_all.json', f'_test_{int(test_frac * 100)}.json')}", 'w') as f:
-        json.dump(test, f, indent=4)
-
-def _safe_model_name(model_name: str) -> str:
-    return model_name.replace("/", "_").replace(":", "_")
 
 def _resolve_ckpt_path(checkpoint: str) -> str:
     """
@@ -677,10 +514,3 @@ def _stack_layer_activations(batch_activations):
     layers = sorted(batch_activations.keys())
     tensors = [batch_activations[i] for i in layers]
     return torch.cat(tensors, dim=-1)
-
-if __name__ == "__main__":
-    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
-    # gen_2d1d_mult_dataset("datasets/2d1d_mult_all.json", None, tokenizer) 
-    # gen_mix_dataset("datasets/add_mult_all.json", ["datasets/2d_add_all.json", "datasets/2d1d_mult_all.json"])
-    # split_dataset("datasets/2d1d_mult_all.json", test_frac=0.2)
-    split_dataset("datasets/2d_add_all.json", test_frac=0.2)
