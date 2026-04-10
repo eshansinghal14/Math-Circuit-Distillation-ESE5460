@@ -1,11 +1,12 @@
 import json
+import random
 import re
 import os
 import glob
 import shutil
 import subprocess
 import torch
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 try:
     import constants as _constants
@@ -274,6 +275,18 @@ def dataset_all_json_path(prefix: str, datasets_dir: Optional[str] = None) -> st
     return os.path.join(d, f"{prefix}{DATASET_ALL_SUFFIX}")
 
 
+def _resolve_dataset_output_path(
+    dataset_fname: str,
+    datasets_dir: Optional[str] = None,
+) -> str:
+    """Place bare filenames (no directory) under ``datasets/``; otherwise absolute path."""
+    expanded = os.path.expanduser(dataset_fname)
+    if os.path.dirname(expanded) == "":
+        root = os.path.abspath(datasets_dir) if datasets_dir else default_datasets_dir()
+        return os.path.join(root, os.path.basename(expanded))
+    return os.path.abspath(expanded)
+
+
 def require_dataset_prefix(
     dataset: Optional[str],
     datasets_dir: Optional[str] = None,
@@ -388,6 +401,169 @@ def eval_model(results_fname):
 
     print('Accuracy: ', correct / len(results))
     return correct / len(results)
+
+
+def _normalize_operand_digits(
+    operand_digits: Union[int, Tuple[int, int]],
+) -> Tuple[int, int]:
+    if isinstance(operand_digits, int):
+        if operand_digits < 1:
+            raise ValueError("operand_digits must be >= 1")
+        return (operand_digits, operand_digits)
+    if len(operand_digits) != 2:
+        raise ValueError("operand_digits tuple must be (left_digits, right_digits)")
+    a, b = int(operand_digits[0]), int(operand_digits[1])
+    if min(a, b) < 1:
+        raise ValueError("operand digit counts must be >= 1")
+    return (a, b)
+
+
+def _iter_math_pairs(
+    da: int,
+    db: int,
+    operation: str,
+    pair_mode: str,
+) -> List[Tuple[str, int]]:
+    """Return list of (prompt ending with '=', int answer)."""
+
+    def emit(num1: int, num2: int) -> Optional[Tuple[str, int]]:
+        op = operation.strip()
+        if op == "+":
+            ans = num1 + num2
+        elif op == "-":
+            ans = num1 - num2
+        elif op in ("*", "×"):
+            ans = num1 * num2
+        elif op in ("/", "//"):
+            if num2 == 0:
+                return None
+            if num1 % num2 != 0:
+                return None
+            ans = num1 // num2
+        else:
+            raise ValueError(
+                f"Unsupported operation {operation!r}; use +, -, *, or / (integer division).",
+            )
+        sym = "*" if op == "×" else op
+        return (f"{num1}{sym}{num2}=", ans)
+
+    pairs: List[Tuple[str, int]] = []
+
+    if pair_mode == "2d1d_mult":
+        if operation not in ("*", "×"):
+            raise ValueError("pair_mode='2d1d_mult' requires multiplication (*).")
+        if (da, db) != (2, 1) and (da, db) != (1, 2):
+            raise ValueError(
+                "pair_mode='2d1d_mult' expects operand_digits (2, 1) or (1, 2) "
+                "(legacy union of 100×10 and 10×100 grids).",
+            )
+        for num1 in range(10**2):
+            for num2 in range(10**1):
+                p = emit(num1, num2)
+                if p:
+                    pairs.append(p)
+        for num1 in range(10**1):
+            for num2 in range(10**2):
+                p = emit(num1, num2)
+                if p:
+                    pairs.append(p)
+        return pairs
+
+    if pair_mode != "grid":
+        raise ValueError(f"Unknown pair_mode {pair_mode!r}; use 'grid' or '2d1d_mult'.")
+
+    na, nb = 10**da, 10**db
+    for num1 in range(na):
+        for num2 in range(nb):
+            p = emit(num1, num2)
+            if p:
+                pairs.append(p)
+    return pairs
+
+
+def generate_math_dataset(
+    dataset_fname: str,
+    tokenizer,
+    *,
+    operand_digits: Union[int, Tuple[int, int]] = 2,
+    operation: str = "+",
+    pair_mode: str = "grid",
+    shuffle: bool = True,
+    samples: Optional[int] = None,
+    split_test_frac: Optional[float] = None,
+    datasets_dir: Optional[str] = None,
+) -> None:
+    """Build a math JSON dataset ``{{q_str, a_str, ids}}`` compatible with the rest of the repo.
+
+    Args:
+        dataset_fname: Primary output path. If the path has no directory (e.g. ``2d_add_all.json``),
+            it is written under the repo ``datasets/`` directory (or ``datasets_dir`` if given).
+            If ``split_test_frac`` is set, must end with ``_all.json``; train/test files are written
+            alongside using ``_train_<100-pct>`` / ``_test_<pct>`` suffixes (same convention as
+            historical splits).
+        tokenizer: HuggingFace tokenizer (``encode`` for ``ids``).
+        operand_digits: Decimal width per operand: one int (both operands ``0..10^d-1``) or
+            ``(left, right)`` for a rectangular grid.
+        operation: ``+``, ``-``, ``*`` (or ``×``), or ``/`` / ``//`` for integer division
+            (only exact integer quotients are kept).
+        pair_mode: ``grid`` = full Cartesian product of operand ranges; ``2d1d_mult`` = union of
+            ``10^2×10^1`` and ``10^1×10^2`` multiplication prompts (expects ``operand_digits``
+            ``(2,1)`` or ``(1,2)``).
+        shuffle: Shuffle row order before optional subsampling (ignored when ``samples`` forces
+            ``random.sample``, which is already unordered).
+        samples: If set and smaller than the number of generated pairs, keep a random subset
+            of exactly this many (without replacement).
+        split_test_frac: If set (e.g. ``0.2``), write ``dataset_fname`` as the full set, then
+            write train/test JSON by splitting the shuffled list (first ``1-fraction`` train).
+        datasets_dir: Optional root for bare ``dataset_fname``; defaults to repo ``datasets/``.
+    """
+    dataset_fname = _resolve_dataset_output_path(dataset_fname, datasets_dir)
+    da, db = _normalize_operand_digits(operand_digits)
+    all_pairs = _iter_math_pairs(da, db, operation, pair_mode)
+
+    if samples is not None and samples < len(all_pairs):
+        selected = random.sample(all_pairs, samples)
+    else:
+        selected = list(all_pairs)
+        if shuffle:
+            random.shuffle(selected)
+
+    rows: List[Dict] = []
+    for prompt, answer in selected:
+        q_str = prompt
+        a_str = str(answer)
+        ids = tokenizer.encode(q_str + a_str, add_special_tokens=False)
+        rows.append({"q_str": q_str, "a_str": a_str, "ids": ids})
+
+    out_dir = os.path.dirname(os.path.abspath(dataset_fname))
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
+    def _write(path: str, data: List[Dict]) -> None:
+        d = os.path.dirname(os.path.abspath(path))
+        if d:
+            os.makedirs(d, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+
+    _write(dataset_fname, rows)
+
+    if split_test_frac is not None:
+        if not (0.0 < split_test_frac < 1.0):
+            raise ValueError("split_test_frac must be in (0, 1).")
+        if not dataset_fname.endswith("_all.json"):
+            raise ValueError(
+                "split_test_frac requires dataset_fname to end with '_all.json' "
+                "(e.g. datasets/2d_add_all.json).",
+            )
+        n = len(rows)
+        split_i = int(n * (1.0 - split_test_frac))
+        train_pct = 100 - int(round(split_test_frac * 100))
+        test_pct = int(round(split_test_frac * 100))
+        train_path = dataset_fname.replace("_all.json", f"_train_{train_pct}.json")
+        test_path = dataset_fname.replace("_all.json", f"_test_{test_pct}.json")
+        _write(train_path, rows[:split_i])
+        _write(test_path, rows[split_i:])
 
 
 def _resolve_ckpt_path(checkpoint: str) -> str:
@@ -514,3 +690,18 @@ def _stack_layer_activations(batch_activations):
     layers = sorted(batch_activations.keys())
     tensors = [batch_activations[i] for i in layers]
     return torch.cat(tensors, dim=-1)
+
+if __name__ == "__main__":
+    # from transformers import AutoTokenizer
+
+    # tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
+    # generate_math_dataset(
+    #     dataset_all_json_path("3d_add"),
+    #     tokenizer,
+    #     operand_digits=3,
+    #     operation="+",
+    #     pair_mode="grid",
+    #     shuffle=True,
+    #     samples=10000,
+    #     split_test_frac=None,
+    # )
