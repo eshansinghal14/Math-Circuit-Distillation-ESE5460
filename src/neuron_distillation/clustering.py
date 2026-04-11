@@ -151,6 +151,7 @@ def _normalize_rows_inplace_chunked(
 
 
 def _kmeans_cosine(x, k, num_iters=20):
+    """Lloyd k-means on L2-normalized rows (cosine geometry); cluster sizes unbalanced."""
     N, D = x.shape
     if k > N:
         raise ValueError("k cannot be larger than number of points")
@@ -188,63 +189,23 @@ def _kmeans_cosine(x, k, num_iters=20):
 
     centroids = x[torch.tensor(indices, device=x.device)]
 
-    base_cap = N // k
-    remainder = N % k
-    capacities = torch.full((k,), base_cap, device=x.device, dtype=torch.long)
-    if remainder > 0:
-        capacities[:remainder] += 1
-
     prev_cluster_ids = None
     prev_loss = None
     loss = None
 
     for _ in range(num_iters):
         sim = x @ centroids.t()
-        dists = 1.0 - sim.clamp(-1.0, 1.0)
-
-        cluster_ids = torch.full((N,), -1, device=x.device, dtype=torch.long)
-        remaining_cap = capacities.clone()
-
-        _, sorted_clusters = torch.sort(dists, dim=1)
-
-        for rank in range(k):
-            unassigned = cluster_ids.eq(-1)
-            if not unassigned.any():
-                break
-
-            cand_clusters = sorted_clusters[unassigned, rank]
-            unassigned_idx = unassigned.nonzero(as_tuple=False).squeeze(1)
-
-            for j in range(k):
-                if remaining_cap[j] <= 0:
-                    continue
-
-                want_j_mask = cand_clusters.eq(j)
-                if not want_j_mask.any():
-                    continue
-
-                cand_indices = unassigned_idx[want_j_mask]
-                take = min(remaining_cap[j].item(), cand_indices.numel())
-                if take <= 0:
-                    continue
-
-                chosen = cand_indices[:take]
-                cluster_ids[chosen] = j
-                remaining_cap[j] -= take
-
-        if (cluster_ids == -1).any():
-            raise RuntimeError("Balanced k-means assignment failed: some points unassigned")
-
-        if prev_cluster_ids is not None and torch.equal(cluster_ids, prev_cluster_ids):
-            break
+        cluster_ids = sim.argmax(dim=1)
 
         point_sim = sim[torch.arange(N, device=x.device), cluster_ids]
         point_dists = 1.0 - point_sim.clamp(-1.0, 1.0)
         loss = point_dists.mean().item()
 
-        if prev_loss is not None and loss is not None:
-            if abs(loss - prev_loss) < 1e-6:
-                break
+        if prev_cluster_ids is not None and torch.equal(cluster_ids, prev_cluster_ids):
+            break
+
+        if prev_loss is not None and abs(loss - prev_loss) < 1e-6:
+            break
 
         prev_cluster_ids = cluster_ids.clone()
         prev_loss = loss
@@ -364,7 +325,7 @@ def _choose_kmeans_device_dtype(x: torch.Tensor) -> Tuple[torch.device, torch.dt
         return torch.device("cuda"), torch.float16
     warnings.warn(
         "k-means feature matrix is too large for available GPU memory (even in float16); "
-        "running balanced k-means on CPU (slower).",
+        "running k-means on CPU (slower).",
         stacklevel=2,
     )
     return torch.device("cpu"), torch.float32
