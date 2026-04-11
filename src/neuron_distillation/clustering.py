@@ -113,6 +113,23 @@ def _parse_args(argv):
             "(lower peak GPU memory during collection; default: 4096)",
         ),
     )
+    parser.add_argument(
+        "--cluster-k-max",
+        type=int,
+        default=19,
+        metavar="K1",
+        help=(
+            "Largest k in the k-sweep, inclusive; sweep always starts at k=1 "
+            "(default: 19; with default step 2 → 1,3,...,19).",
+        ),
+    )
+    parser.add_argument(
+        "--cluster-k-step",
+        type=int,
+        default=2,
+        metavar="S",
+        help="Spacing between k values (default: 2).",
+    )
     return parser.parse_args(argv)
 
 
@@ -473,6 +490,10 @@ if __name__ == "__main__":
         raise SystemExit("ERROR: --neuron-slice-chunk must be a positive integer")
     if args.max_feature_dim is not None and args.max_feature_dim < 1:
         raise SystemExit("ERROR: --max-feature-dim must be >= 1 when set")
+    if args.cluster_k_max < 1:
+        raise SystemExit("ERROR: --cluster-k-max must be >= 1")
+    if args.cluster_k_step < 1:
+        raise SystemExit("ERROR: --cluster-k-step must be >= 1")
 
     model_name = args.model_name
     k_classes = args.k_classes
@@ -512,7 +533,7 @@ if __name__ == "__main__":
         if neuron_masks[subclass].any().item():
             print(f"Processing subclass {subclass}")
             k_gs_testing[subclass] = {}
-            for k in range(1, 20, 2):
+            for k in range(1, args.cluster_k_max + 1, args.cluster_k_step):
                 _, _, loss = run_neuron_kmeans(
                     k,
                     subclass=subclass,
