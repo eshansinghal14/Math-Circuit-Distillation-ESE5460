@@ -19,6 +19,12 @@ from neuron_distillation.activations import NeuronActivationsGenerator
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
+
+def _safe_model_dir(model_name: str) -> str:
+    """Filesystem-safe folder name for a HuggingFace model id."""
+    return model_name.replace("/", "_").replace(":", "_")
+
+
 def _parse_args(argv):
     parser = argparse.ArgumentParser(description="Neuron clustering")
     parser.add_argument(
@@ -65,8 +71,8 @@ def _parse_args(argv):
         default=None,
         metavar="DIR",
         help=(
-            "Root directory for outputs: subclass_features.pt, clusters/, plots/, "
-            "k_gs_testing.json (default: results/neuron-clustering/<model-name>)",
+            "Subdirectory under results/neuron-clustering/ before the model folder "
+            "(default: default). Full path: results/neuron-clustering/<this>/<model-name>/",
         ),
     )
     return parser.parse_args(argv)
@@ -264,7 +270,9 @@ def run_neuron_kmeans(
     results_dir=None,
 ):
     if results_dir is None:
-        results_dir = os.path.join("results", "neuron-clustering", model_name)
+        results_dir = os.path.join(
+            "results", "neuron-clustering", "default", _safe_model_dir(model_name),
+        )
     results_dir = os.path.abspath(results_dir)
     os.makedirs(results_dir, exist_ok=True)
 
@@ -371,10 +379,9 @@ if __name__ == "__main__":
     if args.mask_temperature is not None:
         model.mask_temperature.fill_(float(args.mask_temperature))
 
-    results_dir = (
-        args.output_dir
-        if args.output_dir is not None
-        else os.path.join("results", "neuron-clustering", model_name)
+    out_seg = args.output_dir if args.output_dir is not None else "default"
+    results_dir = os.path.join(
+        "results", "neuron-clustering", out_seg, _safe_model_dir(model_name),
     )
     results_dir = os.path.abspath(results_dir)
     os.makedirs(results_dir, exist_ok=True)
