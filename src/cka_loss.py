@@ -4,11 +4,50 @@ import torch
 from torch import Tensor
 
 
+def center_columns(X: Tensor) -> Tensor:
+    """Subtract column means (same first step as :func:`linear_cka_efficient`).
+
+    ``X`` is ``(n_samples, n_features)`` — one row per sample.
+    """
+    return X - X.mean(dim=0, keepdim=True)
+
+
+def stable_rank_centered_gram(X: Tensor, eps: float = 1e-12) -> Tensor:
+    """Stable rank of ``G = X_c X_c.T`` with column-centered ``X_c``.
+
+    Uses ``||G||_F^2 / ||G||_2^2 = sum_i λ_i^2 / λ_max^2`` for eigenvalues ``λ_i`` of ``G``.
+    Squared singular values of ``X_c`` are eigenvalues of ``X_c.T @ X_c`` (or ``X_c @ X_c.T``);
+    we form the smaller Gram matrix and use ``eigvalsh`` (faster than ``svdvals`` on large ``X``).
+
+    Runs on ``X``'s device (CPU or CUDA); for large matrices, pass ``X`` on GPU for faster linear algebra.
+
+    Args:
+        X: ``(n_samples, n_features)`` — one row per sample (e.g. token positions).
+
+    Returns:
+        Scalar tensor; ``nan`` if ``X`` is empty or has zero width/height.
+    """
+    if X.ndim != 2 or X.shape[0] < 1 or X.shape[1] < 1:
+        return torch.tensor(float("nan"), dtype=X.dtype if X.numel() else torch.float32)
+    Xc = center_columns(X).float()
+    n, d = Xc.shape
+    # Smaller symmetric Gram: same nonzero squared singular values as full SVD of Xc.
+    if n >= d:
+        W = Xc.T @ Xc
+    else:
+        W = Xc @ Xc.T
+    lam = torch.linalg.eigvalsh(W)
+    lam = lam.clamp(min=0.0)
+    num = (lam**2).sum()
+    den = lam[-1].clamp_min(eps) ** 2
+    return num / den
+
+
 def linear_cka_efficient(X: Tensor, Y: Tensor, eps: float = 1e-8) -> Tensor:
     assert X.shape[0] == Y.shape[0], f"Batch sizes must match: {X.shape[0]} vs {Y.shape[0]}"
 
-    X = X - X.mean(dim=0, keepdim=True)
-    Y = Y - Y.mean(dim=0, keepdim=True)
+    X = center_columns(X)
+    Y = center_columns(Y)
 
     YtX = Y.T @ X
     XtX = X.T @ X
@@ -41,5 +80,17 @@ if __name__ == "__main__":
     (1.0 - cka).backward()
     assert Xg.grad is not None
     print(f"Gradient norm: {Xg.grad.norm().item():.6f}")
+
+    Xr = torch.randn(32, 8)
+    sr = stable_rank_centered_gram(Xr)
+    assert torch.isfinite(sr) and sr.item() >= 1.0 - 1e-5
+    print(f"stable_rank_centered_gram(random X) = {sr.item():.6f}")
+
+    if torch.cuda.is_available():
+        sr_gpu = stable_rank_centered_gram(Xr.cuda())
+        assert torch.isfinite(sr_gpu) and torch.allclose(
+            sr.cpu(), sr_gpu.cpu(), rtol=1e-4, atol=1e-5
+        )
+        print("stable_rank_centered_gram CPU vs CUDA: ok")
 
     print("All tests passed.")

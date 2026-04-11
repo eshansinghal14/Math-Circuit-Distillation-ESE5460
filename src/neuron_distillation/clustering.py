@@ -8,7 +8,8 @@ if _SRC_ROOT not in sys.path:
     sys.path.insert(0, _SRC_ROOT)
 
 import argparse
-from typing import List, Optional
+import warnings
+from typing import List, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -78,32 +79,6 @@ def _parse_args(argv):
         ),
     )
     parser.add_argument(
-        "--kmeans-device",
-        type=str,
-        default="cpu",
-        choices=["cpu", "cuda"],
-        help=(
-            "Device for balanced k-means (cpu avoids large [|neurons|, tokens] tensors on GPU; "
-            "cuda is faster if it fits in VRAM)",
-        ),
-    )
-    parser.add_argument(
-        "--max-feature-dim",
-        type=int,
-        default=None,
-        metavar="D",
-        help=(
-            "If set, randomly subsample token positions to D columns before k-means "
-            "(reduces [|neurons|, tokens] memory; use when many activated neurons)",
-        ),
-    )
-    parser.add_argument(
-        "--feature-subsample-seed",
-        type=int,
-        default=0,
-        help="RNG seed for --max-feature-dim column choice (default: 0)",
-    )
-    parser.add_argument(
         "--neuron-slice-chunk",
         type=int,
         default=4096,
@@ -156,17 +131,23 @@ def _gather_subclass_activations_chunked(
     return torch.cat(parts, dim=1)
 
 
-def _maybe_subsample_feature_columns(
+def _normalize_rows_inplace_chunked(
     x: torch.Tensor,
-    max_dim: Optional[int],
-    seed: int = 0,
+    chunk_rows: int = 4096,
+    eps: float = 1e-8,
 ) -> torch.Tensor:
-    """``x`` is ``[|neurons|, n_tokens]``. Optionally subsample token columns to cap k-means memory."""
-    if max_dim is None or x.shape[1] <= max_dim:
+    """In-place row L2 normalize in row chunks (no full-size second buffer; avoids OOM on ``[N,D]``)."""
+    n = x.shape[0]
+    if n <= chunk_rows:
+        norms = x.norm(dim=-1, keepdim=True).clamp_min(eps)
+        x.div_(norms)
         return x
-    torch.manual_seed(seed)
-    perm = torch.randperm(x.shape[1], device=x.device)[:max_dim]
-    return x[:, perm]
+    for i in range(0, n, chunk_rows):
+        sl = slice(i, min(i + chunk_rows, n))
+        sub = x[sl]
+        norms = sub.norm(dim=-1, keepdim=True).clamp_min(eps)
+        sub.div_(norms)
+    return x
 
 
 def _kmeans_cosine(x, k, num_iters=20):
@@ -174,7 +155,7 @@ def _kmeans_cosine(x, k, num_iters=20):
     if k > N:
         raise ValueError("k cannot be larger than number of points")
 
-    x = F.normalize(x, p=2, dim=-1, eps=1e-8)
+    _normalize_rows_inplace_chunked(x)
 
     indices = []
     first = torch.randint(0, N, (1,), device=x.device)
@@ -360,6 +341,35 @@ def _collect_neuron_features_per_subclass(
     return features_per_subclass, indices_per_subclass
 
 
+def _choose_kmeans_device_dtype(x: torch.Tensor) -> Tuple[torch.device, torch.dtype]:
+    """Pick device/dtype so the feature matrix fits in memory.
+
+    Row-normalization is in-place chunked, so peak is ~one tensor + chunk norms.
+    Prefer CUDA float32, then CUDA float16, else CPU float32.
+    """
+    n = x.numel()
+    if n == 0:
+        return torch.device("cpu"), torch.float32
+    bytes_f32 = n * 4
+    bytes_f16 = n * 2
+    if not torch.cuda.is_available():
+        return torch.device("cpu"), torch.float32
+    torch.cuda.empty_cache()
+    free, _total = torch.cuda.mem_get_info()
+    # Leave headroom for k-means matmuls (N×k) and other temps.
+    frac = 0.82
+    if bytes_f32 < free * frac:
+        return torch.device("cuda"), torch.float32
+    if bytes_f16 < free * frac:
+        return torch.device("cuda"), torch.float16
+    warnings.warn(
+        "k-means feature matrix is too large for available GPU memory (even in float16); "
+        "running balanced k-means on CPU (slower).",
+        stacklevel=2,
+    )
+    return torch.device("cpu"), torch.float32
+
+
 def run_neuron_kmeans(
     k,
     subclass: int,
@@ -369,9 +379,6 @@ def run_neuron_kmeans(
     subclass_features_path=None,
     results_dir=None,
     *,
-    kmeans_device: str = "cpu",
-    max_feature_dim: Optional[int] = None,
-    feature_subsample_seed: int = 0,
     neuron_slice_chunk: int = 4096,
 ):
     if results_dir is None:
@@ -399,12 +406,8 @@ def run_neuron_kmeans(
         raise ValueError(f"No features found for subclass {subclass}")
 
     x = features_per_subclass[subclass].float()
-    x = _maybe_subsample_feature_columns(x, max_feature_dim, feature_subsample_seed)
-    if kmeans_device == "cuda" and torch.cuda.is_available():
-        km_dev = torch.device("cuda")
-    else:
-        km_dev = torch.device("cpu")
-    x = x.to(km_dev)
+    km_dev, km_dtype = _choose_kmeans_device_dtype(x)
+    x = x.to(device=km_dev, dtype=km_dtype)
 
     subclass_indices = indices_per_subclass[subclass]
     if subclass_indices.device != km_dev:
@@ -488,8 +491,6 @@ if __name__ == "__main__":
         raise SystemExit("ERROR: --batch-size must be a positive integer")
     if args.neuron_slice_chunk < 1:
         raise SystemExit("ERROR: --neuron-slice-chunk must be a positive integer")
-    if args.max_feature_dim is not None and args.max_feature_dim < 1:
-        raise SystemExit("ERROR: --max-feature-dim must be >= 1 when set")
     if args.cluster_k_max < 1:
         raise SystemExit("ERROR: --cluster-k-max must be >= 1")
     if args.cluster_k_step < 1:
@@ -540,9 +541,6 @@ if __name__ == "__main__":
                     log=False,
                     batch_size=args.batch_size,
                     results_dir=results_dir,
-                    kmeans_device=args.kmeans_device,
-                    max_feature_dim=args.max_feature_dim,
-                    feature_subsample_seed=args.feature_subsample_seed,
                     neuron_slice_chunk=args.neuron_slice_chunk,
                 )
                 k_gs_testing[subclass][k] = loss

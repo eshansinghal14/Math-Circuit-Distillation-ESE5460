@@ -9,6 +9,16 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
+from cka_loss import stable_rank_centered_gram
+from utils import NEURON_CLUSTERING_STUDENT_SUBPATH, NEURON_CLUSTERING_TEACHER_SUBPATH
+
+# Paths passed into this module should be absolute (or cwd-relative); nothing here assumes a repo ``src/`` root.
+
+_TOWER_NEURON_CLUSTER_SUBPATH: Dict[str, str] = {
+    "1b": NEURON_CLUSTERING_STUDENT_SUBPATH,
+    "8b": NEURON_CLUSTERING_TEACHER_SUBPATH,
+}
+
 _NEURIPS_RC: Dict[str, Any] = {
     "font.family": "serif",
     "font.serif": [
@@ -41,34 +51,13 @@ _NEURIPS_RC: Dict[str, Any] = {
 }
 
 
-def default_plots_dir() -> str:
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "plots"))
-
-
-def default_neuron_cossim_topk_dir() -> str:
-    return os.path.abspath(
-        os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "results",
-            "circuit-discovery",
-            "neuron_cossim_topk",
-        ),
-    )
-
-
-def repo_root() -> str:
-    """Parent of ``src/`` (directory containing ``plots/``, ``results/``)."""
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-
-
-def default_clustering_dir(dataset_prefix: str = "2d_add") -> str:
-    """``results/clustering/<dataset_prefix>/`` (e.g. ``2d_add``)."""
-    return os.path.join(repo_root(), "results", "clustering", dataset_prefix)
+def _output_dir_or_cwd(output_dir: Optional[str]) -> str:
+    """Save figures here; if ``output_dir`` is omitted, use the process current working directory."""
+    return os.path.abspath(output_dir) if output_dir else os.path.abspath(os.getcwd())
 
 
 def _cluster_neuron_counts_from_pt(path: str) -> Tuple[int, Dict[int, int]]:
-    """Load a ``*_1b.pt`` / ``*_8b.pt`` checkpoint; return ``(k, {cluster_id -> num_neurons})``."""
+    """Load a cluster assignment ``.pt``; return ``(k, {cluster_id -> num_neurons})``."""
     d = torch.load(path, map_location="cpu", weights_only=False)
     c2i = d["cluster_to_indices"]
     k = int(d.get("k", len(c2i)))
@@ -82,64 +71,109 @@ def _cluster_neuron_counts_from_pt(path: str) -> Tuple[int, Dict[int, int]]:
     return k, counts
 
 
-def print_clustering_cluster_counts_table(
-    clustering_dir: Optional[str] = None,
+def _cluster_pt_paths_under_data_dir(
+    data_dir: str,
+    k_by_tower: Dict[str, int],
     *,
-    dataset_prefix: str = "2d_add",
-    out: Optional[TextIO] = None,
-) -> str:
-    """Print a text table: rows = frac activated, columns = cluster id, cells = ``1b/8b`` neuron counts.
+    subclass: int = 0,
+) -> Tuple[str, str]:
+    """``.../neuron-clustering/meta-llama/Llama-3.2-1B|Meta-Llama-3-8B/clusters/.../k{k}.pt``."""
+    for key in ("1b", "8b"):
+        if key not in k_by_tower:
+            raise KeyError(f"k map must include {key!r}, got {list(k_by_tower.keys())!r}")
 
-    Expects paired files ``{frac}_1b.pt`` and ``{frac}_8b.pt`` under
-    ``results/clustering/<dataset_prefix>/`` (from neuron clustering runs).
+    base = os.path.abspath(data_dir)
+    out: Dict[str, str] = {}
+    for tw in ("1b", "8b"):
+        rel = _TOWER_NEURON_CLUSTER_SUBPATH[tw]
+        k = int(k_by_tower[tw])
+        p = os.path.join(
+            base,
+            "neuron-clustering",
+            *rel.split("/"),
+            "clusters",
+            f"subclass_{subclass}_clusters",
+            f"k{k}.pt",
+        )
+        if not os.path.isfile(p):
+            raise FileNotFoundError(
+                f"Missing {tw} cluster checkpoint under neuron-clustering/{rel}: {p!r}",
+            )
+        out[tw] = p
+    return out["1b"], out["8b"]
+
+
+def print_clustering_cluster_counts_table(
+    data_dirs: Sequence[str],
+    num_clusters: Sequence[Dict[str, int]],
+    *,
+    subclass: int = 0,
+    row_labels: Optional[Sequence[str]] = None,
+    row_label_header: str = "run",
+    out: Optional[TextIO] = None,
+    return_text: bool = False,
+) -> Optional[str]:
+    """Print a text table: rows = one per ``data_dir``, columns = cluster id, cells = ``1b/8b`` counts.
+
+    For each ``data_dir``, ``num_clusters[i]`` is ``{'1b': k1, '8b': k2}``. Cluster ``.pt`` paths are
+    under ``neuron-clustering/`` using :data:`utils.NEURON_CLUSTERING_STUDENT_SUBPATH` and
+    :data:`utils.NEURON_CLUSTERING_TEACHER_SUBPATH`. Prefer **absolute** paths for each ``data_dir``.
+
+    By default this only prints and returns ``None``. In Jupyter/IPython, returning the same string
+    you print causes a second display with ``\\n`` shown as escapes; set ``return_text=True`` when you
+    need the table string (e.g. to write a file).
 
     Returns:
-        The same table as a single string (for logging or saving).
+        The table string if ``return_text`` is true; otherwise ``None``.
     """
-    root = os.path.abspath(clustering_dir) if clustering_dir else default_clustering_dir(dataset_prefix)
-    if not os.path.isdir(root):
-        raise FileNotFoundError(f"Not a directory: {root}")
+    if len(num_clusters) != len(data_dirs):
+        raise ValueError(
+            f"num_clusters length {len(num_clusters)} != data_dirs length {len(data_dirs)}",
+        )
 
-    fracs: List[str] = []
-    for name in os.listdir(root):
-        if name.endswith("_1b.pt"):
-            fracs.append(name[: -len("_1b.pt")])
-
-    def _frac_key(s: str) -> Tuple[int, float]:
-        try:
-            return (0, float(s))
-        except ValueError:
-            return (1, 0.0)
-
-    fracs.sort(key=_frac_key)
-
-    parsed: List[Tuple[str, int, int, Dict[int, int], Dict[int, int]]] = []
     max_k = 0
-    for frac in fracs:
-        p1 = os.path.join(root, f"{frac}_1b.pt")
-        p8 = os.path.join(root, f"{frac}_8b.pt")
-        if not os.path.isfile(p1) or not os.path.isfile(p8):
-            continue
-        k1, c1 = _cluster_neuron_counts_from_pt(p1)
-        k2, c2 = _cluster_neuron_counts_from_pt(p8)
-        max_k = max(max_k, k1, k2)
-        parsed.append((frac, k1, k2, c1, c2))
+    for m in num_clusters:
+        for key in ("1b", "8b"):
+            if key not in m:
+                raise KeyError(f"each num_clusters entry must include {key!r}, got {list(m.keys())!r}")
+        max_k = max(max_k, int(m["1b"]), int(m["8b"]))
+
+    if row_labels is not None and len(row_labels) != len(data_dirs):
+        raise ValueError(
+            f"row_labels length {len(row_labels)} != data_dirs length {len(data_dirs)}",
+        )
+
+    parsed: List[Tuple[str, Dict[int, int], Dict[int, int]]] = []
+    for i, raw in enumerate(data_dirs):
+        root = os.path.abspath(raw)
+        if not os.path.isdir(root):
+            raise FileNotFoundError(f"Not a directory: {root!r}")
+        kmap = num_clusters[i]
+        p1, p8 = _cluster_pt_paths_under_data_dir(
+            root,
+            kmap,
+            subclass=subclass,
+        )
+        _, c1 = _cluster_neuron_counts_from_pt(p1)
+        _, c2 = _cluster_neuron_counts_from_pt(p8)
+        label = row_labels[i] if row_labels is not None else os.path.basename(root.rstrip(os.sep))
+        parsed.append((label, c1, c2))
 
     if not parsed:
-        msg = f"No paired *_1b.pt / *_8b.pt files found under {root!r}"
+        msg = "data_dirs is empty"
         print(msg, file=out or sys.stdout)
-        return msg
+        return msg if return_text else None
 
     rows: List[List[str]] = []
-    for frac, _k1, _k2, c1, c2 in parsed:
-        row = [frac]
+    for label, c1, c2 in parsed:
+        row = [label]
         for cid in range(max_k):
             n1 = c1.get(cid, 0)
             n2 = c2.get(cid, 0)
             row.append(f"{n1}/{n2}")
         rows.append(row)
 
-    headers = ["frac_activated"] + [f"cluster_{j}" for j in range(max_k)]
+    headers = [row_label_header] + [f"cluster_{j}" for j in range(max_k)]
     col_widths = [max(len(headers[i]), max((len(r[i]) for r in rows), default=0)) for i in range(len(headers))]
 
     def fmt_row(cells: List[str]) -> str:
@@ -150,21 +184,206 @@ def print_clustering_cluster_counts_table(
         lines.append(fmt_row(r[: len(headers)]))
     text = "\n".join(lines) + "\n"
     print(text, end="", file=out or sys.stdout)
-    return text
+    return text if return_text else None
 
 
-def _json_files_in_folder(folder: str) -> List[str]:
-    root = os.path.abspath(folder)
-    if not os.path.isdir(root):
-        raise NotADirectoryError(f"Not a directory: {root}")
-    names = [f for f in os.listdir(root) if f.lower().endswith(".json")]
-    names.sort()
-    return [os.path.join(root, f) for f in names]
+def _subclass_features_pt_from_cluster_pt(cluster_pt_path: str) -> str:
+    """``.../<model_dir>/clusters/subclass_*_clusters/k*.pt`` → ``.../<model_dir>/subclass_features.pt``."""
+    model_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(cluster_pt_path))))
+    return os.path.join(model_dir, "subclass_features.pt")
+
+
+def _neuron_rows_for_cluster(
+    cluster_neuron_indices: torch.Tensor,
+    inv: Dict[int, int],
+) -> List[int]:
+    """Map global neuron indices to row indices into ``features_per_subclass[subclass]`` using ``inv``."""
+    rows: List[int] = []
+    for x in cluster_neuron_indices.reshape(-1).tolist():
+        xi = int(x)
+        if xi in inv:
+            rows.append(inv[xi])
+    return rows
+
+
+def _neuron_id_to_feature_row_inv(indices_per_subclass: torch.Tensor) -> Dict[int, int]:
+    """Build once per ``subclass_features`` load; reused for every cluster."""
+    return {int(indices_per_subclass[i]): i for i in range(int(indices_per_subclass.numel()))}
+
+
+def _cuda_device_for_stable_rank() -> torch.device:
+    """CUDA device for per-cluster :func:`cka_loss.stable_rank_centered_gram` (required)."""
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "teacher stable-rank helpers require CUDA (torch.cuda.is_available() is False).",
+        )
+    return torch.device("cuda")
+
+
+def teacher_cluster_stable_ranks_centered_gram(
+    cluster_pt_path: str,
+    subclass_features_pt_path: str,
+    *,
+    subclass: Optional[int] = None,
+) -> Tuple[int, Dict[int, float]]:
+    """Stable rank of the teacher's centered Gram matrix per cluster (tokens × neurons in cluster).
+
+    Uses the same column centering as linear CKA (:func:`cka_loss.stable_rank_centered_gram`).
+    ``cluster_pt_path`` should be the **8b (teacher)** cluster checkpoint. ``subclass_features_pt_path``
+    must be that model's ``subclass_features.pt`` in the same ``neuron-clustering/.../<model_dir>/`` tree.
+
+    Requires CUDA; raises :exc:`RuntimeError` if ``torch.cuda.is_available()`` is false.
+
+    Returns:
+        ``(k, {cluster_id -> stable_rank})`` with ``nan`` for empty clusters.
+    """
+    d = torch.load(cluster_pt_path, map_location="cpu", weights_only=False)
+    sc = int(d["subclass"]) if subclass is None else int(subclass)
+    k = int(d.get("k", len(d["cluster_to_indices"])))
+    c2i = d["cluster_to_indices"]
+
+    ckpt = torch.load(subclass_features_pt_path, map_location="cpu", weights_only=False)
+    fp = ckpt["features_per_subclass"]
+    ip = ckpt["indices_per_subclass"]
+    if sc not in fp or sc not in ip:
+        raise KeyError(f"subclass {sc} not in features checkpoint {subclass_features_pt_path!r}")
+    feat = fp[sc].float()
+    idx_feat = ip[sc]
+    inv = _neuron_id_to_feature_row_inv(idx_feat)
+    comp_dev = _cuda_device_for_stable_rank()
+
+    out: Dict[int, float] = {}
+    with torch.inference_mode():
+        for j in range(k):
+            cj = c2i.get(j)
+            if cj is None or (hasattr(cj, "numel") and cj.numel() == 0):
+                out[j] = float("nan")
+                continue
+            rows = _neuron_rows_for_cluster(cj, inv)
+            if not rows:
+                out[j] = float("nan")
+                continue
+            x_rows = feat[rows, :]  # [|C|, n_tokens]
+            X = x_rows.T.contiguous().to(comp_dev, non_blocking=True)  # (n_tokens, |C|)
+            sr = stable_rank_centered_gram(X)
+            out[j] = float(sr.item())
+
+    return k, out
+
+
+def print_clustering_teacher_stable_rank_table(
+    data_dirs: Sequence[str],
+    num_clusters: Sequence[Dict[str, int]],
+    *,
+    subclass: int = 0,
+    row_labels: Optional[Sequence[str]] = None,
+    row_label_header: str = "run",
+    out: Optional[TextIO] = None,
+    float_fmt: str = "{:.4g}",
+    return_text: bool = False,
+) -> Optional[str]:
+    """Print a text table: one row per ``data_dir``, columns = teacher (8b) cluster stable rank.
+
+    Same path layout as :func:`print_clustering_cluster_counts_table` (8b under
+    :data:`utils.NEURON_CLUSTERING_TEACHER_SUBPATH`). Loads ``subclass_features.pt`` next to the 8b
+    cluster checkpoint.
+
+    Stable rank is ``||G||_F^2 / ||G||_2^2`` for ``G = X_c X_c.T`` with column-centered activations
+    ``X`` (tokens × neurons in cluster), matching :func:`cka_loss.stable_rank_centered_gram`.
+
+    Requires CUDA (see :func:`teacher_cluster_stable_ranks_centered_gram`).
+
+    By default this only prints and returns ``None``. In Jupyter/IPython, returning the same string
+    you print causes a second display with ``\\n`` shown as escapes; set ``return_text=True`` when you
+    need the table string (e.g. to write a file).
+
+    Returns:
+        The table string if ``return_text`` is true; otherwise ``None``.
+    """
+    if len(num_clusters) != len(data_dirs):
+        raise ValueError(
+            f"num_clusters length {len(num_clusters)} != data_dirs length {len(data_dirs)}",
+        )
+    for m in num_clusters:
+        for key in ("1b", "8b"):
+            if key not in m:
+                raise KeyError(f"each num_clusters entry must include {key!r}, got {list(m.keys())!r}")
+
+    max_k = max(int(m["8b"]) for m in num_clusters)
+
+    if row_labels is not None and len(row_labels) != len(data_dirs):
+        raise ValueError(
+            f"row_labels length {len(row_labels)} != data_dirs length {len(data_dirs)}",
+        )
+
+    parsed: List[Tuple[str, int, Dict[int, float]]] = []
+    for i, raw in enumerate(data_dirs):
+        root = os.path.abspath(raw)
+        if not os.path.isdir(root):
+            raise FileNotFoundError(f"Not a directory: {root!r}")
+        kmap = num_clusters[i]
+        _p1, p8 = _cluster_pt_paths_under_data_dir(
+            root,
+            kmap,
+            subclass=subclass,
+        )
+        p_feat = _subclass_features_pt_from_cluster_pt(p8)
+        if not os.path.isfile(p_feat):
+            raise FileNotFoundError(
+                f"Missing subclass_features.pt for teacher: {p_feat!r}",
+            )
+        kk, ranks = teacher_cluster_stable_ranks_centered_gram(
+            p8, p_feat, subclass=subclass,
+        )
+        label = row_labels[i] if row_labels is not None else os.path.basename(root.rstrip(os.sep))
+        parsed.append((label, kk, ranks))
+
+    if not parsed:
+        msg = "data_dirs is empty"
+        print(msg, file=out or sys.stdout)
+        return msg if return_text else None
+
+    rows: List[List[str]] = []
+    for label, _kk, ranks in parsed:
+        row = [label]
+        for cid in range(max_k):
+            v = ranks.get(cid)
+            if v is None or v != v:  # missing cluster or nan
+                row.append("nan")
+            else:
+                row.append(float_fmt.format(v))
+        rows.append(row)
+
+    headers = [row_label_header] + [f"cluster_{j}" for j in range(max_k)]
+    col_widths = [max(len(headers[i]), max((len(r[i]) for r in rows), default=0)) for i in range(len(headers))]
+
+    def fmt_row(cells: List[str]) -> str:
+        return "  ".join(c.ljust(col_widths[i]) for i, c in enumerate(cells))
+
+    lines = [fmt_row(headers), "  ".join("-" * col_widths[i] for i in range(len(headers)))]
+    for r in rows:
+        lines.append(fmt_row(r[: len(headers)]))
+    text = "\n".join(lines) + "\n"
+    print(text, end="", file=out or sys.stdout)
+    return text if return_text else None
 
 
 def _safe_stem(name: str) -> str:
     s = re.sub(r"[^\w\-.]+", "_", name.strip())
     return s or "curve"
+
+
+def _single_json_in_dir(folder: str) -> str:
+    """Return path to the sole ``*.json`` file in ``folder`` (sorted name for determinism)."""
+    names = [f for f in os.listdir(folder) if f.lower().endswith(".json")]
+    names.sort()
+    if len(names) == 0:
+        raise FileNotFoundError(f"No .json file found in {folder!r}")
+    if len(names) > 1:
+        raise ValueError(
+            f"Expected exactly one .json file in {folder!r}, found {len(names)}: {names!r}",
+        )
+    return os.path.join(folder, names[0])
 
 
 def _load_training_history(path: str) -> Dict[str, List]:
@@ -227,11 +446,12 @@ def _format_param_value(v: Any) -> str:
 
 
 def plot_training_histories_param_sweep(
-    json_folder: str,
+    data_dirs: Sequence[str],
     param_name: str,
     param_values: List[Any],
     metrics: List[str],
     *,
+    history_filename: str = "training_history.json",
     x_key: str = "epoch",
     output_dir: Optional[str] = None,
     figure_width_in: float = 5.5,
@@ -241,10 +461,12 @@ def plot_training_histories_param_sweep(
     smooth_window: Optional[int] = None,
     smooth_metrics: Optional[Collection[str]] = None,
 ) -> str:
-    """Plot several training histories (one JSON per run) as multiple lines per subplot.
+    """Plot several training histories (one run per folder) as multiple lines per subplot.
 
-    All ``*.json`` files in ``json_folder`` are loaded (sorted by filename). One colored
-    line per file; legend ``{param_name} = value``.
+    Each entry in ``data_dirs`` is a directory containing ``history_filename`` (default
+    ``training_history.json``). Order matches ``param_values`` (one legend line per directory).
+    Pass **absolute** paths for ``data_dirs`` and ``output_dir`` when you can; if ``output_dir`` is
+    omitted, figures are written under the process current working directory (not relative to ``src/``).
     """
     if len(metrics) == 0:
         raise ValueError("metrics must be non-empty")
@@ -261,19 +483,25 @@ def plot_training_histories_param_sweep(
     else:
         smooth_set = set()
 
-    json_paths = _json_files_in_folder(json_folder)
-    if not json_paths:
-        raise ValueError(f"No .json files found in {os.path.abspath(json_folder)!r}")
+    json_paths: List[str] = []
+    for d in data_dirs:
+        root = os.path.abspath(d)
+        if not os.path.isdir(root):
+            raise NotADirectoryError(f"Not a directory: {root!r}")
+        p = os.path.join(root, history_filename)
+        if not os.path.isfile(p):
+            raise FileNotFoundError(f"Missing {history_filename!r} in {root!r}")
+        json_paths.append(p)
     if len(json_paths) != len(param_values):
         raise ValueError(
-            f"Found {len(json_paths)} JSON file(s) in folder but param_values has length "
-            f"{len(param_values)}; they must match (one value per file, sorted filename order).",
+            f"Got {len(json_paths)} data dir(s) but param_values has length "
+            f"{len(param_values)}; they must match (one value per directory, same order).",
         )
     loaded: List[Dict[str, List]] = []
     for p in json_paths:
         loaded.append(_load_training_history(p))
 
-    out_dir = os.path.abspath(output_dir) if output_dir else default_plots_dir()
+    out_dir = _output_dir_or_cwd(output_dir)
     os.makedirs(out_dir, exist_ok=True)
     base = _safe_stem(param_name) + "_testing"
     stem = os.path.join(out_dir, base)
@@ -366,9 +594,8 @@ def _mean_topk_curve(cossim: Sequence[float], num_points: int) -> Tuple[np.ndarr
 
 
 def plot_frac_activated_vs_mean_cossim(
-    json_folder: Optional[str] = None,
+    data_dirs: Sequence[str],
     *,
-    json_paths: Optional[Sequence[str]] = None,
     towers: Collection[str] = ("1b", "8b"),
     output_dir: Optional[str] = None,
     out_name: str = "frac_activated_vs_mean_cossim",
@@ -380,17 +607,25 @@ def plot_frac_activated_vs_mean_cossim(
     save_pdf: bool = True,
     save_png: bool = True,
 ) -> str:
+    """Plot mean pairwise cossim curves for one or more runs.
+
+    Each directory in ``data_dirs`` must contain **exactly one** ``*.json`` file (e.g. from
+    ``circuit_discovery.neuron_cossim_topk``, schema ``neuron_mean_pairwise_cossim_v2``).
+    Prefer **absolute** paths for ``data_dirs`` and ``output_dir``; if ``output_dir`` is omitted,
+    output goes to the current working directory.
+    """
     if not save_pdf and not save_png:
         raise ValueError("At least one of save_pdf, save_png must be True")
-    if json_paths is not None:
-        paths = [os.path.abspath(p) for p in json_paths]
-    else:
-        root = json_folder if json_folder is not None else default_neuron_cossim_topk_dir()
-        paths = _json_files_in_folder(root)
+    paths: List[str] = []
+    for d in data_dirs:
+        root = os.path.abspath(d)
+        if not os.path.isdir(root):
+            raise NotADirectoryError(f"Not a directory: {root!r}")
+        paths.append(_single_json_in_dir(root))
     if not paths:
-        raise ValueError("No .json files to plot")
+        raise ValueError("data_dirs must be non-empty")
 
-    out_dir = os.path.abspath(output_dir) if output_dir else default_plots_dir()
+    out_dir = _output_dir_or_cwd(output_dir)
     os.makedirs(out_dir, exist_ok=True)
     stem = os.path.join(out_dir, _safe_stem(out_name))
 
@@ -408,7 +643,7 @@ def plot_frac_activated_vs_mean_cossim(
         for pi, path in enumerate(paths):
             with open(path, "r", encoding="utf-8") as f:
                 rec = json.load(f)
-            label_base = rec.get("dataset_prefix") or os.path.splitext(os.path.basename(path))[0]
+            label_base = rec.get("dataset_prefix") or os.path.basename(os.path.dirname(os.path.abspath(path)))
             for tower in tower_list:
                 block = rec.get(tower)
                 if not isinstance(block, dict):
@@ -482,7 +717,7 @@ def plot_k_vs_loss(model_name: str) -> None:
         plt.plot(ks, losses, marker="o")
         plt.xlabel("k (number of clusters)")
         plt.ylabel("Mean cosine distance to centroids (loss)")
-        plt.title(f"k-means loss vs k for {model_name.split('/')[1]}, subclass {subclass_str}")
+        plt.title(f"k-means loss vs k for {os.path.basename(base_dir)}, subclass {subclass_str}")
         plt.grid(True, alpha=0.3)
 
         out_path = os.path.join(base_dir, f"k_vs_loss_subclass_{subclass_str}.png")
@@ -492,7 +727,12 @@ def plot_k_vs_loss(model_name: str) -> None:
 
 if __name__ == "__main__":
     plot_training_histories_param_sweep(
-        json_folder="results/distillation/2d_add/lambda_cluster",
+        data_dirs=[
+            "2d_add/1_class_0.01-lam0.1",
+            "2d_add/1_class_0.01-lam0.5",
+            "2d_add/1_class_0.01-lam1.0",
+            "2d_add/1_class_0.01-lam5.0",
+        ],
         param_name="lambda_cluster",
         param_values=[0.1, 0.5, 1.0, 5.0],
         metrics=["kl_loss", "cluster_loss", "accuracy"],
@@ -500,28 +740,46 @@ if __name__ == "__main__":
     )
 
     plot_training_histories_param_sweep(
-        json_folder="results/distillation/2d_add/frac_activated",
-        param_name="frac_activated",
-        param_values=[0.001, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0],
-        metrics=["kl_loss", "cluster_loss", "accuracy"],
-        smooth_window=10,
+      data_dirs=[
+          "2d_add/1_class_0.001",
+          "2d_add/1_class_0.01-lam0.1",
+          "2d_add/1_class_0.05",
+          "2d_add/1_class_0.10",
+          "2d_add/1_class_0.25",
+          "2d_add/1_class_0.50",
+          "2d_add/1_class_1.0",
+      ],
+      param_name="frac_activated",
+      param_values=[0.001, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0],
+      metrics=["kl_loss", "cluster_loss", "accuracy"],
+      smooth_window=10,
     )
 
     plot_frac_activated_vs_mean_cossim(
-        json_folder="results/circuit-discovery/neuron_cossim_topk",
-        out_name="frac_activated_vs_mean_cossim",
-        figure_width_in=5.5,
-        figure_height_in=2.8,
-        num_points=800,
-        anchor_zero=True,
-        x_as_percent=True,
-        save_pdf=True,
-        save_png=True,
+      data_dirs=[
+          "results/circuit-discovery/neuron_cossim_topk/frac0.001",
+          "results/circuit-discovery/neuron_cossim_topk/frac0.01",
+      ],
+      out_name="frac_activated_vs_mean_cossim",
+      figure_width_in=5.5,
+      figure_height_in=2.8,
+      num_points=800,
+      anchor_zero=True,
+      x_as_percent=True,
+      save_pdf=True,
+      save_png=True,
     )
 
     print_clustering_cluster_counts_table(
-        clustering_dir="results/clustering/2d_add",
-        dataset_prefix="2d_add",
+        data_dirs=[
+            "results/distillation/2d_add/frac_activated/f0.01",
+            "results/distillation/2d_add/frac_activated/f0.05",
+        ],
+        num_clusters=[
+            {"1b": 5, "8b": 5},
+            {"1b": 5, "8b": 7},
+        ],
+        subclass=0,
+        row_label_header="frac_activated",
         out=sys.stdout,
     )
-

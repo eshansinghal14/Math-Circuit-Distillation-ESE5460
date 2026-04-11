@@ -33,6 +33,10 @@ STUDENT_MODEL_DIR = "student_model"
 # Fast mid-training snapshot (state_dict only); final artifact is ``student_model/`` (HF format).
 STUDENT_WEIGHTS_FILE = "student_weights.pt"
 
+# Subpaths under ``<run>/neuron-clustering/`` (literal ``meta-llama/...`` folders on disk).
+NEURON_CLUSTERING_STUDENT_SUBPATH = "meta-llama/Llama-3.2-1B"
+NEURON_CLUSTERING_TEACHER_SUBPATH = "meta-llama/Meta-Llama-3-8B"
+
 
 def rm_dir_tree(path: str) -> None:
     """Delete a directory tree (shell ``rm -rf`` on Unix, :func:`shutil.rmtree` fallback)."""
@@ -57,15 +61,16 @@ def save_training_state(
     next_epoch: int,
     best_acc: float,
 ) -> None:
-    """``next_epoch`` = finished epochs (resume starts at this index). Overwrites ``training_state.pt`` in place."""
+    """``next_epoch`` = number of epochs already completed (resume starts at this index)."""
     path = training_state_path(save_dir)
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    payload = {
-        "optimizer": optimizer.state_dict(),
-        "next_epoch": next_epoch,
-        "best_acc": best_acc,
-    }
-    torch.save(payload, path)
+    torch.save(
+        {
+            "optimizer": optimizer.state_dict(),
+            "next_epoch": next_epoch,
+            "best_acc": best_acc,
+        },
+        path,
+    )
 
 
 def load_training_state(
@@ -294,7 +299,7 @@ def _resolve_dataset_output_path(
 
 def require_dataset_prefix(
     dataset: Optional[str],
-    datasets_dir: Optional[str] = None,
+    datasets_dir: Optional[str],
 ) -> str:
     """Return stripped ``--dataset`` PREFIX or exit with an error (no interactive prompt)."""
     prefix = (dataset or "").strip()
@@ -311,7 +316,7 @@ def require_dataset_prefix(
 def resolve_train_test_paths(
     *,
     dataset: Optional[str],
-    datasets_dir: Optional[str] = None,
+    datasets_dir: Optional[str],
 ) -> Tuple[str, str, str]:
     """Resolve train/test JSON paths from ``--dataset PREFIX``.
 
@@ -333,7 +338,7 @@ def resolve_train_test_paths(
 def resolve_test_path(
     *,
     dataset: Optional[str],
-    datasets_dir: Optional[str] = None,
+    datasets_dir: Optional[str],
 ) -> Tuple[str, str]:
     """Resolve test JSON for eval-only scripts. Returns ``(test_path, prefix)``."""
     prefix = require_dataset_prefix(dataset, datasets_dir)
