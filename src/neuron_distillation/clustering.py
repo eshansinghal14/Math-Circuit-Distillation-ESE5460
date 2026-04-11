@@ -23,9 +23,10 @@ from neuron_distillation.activations import NeuronActivationsGenerator
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def _safe_model_dir(model_name: str) -> str:
-    """Filesystem-safe folder name for a HuggingFace model id."""
-    return model_name.replace("/", "_").replace(":", "_")
+def _model_path_segments(model_name: str) -> Tuple[str, ...]:
+    """HF model id as nested path segments (``meta-llama/Llama-3.2-1B`` → two folders)."""
+    norm = model_name.replace("\\", "/").strip("/")
+    return tuple(p.replace(":", "_") for p in norm.split("/") if p)
 
 
 def _parse_args(argv):
@@ -74,8 +75,8 @@ def _parse_args(argv):
         default=None,
         metavar="DIR",
         help=(
-            "Subdirectory under results/neuron-clustering/ before the model folder "
-            "(default: default). Full path: results/neuron-clustering/<this>/<model-name>/",
+            "Subdirectory under results/neuron-clustering/ before the model-id path "
+            "(default: default). Full path: results/neuron-clustering/<this>/<hf-id-as-dirs>/",
         ),
     )
     parser.add_argument(
@@ -344,7 +345,7 @@ def run_neuron_kmeans(
 ):
     if results_dir is None:
         results_dir = os.path.join(
-            "results", "neuron-clustering", "default", _safe_model_dir(model_name),
+            "results", "neuron-clustering", "default", *_model_path_segments(model_name),
         )
     results_dir = os.path.abspath(results_dir)
     os.makedirs(results_dir, exist_ok=True)
@@ -467,7 +468,7 @@ if __name__ == "__main__":
 
     out_seg = args.output_dir if args.output_dir is not None else "default"
     results_dir = os.path.join(
-        "results", "neuron-clustering", out_seg, _safe_model_dir(model_name),
+        "results", "neuron-clustering", out_seg, *_model_path_segments(model_name),
     )
     results_dir = os.path.abspath(results_dir)
     os.makedirs(results_dir, exist_ok=True)
