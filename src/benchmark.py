@@ -13,7 +13,7 @@ from utils import (
 
 def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Run a model on a dataset JSON and print accuracy (saves generations under results/).",
+        description="Run a model on a dataset JSON and print accuracy (saves generations under results/model_outputs/<model>/).",
     )
     p.add_argument(
         "--model-name",
@@ -72,7 +72,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     model, tokenizer = load_model(model_name)
 
     repo_root = os.path.dirname(datasets_dir)
-    results_dir = os.path.join(repo_root, "results", _safe_model_dir(model_name))
+    results_dir = os.path.join(
+        repo_root, "results", "model_outputs", _safe_model_dir(model_name),
+    )
     os.makedirs(results_dir, exist_ok=True)
     results_path = os.path.join(results_dir, dataset_file)
 

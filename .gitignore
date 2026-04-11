@@ -6,7 +6,8 @@ __pycache__/
 esinghal.pem
 src/constants.py
 src/run_colab_code.ipynb
-results/neuron-clustering/meta-llama
+results/distillation
+results/circuit-discovery/neuron_cossim_topk
 latex/paper.aux
 latex/paper.log
 latex/paper.out
