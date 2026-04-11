@@ -82,6 +82,11 @@ def main() -> None:
     parser.add_argument("--save-best", action="store_true")
     parser.add_argument("--step-log-interval", type=int, default=50)
     parser.add_argument(
+        "--log-kl-cka-grad-norms",
+        action="store_true",
+        help="Log global L2 grad norms for KL vs λ·CKA (autograd.grad; ~2× grad work per step)",
+    )
+    parser.add_argument(
         "--eval-max-new-tokens",
         type=int,
         default=None,
@@ -341,6 +346,7 @@ def main() -> None:
         eval_max_new_tokens=eval_max_new_tokens,
         save_dir=run_dir,
         count_flops_every=args.count_flops_every,
+        log_kl_cka_grad_norms=args.log_kl_cka_grad_norms,
     )
     trainer = ClusterDistillationTrainer(
         config=config,

@@ -122,6 +122,9 @@ class ClusterDistillationConfig:
     # 1 = every epoch; 0 = never; N>1 = every Nth epoch (0, N, 2N, …). ~10% step overhead when active.
     count_flops_every: int = 1
 
+    # Per-loss-term global L2 grad norms (KL vs λ·CKA) via ``autograd.grad``; ~2× backward work.
+    log_kl_cka_grad_norms: bool = False
+
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
     @property
@@ -300,6 +303,19 @@ class ClusterActivationCache:
         for h in self.hooks:
             h.remove()
         self.hooks.clear()
+
+
+# ---------------------------------------------------------------------------
+# Grad norms for KL vs CKA terms (optional logging)
+# ---------------------------------------------------------------------------
+
+def _grad_tuple_global_l2_norm(grads: Tuple[Optional[torch.Tensor], ...]) -> float:
+    """Global L2 norm of a tuple of per-parameter gradients (``None`` ignored)."""
+    sq = 0.0
+    for g in grads:
+        if g is not None:
+            sq += float(g.detach().float().pow(2).sum().item())
+    return sq ** 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -693,8 +709,15 @@ class ClusterDistillationTrainer:
 
     # ------------------------------------------------------------------
 
-    def _forward_and_loss(self, batch: Dict) -> Tuple[torch.Tensor, Dict]:
-        """One forward pass through student + teacher, returns composite loss."""
+    def _forward_and_loss(
+        self, batch: Dict,
+    ) -> Tuple[torch.Tensor, Dict, torch.Tensor, Optional[torch.Tensor]]:
+        """One forward pass through student + teacher.
+
+        Returns:
+            ``(total, metrics, kl_loss, cluster_loss)``. ``cluster_loss`` is ``None`` in
+            standard mode.
+        """
         input_ids = batch["input_ids"].to(self.device)
         attention_mask = batch["attention_mask"].to(self.device)
         kl_mask = batch["kl_mask"].to(self.device)
@@ -724,7 +747,7 @@ class ClusterDistillationTrainer:
                     "total_loss": total.item(),
                     "mean_cka": 0.0,
                 }
-                return total, metrics
+                return total, metrics, kl_loss, None
 
             self.teacher_cache.register_hooks(self.teacher, detach=True)
             self.student_cache.register_hooks(self.student, detach=False)
@@ -767,11 +790,47 @@ class ClusterDistillationTrainer:
                     if cka_scores else 0.0
                 ),
             }
-            return total, metrics
+            return total, metrics, kl_loss, cluster_loss
 
         finally:
             self.student_cache.clear()
             self.teacher_cache.clear()
+
+    def _assign_grad_from_kl_cka(
+        self,
+        kl_loss: torch.Tensor,
+        cluster_loss: Optional[torch.Tensor],
+    ) -> Tuple[float, float]:
+        """Set ``param.grad`` from the KL and (scaled) CKA terms separately.
+
+        Matches ``total.backward()`` for ``kl_loss + lambda_cluster * cluster_loss``.
+        Returns global L2 norms ``(||g_KL||_2, ||g_{λ·CKA}||_2)``.
+        """
+        params = [p for p in self.student.parameters() if p.requires_grad]
+        if self._standard:
+            g_kl = torch.autograd.grad(
+                kl_loss, params, retain_graph=False, allow_unused=True,
+            )
+            kl_gn = _grad_tuple_global_l2_norm(g_kl)
+            for p, g in zip(params, g_kl):
+                p.grad = g if g is not None else torch.zeros_like(p)
+            return kl_gn, 0.0
+
+        assert cluster_loss is not None
+        g_kl = torch.autograd.grad(
+            kl_loss, params, retain_graph=True, allow_unused=True,
+        )
+        kl_gn = _grad_tuple_global_l2_norm(g_kl)
+        cka_term = self.config.lambda_cluster * cluster_loss
+        g_cka = torch.autograd.grad(
+            cka_term, params, retain_graph=False, allow_unused=True,
+        )
+        cka_gn = _grad_tuple_global_l2_norm(g_cka)
+        for p, gk, gc in zip(params, g_kl, g_cka):
+            gk = torch.zeros_like(p) if gk is None else gk
+            gc = torch.zeros_like(p) if gc is None else gc
+            p.grad = gk + gc
+        return kl_gn, cka_gn
 
     # ------------------------------------------------------------------
 
@@ -793,12 +852,19 @@ class ClusterDistillationTrainer:
                 assert FlopCounterMode is not None
                 fcm = FlopCounterMode(display=False)
                 with fcm:
-                    loss, metrics = self._forward_and_loss(batch)
+                    loss, metrics, kl_loss, cluster_loss = self._forward_and_loss(batch)
                     if loss is None:
                         pass
                     elif torch.isfinite(loss).item():
                         self.optimizer.zero_grad()
-                        loss.backward()
+                        if cfg.log_kl_cka_grad_norms:
+                            kl_gn, cka_gn = self._assign_grad_from_kl_cka(
+                                kl_loss, cluster_loss,
+                            )
+                            metrics["kl_grad_norm"] = kl_gn
+                            metrics["cka_grad_norm"] = cka_gn
+                        else:
+                            loss.backward()
                         torch.nn.utils.clip_grad_norm_(
                             self.student.parameters(), self.config.grad_clip,
                         )
@@ -807,14 +873,21 @@ class ClusterDistillationTrainer:
                 if loss is None:
                     continue
             else:
-                loss, metrics = self._forward_and_loss(batch)
+                loss, metrics, kl_loss, cluster_loss = self._forward_and_loss(batch)
                 if loss is None:
                     continue
                 if not torch.isfinite(loss).item():
                     skipped_nonfinite += 1
                     continue
                 self.optimizer.zero_grad()
-                loss.backward()
+                if cfg.log_kl_cka_grad_norms:
+                    kl_gn, cka_gn = self._assign_grad_from_kl_cka(
+                        kl_loss, cluster_loss,
+                    )
+                    metrics["kl_grad_norm"] = kl_gn
+                    metrics["cka_grad_norm"] = cka_gn
+                else:
+                    loss.backward()
                 torch.nn.utils.clip_grad_norm_(
                     self.student.parameters(), self.config.grad_clip,
                 )
@@ -834,14 +907,24 @@ class ClusterDistillationTrainer:
                     if count_flops_this_epoch
                     else ""
                 )
+                grad_s = ""
+                if cfg.log_kl_cka_grad_norms:
+                    grad_s = (
+                        f" | ||g||_KL {metrics['kl_grad_norm']:.4f}"
+                        f" | ||g||_λCKA {metrics['cka_grad_norm']:.4f}"
+                    )
                 if self._standard:
-                    print(f"  step {step:04d} | KL {metrics['kl_loss']:.4f}{flop_s}")
+                    print(
+                        f"  step {step:04d} | KL {metrics['kl_loss']:.4f}"
+                        f"{grad_s}{flop_s}",
+                    )
                 else:
                     print(
                         f"  step {step:04d} | "
                         f"KL {metrics['kl_loss']:.4f} | "
                         f"Cluster {metrics['cluster_loss']:.4f} | "
-                        f"CKA {metrics['mean_cka']:.4f}{flop_s}"
+                        f"CKA {metrics['mean_cka']:.4f}"
+                        f"{grad_s}{flop_s}",
                     )
 
         if n == 0:
@@ -873,7 +956,15 @@ class ClusterDistillationTrainer:
                 if isinstance(loaded, dict):
                     for k, v in loaded.items():
                         self.history[k] = v
-            for key in ("epoch", "kl_loss", "accuracy", "cluster_loss", "mean_cka"):
+            for key in (
+                "epoch",
+                "kl_loss",
+                "accuracy",
+                "cluster_loss",
+                "mean_cka",
+                "kl_grad_norm",
+                "cka_grad_norm",
+            ):
                 if key not in self.history:
                     self.history[key] = []
 
@@ -944,6 +1035,10 @@ class ClusterDistillationTrainer:
             print(f"  Cluster pairs:    {len(self.cluster_pairs)}")
         print(f"  Save every:       {cfg.save_every}")
         print(f"  Step log interval:{cfg.step_log_interval}")
+        if cfg.log_kl_cka_grad_norms:
+            print(
+                "  KL/CKA grad norms: on (||g||_KL and ||g||_λ·CKA via autograd.grad; ~2× grad work)",
+            )
         if cfg.count_flops_every <= 0:
             print("  FLOP counting:    off (--count-flops-every 0)")
         elif FlopCounterMode is None:
@@ -1012,18 +1107,29 @@ class ClusterDistillationTrainer:
                 if ef is not None:
                     flop_s = f", FLOPs={format_flops(float(ef))}"
                 if self._standard:
+                    g_line = ""
+                    if cfg.log_kl_cka_grad_norms and "kl_grad_norm" in epoch_metrics:
+                        g_line = (
+                            f", ||g||_KL={epoch_metrics['kl_grad_norm']:.4f}"
+                        )
                     print(
                         f"Epoch {epoch + 1}/{end_epoch}: "
-                        f"KL={epoch_metrics.get('kl_loss', float('nan')):.4f}, "
-                        f"Acc={acc:.4f}{flop_s}"
+                        f"KL={epoch_metrics.get('kl_loss', float('nan')):.4f}"
+                        f"{g_line}, Acc={acc:.4f}{flop_s}"
                     )
                 else:
+                    g_line = ""
+                    if cfg.log_kl_cka_grad_norms and "kl_grad_norm" in epoch_metrics:
+                        g_line = (
+                            f", ||g||_KL={epoch_metrics['kl_grad_norm']:.4f}, "
+                            f"||g||_λCKA={epoch_metrics['cka_grad_norm']:.4f}"
+                        )
                     print(
                         f"Epoch {epoch + 1}/{end_epoch}: "
                         f"KL={epoch_metrics.get('kl_loss', float('nan')):.4f}, "
                         f"Cluster={epoch_metrics.get('cluster_loss', float('nan')):.4f}, "
-                        f"CKA={epoch_metrics.get('mean_cka', float('nan')):.4f}, "
-                        f"Acc={acc:.4f}{flop_s}"
+                        f"CKA={epoch_metrics.get('mean_cka', float('nan')):.4f}"
+                        f"{g_line}, Acc={acc:.4f}{flop_s}"
                     )
             else:
                 tag = "KL=n/a" if self._standard else "KL/Cluster/CKA=n/a"

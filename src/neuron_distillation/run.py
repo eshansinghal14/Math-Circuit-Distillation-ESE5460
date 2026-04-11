@@ -233,6 +233,10 @@ def main():
         help="Dataset family prefix, e.g. 2d_add → datasets/2d_add_train_80.json + _test_20.json",
     )
     parser.add_argument(
+        "--datasets-dir", type=str, default=None,
+        help="Directory containing *_train_80.json (default: repo datasets/)",
+    )
+    parser.add_argument(
         "--k", type=int, default=None, metavar="INT",
         help="Clusters per subclass (circuit mode only; required for new circuit runs).",
     )
@@ -262,6 +266,11 @@ def main():
         type=int,
         default=50,
         help="Print in-epoch metrics every N batches",
+    )
+    parser.add_argument(
+        "--log-kl-cka-grad-norms",
+        action="store_true",
+        help="Log global L2 grad norms for KL vs λ·CKA (uses autograd.grad; ~2× grad work per step)",
     )
     parser.add_argument(
         "--eval-max-new-tokens",
@@ -315,6 +324,7 @@ def main():
     try:
         train_path, test_path, dataset_prefix = resolve_train_test_paths(
             dataset=args.dataset,
+            datasets_dir=args.datasets_dir,
         )
     except FileNotFoundError as e:
         raise SystemExit(str(e)) from e
@@ -513,6 +523,7 @@ def main():
         eval_batch_size=args.eval_batch_size,
         save_dir=run_dir,
         count_flops_every=args.count_flops_every,
+        log_kl_cka_grad_norms=args.log_kl_cka_grad_norms,
     )
     trainer = ClusterDistillationTrainer(
         config=config,
