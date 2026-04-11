@@ -8,6 +8,8 @@ if _SRC_ROOT not in sys.path:
     sys.path.insert(0, _SRC_ROOT)
 
 import argparse
+from typing import List, Optional
+
 import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer
@@ -75,7 +77,79 @@ def _parse_args(argv):
             "(default: default). Full path: results/neuron-clustering/<this>/<model-name>/",
         ),
     )
+    parser.add_argument(
+        "--kmeans-device",
+        type=str,
+        default="cpu",
+        choices=["cpu", "cuda"],
+        help=(
+            "Device for balanced k-means (cpu avoids large [|neurons|, tokens] tensors on GPU; "
+            "cuda is faster if it fits in VRAM)",
+        ),
+    )
+    parser.add_argument(
+        "--max-feature-dim",
+        type=int,
+        default=None,
+        metavar="D",
+        help=(
+            "If set, randomly subsample token positions to D columns before k-means "
+            "(reduces [|neurons|, tokens] memory; use when many activated neurons)",
+        ),
+    )
+    parser.add_argument(
+        "--feature-subsample-seed",
+        type=int,
+        default=0,
+        help="RNG seed for --max-feature-dim column choice (default: 0)",
+    )
+    parser.add_argument(
+        "--neuron-slice-chunk",
+        type=int,
+        default=4096,
+        metavar="N",
+        help=(
+            "When gathering activations per subclass, slice this many neuron columns at a time "
+            "(lower peak GPU memory during collection; default: 4096)",
+        ),
+    )
     return parser.parse_args(argv)
+
+
+def _gather_subclass_activations_chunked(
+    activations: torch.Tensor,
+    ex_mask: torch.Tensor,
+    idx: torch.Tensor,
+    chunk_size: int,
+) -> torch.Tensor:
+    """Subset activations to neuron indices ``idx`` with chunked column slices (lower peak GPU memory).
+
+    Returns a **CPU** float tensor of shape ``[n_c * T, |idx|]``.
+    """
+    n_neu = int(idx.numel())
+    if n_neu == 0:
+        return torch.empty(0, 0)
+    sub = activations[ex_mask]
+    parts: List[torch.Tensor] = []
+    cs = max(1, int(chunk_size))
+    for start in range(0, n_neu, cs):
+        sl = idx[start : start + cs]
+        chunk = sub[:, :, sl].reshape(-1, sl.numel())
+        parts.append(chunk.detach().float().cpu())
+    return torch.cat(parts, dim=1)
+
+
+def _maybe_subsample_feature_columns(
+    x: torch.Tensor,
+    max_dim: Optional[int],
+    seed: int = 0,
+) -> torch.Tensor:
+    """``x`` is ``[|neurons|, n_tokens]``. Optionally subsample token columns to cap k-means memory."""
+    if max_dim is None or x.shape[1] <= max_dim:
+        return x
+    torch.manual_seed(seed)
+    perm = torch.randperm(x.shape[1], device=x.device)[:max_dim]
+    return x[:, perm]
 
 
 def _kmeans_cosine(x, k, num_iters=20):
@@ -191,7 +265,12 @@ def _kmeans_cosine(x, k, num_iters=20):
     return cluster_ids, centroids, loss
 
 
-def _collect_neuron_features_per_subclass(batch_size=5, save_path=None):
+def _collect_neuron_features_per_subclass(
+    batch_size=5,
+    save_path=None,
+    *,
+    neuron_slice_chunk: int = 4096,
+):
     activations_generator = NeuronActivationsGenerator(model_name, batch_size=batch_size)
     num_batches = (activations_generator.ids.shape[0] + batch_size - 1) // batch_size
 
@@ -229,11 +308,15 @@ def _collect_neuron_features_per_subclass(batch_size=5, save_path=None):
             ex_mask = subclass == c
             if not ex_mask.any():
                 continue
-            # activations: [B, T, D]. Concatenate every (example, token) for this subclass
-            # in batch order: rows are [ex0 tok0..tokT-1, ex1 tok0.., ...].
-            acts_c = activations[ex_mask][:, :, idx]  # [n_c, T, |idx|]
-            flat_c = acts_c.reshape(-1, acts_c.size(-1))  # [n_c * T, |idx|]
+            # Chunked column slices -> CPU [n_c*T, |idx|]; avoids one huge [n_c,T,|idx|] on GPU.
+            flat_c = _gather_subclass_activations_chunked(
+                activations, ex_mask, idx, chunk_size=neuron_slice_chunk,
+            )
             features_lists[c].append(flat_c)
+
+        del activations
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     activations_generator.remove_handles()
 
@@ -241,9 +324,9 @@ def _collect_neuron_features_per_subclass(batch_size=5, save_path=None):
     for c, feats in features_lists.items():
         if not feats:
             continue
-        # feats: list of [n_b*T, |idx|] per batch; cat -> [N_c*T, |idx|] for all examples in c.
-        combined = torch.cat(feats, dim=0).to(device)
-        feats_flat = combined.T.contiguous()  # [|idx|, N_c*T]
+        # feats: list of CPU [n_b*T, |idx|] per batch; cat -> [N_c*T, |idx|] on CPU.
+        combined = torch.cat(feats, dim=0)
+        feats_flat = combined.T.contiguous()  # [|idx|, N_c*T] on CPU
         features_per_subclass[c] = feats_flat
 
     if save_path is not None:
@@ -268,6 +351,11 @@ def run_neuron_kmeans(
     log=True,
     subclass_features_path=None,
     results_dir=None,
+    *,
+    kmeans_device: str = "cpu",
+    max_feature_dim: Optional[int] = None,
+    feature_subsample_seed: int = 0,
+    neuron_slice_chunk: int = 4096,
 ):
     if results_dir is None:
         results_dir = os.path.join(
@@ -280,19 +368,30 @@ def run_neuron_kmeans(
         subclass_features_path = os.path.join(results_dir, "subclass_features.pt")
 
     if subclass_features_path is not None and os.path.exists(subclass_features_path):
-        ckpt = torch.load(subclass_features_path, map_location=device)
-        features_per_subclass = {int(c): v.to(device) for c, v in ckpt["features_per_subclass"].items()}
-        indices_per_subclass = {int(c): idx.to(device) for c, idx in ckpt["indices_per_subclass"].items()}
+        ckpt = torch.load(subclass_features_path, map_location="cpu")
+        features_per_subclass = {int(c): v for c, v in ckpt["features_per_subclass"].items()}
+        indices_per_subclass = {int(c): idx for c, idx in ckpt["indices_per_subclass"].items()}
     else:
         features_per_subclass, indices_per_subclass = _collect_neuron_features_per_subclass(
-            batch_size=batch_size, save_path=subclass_features_path
+            batch_size=batch_size,
+            save_path=subclass_features_path,
+            neuron_slice_chunk=neuron_slice_chunk,
         )
 
     if subclass not in features_per_subclass:
         raise ValueError(f"No features found for subclass {subclass}")
 
-    x = features_per_subclass[subclass]
+    x = features_per_subclass[subclass].float()
+    x = _maybe_subsample_feature_columns(x, max_feature_dim, feature_subsample_seed)
+    if kmeans_device == "cuda" and torch.cuda.is_available():
+        km_dev = torch.device("cuda")
+    else:
+        km_dev = torch.device("cpu")
+    x = x.to(km_dev)
+
     subclass_indices = indices_per_subclass[subclass]
+    if subclass_indices.device != km_dev:
+        subclass_indices = subclass_indices.to(km_dev)
 
     cluster_ids, centroids, loss = _kmeans_cosine(x, k=k, num_iters=num_iters)
 
@@ -370,6 +469,10 @@ if __name__ == "__main__":
     args = _parse_args(sys.argv[1:])
     if args.batch_size < 1:
         raise SystemExit("ERROR: --batch-size must be a positive integer")
+    if args.neuron_slice_chunk < 1:
+        raise SystemExit("ERROR: --neuron-slice-chunk must be a positive integer")
+    if args.max_feature_dim is not None and args.max_feature_dim < 1:
+        raise SystemExit("ERROR: --max-feature-dim must be >= 1 when set")
 
     model_name = args.model_name
     k_classes = args.k_classes
@@ -416,6 +519,10 @@ if __name__ == "__main__":
                     log=False,
                     batch_size=args.batch_size,
                     results_dir=results_dir,
+                    kmeans_device=args.kmeans_device,
+                    max_feature_dim=args.max_feature_dim,
+                    feature_subsample_seed=args.feature_subsample_seed,
+                    neuron_slice_chunk=args.neuron_slice_chunk,
                 )
                 k_gs_testing[subclass][k] = loss
                 print(f"Subclass {subclass}, k={k}, loss={loss}")
