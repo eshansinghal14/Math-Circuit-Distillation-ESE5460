@@ -8,6 +8,7 @@ src/constants.py
 src/run_colab_code.ipynb
 results/distillation
 results/circuit-discovery/neuron_cossim_topk
+results/clustering
 latex/paper.aux
 latex/paper.log
 latex/paper.out

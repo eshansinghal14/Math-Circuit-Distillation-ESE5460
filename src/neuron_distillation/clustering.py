@@ -59,6 +59,16 @@ def _parse_args(argv):
         metavar="N",
         help="Batch size for forward passes when collecting neuron features (default: 500)",
     )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        metavar="DIR",
+        help=(
+            "Root directory for outputs: subclass_features.pt, clusters/, plots/, "
+            "k_gs_testing.json (default: results/neuron-clustering/<model-name>)",
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -251,8 +261,11 @@ def run_neuron_kmeans(
     num_iters=100,
     log=True,
     subclass_features_path=None,
+    results_dir=None,
 ):
-    results_dir = os.path.join("results", "neuron-clustering", model_name)
+    if results_dir is None:
+        results_dir = os.path.join("results", "neuron-clustering", model_name)
+    results_dir = os.path.abspath(results_dir)
     os.makedirs(results_dir, exist_ok=True)
 
     if subclass_features_path is None:
@@ -358,7 +371,12 @@ if __name__ == "__main__":
     if args.mask_temperature is not None:
         model.mask_temperature.fill_(float(args.mask_temperature))
 
-    results_dir = os.path.join("results", "neuron-clustering", model_name)
+    results_dir = (
+        args.output_dir
+        if args.output_dir is not None
+        else os.path.join("results", "neuron-clustering", model_name)
+    )
+    results_dir = os.path.abspath(results_dir)
     os.makedirs(results_dir, exist_ok=True)
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -386,7 +404,11 @@ if __name__ == "__main__":
             k_gs_testing[subclass] = {}
             for k in range(1, 20, 2):
                 _, _, loss = run_neuron_kmeans(
-                    k, subclass=subclass, log=False, batch_size=args.batch_size
+                    k,
+                    subclass=subclass,
+                    log=False,
+                    batch_size=args.batch_size,
+                    results_dir=results_dir,
                 )
                 k_gs_testing[subclass][k] = loss
                 print(f"Subclass {subclass}, k={k}, loss={loss}")

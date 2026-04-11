@@ -3,10 +3,11 @@ import json
 import os
 import re
 import sys
-from typing import Any, Collection, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Collection, Dict, List, Optional, Sequence, Set, TextIO, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 
 _NEURIPS_RC: Dict[str, Any] = {
     "font.family": "serif",
@@ -59,6 +60,97 @@ def default_neuron_cossim_topk_dir() -> str:
 def repo_root() -> str:
     """Parent of ``src/`` (directory containing ``plots/``, ``results/``)."""
     return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
+def default_clustering_dir(dataset_prefix: str = "2d_add") -> str:
+    """``results/clustering/<dataset_prefix>/`` (e.g. ``2d_add``)."""
+    return os.path.join(repo_root(), "results", "clustering", dataset_prefix)
+
+
+def _cluster_neuron_counts_from_pt(path: str) -> Tuple[int, Dict[int, int]]:
+    """Load a ``*_1b.pt`` / ``*_8b.pt`` checkpoint; return ``(k, {cluster_id -> num_neurons})``."""
+    d = torch.load(path, map_location="cpu", weights_only=False)
+    c2i = d["cluster_to_indices"]
+    k = int(d.get("k", len(c2i)))
+    counts: Dict[int, int] = {}
+    for cid, t in c2i.items():
+        cid_i = int(cid)
+        if hasattr(t, "numel"):
+            counts[cid_i] = int(t.numel())
+        else:
+            counts[cid_i] = len(t)
+    return k, counts
+
+
+def print_clustering_cluster_counts_table(
+    clustering_dir: Optional[str] = None,
+    *,
+    dataset_prefix: str = "2d_add",
+    out: Optional[TextIO] = None,
+) -> str:
+    """Print a text table: rows = frac activated, columns = cluster id, cells = ``1b/8b`` neuron counts.
+
+    Expects paired files ``{frac}_1b.pt`` and ``{frac}_8b.pt`` under
+    ``results/clustering/<dataset_prefix>/`` (from neuron clustering runs).
+
+    Returns:
+        The same table as a single string (for logging or saving).
+    """
+    root = os.path.abspath(clustering_dir) if clustering_dir else default_clustering_dir(dataset_prefix)
+    if not os.path.isdir(root):
+        raise FileNotFoundError(f"Not a directory: {root}")
+
+    fracs: List[str] = []
+    for name in os.listdir(root):
+        if name.endswith("_1b.pt"):
+            fracs.append(name[: -len("_1b.pt")])
+
+    def _frac_key(s: str) -> Tuple[int, float]:
+        try:
+            return (0, float(s))
+        except ValueError:
+            return (1, 0.0)
+
+    fracs.sort(key=_frac_key)
+
+    parsed: List[Tuple[str, int, int, Dict[int, int], Dict[int, int]]] = []
+    max_k = 0
+    for frac in fracs:
+        p1 = os.path.join(root, f"{frac}_1b.pt")
+        p8 = os.path.join(root, f"{frac}_8b.pt")
+        if not os.path.isfile(p1) or not os.path.isfile(p8):
+            continue
+        k1, c1 = _cluster_neuron_counts_from_pt(p1)
+        k2, c2 = _cluster_neuron_counts_from_pt(p8)
+        max_k = max(max_k, k1, k2)
+        parsed.append((frac, k1, k2, c1, c2))
+
+    if not parsed:
+        msg = f"No paired *_1b.pt / *_8b.pt files found under {root!r}"
+        print(msg, file=out or sys.stdout)
+        return msg
+
+    rows: List[List[str]] = []
+    for frac, _k1, _k2, c1, c2 in parsed:
+        row = [frac]
+        for cid in range(max_k):
+            n1 = c1.get(cid, 0)
+            n2 = c2.get(cid, 0)
+            row.append(f"{n1}/{n2}")
+        rows.append(row)
+
+    headers = ["frac_activated"] + [f"cluster_{j}" for j in range(max_k)]
+    col_widths = [max(len(headers[i]), max((len(r[i]) for r in rows), default=0)) for i in range(len(headers))]
+
+    def fmt_row(cells: List[str]) -> str:
+        return "  ".join(c.ljust(col_widths[i]) for i, c in enumerate(cells))
+
+    lines = [fmt_row(headers), "  ".join("-" * col_widths[i] for i in range(len(headers)))]
+    for r in rows:
+        lines.append(fmt_row(r[: len(headers)]))
+    text = "\n".join(lines) + "\n"
+    print(text, end="", file=out or sys.stdout)
+    return text
 
 
 def _json_files_in_folder(folder: str) -> List[str]:
@@ -425,5 +517,11 @@ if __name__ == "__main__":
         x_as_percent=True,
         save_pdf=True,
         save_png=True,
+    )
+
+    print_clustering_cluster_counts_table(
+        clustering_dir="results/clustering/2d_add",
+        dataset_prefix="2d_add",
+        out=sys.stdout,
     )
 
