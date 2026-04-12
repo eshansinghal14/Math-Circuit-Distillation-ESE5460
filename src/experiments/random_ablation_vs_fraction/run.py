@@ -87,14 +87,17 @@ def main() -> None:
     model, tokenizer = load_model(args.model_name)
     tokenizer.padding_side = "left"
     total = mlp_flatten_dim_from_model(model)
-    fracs = np.linspace(0.0, 1.0, args.n_points)
+    fracs = np.linspace(0.0, float(args.max_frac), args.n_points)
 
     test_model(
         model, tokenizer, dataset_path, buf_path,
         batch_size=args.batch_size, max_new_tokens=EVAL_MAX_NEW_TOKENS, log=False,
     )
     baseline = eval_model(buf_path, log=False)
-    print(f"  baseline accuracy: {baseline:.4f} ({total} flat MLP neurons)")
+    print(
+        f"  baseline accuracy: {baseline:.4f} ({total} flat MLP neurons); "
+        f"sweep 0 … {float(args.max_frac):.4f} ({args.n_points} points)",
+    )
 
     points: list[dict] = []
     n_frac = len(fracs)
