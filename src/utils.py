@@ -199,12 +199,6 @@ def load_prompt_answer_json(path: str) -> Dict[str, int]:
         return json_to_prompt_answer_dict(json.load(f))
 
 
-def load_prompt_answer_json_test_rows(path: str) -> List[Dict[str, str]]:
-    """Load math JSON into ``[{q_str, a_str}, ...]`` for :func:`test_model`."""
-    data = load_prompt_answer_json(path)
-    return [{"q_str": q, "a_str": str(a)} for q, a in data.items()]
-
-
 def _extract_int_after_equals(text: str) -> Optional[int]:
     m = re.search(r"=\s*(\d+)", text)
     return int(m.group(1)) if m else None
@@ -378,26 +372,41 @@ def load_model(model_name):
     return model, tokenizer
 
 def test_model(model, tokenizer, dataset_fname, results_fname, batch_size=50, max_new_tokens=EVAL_MAX_NEW_TOKENS, log=True):
+    """Greedy eval on a math JSON file.
+
+    ``dataset_fname`` uses the same formats as :func:`json_to_prompt_answer_dict`:
+    flat ``{prompt: answer}`` or a list of ``{q_str, a_str}`` rows (extra keys allowed).
+    """
     model.eval()
-    with open(dataset_fname, 'r') as f:
-        dataset = json.load(f)
-    prompts = []
-    for s in dataset:
-        prompts.append(s['q_str'])
+    with open(dataset_fname, encoding="utf-8") as f:
+        raw = json.load(f)
+    data = json_to_prompt_answer_dict(raw)
+    prompts = list(data.keys())
+    answers = [int(v) for v in data.values()]
+    n = len(prompts)
     results = []
-    for i in range(0, len(prompts), batch_size):
+    for i in range(0, n, batch_size):
         with torch.no_grad():
             if log:
-                print(f'processing {i}/{len(prompts)}')
-            batched_prompts = prompts[i:min(i + batch_size, len(prompts))]   
-            input_ids = tokenizer(batched_prompts, return_tensors="pt", padding=True, truncation=True).to(model.device)
-            outputs = model.generate(**input_ids, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tokenizer.pad_token_id)
+                print(f"processing {i}/{n}")
+            end = min(i + batch_size, n)
+            batched_prompts = prompts[i:end]
+            batched_answers = answers[i:end]
+            input_ids = tokenizer(
+                batched_prompts, return_tensors="pt", padding=True, truncation=True,
+            ).to(model.device)
+            outputs = model.generate(
+                **input_ids,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                pad_token_id=tokenizer.pad_token_id,
+            )
             responses = tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
             for k, resp in enumerate(responses):
-                results.append({'response': resp, 'answer': dataset[i + k]['a_str']})
+                results.append({"response": resp, "answer": str(batched_answers[k])})
 
-    with open(results_fname, 'w') as f:
+    with open(results_fname, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=4)
 
     return results

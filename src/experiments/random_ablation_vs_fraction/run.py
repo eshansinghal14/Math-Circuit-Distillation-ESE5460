@@ -37,7 +37,6 @@ from utils import (  # noqa: E402
     EVAL_MAX_NEW_TOKENS,
     eval_model,
     load_model,
-    load_prompt_answer_json_test_rows,
     mlp_flatten_dim_from_model,
     test_model,
 )
@@ -69,12 +68,8 @@ def main() -> None:
 
     out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
     os.makedirs(out_dir, exist_ok=True)
-    ds_path = os.path.join(out_dir, "_eval_dataset.json")
     buf_path = os.path.join(out_dir, "_eval_buffer.json")
-
-    rows = load_prompt_answer_json_test_rows(args.dataset)
-    with open(ds_path, "w", encoding="utf-8") as f:
-        json.dump(rows, f, indent=2)
+    dataset_path = os.path.abspath(args.dataset)
 
     model, tokenizer = load_model(args.model_name)
     tokenizer.padding_side = "left"
@@ -82,12 +77,14 @@ def main() -> None:
     fracs = np.linspace(0.0, 1.0, args.n_points)
 
     test_model(
-        model, tokenizer, ds_path, buf_path,
+        model, tokenizer, dataset_path, buf_path,
         batch_size=args.batch_size, max_new_tokens=EVAL_MAX_NEW_TOKENS, log=False,
     )
     baseline = eval_model(buf_path, log=False)
+    print(f"  baseline accuracy: {baseline:.4f} ({total} flat MLP neurons)")
 
     points: list[dict] = []
+    n_frac = len(fracs)
     for i, frac in enumerate(fracs):
         k = int(round(float(frac) * total))
         k = max(0, min(k, total))
@@ -110,6 +107,10 @@ def main() -> None:
         points.append(
             {"fraction_ablated": float(frac), "accuracy": acc, "performance_drop": drop},
         )
+        print(
+            f"  [{i + 1}/{n_frac}] frac={float(frac):.4f}  "
+            f"k={k}/{total}  acc={acc:.4f}  drop={drop:.4f}",
+        )
 
     json_path = os.path.join(out_dir, "random_ablation_vs_fraction.json")
     prior: list[dict] = []
@@ -125,7 +126,7 @@ def main() -> None:
     all_points = prior + points
     payload = {
         "model_name": args.model_name,
-        "dataset": os.path.abspath(args.dataset),
+        "dataset": dataset_path,
         "baseline_accuracy": baseline,
         "total_flat_mlp_neurons": total,
         "seed": args.seed,
