@@ -5,6 +5,10 @@ Run from ``src/``::
   python -m experiments.random_ablation_vs_fraction.run \\
     --dataset ../datasets/2d_add_test_20.json --n-points 25 --batch-size 32
 
+  # Sweep fractions 0 … 0.3 only:
+  python -m experiments.random_ablation_vs_fraction.run \\
+    --dataset ../datasets/2d_add_test_20.json --n-points 20 --batch-size 32 --max-frac 0.3
+
 Outputs go under ``experiments/random_ablation_vs_fraction/results/``.
 If ``random_ablation_vs_fraction.json`` already exists there, new points are **appended**
 and the scatter plot uses **all** stored points.
@@ -50,7 +54,14 @@ def main() -> None:
         type=int,
         required=True,
         metavar="N",
-        help="Number of (fraction, accuracy) points (fractions linspace 0..1)",
+        help="Number of (fraction, accuracy) points along the sweep",
+    )
+    p.add_argument(
+        "--max-frac",
+        type=float,
+        default=1.0,
+        metavar="F",
+        help="Largest fraction of neurons ablated in the sweep (default: 1). Sweep is linspace 0..F.",
     )
     p.add_argument("--batch-size", type=int, required=True, metavar="N", help="Eval batch size")
     p.add_argument(
@@ -63,6 +74,8 @@ def main() -> None:
     args = p.parse_args()
     if args.n_points < 2:
         raise SystemExit("--n-points must be >= 2")
+    if not (0.0 < args.max_frac <= 1.0):
+        raise SystemExit("--max-frac must be in (0, 1]")
     if args.batch_size < 1:
         raise SystemExit("--batch-size must be >= 1")
 
@@ -129,6 +142,7 @@ def main() -> None:
         "dataset": dataset_path,
         "baseline_accuracy": baseline,
         "total_flat_mlp_neurons": total,
+        "max_frac": float(args.max_frac),
         "seed": args.seed,
         "points": all_points,
         "n_points_this_run": len(points),
