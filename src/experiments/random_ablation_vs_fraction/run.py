@@ -97,7 +97,7 @@ def main() -> None:
             handles = apply_activation_ablation_hooks(model, idx)
             try:
                 test_model(
-                    model, tokenizer, ds_path, buf_path,
+                    model, tokenizer, dataset_path, buf_path,
                     batch_size=args.batch_size, max_new_tokens=EVAL_MAX_NEW_TOKENS, log=False,
                 )
                 acc = eval_model(buf_path, log=False)
