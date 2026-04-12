@@ -23,12 +23,14 @@ Pipeline prerequisites (run before this module):
 
 import json
 import os
+import random
 import re
 from collections import defaultdict
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -78,6 +80,15 @@ from utils import (
 )
 
 
+def _seed_all(seed: int) -> None:
+    """Set Python / NumPy / PyTorch RNGs (DataLoader shuffle uses the torch generator passed separately)."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
@@ -124,6 +135,9 @@ class ClusterDistillationConfig:
 
     # Per-loss-term global L2 grad norms (KL vs λ·CKA) via ``autograd.grad``; ~2× backward work.
     log_kl_cka_grad_norms: bool = False
+
+    # Reproducible train loader shuffle / batch order (also call :func:`_seed_all` in the trainer).
+    seed: int = 42
 
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -614,6 +628,10 @@ class ClusterDistillationTrainer:
         self.test_data = test_data
         self.device = config.device
 
+        _seed_all(config.seed)
+        self._loader_generator = torch.Generator()
+        self._loader_generator.manual_seed(config.seed)
+
         # Tokenizer
         if tokenizer is not None:
             self.tokenizer = tokenizer
@@ -661,6 +679,7 @@ class ClusterDistillationTrainer:
             self.dataset,
             batch_size=config.batch_size,
             shuffle=True,
+            generator=self._loader_generator,
             collate_fn=partial(collate_fn, pad_id=self.tokenizer.eos_token_id),
         )
 
@@ -1026,6 +1045,7 @@ class ClusterDistillationTrainer:
         else:
             print(f"  Epochs:           {cfg.epochs}")
         print(f"  Batch size:       {cfg.batch_size}")
+        print(f"  RNG seed:         {cfg.seed}")
         print(f"  LR:               {cfg.learning_rate}")
         print(f"  Temperature:      {cfg.temperature}")
         print(f"  eval batch size:  {cfg.eval_batch_size}")

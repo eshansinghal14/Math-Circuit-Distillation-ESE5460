@@ -119,6 +119,13 @@ def main() -> None:
     )
     parser.add_argument("--random-seed", type=int, default=42)
     parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="RNG seed for distillation (DataLoader shuffle; default: 42). "
+        "Random neuron subsets use --random-seed.",
+    )
+    parser.add_argument(
         "--uniform-importance",
         action="store_true",
         help="Ignore mapping importances; weight every pair equally for CKA",
@@ -347,6 +354,7 @@ def main() -> None:
         save_dir=run_dir,
         count_flops_every=args.count_flops_every,
         log_kl_cka_grad_norms=args.log_kl_cka_grad_norms,
+        seed=args.seed,
     )
     trainer = ClusterDistillationTrainer(
         config=config,

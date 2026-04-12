@@ -199,6 +199,12 @@ def load_prompt_answer_json(path: str) -> Dict[str, int]:
         return json_to_prompt_answer_dict(json.load(f))
 
 
+def load_prompt_answer_json_test_rows(path: str) -> List[Dict[str, str]]:
+    """Load math JSON into ``[{q_str, a_str}, ...]`` for :func:`test_model`."""
+    data = load_prompt_answer_json(path)
+    return [{"q_str": q, "a_str": str(a)} for q, a in data.items()]
+
+
 def _extract_int_after_equals(text: str) -> Optional[int]:
     m = re.search(r"=\s*(\d+)", text)
     return int(m.group(1)) if m else None
@@ -400,17 +406,35 @@ def parse_answer(resp):
     match = re.search(r'=\s*(\d+)', resp)
     return int(match.group(1)) if match else None
 
-def eval_model(results_fname):
-    with open(results_fname, 'r') as f:
+def eval_model(results_fname, log: bool = True):
+    with open(results_fname, "r", encoding="utf-8") as f:
         results = json.load(f)
+    if not results:
+        return 0.0
 
     correct = 0
     for res in results:
-        if parse_answer(res['response']) == int(res['answer']):
+        if parse_answer(res["response"]) == int(res["answer"]):
             correct += 1
 
-    print('Accuracy: ', correct / len(results))
-    return correct / len(results)
+    acc = correct / len(results)
+    if log:
+        print("Accuracy: ", acc)
+    return acc
+
+
+def mlp_flatten_dim_from_model(model) -> int:
+    """Total flattened MLP width (``layers × intermediate_size``) for Llama-style causal LMs."""
+    cfg = model.config
+    return int(cfg.num_hidden_layers) * int(cfg.intermediate_size)
+
+
+def mlp_flatten_dim_from_pretrained_id(model_id: str) -> int:
+    """Same as :func:`mlp_flatten_dim_from_model` but from a HuggingFace id (no model load)."""
+    from transformers import AutoConfig
+
+    cfg = AutoConfig.from_pretrained(model_id, token=HF_READ_TOKEN or None)
+    return int(cfg.num_hidden_layers) * int(cfg.intermediate_size)
 
 
 def _normalize_operand_digits(

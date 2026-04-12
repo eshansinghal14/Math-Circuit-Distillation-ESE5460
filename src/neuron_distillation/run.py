@@ -315,6 +315,12 @@ def main():
                         help="Circuit: skip ablation (expects cached ablation JSON under run dir)")
     parser.add_argument("--ablation-batch-size", type=int, default=50,
                         help="Circuit: batch size for neuron-cluster ablation")
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="RNG seed for Python/NumPy/torch and train DataLoader shuffle (default: 42)",
+    )
     args = parser.parse_args()
     if args.count_flops_every < 0:
         raise SystemExit("--count-flops-every must be >= 0 (use 0 to disable FLOP counting)")
@@ -524,6 +530,7 @@ def main():
         save_dir=run_dir,
         count_flops_every=args.count_flops_every,
         log_kl_cka_grad_norms=args.log_kl_cka_grad_norms,
+        seed=args.seed,
     )
     trainer = ClusterDistillationTrainer(
         config=config,

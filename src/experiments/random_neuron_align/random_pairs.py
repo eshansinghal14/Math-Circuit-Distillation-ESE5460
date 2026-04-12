@@ -7,16 +7,9 @@ import os
 from typing import List
 
 import torch
-from transformers import AutoConfig
 
 from neuron_distillation.distillation import ClusterPairInfo
-from utils import HF_READ_TOKEN
-
-
-def mlp_flatten_dim(model_id: str) -> int:
-    """Total width of ``[layer_0.up_proj | … | layer_{L-1}.up_proj]`` (Llama-style)."""
-    cfg = AutoConfig.from_pretrained(model_id, token=HF_READ_TOKEN or None)
-    return int(cfg.num_hidden_layers) * int(cfg.intermediate_size)
+from utils import mlp_flatten_dim_from_pretrained_id as mlp_flatten_dim
 
 
 def replace_pairs_with_random_neurons(
