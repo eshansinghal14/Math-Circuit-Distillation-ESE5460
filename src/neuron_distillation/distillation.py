@@ -398,7 +398,8 @@ class ClusterAlignmentLoss(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         importance_weighting: bool = True,
         cluster_size_weighting: bool = False,
-    ) -> Tuple[torch.Tensor, Dict]:
+        compute_kc_leading_eigenvalue: bool = False,
+    ) -> Tuple[torch.Tensor, Dict, Dict]:
         """
         Args:
             student_acts: ``(B, T, D_student_total)`` per-token up_proj activations.
