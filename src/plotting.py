@@ -647,6 +647,75 @@ def _trailing_moving_average(
     return out_x, out_y
 
 
+def _grad_ratio_kl_over_cka(
+    kl: np.ndarray,
+    cka: np.ndarray,
+    eps: float = 1e-12,
+) -> np.ndarray:
+    """Per-epoch ``‖g_KL‖ / ‖g_{λ·CKA}‖`` (NaN where inputs invalid)."""
+    return np.abs(kl) / (np.abs(cka) + eps)
+
+
+def _block_mean_hline_segments(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    block_epochs: int,
+) -> List[Tuple[float, float, float]]:
+    """For each contiguous index block of size ``block_epochs``, return ``(x_left, x_right, mean_y)``."""
+    n = len(xs)
+    out: List[Tuple[float, float, float]] = []
+    if n == 0:
+        return out
+    w = max(1, int(block_epochs))
+    for start in range(0, n, w):
+        end = min(start + w, n)
+        block_x = xs[start:end]
+        block_y = ys[start:end]
+        mean_y = float(np.nanmean(block_y))
+        x_left = float(block_x[0])
+        x_right = float(block_x[-1])
+        out.append((x_left, x_right, mean_y))
+    return out
+
+
+def _kc_weighted_denominator_per_epoch(
+    kc_lam1_epochs: List[Any],
+    importance: Sequence[float],
+    p: Sequence[float],
+    cluster_keys: Sequence[str],
+    eps: float = 1e-12,
+) -> np.ndarray:
+    """``sum_k importance_k * p_k / λ_max(K_c)_{k,epoch}`` per epoch (NaN if empty denom)."""
+    n_ep = len(kc_lam1_epochs)
+    out = np.full(n_ep, np.nan, dtype=float)
+    imp = [float(x) for x in importance]
+    pv = [float(x) for x in p]
+    keys = list(cluster_keys)
+    if not (len(imp) == len(pv) == len(keys)):
+        raise ValueError(
+            "importance, p, and cluster_keys must have the same length "
+            f"({len(imp)}, {len(pv)}, {len(keys)}).",
+        )
+    for i in range(n_ep):
+        row = kc_lam1_epochs[i]
+        if not isinstance(row, dict):
+            continue
+        s = 0.0
+        ok = False
+        for ik, pk, key in zip(imp, pv, keys):
+            lam = row.get(key)
+            if lam is None:
+                continue
+            lv = float(lam)
+            if not np.isfinite(lv) or lv <= eps:
+                continue
+            s += ik * pk / (lv + eps)
+            ok = True
+        if ok and s > 0:
+            out[i] = s
+    return out
+
+
 def _format_param_value(v: Any) -> str:
     if isinstance(v, float):
         return f"{v:g}"
@@ -776,6 +845,123 @@ def plot_training_histories_param_sweep(
         else:
             fig.tight_layout()
 
+        if save_pdf:
+            fig.savefig(f"{stem}.pdf", format="pdf")
+        if save_png:
+            fig.savefig(f"{stem}.png", format="png", dpi=300)
+        plt.close(fig)
+
+    primary = f"{stem}.pdf" if save_pdf else f"{stem}.png"
+    return primary
+
+
+def plot_training_history_kl_cka_grad_ratios(
+    data_dir: str,
+    importance: Sequence[float],
+    p: Sequence[float],
+    cluster_keys: Sequence[str],
+    *,
+    block_epochs: int = 5,
+    history_filename: str = "training_history.json",
+    x_key: str = "epoch",
+    output_dir: Optional[str] = None,
+    out_name: str = "kl_cka_grad_ratio",
+    figure_width_in: float = 5.5,
+    figure_height_in: float = 4.2,
+    save_pdf: bool = True,
+    save_png: bool = True,
+) -> str:
+    """Plot grad-norm ratios from a single run's ``training_history.json``.
+
+    **Top:** Per-epoch ``kl_grad_norm / cka_grad_norm`` (line), plus horizontal segments
+    whose level is the **mean ratio** over each contiguous block of ``block_epochs`` epochs
+    (spanning the first to last epoch in that block; repeated along the full run).
+
+    **Bottom:** ``|kl_grad_norm| / D`` where ``D = sum_k importance_k * p_k / lam_k`` and
+    ``lam_k`` is ``kc_lam1[epoch][cluster_keys[k]]`` (``kc_lam1`` is the list of per-epoch
+    dicts in the JSON). Keys must match those written by training (e.g. ``s0_us1_ut2``).
+
+    Args:
+        data_dir: Directory containing ``history_filename``.
+        importance: Per-cluster weights, same length as ``p`` and ``cluster_keys``.
+        p: Per-cluster multipliers.
+        cluster_keys: Keys into each epoch's ``kc_lam1`` dict.
+        block_epochs: Epochs per block for the top-panel stepwise horizontal means.
+    """
+    if not save_pdf and not save_png:
+        raise ValueError("At least one of save_pdf, save_png must be True")
+    root = os.path.abspath(data_dir)
+    if not os.path.isdir(root):
+        raise NotADirectoryError(f"Not a directory: {root!r}")
+    path = os.path.join(root, history_filename)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Missing {history_filename!r} in {root!r}")
+
+    hist = _load_training_history(path)
+    if "kl_grad_norm" not in hist or "cka_grad_norm" not in hist:
+        raise KeyError(
+            "History must contain 'kl_grad_norm' and 'cka_grad_norm' "
+            f"(keys: {list(hist.keys())!r})",
+        )
+
+    xs, kl = _series_x_y(hist, "kl_grad_norm", x_key)
+    _, cka = _series_x_y(hist, "cka_grad_norm", x_key)
+    ratio = _grad_ratio_kl_over_cka(kl, cka)
+
+    kc_epochs = hist.get("kc_lam1")
+    if kc_epochs is None:
+        raise KeyError(
+            "History must contain 'kc_lam1' (list of per-epoch dicts) for the weighted plot.",
+        )
+    if not isinstance(kc_epochs, list) or len(kc_epochs) != len(kl):
+        raise ValueError(
+            "kc_lam1 must be a list with the same length as kl_grad_norm.",
+        )
+
+    denom = _kc_weighted_denominator_per_epoch(
+        kc_epochs, importance, p, cluster_keys,
+    )
+    weighted_ratio = np.abs(kl) / denom
+
+    block_segs = _block_mean_hline_segments(xs, ratio, block_epochs)
+
+    out_dir = _output_dir_or_cwd(output_dir)
+    os.makedirs(out_dir, exist_ok=True)
+    stem = os.path.join(out_dir, _safe_stem(out_name))
+
+    with plt.rc_context(_NEURIPS_RC):
+        fig, (ax0, ax1) = plt.subplots(
+            2,
+            1,
+            figsize=(figure_width_in, figure_height_in),
+            sharex=True,
+        )
+
+        ax0.plot(
+            xs,
+            ratio,
+            color="0.35",
+            linewidth=0.9,
+            alpha=0.85,
+            label=r"$\|g_{\mathrm{KL}}\|/\|g_{\lambda\mathrm{CKA}}\|$",
+        )
+        for bi, (x0, x1, ym) in enumerate(block_segs):
+            ax0.hlines(
+                ym,
+                x0,
+                x1,
+                colors="C0",
+                linewidth=1.8,
+                label=f"Block mean ($n={max(1, int(block_epochs))}$ ep.)" if bi == 0 else None,
+            )
+        ax0.set_ylabel(r"$\|g_{\mathrm{KL}}\|/\|g_{\lambda\mathrm{CKA}}\|$")
+        ax0.legend(loc="best", frameon=False, fontsize=7)
+
+        ax1.plot(xs, weighted_ratio, color="C3", linewidth=1.2, clip_on=False)
+        ax1.set_xlabel(x_key.replace("_", " "))
+        ax1.set_ylabel(r"$|g_{\mathrm{KL}}| \;/\; \sum_k \alpha_k p_k / \lambda_{\max}(K_c)_k$")
+
+        fig.tight_layout()
         if save_pdf:
             fig.savefig(f"{stem}.pdf", format="pdf")
         if save_png:
