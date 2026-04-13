@@ -110,7 +110,10 @@ def main() -> None:
     parser.add_argument(
         "--log-kl-cka-grad-norms",
         action="store_true",
-        help="Log global L2 grad norms for KL vs λ·CKA (autograd.grad; ~2× grad work per step)",
+        help=(
+            "Log ‖g_KL‖ and ‖g_{λ·CKA}‖ (autograd.grad; ~2× work); scale λ·CKA grads by "
+            "‖g_KL‖/‖g_{λ·CKA}‖"
+        ),
     )
     parser.add_argument(
         "--eval-max-new-tokens",

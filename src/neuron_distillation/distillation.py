@@ -22,6 +22,7 @@ Pipeline prerequisites (run before this module):
 """
 
 import json
+import math
 import os
 import random
 from collections import defaultdict
@@ -139,7 +140,9 @@ class ClusterDistillationConfig:
     # 1 = every epoch; 0 = never; N>1 = every Nth epoch (0, N, 2N, …). ~10% step overhead when active.
     count_flops_every: int = 1
 
-    # Per-loss-term global L2 grad norms (KL vs λ·CKA) via ``autograd.grad``; ~2× backward work.
+    # Log global L2 grads for KL vs λ·CKA (``autograd.grad``; ~2× work). When True, the
+    # λ·CKA contribution to ``param.grad`` is scaled by ``||g_KL|| / ||g_{λ·CKA}||`` (KL vs
+    # scaled CKA term) so the step matches unscaled KL plus that ratio times the CKA grads.
     log_kl_cka_grad_norms: bool = False
 
     # Reproducible train loader shuffle / batch order (also call :func:`_seed_all` in the trainer).
@@ -912,11 +915,14 @@ class ClusterDistillationTrainer:
         self,
         kl_loss: torch.Tensor,
         cluster_loss: Optional[torch.Tensor],
-    ) -> Tuple[float, float]:
-        """Set ``param.grad`` from the KL and (scaled) CKA terms separately.
+    ) -> Tuple[float, float, float]:
+        """Set ``param.grad`` from KL and λ·CKA (circuit: CKA grads scaled by ``‖g_KL‖/‖g_{λ·CKA}‖``).
 
-        Matches ``total.backward()`` for ``kl_loss + lambda_cluster * cluster_loss``.
-        Returns global L2 norms ``(||g_KL||_2, ||g_{λ·CKA}||_2)``.
+        Circuit mode: ``p.grad = g_KL + r · g_{λ·CKA}`` with
+        ``r = ||g_KL|| / (||g_{λ·CKA}|| + ε)``. Standard mode only backprops KL; ``r`` is ``1.0``.
+
+        Returns:
+            ``(||g_KL||_2, ||g_{λ·CKA}||_2, r)``. Standard KL-only: third value is ``1.0``.
         """
         params = [p for p in self.student.parameters() if p.requires_grad]
         if self._standard:
@@ -926,7 +932,7 @@ class ClusterDistillationTrainer:
             kl_gn = _grad_tuple_global_l2_norm(g_kl)
             for p, g in zip(params, g_kl):
                 p.grad = g if g is not None else torch.zeros_like(p)
-            return kl_gn, 0.0
+            return kl_gn, 0.0, 1.0
 
         assert cluster_loss is not None
         g_kl = torch.autograd.grad(
@@ -938,11 +944,15 @@ class ClusterDistillationTrainer:
             cka_term, params, retain_graph=False, allow_unused=True,
         )
         cka_gn = _grad_tuple_global_l2_norm(g_cka)
+        eps = 1e-12
+        ratio = kl_gn / (cka_gn + eps)
+        if not math.isfinite(ratio):
+            ratio = 1.0
         for p, gk, gc in zip(params, g_kl, g_cka):
             gk = torch.zeros_like(p) if gk is None else gk
             gc = torch.zeros_like(p) if gc is None else gc
-            p.grad = gk + gc
-        return kl_gn, cka_gn
+            p.grad = gk + float(ratio) * gc
+        return kl_gn, cka_gn, float(ratio)
 
     # ------------------------------------------------------------------
 
@@ -971,11 +981,12 @@ class ClusterDistillationTrainer:
                     elif torch.isfinite(loss).item():
                         self.optimizer.zero_grad()
                         if cfg.log_kl_cka_grad_norms:
-                            kl_gn, cka_gn = self._assign_grad_from_kl_cka(
+                            kl_gn, cka_gn, kl_over_cka = self._assign_grad_from_kl_cka(
                                 kl_loss, cluster_loss,
                             )
                             metrics["kl_grad_norm"] = kl_gn
                             metrics["cka_grad_norm"] = cka_gn
+                            metrics["cka_kl_grad_scale"] = kl_over_cka
                         else:
                             loss.backward()
                         torch.nn.utils.clip_grad_norm_(
@@ -994,11 +1005,12 @@ class ClusterDistillationTrainer:
                     continue
                 self.optimizer.zero_grad()
                 if cfg.log_kl_cka_grad_norms:
-                    kl_gn, cka_gn = self._assign_grad_from_kl_cka(
+                    kl_gn, cka_gn, kl_over_cka = self._assign_grad_from_kl_cka(
                         kl_loss, cluster_loss,
                     )
                     metrics["kl_grad_norm"] = kl_gn
                     metrics["cka_grad_norm"] = cka_gn
+                    metrics["cka_kl_grad_scale"] = kl_over_cka
                 else:
                     loss.backward()
                 torch.nn.utils.clip_grad_norm_(
@@ -1032,6 +1044,9 @@ class ClusterDistillationTrainer:
                         f" | ||g||_λCKA {metrics['cka_grad_norm']:.4f}"
                     )
                     if not self._standard:
+                        grad_s += (
+                            f" | ‖g_KL‖/‖g_CKA‖ {metrics.get('cka_kl_grad_scale', 1.0):.4f}"
+                        )
                         kc = metrics.get("kc_lam1") or {}
                         if kc:
                             parts = [f"{pk}={pv:.4f}" for pk, pv in sorted(kc.items())]
@@ -1089,6 +1104,7 @@ class ClusterDistillationTrainer:
                 "kc_lam1",
                 "kl_grad_norm",
                 "cka_grad_norm",
+                "cka_kl_grad_scale",
             ):
                 if key not in self.history:
                     self.history[key] = []
@@ -1163,7 +1179,8 @@ class ClusterDistillationTrainer:
         print(f"  Step log interval:{cfg.step_log_interval}")
         if cfg.log_kl_cka_grad_norms:
             print(
-                "  KL/CKA grad norms: on (||g||_KL and ||g||_λ·CKA via autograd.grad; ~2× grad work)",
+                "  KL/CKA grad norms: on (split grads; ~2× work); circuit mode scales λ·CKA grads "
+                "by ‖g_KL‖/‖g_{λ·CKA}‖",
             )
             if not self._standard:
                 print(
@@ -1263,7 +1280,8 @@ class ClusterDistillationTrainer:
                             )
                         g_line = (
                             f", ||g||_KL={epoch_metrics['kl_grad_norm']:.4f}, "
-                            f"||g||_λCKA={epoch_metrics['cka_grad_norm']:.4f}"
+                            f"||g||_λCKA={epoch_metrics['cka_grad_norm']:.4f}, "
+                            f"‖g_KL‖/‖g_CKA‖={epoch_metrics.get('cka_kl_grad_scale', float('nan')):.4f}"
                             f"{kc_s}"
                         )
                     print(
