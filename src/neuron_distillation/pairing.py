@@ -22,14 +22,22 @@ We convert these into importance scores per subclass and cluster via the
 (clamped at 0).
 
 When poly-based importance is enabled (default in the distillation CLI),
-each Δ is replaced by a **residual** vs the random-ablation polynomial fit
-at the same ablated fraction ``|cluster| / D`` (flattened MLP width):
+each raw drop Δ is replaced by a **signed residual** vs the random-ablation
+polynomial at the same ablated fraction ``|cluster| / D`` (flattened MLP width):
 
-    importance(subclass, cluster) = max(0, Δ - poly(|cluster|/D))
+    importance(subclass, cluster) = Δ - poly(|cluster|/D)
 
 where ``poly`` comes from ``random_ablation_poly_1b.json`` / ``_8b.json``.
+(Values may be negative if the cluster hurts less than the random baseline curve.)
 Clusters are then matched between models by minimizing |importance_s − importance_t|
 within each subclass (after optional per-subclass normalization).
+
+**Why several helpers:** one function loads cluster ``.pt`` files and evaluates the
+poly (``residual_drops_vs_random_ablation_poly``); student and teacher use different
+``D`` and poly files, so ``adjust_ablation_drops_for_poly_importance`` runs that
+twice; default JSON paths live in ``default_random_ablation_poly_json_paths``;
+the distillation CLI and ``load_cluster_pairs`` thread model names (for ``D``) and
+optional path overrides without duplicating logic.
 """
 
 import json
@@ -102,13 +110,13 @@ def residual_drops_vs_random_ablation_poly(
         inner: Dict[int, float] = {}
         for cid, actual in cluster_map.items():
             if cid not in c2i:
-                inner[cid] = max(0.0, float(actual))
+                inner[cid] = float(actual)
                 continue
             idx = c2i[cid]
             n = int(idx.numel()) if hasattr(idx, "numel") else len(idx)
             frac = float(n) / float(d_total + 1e-12)
             exp = expected_performance_drop_from_random_ablation_poly(frac, poly_json_path)
-            inner[cid] = max(0.0, float(actual) - float(exp))
+            inner[cid] = float(actual) - float(exp)
         out[subclass] = inner
     return out
 

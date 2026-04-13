@@ -117,8 +117,8 @@ def build_cluster_pairs(
     Uses all student clusters per subclass (no top-k truncation) for CKA.
     If ``mapping_cache_path`` exists, load pairs from that JSON instead.
 
-    When ``importance_vs_poly`` is True (default), pairing uses residual importance
-    ``max(0, actual_drop − poly(|C|/D))`` with the random-ablation poly JSONs
+    When ``importance_vs_poly`` is True (default), pairing uses signed residual importance
+    ``actual_drop − poly(|C|/D)`` with the random-ablation poly JSONs
     (see :func:`pairing.adjust_ablation_drops_for_poly_importance`). Cached
     mappings skip this step (importance values come from the JSON).
     """

@@ -184,7 +184,7 @@ def load_cluster_pairs(
         top_k_per_subclass: Keep only the top-k most important student
             clusters per subclass.
         importance_vs_poly: If True (default), replace raw drops with
-            ``max(0, drop − poly(|C|/D))`` using default or given poly JSON paths.
+            ``drop − poly(|C|/D)`` (signed residual) using default or given poly JSON paths.
         student_poly_json / teacher_poly_json: Optional overrides for poly files.
         student_model_name / teacher_model_name: HF ids (required if poly adjustment on).
 
