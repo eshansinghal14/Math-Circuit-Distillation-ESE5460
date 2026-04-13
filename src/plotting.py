@@ -56,6 +56,146 @@ def _output_dir_or_cwd(output_dir: Optional[str]) -> str:
     return os.path.abspath(output_dir) if output_dir else os.path.abspath(os.getcwd())
 
 
+def _plotting_src_dir() -> str:
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _repo_root_from_plotting() -> str:
+    """Repository root (parent of ``src/``)."""
+    return os.path.abspath(os.path.join(_plotting_src_dir(), ".."))
+
+
+def _load_random_ablation_xy(path: str) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """Return sorted ``(fraction_ablated, performance_drop)`` or ``None`` if missing/empty."""
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    pts = data.get("points")
+    if not isinstance(pts, list) or not pts:
+        return None
+    xs = np.array([float(p["fraction_ablated"]) for p in pts], dtype=np.float64)
+    ys = np.array([float(p["performance_drop"]) for p in pts], dtype=np.float64)
+    order = np.argsort(xs)
+    return xs[order], ys[order]
+
+
+def _poly_regression_curve(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    *,
+    max_deg: int = 16,
+    grid_n: int = 256,
+) -> Optional[Tuple[np.ndarray, np.ndarray, int]]:
+    """Least-squares polynomial fit; returns ``(x_grid, y_grid, degree_used)`` or ``None``."""
+    n = int(xs.shape[0])
+    if n < 2:
+        return None
+    deg = min(max_deg, n - 1)
+    deg = max(1, deg)
+    coef = np.polyfit(xs.astype(np.float64), ys.astype(np.float64), deg=deg)
+    xg = np.linspace(float(xs.min()), float(xs.max()), grid_n)
+    yg = np.polyval(coef, xg)
+    return xg, yg, deg
+
+
+def save_random_ablation_1b_8b_plot() -> None:
+    """Plot 1B vs 8B random-ablation JSONs and one polynomial regression curve per model; save under ``plots/``.
+
+    Reads (no arguments):
+
+    - ``src/experiments/random_ablation_vs_fraction/results/random_ablation_vs_fraction_1b.json``
+    - ``src/experiments/random_ablation_vs_fraction/results/random_ablation_vs_fraction_8b.json``
+
+    After each experiment run, copy ``random_ablation_vs_fraction.json`` to the matching
+    ``*_1b.json`` / ``*_8b.json`` filename so both models are present.
+
+    Saves ``plots/random_ablation_1b_8b.png``. For each available JSON, draws a least-squares
+    polynomial (degree at most 3, capped by number of points) fit to that model’s points alone;
+    both fit curves are drawn in black (scatters stay blue / orange).
+    """
+    res_dir = os.path.join(
+        _plotting_src_dir(), "experiments", "random_ablation_vs_fraction", "results",
+    )
+    p1 = os.path.join(res_dir, "random_ablation_vs_fraction_1b.json")
+    p8 = os.path.join(res_dir, "random_ablation_vs_fraction_8b.json")
+    out_dir = os.path.join(_repo_root_from_plotting(), "plots")
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, "random_ablation_1b_8b.png")
+
+    xy1 = _load_random_ablation_xy(p1)
+    xy8 = _load_random_ablation_xy(p8)
+    if xy1 is None:
+        print(f"save_random_ablation_1b_8b_plot: missing or empty {p1!r}")
+    if xy8 is None:
+        print(f"save_random_ablation_1b_8b_plot: missing or empty {p8!r}")
+    if xy1 is None and xy8 is None:
+        print("save_random_ablation_1b_8b_plot: nothing to plot; skipping save.")
+        return
+
+    with plt.rc_context(_NEURIPS_RC):
+        fig, ax = plt.subplots(figsize=(5.0, 3.4))
+        if xy1 is not None:
+            x1, y1 = xy1
+            ax.scatter(
+                x1,
+                y1,
+                s=16,
+                alpha=0.45,
+                c="tab:blue",
+                edgecolors="none",
+                label="1B",
+                zorder=2,
+            )
+        if xy8 is not None:
+            x8, y8 = xy8
+            ax.scatter(
+                x8,
+                y8,
+                s=16,
+                alpha=0.45,
+                c="tab:orange",
+                edgecolors="none",
+                label="8B",
+                zorder=2,
+            )
+
+        _max_poly_deg = 8
+        if xy1 is not None:
+            fit1 = _poly_regression_curve(x1, y1, max_deg=_max_poly_deg)
+            if fit1 is not None:
+                xg, yg, deg_used = fit1
+                ax.plot(
+                    xg,
+                    yg,
+                    color="black",
+                    linewidth=1.4,
+                    zorder=3,
+                    label=f"1B poly fit (deg {deg_used})",
+                )
+        if xy8 is not None:
+            fit8 = _poly_regression_curve(xy8[0], xy8[1], max_deg=_max_poly_deg)
+            if fit8 is not None:
+                xg, yg, deg_used = fit8
+                ax.plot(
+                    xg,
+                    yg,
+                    color="black",
+                    linewidth=1.4,
+                    zorder=3,
+                    label=f"8B poly fit (deg {deg_used})",
+                )
+        ax.set_xlabel("Fraction of neurons ablated")
+        ax.set_ylabel("Performance drop (baseline − accuracy)")
+        ax.set_title("Random ablation: 1B vs 8B")
+        ax.legend(loc="best", frameon=True)
+        fig.tight_layout()
+        fig.savefig(out_path)
+        plt.close(fig)
+
+    print(f"Saved {out_path}")
+
+
 def _cluster_neuron_counts_from_pt(path: str) -> Tuple[int, Dict[int, int]]:
     """Load a cluster assignment ``.pt``; return ``(k, {cluster_id -> num_neurons})``."""
     d = torch.load(path, map_location="cpu", weights_only=False)
@@ -726,60 +866,62 @@ def plot_k_vs_loss(model_name: str) -> None:
         print(f"Saved plot to {out_path}")
 
 if __name__ == "__main__":
-    plot_training_histories_param_sweep(
-        data_dirs=[
-            "2d_add/1_class_0.01-lam0.1",
-            "2d_add/1_class_0.01-lam0.5",
-            "2d_add/1_class_0.01-lam1.0",
-            "2d_add/1_class_0.01-lam5.0",
-        ],
-        param_name="lambda_cluster",
-        param_values=[0.1, 0.5, 1.0, 5.0],
-        metrics=["kl_loss", "cluster_loss", "accuracy"],
-        smooth_window=10,
-    )
+    # plot_training_histories_param_sweep(
+    #     data_dirs=[
+    #         "2d_add/1_class_0.01-lam0.1",
+    #         "2d_add/1_class_0.01-lam0.5",
+    #         "2d_add/1_class_0.01-lam1.0",
+    #         "2d_add/1_class_0.01-lam5.0",
+    #     ],
+    #     param_name="lambda_cluster",
+    #     param_values=[0.1, 0.5, 1.0, 5.0],
+    #     metrics=["kl_loss", "cluster_loss", "accuracy"],
+    #     smooth_window=10,
+    # )
 
-    plot_training_histories_param_sweep(
-      data_dirs=[
-          "2d_add/1_class_0.001",
-          "2d_add/1_class_0.01-lam0.1",
-          "2d_add/1_class_0.05",
-          "2d_add/1_class_0.10",
-          "2d_add/1_class_0.25",
-          "2d_add/1_class_0.50",
-          "2d_add/1_class_1.0",
-      ],
-      param_name="frac_activated",
-      param_values=[0.001, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0],
-      metrics=["kl_loss", "cluster_loss", "accuracy"],
-      smooth_window=10,
-    )
+    # plot_training_histories_param_sweep(
+    #   data_dirs=[
+    #       "2d_add/1_class_0.001",
+    #       "2d_add/1_class_0.01-lam0.1",
+    #       "2d_add/1_class_0.05",
+    #       "2d_add/1_class_0.10",
+    #       "2d_add/1_class_0.25",
+    #       "2d_add/1_class_0.50",
+    #       "2d_add/1_class_1.0",
+    #   ],
+    #   param_name="frac_activated",
+    #   param_values=[0.001, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0],
+    #   metrics=["kl_loss", "cluster_loss", "accuracy"],
+    #   smooth_window=10,
+    # )
 
-    plot_frac_activated_vs_mean_cossim(
-      data_dirs=[
-          "results/circuit-discovery/neuron_cossim_topk/frac0.001",
-          "results/circuit-discovery/neuron_cossim_topk/frac0.01",
-      ],
-      out_name="frac_activated_vs_mean_cossim",
-      figure_width_in=5.5,
-      figure_height_in=2.8,
-      num_points=800,
-      anchor_zero=True,
-      x_as_percent=True,
-      save_pdf=True,
-      save_png=True,
-    )
+    # plot_frac_activated_vs_mean_cossim(
+    #   data_dirs=[
+    #       "results/circuit-discovery/neuron_cossim_topk/frac0.001",
+    #       "results/circuit-discovery/neuron_cossim_topk/frac0.01",
+    #   ],
+    #   out_name="frac_activated_vs_mean_cossim",
+    #   figure_width_in=5.5,
+    #   figure_height_in=2.8,
+    #   num_points=800,
+    #   anchor_zero=True,
+    #   x_as_percent=True,
+    #   save_pdf=True,
+    #   save_png=True,
+    # )
 
-    print_clustering_cluster_counts_table(
-        data_dirs=[
-            "results/distillation/2d_add/frac_activated/f0.01",
-            "results/distillation/2d_add/frac_activated/f0.05",
-        ],
-        num_clusters=[
-            {"1b": 5, "8b": 5},
-            {"1b": 5, "8b": 7},
-        ],
-        subclass=0,
-        row_label_header="frac_activated",
-        out=sys.stdout,
-    )
+    # print_clustering_cluster_counts_table(
+    #     data_dirs=[
+    #         "results/distillation/2d_add/frac_activated/f0.01",
+    #         "results/distillation/2d_add/frac_activated/f0.05",
+    #     ],
+    #     num_clusters=[
+    #         {"1b": 5, "8b": 5},
+    #         {"1b": 5, "8b": 7},
+    #     ],
+    #     subclass=0,
+    #     row_label_header="frac_activated",
+    #     out=sys.stdout,
+    # )
+
+    save_random_ablation_1b_8b_plot()
