@@ -3,6 +3,8 @@ import torch
 from transformers import AutoConfig
 from huggingface_hub import login
 
+from utils import _stack_layer_activations
+
 try:
     import constants as _constants
 
@@ -61,15 +63,6 @@ def merge_activation_batches(batches):
     for layer_idx, chunks in list(merged.items()):
         merged[layer_idx] = torch.cat(chunks, dim=0)
     return {"ids": ids_cat, "activations": merged}
-
-
-def _stack_layer_activations(batch_activations):
-    if not batch_activations:
-        raise ValueError("batch_activations is empty")
-
-    layers = sorted(batch_activations.keys())
-    tensors = [batch_activations[i] for i in layers]
-    return torch.cat(tensors, dim=-1)
 
 
 def tower_grad_balance_weights(loss_1b, loss_8b, parameters, eps=1e-8):

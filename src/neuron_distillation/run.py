@@ -53,6 +53,7 @@ from utils import (
     load_model,
     load_model_checkpoint,
     load_prompt_answer_json,
+    load_student_model_for_distillation,
     resolve_distillation_run_dir,
     resolve_train_test_paths,
 )
@@ -303,7 +304,7 @@ def main():
         action="store_true",
         help=(
             "Pairing: use raw ablation drops (baseline−accuracy); do not subtract poly expected "
-            "drop at |C|/D (see experiments/random_ablation_vs_fraction/results/random_ablation_poly_*.json)"
+            "drop at |C|/D (see datasets/random_ablation_poly/random_ablation_poly_*.json)"
         ),
     )
     parser.add_argument(
@@ -566,23 +567,9 @@ def main():
     print(f"  Test:  {len(test_data)} examples")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print("\n" + "=" * 60)
-    print("Loading student")
-    print("=" * 60)
-    if student_source and student_source.endswith(".pt"):
-        print(f"  Loading base model + fast weights from: {student_source!r}")
-        student, tokenizer = load_model(args.student_model)
-        state_dict = torch.load(student_source, map_location="cpu", weights_only=True)
-        student.load_state_dict(state_dict)
-        del state_dict
-    elif student_source:
-        print(f"  From checkpoint dir: {student_source!r}")
-        student, tokenizer = load_model(student_source)
-    else:
-        print(f"  From Hugging Face: {args.student_model!r}")
-        student, tokenizer = load_model(args.student_model)
-    student = student.to("cpu").float().to(device)
-    tokenizer.padding_side = "left"
+    student, tokenizer = load_student_model_for_distillation(
+        student_source, args.student_model, device,
+    )
 
     print("\n" + "=" * 60)
     print("Distillation training")

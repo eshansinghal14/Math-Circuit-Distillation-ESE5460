@@ -372,6 +372,33 @@ def load_model(model_name):
     tokenizer.padding_size = 'left'
     return model, tokenizer
 
+
+def load_student_model_for_distillation(
+    student_source: Optional[str],
+    student_model_id: str,
+    device: Union[str, torch.device],
+):
+    """Load student LM + tokenizer for distillation (HF id, saved HF dir, or ``.pt`` state_dict)."""
+    print("\n" + "=" * 60)
+    print("Loading student")
+    print("=" * 60)
+    if student_source and student_source.endswith(".pt"):
+        print(f"  Loading base model + fast weights from: {student_source!r}")
+        student, tokenizer = load_model(student_model_id)
+        state_dict = torch.load(student_source, map_location="cpu", weights_only=True)
+        student.load_state_dict(state_dict)
+        del state_dict
+    elif student_source:
+        print(f"  From checkpoint dir: {student_source!r}")
+        student, tokenizer = load_model(student_source)
+    else:
+        print(f"  From Hugging Face: {student_model_id!r}")
+        student, tokenizer = load_model(student_model_id)
+    student = student.to("cpu").float().to(device)
+    tokenizer.padding_side = "left"
+    return student, tokenizer
+
+
 def test_model(model, tokenizer, dataset_fname, results_fname, batch_size=50, max_new_tokens=EVAL_MAX_NEW_TOKENS, log=True):
     """Greedy eval on a math JSON file.
 
@@ -413,8 +440,7 @@ def test_model(model, tokenizer, dataset_fname, results_fname, batch_size=50, ma
     return results
 
 def parse_answer(resp):
-    match = re.search(r'=\s*(\d+)', resp)
-    return int(match.group(1)) if match else None
+    return _extract_int_after_equals(resp)
 
 def eval_model(results_fname, log: bool = True):
     with open(results_fname, "r", encoding="utf-8") as f:
@@ -742,8 +768,9 @@ def expected_performance_drop_from_random_ablation_poly(
 ) -> float:
     """Evaluate the saved random-ablation polynomial at ``fraction_ablated``.
 
-    Expects JSON written by :func:`plotting.save_random_ablation_1b_8b_plot` (e.g.
-    ``random_ablation_poly_1b.json`` or ``random_ablation_poly_8b.json``), with
+    Expects JSON written by :func:`plotting.save_random_ablation_1b_8b_plot` (under
+    ``datasets/random_ablation_poly/``, e.g. ``random_ablation_poly_1b.json`` or
+    ``random_ablation_poly_8b.json``), with
     ``coefficients`` in ``numpy.polyfit`` order (highest degree first).
 
     Returns the predicted performance drop (same units as the ablation JSON ``performance_drop``).

@@ -67,11 +67,9 @@ class ClusterMapping:
 
 
 def default_random_ablation_poly_json_paths() -> Tuple[str, str]:
-    """Default ``random_ablation_poly_1b.json`` / ``random_ablation_poly_8b.json`` under ``src/experiments/random_ablation_vs_fraction/results/``."""
+    """Default ``random_ablation_poly_1b.json`` / ``random_ablation_poly_8b.json`` under ``datasets/random_ablation_poly/``."""
     here = os.path.dirname(os.path.abspath(__file__))
-    root = os.path.abspath(
-        os.path.join(here, "..", "experiments", "random_ablation_vs_fraction", "results"),
-    )
+    root = os.path.abspath(os.path.join(here, "..", "..", "datasets", "random_ablation_poly"))
     return (
         os.path.join(root, "random_ablation_poly_1b.json"),
         os.path.join(root, "random_ablation_poly_8b.json"),

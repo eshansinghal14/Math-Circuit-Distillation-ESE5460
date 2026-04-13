@@ -153,7 +153,7 @@ def save_random_ablation_1b_8b_plot() -> None:
     both fit curves are drawn in black (scatters stay blue / orange).
 
     Also writes ``random_ablation_poly_1b.json`` / ``random_ablation_poly_8b.json`` under
-    ``.../random_ablation_vs_fraction/results/`` with ``numpy.polyfit`` coefficients (evaluate
+    ``datasets/random_ablation_poly/`` with ``numpy.polyfit`` coefficients (evaluate
     with :func:`utils.expected_performance_drop_from_random_ablation_poly`).
     """
     res_dir = os.path.join(
@@ -203,8 +203,10 @@ def save_random_ablation_1b_8b_plot() -> None:
             )
 
         _max_poly_deg = 8
-        poly_1b = os.path.join(res_dir, "random_ablation_poly_1b.json")
-        poly_8b = os.path.join(res_dir, "random_ablation_poly_8b.json")
+        poly_dir = os.path.join(_repo_root_from_plotting(), "datasets", "random_ablation_poly")
+        os.makedirs(poly_dir, exist_ok=True)
+        poly_1b = os.path.join(poly_dir, "random_ablation_poly_1b.json")
+        poly_8b = os.path.join(poly_dir, "random_ablation_poly_8b.json")
         if xy1 is not None:
             fc1 = _poly_fit_coefficients(x1, y1, max_deg=_max_poly_deg)
             if fc1 is not None:

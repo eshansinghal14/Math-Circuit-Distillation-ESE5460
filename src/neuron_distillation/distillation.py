@@ -24,7 +24,6 @@ Pipeline prerequisites (run before this module):
 import json
 import os
 import random
-import re
 from collections import defaultdict
 from dataclasses import dataclass
 from functools import partial
@@ -74,6 +73,7 @@ from utils import (
     EVAL_MAX_NEW_TOKENS,
     STUDENT_MODEL_DIR,
     STUDENT_WEIGHTS_FILE,
+    _extract_int_after_equals,
     json_to_prompt_answer_dict,
     load_training_state,
     rm_dir_tree,
@@ -580,10 +580,6 @@ def preclassify_training_data(
 # ---------------------------------------------------------------------------
 # Evaluation
 # ---------------------------------------------------------------------------
-
-def _extract_int_after_equals(text: str) -> Optional[int]:
-    m = re.search(r"=\s*(\d+)", text)
-    return int(m.group(1)) if m else None
 
 
 @torch.no_grad()
