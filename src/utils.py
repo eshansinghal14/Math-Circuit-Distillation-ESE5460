@@ -266,8 +266,22 @@ DATASET_TEST_SUFFIX = "_test_20"
 DATASET_ALL_SUFFIX = "_all.json"  # ``{prefix}_all.json``
 
 
+# Colab + Google Drive default when the folder is mounted; otherwise use repo ``datasets/``.
+_DEFAULT_DATASETS_DIR_DRIVE = (
+    "/content/drive/My Drive/Math Circuit Distillation (ESE 5460)/datasets"
+)
+
+
 def default_datasets_dir() -> str:
-    """Absolute path to the repo ``datasets/`` directory (sibling of ``src/``)."""
+    """Absolute path to the datasets root.
+
+    If ``/content/drive/My Drive/Math Circuit Distillation (ESE 5460)/datasets`` exists
+    (e.g. Colab with Drive mounted), that path is used; otherwise the repository
+    ``datasets/`` directory (sibling of ``src/``).
+    """
+    drive = os.path.abspath(_DEFAULT_DATASETS_DIR_DRIVE)
+    if os.path.isdir(drive):
+        return drive
     return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datasets"))
 
 
@@ -791,17 +805,16 @@ def expected_performance_drop_from_random_ablation_poly(
     coef = np.asarray(coeffs, dtype=np.float64)
     return float(np.polyval(coef, float(fraction_ablated)))
 
-# if __name__ == "__main__":
-    # from transformers import AutoTokenizer
+if __name__ == "__main__":
+    from transformers import AutoTokenizer
 
-    # tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
-    # generate_math_dataset(
-    #     dataset_all_json_path("3d_add"),
-    #     tokenizer,
-    #     operand_digits=3,
-    #     operation="+",
-    #     pair_mode="grid",
-    #     shuffle=True,
-    #     samples=10000,
-    #     split_test_frac=None,
-    # )
+    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
+    generate_math_dataset(
+        dataset_all_json_path("3d_add"),
+        tokenizer,
+        operand_digits=3,
+        operation="+",
+        pair_mode="grid",
+        shuffle=True,
+        split_test_frac=0.2,
+    )

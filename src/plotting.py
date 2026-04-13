@@ -10,7 +10,11 @@ import numpy as np
 import torch
 
 from cka_loss import stable_rank_centered_gram
-from utils import NEURON_CLUSTERING_STUDENT_SUBPATH, NEURON_CLUSTERING_TEACHER_SUBPATH
+from utils import (
+    NEURON_CLUSTERING_STUDENT_SUBPATH,
+    NEURON_CLUSTERING_TEACHER_SUBPATH,
+    default_datasets_dir,
+)
 
 # Paths passed into this module should be absolute (or cwd-relative); nothing here assumes a repo ``src/`` root.
 
@@ -203,7 +207,7 @@ def save_random_ablation_1b_8b_plot() -> None:
             )
 
         _max_poly_deg = 8
-        poly_dir = os.path.join(_repo_root_from_plotting(), "datasets", "random_ablation_poly")
+        poly_dir = os.path.join(default_datasets_dir(), "random_ablation_poly")
         os.makedirs(poly_dir, exist_ok=True)
         poly_1b = os.path.join(poly_dir, "random_ablation_poly_1b.json")
         poly_8b = os.path.join(poly_dir, "random_ablation_poly_8b.json")

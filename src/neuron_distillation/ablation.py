@@ -20,6 +20,7 @@ import torch
 
 from utils import (
     EVAL_MAX_NEW_TOKENS,
+    default_datasets_dir,
     eval_model,
     load_model,
     load_model_checkpoint,
@@ -44,7 +45,7 @@ def classify_problems(
     Args:
         circuit_model: A trained ``CircuitDiscoveryModel`` (will be used in eval mode).
         tokenizer: HuggingFace tokenizer for decoding token ids.
-        dataset_path: Path to ``2d_add_all.json``.  Defaults to ``../datasets/2d_add_all.json``.
+        dataset_path: Path to ``2d_add_all.json``.  If ``None``, uses ``default_datasets_dir()`` + ``2d_add_all.json``.
         output_path: Where to save the JSON mapping.  ``None`` skips saving.
         batch_size: Inference batch size.
 
@@ -54,7 +55,7 @@ def classify_problems(
     device = next(circuit_model.parameters()).device
 
     if dataset_path is None:
-        dataset_path = os.path.join(os.path.dirname(__file__), "..", "..", "datasets", "2d_add_all.json")
+        dataset_path = os.path.join(default_datasets_dir(), "2d_add_all.json")
 
     with open(dataset_path, "r") as f:
         dataset = json.load(f)

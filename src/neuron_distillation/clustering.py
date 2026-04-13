@@ -16,7 +16,7 @@ import torch.nn.functional as F
 from transformers import AutoTokenizer
 import matplotlib.pyplot as plt
 
-from utils import load_model_checkpoint, _stack_layer_activations
+from utils import default_datasets_dir, load_model_checkpoint, _stack_layer_activations
 from circuit_discovery.utils import parse_equation
 from neuron_distillation.activations import NeuronActivationsGenerator
 
@@ -413,9 +413,7 @@ def run_neuron_kmeans(
 
 def print_problem_counts_per_class(model, tokenizer, k_classes, device, batch_size=128):
     """Argmax class assignment over `datasets/2d_add_all.json` (same source as activation gen)."""
-    dataset_path = os.path.join(
-        os.path.dirname(__file__), "..", "..", "datasets", "2d_add_all.json"
-    )
+    dataset_path = os.path.join(default_datasets_dir(), "2d_add_all.json")
     if not os.path.isfile(dataset_path):
         print(f"Warning: dataset not found at {dataset_path}, skipping problems-per-class counts.")
         return
