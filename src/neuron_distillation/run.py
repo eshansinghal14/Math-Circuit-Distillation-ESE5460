@@ -41,8 +41,10 @@ from neuron_distillation.distillation import (
 )
 from neuron_distillation.pairing import (
     _load_single_ablation_performance,
-    create_cluster_mapping,
+    adjust_ablation_drops_for_poly_importance,
     analyze_mapping,
+    create_cluster_mapping,
+    default_random_ablation_poly_json_paths,
     save_mapping,
 )
 from utils import (
@@ -104,11 +106,21 @@ def build_cluster_pairs(
     k: int,
     k_classes: int = 8,
     mapping_cache_path: Optional[str] = None,
+    importance_vs_poly: bool = True,
+    student_poly_json: Optional[str] = None,
+    teacher_poly_json: Optional[str] = None,
+    student_model_name: Optional[str] = None,
+    teacher_model_name: Optional[str] = None,
 ):
     """Load ablation results, pair clusters, attach neuron indices.
 
     Uses all student clusters per subclass (no top-k truncation) for CKA.
     If ``mapping_cache_path`` exists, load pairs from that JSON instead.
+
+    When ``importance_vs_poly`` is True (default), pairing uses residual importance
+    ``max(0, actual_drop − poly(|C|/D))`` with the random-ablation poly JSONs
+    (see :func:`pairing.adjust_ablation_drops_for_poly_importance`). Cached
+    mappings skip this step (importance values come from the JSON).
     """
     if mapping_cache_path and os.path.isfile(mapping_cache_path):
         print(f"  Found cached cluster mapping: {mapping_cache_path}")
@@ -151,6 +163,34 @@ def build_cluster_pairs(
 
     delta_s = _load_single_ablation_performance(student_ablation_path)
     delta_t = _load_single_ablation_performance(teacher_ablation_path)
+    if importance_vs_poly:
+        if not student_model_name or not teacher_model_name:
+            raise ValueError(
+                "Poly-based cluster importance requires student_model_name and "
+                "teacher_model_name (HF ids). Pass them into build_cluster_pairs.",
+            )
+        sp_default, tp_default = default_random_ablation_poly_json_paths()
+        sp = student_poly_json or sp_default
+        tp = teacher_poly_json or tp_default
+        class_clusters_s = [k] * k_classes
+        class_clusters_t = [k] * k_classes
+        print(
+            "  Cluster importance: residual (actual ablation drop − poly expected at |C|/D)\n"
+            f"    student poly: {sp}\n"
+            f"    teacher poly: {tp}",
+        )
+        delta_s, delta_t = adjust_ablation_drops_for_poly_importance(
+            delta_s,
+            delta_t,
+            student_clusters_dir,
+            teacher_clusters_dir,
+            class_clusters_s,
+            class_clusters_t,
+            sp,
+            tp,
+            student_model_name,
+            teacher_model_name,
+        )
     mappings = create_cluster_mapping(delta_s, delta_t, top_k_student=None)
     stats = analyze_mapping(mappings)
     print("\n  Cluster mapping statistics:")
@@ -257,6 +297,28 @@ def main():
             "CKA: multiply each cluster pair's loss weight by the fraction of student MLP neurons "
             "in that cluster vs full flattened width (combines with importance weighting when both on)"
         ),
+    )
+    parser.add_argument(
+        "--no-poly-importance",
+        action="store_true",
+        help=(
+            "Pairing: use raw ablation drops (baseline−accuracy); do not subtract poly expected "
+            "drop at |C|/D (see experiments/random_ablation_vs_fraction/results/random_ablation_poly_*.json)"
+        ),
+    )
+    parser.add_argument(
+        "--student-poly-json",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Override default random_ablation_poly_1b.json for residual cluster importance",
+    )
+    parser.add_argument(
+        "--teacher-poly-json",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Override default random_ablation_poly_8b.json for residual cluster importance",
     )
     parser.add_argument(
         "--save-every",
@@ -477,6 +539,11 @@ def main():
             k=args.k,
             k_classes=args.k_classes,
             mapping_cache_path=mapping_cache,
+            importance_vs_poly=not args.no_poly_importance,
+            student_poly_json=args.student_poly_json,
+            teacher_poly_json=args.teacher_poly_json,
+            student_model_name=args.student_model,
+            teacher_model_name=args.teacher_model,
         )
         if not cluster_pairs:
             print("No cluster pairs found. Check ablation results and cluster files.")

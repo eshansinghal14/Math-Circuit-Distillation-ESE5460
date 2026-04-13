@@ -16,10 +16,20 @@ Each ablation_performance.json has the structure:
   ...
 }
 
-We convert these into importance scores per subclass and cluster via:
+We convert these into importance scores per subclass and cluster via the
+**actual** performance drop
     Δ(subclass, cluster) = baseline - accuracy_with_cluster_ablated
-and then match clusters between models by minimizing |Δ_s - Δ_t| within
-each subclass.
+(clamped at 0).
+
+When poly-based importance is enabled (default in the distillation CLI),
+each Δ is replaced by a **residual** vs the random-ablation polynomial fit
+at the same ablated fraction ``|cluster| / D`` (flattened MLP width):
+
+    importance(subclass, cluster) = max(0, Δ - poly(|cluster|/D))
+
+where ``poly`` comes from ``random_ablation_poly_1b.json`` / ``_8b.json``.
+Clusters are then matched between models by minimizing |importance_s − importance_t|
+within each subclass (after optional per-subclass normalization).
 """
 
 import json
@@ -27,6 +37,13 @@ import os
 import sys
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
+
+import torch
+
+from utils import (
+    expected_performance_drop_from_random_ablation_poly,
+    mlp_flatten_dim_from_pretrained_id,
+)
 
 
 @dataclass
@@ -39,6 +56,93 @@ class ClusterMapping:
     student_importance: float
     teacher_importance: float
     distance: float  # |delta_s - delta_t|
+
+
+def default_random_ablation_poly_json_paths() -> Tuple[str, str]:
+    """Default ``random_ablation_poly_1b.json`` / ``random_ablation_poly_8b.json`` under ``src/experiments/random_ablation_vs_fraction/results/``."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.abspath(
+        os.path.join(here, "..", "experiments", "random_ablation_vs_fraction", "results"),
+    )
+    return (
+        os.path.join(root, "random_ablation_poly_1b.json"),
+        os.path.join(root, "random_ablation_poly_8b.json"),
+    )
+
+
+def residual_drops_vs_random_ablation_poly(
+    raw_drops: Dict[int, Dict[int, float]],
+    clusters_dir: str,
+    class_clusters: List[int],
+    poly_json_path: str,
+    d_total: int,
+) -> Dict[int, Dict[int, float]]:
+    """Replace each raw drop with max(0, actual_drop − poly(|cluster|/D)) for pairing."""
+    if not os.path.isfile(poly_json_path):
+        raise FileNotFoundError(
+            f"Poly JSON for importance adjustment not found: {poly_json_path!r}",
+        )
+    out: Dict[int, Dict[int, float]] = {}
+    for subclass, cluster_map in raw_drops.items():
+        if subclass < 0 or subclass >= len(class_clusters):
+            raise ValueError(
+                f"subclass {subclass} invalid for class_clusters length {len(class_clusters)}",
+            )
+        k = class_clusters[subclass]
+        pt_path = os.path.join(clusters_dir, f"subclass_{subclass}_clusters/k{k}.pt")
+        if not os.path.isfile(pt_path):
+            print(
+                f"WARN: pairing: missing {pt_path!r} — poly residual importance skipped "
+                f"for subclass {subclass} (using raw drops).",
+            )
+            out[subclass] = dict(cluster_map)
+            continue
+        ckpt = torch.load(pt_path, map_location="cpu")
+        c2i = ckpt["cluster_to_indices"]
+        inner: Dict[int, float] = {}
+        for cid, actual in cluster_map.items():
+            if cid not in c2i:
+                inner[cid] = max(0.0, float(actual))
+                continue
+            idx = c2i[cid]
+            n = int(idx.numel()) if hasattr(idx, "numel") else len(idx)
+            frac = float(n) / float(d_total + 1e-12)
+            exp = expected_performance_drop_from_random_ablation_poly(frac, poly_json_path)
+            inner[cid] = max(0.0, float(actual) - float(exp))
+        out[subclass] = inner
+    return out
+
+
+def adjust_ablation_drops_for_poly_importance(
+    delta_s: Dict[int, Dict[int, float]],
+    delta_t: Dict[int, Dict[int, float]],
+    student_clusters_dir: str,
+    teacher_clusters_dir: str,
+    class_clusters_student: List[int],
+    class_clusters_teacher: List[int],
+    student_poly_json: str,
+    teacher_poly_json: str,
+    student_model_name: str,
+    teacher_model_name: str,
+) -> Tuple[Dict[int, Dict[int, float]], Dict[int, Dict[int, float]]]:
+    """Apply :func:`residual_drops_vs_random_ablation_poly` for student and teacher."""
+    d_s = mlp_flatten_dim_from_pretrained_id(student_model_name)
+    d_t = mlp_flatten_dim_from_pretrained_id(teacher_model_name)
+    delta_s = residual_drops_vs_random_ablation_poly(
+        delta_s,
+        student_clusters_dir,
+        class_clusters_student,
+        student_poly_json,
+        d_s,
+    )
+    delta_t = residual_drops_vs_random_ablation_poly(
+        delta_t,
+        teacher_clusters_dir,
+        class_clusters_teacher,
+        teacher_poly_json,
+        d_t,
+    )
+    return delta_s, delta_t
 
 
 def _load_single_ablation_performance(path: str) -> Dict[int, Dict[int, float]]:

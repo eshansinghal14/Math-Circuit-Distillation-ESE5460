@@ -66,7 +66,9 @@ from cka_loss import linear_cka_efficient
 from neuron_distillation.pairing import (
     ClusterMapping,
     _load_single_ablation_performance,
+    adjust_ablation_drops_for_poly_importance,
     create_cluster_mapping,
+    default_random_ablation_poly_json_paths,
 )
 from utils import (
     EVAL_MAX_NEW_TOKENS,
@@ -96,11 +98,13 @@ def _seed_all(seed: int) -> None:
 @dataclass
 class ClusterPairInfo:
     """A single student<->teacher cluster pair with full neuron indices."""
+
     subclass: int
     student_cluster_idx: int
     teacher_cluster_idx: int
     student_neuron_indices: torch.Tensor
     teacher_neuron_indices: torch.Tensor
+    # Student-side score used for pairing / CKA weighting (residual vs poly when enabled).
     importance: float
 
 
@@ -161,6 +165,11 @@ def load_cluster_pairs(
     class_clusters_student: List[int],
     class_clusters_teacher: List[int],
     top_k_per_subclass: Optional[int] = None,
+    importance_vs_poly: bool = True,
+    student_poly_json: Optional[str] = None,
+    teacher_poly_json: Optional[str] = None,
+    student_model_name: Optional[str] = None,
+    teacher_model_name: Optional[str] = None,
 ) -> List[ClusterPairInfo]:
     """Build a flat list of cluster pairs with neuron indices and importance.
 
@@ -174,12 +183,37 @@ def load_cluster_pairs(
         class_clusters_teacher: Same for teacher.
         top_k_per_subclass: Keep only the top-k most important student
             clusters per subclass.
+        importance_vs_poly: If True (default), replace raw drops with
+            ``max(0, drop − poly(|C|/D))`` using default or given poly JSON paths.
+        student_poly_json / teacher_poly_json: Optional overrides for poly files.
+        student_model_name / teacher_model_name: HF ids (required if poly adjustment on).
 
     Returns:
         List of :class:`ClusterPairInfo` sorted by importance (descending).
     """
     delta_s = _load_single_ablation_performance(student_ablation_path)
     delta_t = _load_single_ablation_performance(teacher_ablation_path)
+
+    if importance_vs_poly:
+        if not student_model_name or not teacher_model_name:
+            raise ValueError(
+                "load_cluster_pairs(..., importance_vs_poly=True) requires "
+                "student_model_name and teacher_model_name.",
+            )
+        sp = student_poly_json or default_random_ablation_poly_json_paths()[0]
+        tp = teacher_poly_json or default_random_ablation_poly_json_paths()[1]
+        delta_s, delta_t = adjust_ablation_drops_for_poly_importance(
+            delta_s,
+            delta_t,
+            student_clusters_dir,
+            teacher_clusters_dir,
+            class_clusters_student,
+            class_clusters_teacher,
+            sp,
+            tp,
+            student_model_name,
+            teacher_model_name,
+        )
 
     mappings: List[ClusterMapping] = create_cluster_mapping(
         delta_s, delta_t, top_k_student=top_k_per_subclass,
@@ -691,6 +725,25 @@ class ClusterDistillationTrainer:
             generator=self._loader_generator,
             collate_fn=partial(collate_fn, pad_id=self.tokenizer.eos_token_id),
         )
+
+        if (
+            not self._standard
+            and self.config.cluster_size_weighting
+            and self.cluster_pairs
+        ):
+            scfg = self.student.config
+            tcfg = self.teacher.config
+            d_s = int(scfg.num_hidden_layers) * int(scfg.intermediate_size)
+            d_t = int(tcfg.num_hidden_layers) * int(tcfg.intermediate_size)
+            print("\nCluster size weighting: |C|/D (fraction of flattened MLP per pair)")
+            for p in self.cluster_pairs:
+                n_s = int(p.student_neuron_indices.numel())
+                n_t = int(p.teacher_neuron_indices.numel())
+                print(
+                    f"  subclass={p.subclass}  s_cl={p.student_cluster_idx}  "
+                    f"t_cl={p.teacher_cluster_idx}  "
+                    f"|C_s|/D_s={n_s / d_s:.6f}  |C_t|/D_t={n_t / d_t:.6f}",
+                )
 
         # History
         self.history: Dict[str, List] = defaultdict(list)

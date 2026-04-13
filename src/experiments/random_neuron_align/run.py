@@ -84,6 +84,25 @@ def main() -> None:
             "CKA: multiply each cluster pair's loss weight by |student cluster| / full student MLP width"
         ),
     )
+    parser.add_argument(
+        "--no-poly-importance",
+        action="store_true",
+        help="Pairing: use raw ablation drops; do not subtract poly expected drop at |C|/D",
+    )
+    parser.add_argument(
+        "--student-poly-json",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Override default random_ablation_poly_1b.json for residual importance",
+    )
+    parser.add_argument(
+        "--teacher-poly-json",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Override default random_ablation_poly_8b.json for residual importance",
+    )
     parser.add_argument("--save-every", type=int, default=5,
                         help="Overwrite student_model/ every N epochs (0=disable)")
     parser.add_argument("--save-best", action="store_true")
@@ -281,6 +300,11 @@ def main() -> None:
         k=args.k,
         k_classes=args.k_classes,
         mapping_cache_path=mapping_cache,
+        importance_vs_poly=not args.no_poly_importance,
+        student_poly_json=args.student_poly_json,
+        teacher_poly_json=args.teacher_poly_json,
+        student_model_name=args.student_model,
+        teacher_model_name=args.teacher_model,
     )
     if not cluster_pairs:
         print("No cluster pairs found. Check ablation results and cluster files.")
