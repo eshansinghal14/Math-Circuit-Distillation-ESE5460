@@ -251,6 +251,14 @@ def main():
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--lambda-cluster", type=float, default=0.01)
     parser.add_argument(
+        "--cluster-size-weighting",
+        action="store_true",
+        help=(
+            "CKA: multiply each cluster pair's loss weight by the fraction of student MLP neurons "
+            "in that cluster vs full flattened width (combines with importance weighting when both on)"
+        ),
+    )
+    parser.add_argument(
         "--save-every",
         type=int,
         default=5,
@@ -523,6 +531,7 @@ def main():
         temperature=args.temperature,
         grad_clip=args.grad_clip,
         lambda_cluster=args.lambda_cluster,
+        cluster_size_weighting=args.cluster_size_weighting,
         save_every=args.save_every,
         save_best=args.save_best,
         eval_max_new_tokens=eval_max_new_tokens,

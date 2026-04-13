@@ -80,6 +80,22 @@ def _load_random_ablation_xy(path: str) -> Optional[Tuple[np.ndarray, np.ndarray
     return xs[order], ys[order]
 
 
+def _poly_fit_coefficients(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    *,
+    max_deg: int = 16,
+) -> Optional[Tuple[np.ndarray, int]]:
+    """Least-squares polynomial coefficients (``numpy.polyfit`` order: highest degree first)."""
+    n = int(xs.shape[0])
+    if n < 2:
+        return None
+    deg = min(max_deg, n - 1)
+    deg = max(1, deg)
+    coef = np.polyfit(xs.astype(np.float64), ys.astype(np.float64), deg=deg)
+    return coef, deg
+
+
 def _poly_regression_curve(
     xs: np.ndarray,
     ys: np.ndarray,
@@ -88,15 +104,37 @@ def _poly_regression_curve(
     grid_n: int = 256,
 ) -> Optional[Tuple[np.ndarray, np.ndarray, int]]:
     """Least-squares polynomial fit; returns ``(x_grid, y_grid, degree_used)`` or ``None``."""
-    n = int(xs.shape[0])
-    if n < 2:
+    fc = _poly_fit_coefficients(xs, ys, max_deg=max_deg)
+    if fc is None:
         return None
-    deg = min(max_deg, n - 1)
-    deg = max(1, deg)
-    coef = np.polyfit(xs.astype(np.float64), ys.astype(np.float64), deg=deg)
+    coef, deg = fc
     xg = np.linspace(float(xs.min()), float(xs.max()), grid_n)
     yg = np.polyval(coef, xg)
     return xg, yg, deg
+
+
+def _write_random_ablation_poly_json(
+    path: str,
+    coef: np.ndarray,
+    degree: int,
+    xs: np.ndarray,
+    *,
+    source_basename: str,
+    max_poly_degree_cap: int,
+) -> None:
+    """Save polyfit metadata for :func:`utils.expected_performance_drop_from_random_ablation_poly`."""
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    payload = {
+        "format": "numpy_polyfit",
+        "coefficients_order": "high_to_low",
+        "degree": int(degree),
+        "coefficients": [float(c) for c in np.ravel(coef).tolist()],
+        "fraction_ablated_range": [float(xs.min()), float(xs.max())],
+        "max_poly_degree_cap": int(max_poly_degree_cap),
+        "source_points_json": source_basename,
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
 
 
 def save_random_ablation_1b_8b_plot() -> None:
@@ -111,8 +149,12 @@ def save_random_ablation_1b_8b_plot() -> None:
     ``*_1b.json`` / ``*_8b.json`` filename so both models are present.
 
     Saves ``plots/random_ablation_1b_8b.png``. For each available JSON, draws a least-squares
-    polynomial (degree at most 3, capped by number of points) fit to that model’s points alone;
+    polynomial (degree capped by number of points) fit to that model’s points alone;
     both fit curves are drawn in black (scatters stay blue / orange).
+
+    Also writes ``random_ablation_poly_1b.json`` / ``random_ablation_poly_8b.json`` under
+    ``.../random_ablation_vs_fraction/results/`` with ``numpy.polyfit`` coefficients (evaluate
+    with :func:`utils.expected_performance_drop_from_random_ablation_poly`).
     """
     res_dir = os.path.join(
         _plotting_src_dir(), "experiments", "random_ablation_vs_fraction", "results",
@@ -161,10 +203,23 @@ def save_random_ablation_1b_8b_plot() -> None:
             )
 
         _max_poly_deg = 8
+        poly_1b = os.path.join(res_dir, "random_ablation_poly_1b.json")
+        poly_8b = os.path.join(res_dir, "random_ablation_poly_8b.json")
         if xy1 is not None:
-            fit1 = _poly_regression_curve(x1, y1, max_deg=_max_poly_deg)
-            if fit1 is not None:
-                xg, yg, deg_used = fit1
+            fc1 = _poly_fit_coefficients(x1, y1, max_deg=_max_poly_deg)
+            if fc1 is not None:
+                coef1, deg_used = fc1
+                _write_random_ablation_poly_json(
+                    poly_1b,
+                    coef1,
+                    deg_used,
+                    x1,
+                    source_basename=os.path.basename(p1),
+                    max_poly_degree_cap=_max_poly_deg,
+                )
+                print(f"Saved {poly_1b}")
+                xg = np.linspace(float(x1.min()), float(x1.max()), 256)
+                yg = np.polyval(coef1, xg)
                 ax.plot(
                     xg,
                     yg,
@@ -174,9 +229,20 @@ def save_random_ablation_1b_8b_plot() -> None:
                     label=f"1B poly fit (deg {deg_used})",
                 )
         if xy8 is not None:
-            fit8 = _poly_regression_curve(xy8[0], xy8[1], max_deg=_max_poly_deg)
-            if fit8 is not None:
-                xg, yg, deg_used = fit8
+            fc8 = _poly_fit_coefficients(xy8[0], xy8[1], max_deg=_max_poly_deg)
+            if fc8 is not None:
+                coef8, deg_used = fc8
+                _write_random_ablation_poly_json(
+                    poly_8b,
+                    coef8,
+                    deg_used,
+                    xy8[0],
+                    source_basename=os.path.basename(p8),
+                    max_poly_degree_cap=_max_poly_deg,
+                )
+                print(f"Saved {poly_8b}")
+                xg = np.linspace(float(xy8[0].min()), float(xy8[0].max()), 256)
+                yg = np.polyval(coef8, xg)
                 ax.plot(
                     xg,
                     yg,

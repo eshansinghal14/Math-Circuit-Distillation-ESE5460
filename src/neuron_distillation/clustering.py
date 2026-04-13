@@ -92,7 +92,7 @@ def _parse_args(argv):
     parser.add_argument(
         "--cluster-k-max",
         type=int,
-        default=19,
+        default=8,
         metavar="K1",
         help=(
             "Largest k in the k-sweep, inclusive; sweep always starts at k=1 "
@@ -102,7 +102,7 @@ def _parse_args(argv):
     parser.add_argument(
         "--cluster-k-step",
         type=int,
-        default=2,
+        default=1,
         metavar="S",
         help="Spacing between k values (default: 2).",
     )

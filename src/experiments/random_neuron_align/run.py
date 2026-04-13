@@ -77,6 +77,13 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=2.0)
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--lambda-cluster", type=float, default=0.01)
+    parser.add_argument(
+        "--cluster-size-weighting",
+        action="store_true",
+        help=(
+            "CKA: multiply each cluster pair's loss weight by |student cluster| / full student MLP width"
+        ),
+    )
     parser.add_argument("--save-every", type=int, default=5,
                         help="Overwrite student_model/ every N epochs (0=disable)")
     parser.add_argument("--save-best", action="store_true")
@@ -348,6 +355,7 @@ def main() -> None:
         temperature=args.temperature,
         grad_clip=args.grad_clip,
         lambda_cluster=args.lambda_cluster,
+        cluster_size_weighting=args.cluster_size_weighting,
         save_every=args.save_every,
         save_best=args.save_best,
         eval_max_new_tokens=eval_max_new_tokens,

@@ -119,6 +119,8 @@ class ClusterDistillationConfig:
 
     lambda_cluster: float = 0.01
     importance_weighting: bool = True
+    # If True, multiply each pair's CKA loss weight by (|student cluster| / full student MLP width).
+    cluster_size_weighting: bool = False
 
     eval_every: int = 1
     # Greedy test accuracy: prompts batched for ``generate`` (independent of training batch size).
@@ -356,6 +358,7 @@ class ClusterAlignmentLoss(nn.Module):
         cluster_pairs: List[ClusterPairInfo],
         attention_mask: Optional[torch.Tensor] = None,
         importance_weighting: bool = True,
+        cluster_size_weighting: bool = False,
     ) -> Tuple[torch.Tensor, Dict]:
         """
         Args:
@@ -364,12 +367,14 @@ class ClusterAlignmentLoss(nn.Module):
             cluster_pairs: List of :class:`ClusterPairInfo`.
             attention_mask: ``(B, T)`` binary mask; 1 = real token, 0 = pad.
             importance_weighting: Scale each pair's loss by its importance.
+            cluster_size_weighting: If True, multiply each pair's weight by
+                ``|student cluster| / D_student_total`` (flattened MLP width).
 
         Returns:
             ``(total_loss, info_dict)`` where info_dict has per-pair mean CKA.
         """
         device = student_acts.device
-        B, T, _ = student_acts.shape
+        B, T, d_student_total = student_acts.shape
 
         if attention_mask is not None:
             valid_mask = attention_mask.bool()  # (B, T)
@@ -409,7 +414,11 @@ class ClusterAlignmentLoss(nn.Module):
 
             mean_cka = torch.stack(token_ckas).mean()
             pair_losses.append(1.0 - mean_cka)
-            pair_weights.append(pair.importance if importance_weighting else 1.0)
+            w = pair.importance if importance_weighting else 1.0
+            if cluster_size_weighting:
+                n_s = float(s_idx.numel())
+                w = w * (n_s / (float(d_student_total) + 1e-12))
+            pair_weights.append(w)
             cka_scores[(pair.subclass, pair.student_cluster_idx,
                          pair.teacher_cluster_idx)] = mean_cka.item()
 
@@ -796,6 +805,7 @@ class ClusterDistillationTrainer:
                 student_acts, teacher_acts, self.cluster_pairs,
                 attention_mask=attention_mask,
                 importance_weighting=self.config.importance_weighting,
+                cluster_size_weighting=self.config.cluster_size_weighting,
             )
 
             total = kl_loss + self.config.lambda_cluster * cluster_loss
