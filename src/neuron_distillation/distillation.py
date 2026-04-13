@@ -12,8 +12,9 @@ full outputs, this module:
   3. For each paired cluster (discovered via ablation-based importance
      matching), extracts the corresponding neuron subsets and computes
      CKA between student and teacher.
-  4. The total loss uses masked per-position KL at the first-answer
-     logit, plus ``lambda * L_cluster_align`` (CKA). No ``batchmean`` over the full vocab grid.
+  4. The total loss uses masked per-position KL at every answer token
+     (next-token positions over the full answer span, including EOS),
+     plus ``lambda * L_cluster_align`` (CKA). No ``batchmean`` over the full vocab grid.
 
 Pipeline prerequisites (run before this module):
   - Neuron clustering  (clustering.py)
@@ -498,7 +499,7 @@ class ClusterAlignmentLoss(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Dataset & collate (masked KL at first answer token)
+# Dataset & collate (masked KL at all answer-token prediction positions)
 # ---------------------------------------------------------------------------
 
 class AddDataset(Dataset):
@@ -537,7 +538,12 @@ class AddDataset(Dataset):
 
 
 def collate_fn(examples, pad_id: int):
-    """Right-pad batch sequences and build ``kl_mask`` (first-answer logit only)."""
+    """Right-pad batch sequences and build ``kl_mask`` for all answer next-token positions.
+
+    For causal LM, ``logits[:, t, :]`` predicts ``input_ids[:, t + 1]``.  Answer tokens
+    occupy indices ``prompt_len .. L-1``; include KL at ``t = prompt_len-1 .. L-2``
+    (covers every answer token including EOS).
+    """
     max_len = max(ex["input_ids"].size(0) for ex in examples)
     B = len(examples)
 
@@ -550,8 +556,9 @@ def collate_fn(examples, pad_id: int):
         L = ids.size(0)
         input_ids[i, :L] = ids
         attention_mask[i, :L] = 1
-        pos = ex["prompt_len"] - 1
-        if 0 <= pos < L:
+        p = ex["prompt_len"]
+        # Next-token KL for each answer position: logits t predict token t+1 for t in [p-1, L-2].
+        for pos in range(max(p - 1, 0), L - 1):
             kl_mask[i, pos] = 1.0
 
     return {
@@ -742,7 +749,7 @@ class ClusterDistillationTrainer:
         # Optimizer
         self.optimizer = AdamW(params=self.student.parameters(), lr=config.learning_rate)
 
-        # Dataset / loader (padding + kl_mask at answer position)
+        # Dataset / loader (padding + kl_mask over all answer prediction positions)
         self.dataset = AddDataset(train_data, self.tokenizer)
         self.loader = DataLoader(
             self.dataset,
@@ -871,7 +878,7 @@ class ClusterDistillationTrainer:
             student_logits = student_out.logits
             student_acts = self.student_cache.get_flattened_per_token()
 
-            # Masked KL at first-answer logit only.
+            # Masked KL at all answer-token prediction positions (same mask as standard mode).
             log_p_s = F.log_softmax(student_logits.float() / T, dim=-1)
             p_t = F.softmax(teacher_logits.float() / T, dim=-1)
             kl_per_token = F.kl_div(log_p_s, p_t, reduction="none").sum(dim=-1)

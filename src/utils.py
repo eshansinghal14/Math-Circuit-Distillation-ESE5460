@@ -810,11 +810,12 @@ if __name__ == "__main__":
 
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
     generate_math_dataset(
-        dataset_all_json_path("3d_add"),
+        dataset_all_json_path("2d_mult"),
         tokenizer,
-        operand_digits=3,
-        operation="+",
+        operand_digits=2,
+        operation="*",
         pair_mode="grid",
         shuffle=True,
+        samples=10000,
         split_test_frac=0.2,
     )
