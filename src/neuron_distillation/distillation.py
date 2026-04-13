@@ -61,7 +61,7 @@ try:
 except ImportError:
     FlopCounterMode = None  # type: ignore[misc, assignment]
 
-from cka_loss import linear_cka_efficient
+from cka_loss import leading_eigenvalue_hkh, linear_cka_efficient
 from neuron_distillation.pairing import (
     ClusterMapping,
     _load_single_ablation_performance,
@@ -368,6 +368,11 @@ def _grad_tuple_global_l2_norm(grads: Tuple[Optional[torch.Tensor], ...]) -> flo
     return sq ** 0.5
 
 
+def kc_lam1_metric_key(subclass: int, student_c: int, teacher_c: int) -> str:
+    """JSON-safe key for per-cluster-pair ``λ_max(K_c)`` (subclass, student cluster, teacher cluster)."""
+    return f"s{subclass}_us{student_c}_ut{teacher_c}"
+
+
 # ---------------------------------------------------------------------------
 # Cluster-level CKA alignment loss
 # ---------------------------------------------------------------------------
@@ -403,9 +408,14 @@ class ClusterAlignmentLoss(nn.Module):
             importance_weighting: Scale each pair's loss by its importance.
             cluster_size_weighting: If True, multiply each pair's weight by
                 ``|student cluster| / D_student_total`` (flattened MLP width).
+            compute_kc_leading_eigenvalue: If True, compute per-pair mean
+                ``λ_max(K_c)`` for student cluster activations with
+                ``K_c = H X X^T H`` (column centering ``H``); used for logging only.
 
         Returns:
-            ``(total_loss, info_dict)`` where info_dict has per-pair mean CKA.
+            ``(total_loss, cka_scores, kc_lam1_scores)`` where ``kc_lam1_scores`` maps
+            the same keys as ``cka_scores`` to mean ``λ_max(K_c)`` over valid tokens, or
+            is empty when ``compute_kc_leading_eigenvalue`` is False.
         """
         device = student_acts.device
         B, T, d_student_total = student_acts.shape
@@ -421,11 +431,16 @@ class ClusterAlignmentLoss(nn.Module):
         valid_positions = all_valid.nonzero(as_tuple=False).squeeze(-1)
 
         if valid_positions.numel() == 0:
-            return torch.tensor(0.0, device=device, requires_grad=True), {}
+            return (
+                torch.tensor(0.0, device=device, requires_grad=True),
+                {},
+                {},
+            )
 
         pair_losses = []
         pair_weights = []
         cka_scores: Dict[Tuple[int, int, int], float] = {}
+        kc_lam1_scores: Dict[Tuple[int, int, int], float] = {}
 
         for pair in cluster_pairs:
             s_idx = pair.student_neuron_indices.to(device)
@@ -440,11 +455,17 @@ class ClusterAlignmentLoss(nn.Module):
 
             # CKA at each valid token position, then average
             token_ckas = []
+            lam1_tokens: List[float] = []
+            key = (pair.subclass, pair.student_cluster_idx, pair.teacher_cluster_idx)
             for t in valid_positions:
                 s_t = s_cluster[:, t, :]  # (B, |C_s|)
                 t_t = t_cluster[:, t, :]  # (B, |C_t|)
                 cka = linear_cka_efficient(s_t, t_t, eps=self.eps)
                 token_ckas.append(cka)
+                if compute_kc_leading_eigenvalue:
+                    with torch.no_grad():
+                        lam1 = leading_eigenvalue_hkh(s_t)
+                    lam1_tokens.append(float(lam1.item()))
 
             mean_cka = torch.stack(token_ckas).mean()
             pair_losses.append(1.0 - mean_cka)
@@ -453,18 +474,23 @@ class ClusterAlignmentLoss(nn.Module):
                 n_s = float(s_idx.numel())
                 w = w * (n_s / (float(d_student_total) + 1e-12))
             pair_weights.append(w)
-            cka_scores[(pair.subclass, pair.student_cluster_idx,
-                         pair.teacher_cluster_idx)] = mean_cka.item()
+            cka_scores[key] = mean_cka.item()
+            if compute_kc_leading_eigenvalue and lam1_tokens:
+                kc_lam1_scores[key] = sum(lam1_tokens) / len(lam1_tokens)
 
         if not pair_losses:
-            return torch.tensor(0.0, device=device, requires_grad=True), {}
+            return (
+                torch.tensor(0.0, device=device, requires_grad=True),
+                {},
+                {},
+            )
 
         losses_t = torch.stack(pair_losses)
         weights_t = torch.tensor(pair_weights, device=device, dtype=losses_t.dtype)
         weights_t = weights_t / (weights_t.sum() + 1e-12)
 
         total = (losses_t * weights_t).sum()
-        return total, cka_scores
+        return total, cka_scores, kc_lam1_scores
 
 
 # ---------------------------------------------------------------------------
@@ -823,6 +849,7 @@ class ClusterDistillationTrainer:
                     "cluster_loss": 0.0,
                     "total_loss": total.item(),
                     "mean_cka": 0.0,
+                    "kc_lam1": {},
                 }
                 return total, metrics, kl_loss, None
 
@@ -850,15 +877,20 @@ class ClusterDistillationTrainer:
                 * (T**2)
             )
 
-            cluster_loss, cka_scores = self.cluster_loss_fn(
+            cluster_loss, cka_scores, kc_lam1_scores = self.cluster_loss_fn(
                 student_acts, teacher_acts, self.cluster_pairs,
                 attention_mask=attention_mask,
                 importance_weighting=self.config.importance_weighting,
                 cluster_size_weighting=self.config.cluster_size_weighting,
+                compute_kc_leading_eigenvalue=self.config.log_kl_cka_grad_norms,
             )
 
             total = kl_loss + self.config.lambda_cluster * cluster_loss
 
+            kc_lam1 = {
+                kc_lam1_metric_key(sk, sc, tc): float(v)
+                for (sk, sc, tc), v in kc_lam1_scores.items()
+            }
             metrics = {
                 "kl_loss": kl_loss.item(),
                 "cluster_loss": cluster_loss.item(),
@@ -867,6 +899,7 @@ class ClusterDistillationTrainer:
                     sum(cka_scores.values()) / len(cka_scores)
                     if cka_scores else 0.0
                 ),
+                "kc_lam1": kc_lam1,
             }
             return total, metrics, kl_loss, cluster_loss
 
@@ -915,6 +948,7 @@ class ClusterDistillationTrainer:
     def train_epoch(self, epoch: int) -> Dict[str, Any]:
         self.student.train()
         agg = defaultdict(float)
+        agg_kc_lam1: Dict[str, float] = defaultdict(float)
         n = 0
         skipped_nonfinite = 0
         epoch_flops = 0
@@ -976,7 +1010,12 @@ class ClusterDistillationTrainer:
                 continue
 
             for k, v in metrics.items():
-                agg[k] += v
+                if k == "kc_lam1":
+                    if isinstance(v, dict):
+                        for pk, pv in v.items():
+                            agg_kc_lam1[pk] += float(pv)
+                    continue
+                agg[k] += float(v)
             n += 1
 
             if step % max(1, self.config.step_log_interval) == 0:
@@ -991,6 +1030,11 @@ class ClusterDistillationTrainer:
                         f" | ||g||_KL {metrics['kl_grad_norm']:.4f}"
                         f" | ||g||_λCKA {metrics['cka_grad_norm']:.4f}"
                     )
+                    if not self._standard:
+                        kc = metrics.get("kc_lam1") or {}
+                        if kc:
+                            parts = [f"{pk}={pv:.4f}" for pk, pv in sorted(kc.items())]
+                            grad_s += " | λ_max(K_c) " + " ".join(parts)
                 if self._standard:
                     print(
                         f"  step {step:04d} | KL {metrics['kl_loss']:.4f}"
@@ -1013,6 +1057,7 @@ class ClusterDistillationTrainer:
                 f"Epoch metrics below are undefined (not zero loss)."
             )
         out: Dict[str, Any] = {k: v / max(n, 1) for k, v in agg.items()}
+        out["kc_lam1"] = {pk: v / max(n, 1) for pk, v in agg_kc_lam1.items()}
         out["epoch_flops"] = float(epoch_flops) if count_flops_this_epoch else None
         return out
 
@@ -1040,6 +1085,7 @@ class ClusterDistillationTrainer:
                 "accuracy",
                 "cluster_loss",
                 "mean_cka",
+                "kc_lam1",
                 "kl_grad_norm",
                 "cka_grad_norm",
             ):
@@ -1118,6 +1164,11 @@ class ClusterDistillationTrainer:
             print(
                 "  KL/CKA grad norms: on (||g||_KL and ||g||_λ·CKA via autograd.grad; ~2× grad work)",
             )
+            if not self._standard:
+                print(
+                    "  K_c spectrum:     λ_max(H X X^T H) per cluster (student), "
+                    "mean over pairs/tokens (same CKA mask)",
+                )
         if cfg.count_flops_every <= 0:
             print("  FLOP counting:    off (--count-flops-every 0)")
         elif FlopCounterMode is None:
@@ -1199,9 +1250,20 @@ class ClusterDistillationTrainer:
                 else:
                     g_line = ""
                     if cfg.log_kl_cka_grad_norms and "kl_grad_norm" in epoch_metrics:
+                        kc = epoch_metrics.get("kc_lam1") or {}
+                        kc_s = ""
+                        if kc:
+                            kc_s = (
+                                ", λ_max(K_c): "
+                                + ", ".join(
+                                    f"{pk}={pv:.4f}"
+                                    for pk, pv in sorted(kc.items())
+                                )
+                            )
                         g_line = (
                             f", ||g||_KL={epoch_metrics['kl_grad_norm']:.4f}, "
                             f"||g||_λCKA={epoch_metrics['cka_grad_norm']:.4f}"
+                            f"{kc_s}"
                         )
                     print(
                         f"Epoch {epoch + 1}/{end_epoch}: "
