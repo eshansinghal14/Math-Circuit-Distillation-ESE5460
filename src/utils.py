@@ -169,6 +169,20 @@ def resolve_distillation_run_dir(
     return run_dir, student_source
 
 
+def _coerce_dataset_answer(v: object) -> int:
+    """Turn a dataset label into an int (numeric strings, JSON ints, or ``True``/``False``)."""
+    if isinstance(v, bool):
+        return int(v)
+    if isinstance(v, int):
+        return v
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in ("true", "false"):
+            return 1 if s == "true" else 0
+        return int(s, 10)
+    raise TypeError(f"Unsupported answer value type {type(v)!r}: {v!r}")
+
+
 def json_to_prompt_answer_dict(raw: object) -> Dict[str, int]:
     """Normalize math-dataset JSON to ``{prompt: int answer}``.
 
@@ -176,9 +190,10 @@ def json_to_prompt_answer_dict(raw: object) -> Dict[str, int]:
 
     - **Flat dict** ``{"12+34=": 46, ...}`` (string or int values).
     - **List of records** ``[{"q_str": "...", "a_str": "..."}, ...]`` (current repo format).
+    - **Boolean strings** in ``a_str`` (``greater_than`` datasets): ``"True"``/``"False"`` → ``1``/``0``.
     """
     if isinstance(raw, dict):
-        return {str(k): int(v) for k, v in raw.items()}
+        return {str(k): _coerce_dataset_answer(v) for k, v in raw.items()}
     if isinstance(raw, list):
         out: Dict[str, int] = {}
         for i, row in enumerate(raw):
@@ -189,7 +204,7 @@ def json_to_prompt_answer_dict(raw: object) -> Dict[str, int]:
                     "List-format rows must include q_str and a_str; "
                     f"row {i} has keys: {list(row.keys())}",
                 )
-            out[str(row["q_str"])] = int(row["a_str"])
+            out[str(row["q_str"])] = _coerce_dataset_answer(row["a_str"])
         return out
     raise TypeError(f"Dataset JSON must be a dict or list, got {type(raw)!r}")
 
