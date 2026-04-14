@@ -359,8 +359,8 @@ def main():
         metavar="N",
         help=(
             "Each time eval runs (baselines + periodic student eval), print the first N "
-            "test prompts and top-5 softmax next-token predictions for student and teacher. "
-            "0=off."
+            "test prompts and top-5 softmax next-token predictions for student and teacher "
+            "(uses same --temperature as KL). 0=off."
         ),
     )
     parser.add_argument(

@@ -136,7 +136,7 @@ class ClusterDistillationConfig:
     save_every: int = 5
     save_best: bool = False
     eval_max_new_tokens: int = EVAL_MAX_NEW_TOKENS
-    # Greedy-eval debug: print first N prompts + top-5 next-token softmax (student & teacher).
+    # Greedy-eval debug: print first N prompts + top-5 softmax at ``temperature`` (student & teacher).
     eval_print_samples: int = 0
     save_dir: str = "results/cluster-distillation"
     # Count FLOPs (FlopCounterMode) only on epochs where ``epoch_index % N == 0`` (0-based).
@@ -627,8 +627,11 @@ def _topk_next_token_probs(
     prompt: str,
     device: torch.device,
     k: int = 5,
+    temperature: float = 1.0,
 ) -> List[Tuple[str, float]]:
-    """Softmax top-``k`` at the last prefill position (next token after ``prompt``)."""
+    """Softmax top-``k`` at the last prefill position (same scaling as KL: ``logits / T``)."""
+    if temperature <= 0:
+        raise ValueError("temperature must be > 0")
     enc = tokenizer(
         prompt,
         return_tensors="pt",
@@ -639,7 +642,7 @@ def _topk_next_token_probs(
     with torch.no_grad():
         out = lm(**enc)
     logits = out.logits[0, -1].float()
-    probs = torch.softmax(logits, dim=-1)
+    probs = torch.softmax(logits / temperature, dim=-1)
     top_p, top_i = torch.topk(probs, min(k, probs.numel()))
     rows: List[Tuple[str, float]] = []
     for prob, idx in zip(top_p.tolist(), top_i.tolist()):
@@ -648,8 +651,8 @@ def _topk_next_token_probs(
     return rows
 
 
-def _print_topk_lines(name: str, rows: List[Tuple[str, float]]) -> None:
-    print(f"  {name} top-{len(rows)} next-token (softmax):")
+def _print_topk_lines(name: str, rows: List[Tuple[str, float]], temperature: float) -> None:
+    print(f"  {name} top-{len(rows)} next-token (softmax at T={temperature:g}):")
     for rank, (tok, p) in enumerate(rows, start=1):
         print(f"    {rank}. p={p:.4f} {tok!r}")
 
@@ -664,6 +667,7 @@ def eval_accuracy(
     print_samples: int = 0,
     eval_label: str = "",
     teacher_for_topk_print: Optional[nn.Module] = None,
+    temperature: float = 1.0,
 ) -> float:
     if max_new_tokens is None:
         max_new_tokens = EVAL_MAX_NEW_TOKENS
@@ -709,9 +713,14 @@ def eval_accuracy(
                     else ("teacher" if "teacher" in eval_label.lower() else "student")
                 )
                 s_rows = _topk_next_token_probs(
-                    model, tokenizer, batch_prompts[j], model.device, k=5,
+                    model,
+                    tokenizer,
+                    batch_prompts[j],
+                    model.device,
+                    k=5,
+                    temperature=temperature,
                 )
-                _print_topk_lines(primary_name, s_rows)
+                _print_topk_lines(primary_name, s_rows, temperature)
                 if teacher_for_topk_print is not None:
                     t_rows = _topk_next_token_probs(
                         teacher_for_topk_print,
@@ -719,8 +728,9 @@ def eval_accuracy(
                         batch_prompts[j],
                         teacher_for_topk_print.device,
                         k=5,
+                        temperature=temperature,
                     )
-                    _print_topk_lines("teacher", t_rows)
+                    _print_topk_lines("teacher", t_rows, temperature)
                 printed += 1
             pred = _extract_int_after_equals(pred_text)
             if pred == gold:
@@ -1219,6 +1229,7 @@ class ClusterDistillationTrainer:
                 teacher_for_topk_print=(
                     self.teacher if cfg.eval_print_samples > 0 else None
                 ),
+                temperature=cfg.temperature,
             )
             teacher_base = eval_accuracy(
                 self.teacher, self.tokenizer, self.test_data,
@@ -1226,6 +1237,7 @@ class ClusterDistillationTrainer:
                 max_new_tokens=cfg.eval_max_new_tokens,
                 print_samples=0,
                 eval_label="teacher baseline",
+                temperature=cfg.temperature,
             )
             print(f"  Student baseline accuracy: {student_base:.4f}")
             print(f"  Teacher baseline accuracy: {teacher_base:.4f}")
@@ -1257,7 +1269,7 @@ class ClusterDistillationTrainer:
         if cfg.eval_print_samples > 0:
             print(
                 f"  eval print samples: {cfg.eval_print_samples} "
-                "(prompt + top-5 next-token softmax for student & teacher)",
+                f"(prompt + top-5 softmax at T={cfg.temperature:g} for student & teacher)",
             )
         if not self._standard:
             print(f"  lambda_cluster:   {cfg.lambda_cluster}")
@@ -1310,6 +1322,7 @@ class ClusterDistillationTrainer:
                     teacher_for_topk_print=(
                         self.teacher if cfg.eval_print_samples > 0 else None
                     ),
+                    temperature=cfg.temperature,
                 )
                 epoch_metrics["accuracy"] = acc
 
