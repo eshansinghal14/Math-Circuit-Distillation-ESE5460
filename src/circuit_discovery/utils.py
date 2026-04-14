@@ -1,4 +1,5 @@
 import os
+import re
 import torch
 from transformers import AutoConfig
 from huggingface_hub import login
@@ -29,16 +30,42 @@ config = {
 
 
 def parse_equation(probs, device=None):
+    """Parse ``op1, op2, res`` for circuit training / preclassify.
+
+    Supports:
+
+    - ``num1+num2=answer`` (addition; ``res`` is the value after ``=``).
+    - ``(a op b)%z=answer`` (legacy modular prompts).
+    - ``a op b mod n = answer`` (``op`` in ``+``, ``-``, ``*``, ``×``; space after ``=`` optional;
+      ``res`` is the value after ``=``).
+    """
+
     op1_list = []
     op2_list = []
     res_list = []
 
+    _head_binop = re.compile(r"^\s*(\d+)\s*([+\-×*])\s*(\d+)\s*$")
+
     for prob in probs:
-        add_idx = prob.index("+")
-        equal_idx = prob.index("=")
-        op1_str = prob[:add_idx]
-        op2_str = prob[add_idx + 1 : equal_idx]
-        res_str = prob[equal_idx + 1 :]
+        equal_idx = prob.rindex("=")
+        res_str = prob[equal_idx + 1 :].strip()
+        left = prob[:equal_idx].strip()
+
+        if " mod " in left:
+            before_mod, mod_part = left.rsplit(" mod ", 1)
+            int(mod_part.strip())  # validate modulus present
+            m = _head_binop.match(before_mod.strip())
+            if not m:
+                raise ValueError(f"Cannot parse mod-prompt head: {before_mod!r}")
+            op1_str, op2_str = m.group(1), m.group(3)
+        else:
+            legacy = re.match(r"^\((\d+)([+\-×*])(\d+)\)%(\d+)\s*$", left)
+            if legacy:
+                op1_str, op2_str = legacy.group(1), legacy.group(3)
+            else:
+                add_idx = left.index("+")
+                op1_str = left[:add_idx].strip()
+                op2_str = left[add_idx + 1 :].strip()
 
         op1_list.append(int(op1_str))
         op2_list.append(int(op2_str))

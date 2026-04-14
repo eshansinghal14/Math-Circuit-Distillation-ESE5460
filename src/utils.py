@@ -169,20 +169,6 @@ def resolve_distillation_run_dir(
     return run_dir, student_source
 
 
-def _coerce_dataset_answer(v: object) -> int:
-    """Turn a dataset label into an int (numeric strings, JSON ints, or ``True``/``False``)."""
-    if isinstance(v, bool):
-        return int(v)
-    if isinstance(v, int):
-        return v
-    if isinstance(v, str):
-        s = v.strip().lower()
-        if s in ("true", "false"):
-            return 1 if s == "true" else 0
-        return int(s, 10)
-    raise TypeError(f"Unsupported answer value type {type(v)!r}: {v!r}")
-
-
 def json_to_prompt_answer_dict(raw: object) -> Dict[str, int]:
     """Normalize math-dataset JSON to ``{prompt: int answer}``.
 
@@ -190,10 +176,9 @@ def json_to_prompt_answer_dict(raw: object) -> Dict[str, int]:
 
     - **Flat dict** ``{"12+34=": 46, ...}`` (string or int values).
     - **List of records** ``[{"q_str": "...", "a_str": "..."}, ...]`` (current repo format).
-    - **Boolean strings** in ``a_str`` (``greater_than`` datasets): ``"True"``/``"False"`` → ``1``/``0``.
     """
     if isinstance(raw, dict):
-        return {str(k): _coerce_dataset_answer(v) for k, v in raw.items()}
+        return {str(k): int(v) for k, v in raw.items()}
     if isinstance(raw, list):
         out: Dict[str, int] = {}
         for i, row in enumerate(raw):
@@ -204,7 +189,7 @@ def json_to_prompt_answer_dict(raw: object) -> Dict[str, int]:
                     "List-format rows must include q_str and a_str; "
                     f"row {i} has keys: {list(row.keys())}",
                 )
-            out[str(row["q_str"])] = _coerce_dataset_answer(row["a_str"])
+            out[str(row["q_str"])] = int(row["a_str"])
         return out
     raise TypeError(f"Dataset JSON must be a dict or list, got {type(raw)!r}")
 
@@ -605,9 +590,9 @@ def generate_math_dataset(
             alongside using ``_train_<100-pct>`` / ``_test_<pct>`` suffixes (same convention as
             historical splits).
         tokenizer: HuggingFace tokenizer (``encode`` for ``ids``).
-        dataset_type: ``arithmetic`` (default), ``mod`` for ``(xopy)%z=`` (no spaces),
-            ``greater_than`` for ``Is a > b? `` with ``True``/``False``, or ``linear_eq`` for
-            ``If x + b = c, x =`` with integer ``x``.
+        dataset_type: ``arithmetic`` (default), ``mod`` for ``a op b mod n = `` (space after ``=``),
+            ``greater_than`` for
+            boolean comparison prompts, or ``linear_eq`` for ``If x + b = c, x =`` prompts.
         operand_digits: Decimal width per operand: one int (both operands ``0..10^d-1``) or
             ``(left, right)`` for a rectangular grid.
         operation: ``+``, ``-``, ``*`` (or ``×``), or ``/`` / ``//`` for integer division
@@ -657,8 +642,7 @@ def generate_math_dataset(
                         inner = num1 + num2
                     else:
                         inner = num1 - num2
-                    # No spaces; matches ``(x+y)%z=`` style.
-                    all_pairs.append((f"({num1}{op_sym}{num2})%{mod}=", inner % mod))
+                    all_pairs.append((f"{num1} {op_sym} {num2} mod {mod} = ", inner % mod))
     elif dataset_type == "greater_than":
         all_pairs = []
         na, nb = 10**da, 10**db
@@ -884,12 +868,14 @@ if __name__ == "__main__":
 
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
     generate_math_dataset(
-        dataset_all_json_path("2d_mult"),
+        dataset_all_json_path("3d_mod_add_7"),
         tokenizer,
-        operand_digits=2,
-        operation="*",
-        pair_mode="grid",
+        dataset_type="mod",
+        operand_digits=3,
+        operation="+",
+        modulus_digits=3,
         shuffle=True,
         samples=10000,
         split_test_frac=0.2,
+        fixed_modulus=5,
     )
