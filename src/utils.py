@@ -574,6 +574,7 @@ def generate_math_dataset(
     operation: str = "+",
     pair_mode: str = "grid",
     modulus_digits: int = 2,
+    fixed_modulus: Optional[int] = None,
     variable_name: str = "x",
     shuffle: bool = True,
     samples: Optional[int] = None,
@@ -589,8 +590,9 @@ def generate_math_dataset(
             alongside using ``_train_<100-pct>`` / ``_test_<pct>`` suffixes (same convention as
             historical splits).
         tokenizer: HuggingFace tokenizer (``encode`` for ``ids``).
-        dataset_type: ``arithmetic`` (default), ``mod`` for ``(x op y)%z``, ``greater_than`` for
-            boolean comparison prompts, or ``linear_eq`` for ``If x + b = c, x =`` prompts.
+        dataset_type: ``arithmetic`` (default), ``mod`` for ``(xopy)%z=`` (no spaces),
+            ``greater_than`` for ``Is a > b? `` with ``True``/``False``, or ``linear_eq`` for
+            ``If x + b = c, x =`` with integer ``x``.
         operand_digits: Decimal width per operand: one int (both operands ``0..10^d-1``) or
             ``(left, right)`` for a rectangular grid.
         operation: ``+``, ``-``, ``*`` (or ``×``), or ``/`` / ``//`` for integer division
@@ -598,8 +600,10 @@ def generate_math_dataset(
         pair_mode: ``grid`` = full Cartesian product of operand ranges; ``2d1d_mult`` = union of
             ``10^2×10^1`` and ``10^1×10^2`` multiplication prompts (expects ``operand_digits``
             ``(2,1)`` or ``(1,2)``). Used for ``dataset_type='arithmetic'``.
-        modulus_digits: For ``dataset_type='mod'``, sample ``z`` from ``1..10^modulus_digits-1``.
-            Supports ``operation`` in ``{"+", "-", "*", "×"}`` for the inner expression.
+        modulus_digits: For ``dataset_type='mod'`` when ``fixed_modulus`` is omitted, sample ``z``
+            from ``1..10^modulus_digits-1``. Ignored if ``fixed_modulus`` is set.
+        fixed_modulus: For ``dataset_type='mod'``, use this ``z`` for every row (constant modulus).
+            Must be ``>= 1``. When set, ``modulus_digits`` is unused for choosing ``z``.
         variable_name: Variable token for ``dataset_type='linear_eq'`` prompts.
         shuffle: Shuffle row order before optional subsampling (ignored when ``samples`` forces
             ``random.sample``, which is already unordered).
@@ -614,24 +618,32 @@ def generate_math_dataset(
     if dataset_type == "arithmetic":
         all_pairs = _iter_math_pairs(da, db, operation, pair_mode)
     elif dataset_type == "mod":
-        if modulus_digits < 1:
-            raise ValueError("modulus_digits must be >= 1.")
         op = operation.strip()
         if op not in ("+", "-", "*", "×"):
             raise ValueError("dataset_type='mod' supports operation in {'+', '-', '*', '×'}.")
         op_sym = "*" if op == "×" else op
         all_pairs = []
-        na, nb, nz = 10**da, 10**db, 10**modulus_digits
+        na, nb = 10**da, 10**db
+        if fixed_modulus is not None:
+            if fixed_modulus < 1:
+                raise ValueError("fixed_modulus must be >= 1.")
+            mod_list = [fixed_modulus]
+        else:
+            if modulus_digits < 1:
+                raise ValueError("modulus_digits must be >= 1 when fixed_modulus is omitted.")
+            nz = 10**modulus_digits
+            mod_list = list(range(1, nz))
         for num1 in range(na):
             for num2 in range(nb):
-                for mod in range(1, nz):
+                for mod in mod_list:
                     if op in ("*", "×"):
                         inner = num1 * num2
                     elif op == "+":
                         inner = num1 + num2
                     else:
                         inner = num1 - num2
-                    all_pairs.append((f"({num1} {op_sym} {num2}) % {mod}=", inner % mod))
+                    # No spaces; matches ``(x+y)%z=`` style.
+                    all_pairs.append((f"({num1}{op_sym}{num2})%{mod}=", inner % mod))
     elif dataset_type == "greater_than":
         all_pairs = []
         na, nb = 10**da, 10**db

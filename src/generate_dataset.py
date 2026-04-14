@@ -61,7 +61,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--modulus-digits",
         type=int,
         default=2,
-        help="For mod datasets: z sampled from [1, 10^d - 1].",
+        help="For mod datasets (no --fixed-modulus): z sampled from [1, 10^d - 1].",
+    )
+    p.add_argument(
+        "--fixed-modulus",
+        type=int,
+        default=None,
+        metavar="Z",
+        help="For mod datasets: use this z for every row (constant modulus). Overrides modulus range.",
     )
     p.add_argument(
         "--variable-name",
@@ -113,6 +120,7 @@ def main() -> None:
         operation=args.operation,
         pair_mode=args.pair_mode,
         modulus_digits=args.modulus_digits,
+        fixed_modulus=args.fixed_modulus,
         variable_name=args.variable_name,
         shuffle=not args.no_shuffle,
         samples=args.samples,
