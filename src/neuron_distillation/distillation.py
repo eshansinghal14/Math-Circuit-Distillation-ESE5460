@@ -1243,6 +1243,7 @@ class ClusterDistillationTrainer:
             for key in (
                 "epoch",
                 "kl_loss",
+                "hard_ce_loss",
                 "accuracy",
                 "cluster_loss",
                 "mean_cka",
@@ -1425,10 +1426,15 @@ class ClusterDistillationTrainer:
                         g_line = (
                             f", ||g||_KL={epoch_metrics['kl_grad_norm']:.4f}"
                         )
+                    ce_s = ""
+                    if cfg.hard_ce_weight > 0:
+                        ce_s = (
+                            f", hardCE={epoch_metrics.get('hard_ce_loss', float('nan')):.4f}"
+                        )
                     print(
                         f"Epoch {epoch + 1}/{end_epoch}: "
                         f"KL={epoch_metrics.get('kl_loss', float('nan')):.4f}"
-                        f"{g_line}, Acc={acc:.4f}{flop_s}"
+                        f"{ce_s}{g_line}, Acc={acc:.4f}{flop_s}"
                     )
                 else:
                     g_line = ""
@@ -1449,12 +1455,17 @@ class ClusterDistillationTrainer:
                             f"‖g_KL‖/‖g_CKA‖={epoch_metrics.get('cka_kl_grad_scale', float('nan')):.4f}"
                             f"{kc_s}"
                         )
+                    ce_s = ""
+                    if cfg.hard_ce_weight > 0:
+                        ce_s = (
+                            f", hardCE={epoch_metrics.get('hard_ce_loss', float('nan')):.4f}"
+                        )
                     print(
                         f"Epoch {epoch + 1}/{end_epoch}: "
                         f"KL={epoch_metrics.get('kl_loss', float('nan')):.4f}, "
                         f"Cluster={epoch_metrics.get('cluster_loss', float('nan')):.4f}, "
                         f"CKA={epoch_metrics.get('mean_cka', float('nan')):.4f}"
-                        f"{g_line}, Acc={acc:.4f}{flop_s}"
+                        f"{ce_s}{g_line}, Acc={acc:.4f}{flop_s}"
                     )
             else:
                 tag = "KL=n/a" if self._standard else "KL/Cluster/CKA=n/a"
