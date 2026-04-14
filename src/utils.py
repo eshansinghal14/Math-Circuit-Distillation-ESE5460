@@ -569,9 +569,12 @@ def generate_math_dataset(
     dataset_fname: str,
     tokenizer,
     *,
+    dataset_type: str = "arithmetic",
     operand_digits: Union[int, Tuple[int, int]] = 2,
     operation: str = "+",
     pair_mode: str = "grid",
+    modulus_digits: int = 2,
+    variable_name: str = "x",
     shuffle: bool = True,
     samples: Optional[int] = None,
     split_test_frac: Optional[float] = None,
@@ -586,13 +589,18 @@ def generate_math_dataset(
             alongside using ``_train_<100-pct>`` / ``_test_<pct>`` suffixes (same convention as
             historical splits).
         tokenizer: HuggingFace tokenizer (``encode`` for ``ids``).
+        dataset_type: ``arithmetic`` (default), ``mod`` for ``(x op y)%z``, ``greater_than`` for
+            boolean comparison prompts, or ``linear_eq`` for ``If x + b = c, x =`` prompts.
         operand_digits: Decimal width per operand: one int (both operands ``0..10^d-1``) or
             ``(left, right)`` for a rectangular grid.
         operation: ``+``, ``-``, ``*`` (or ``×``), or ``/`` / ``//`` for integer division
-            (only exact integer quotients are kept).
+            (only exact integer quotients are kept). Used for ``dataset_type='arithmetic'``.
         pair_mode: ``grid`` = full Cartesian product of operand ranges; ``2d1d_mult`` = union of
             ``10^2×10^1`` and ``10^1×10^2`` multiplication prompts (expects ``operand_digits``
-            ``(2,1)`` or ``(1,2)``).
+            ``(2,1)`` or ``(1,2)``). Used for ``dataset_type='arithmetic'``.
+        modulus_digits: For ``dataset_type='mod'``, sample ``z`` from ``1..10^modulus_digits-1``.
+            Supports ``operation`` in ``{"+", "-", "*", "×"}`` for the inner expression.
+        variable_name: Variable token for ``dataset_type='linear_eq'`` prompts.
         shuffle: Shuffle row order before optional subsampling (ignored when ``samples`` forces
             ``random.sample``, which is already unordered).
         samples: If set and smaller than the number of generated pairs, keep a random subset
@@ -603,7 +611,46 @@ def generate_math_dataset(
     """
     dataset_fname = _resolve_dataset_output_path(dataset_fname, datasets_dir)
     da, db = _normalize_operand_digits(operand_digits)
-    all_pairs = _iter_math_pairs(da, db, operation, pair_mode)
+    if dataset_type == "arithmetic":
+        all_pairs = _iter_math_pairs(da, db, operation, pair_mode)
+    elif dataset_type == "mod":
+        if modulus_digits < 1:
+            raise ValueError("modulus_digits must be >= 1.")
+        op = operation.strip()
+        if op not in ("+", "-", "*", "×"):
+            raise ValueError("dataset_type='mod' supports operation in {'+', '-', '*', '×'}.")
+        op_sym = "*" if op == "×" else op
+        all_pairs = []
+        na, nb, nz = 10**da, 10**db, 10**modulus_digits
+        for num1 in range(na):
+            for num2 in range(nb):
+                for mod in range(1, nz):
+                    if op in ("*", "×"):
+                        inner = num1 * num2
+                    elif op == "+":
+                        inner = num1 + num2
+                    else:
+                        inner = num1 - num2
+                    all_pairs.append((f"({num1} {op_sym} {num2}) % {mod}=", inner % mod))
+    elif dataset_type == "greater_than":
+        all_pairs = []
+        na, nb = 10**da, 10**db
+        for num1 in range(na):
+            for num2 in range(nb):
+                all_pairs.append((f"Is {num1} > {num2}? ", "True" if num1 > num2 else "False"))
+    elif dataset_type == "linear_eq":
+        all_pairs = []
+        na, nb = 10**da, 10**db
+        var = variable_name.strip() or "x"
+        for x in range(na):
+            for b in range(nb):
+                c = x + b
+                all_pairs.append((f"If {var} + {b} = {c}, {var} =", x))
+    else:
+        raise ValueError(
+            f"Unknown dataset_type {dataset_type!r}; "
+            "use 'arithmetic', 'mod', 'greater_than', or 'linear_eq'.",
+        )
 
     if samples is not None and samples < len(all_pairs):
         selected = random.sample(all_pairs, samples)
