@@ -136,6 +136,8 @@ class ClusterDistillationConfig:
     save_every: int = 5
     save_best: bool = False
     eval_max_new_tokens: int = EVAL_MAX_NEW_TOKENS
+    # Greedy-eval debug: print first N test prompts + full decodes per eval call (0 = off).
+    eval_print_samples: int = 0
     save_dir: str = "results/cluster-distillation"
     # Count FLOPs (FlopCounterMode) only on epochs where ``epoch_index % N == 0`` (0-based).
     # 1 = every epoch; 0 = never; N>1 = every Nth epoch (0, N, 2N, …). ~10% step overhead when active.
@@ -626,6 +628,8 @@ def eval_accuracy(
     data: Dict[str, int],
     batch_size: int = 50,
     max_new_tokens: Optional[int] = None,
+    print_samples: int = 0,
+    eval_label: str = "",
 ) -> float:
     if max_new_tokens is None:
         max_new_tokens = EVAL_MAX_NEW_TOKENS
@@ -633,6 +637,8 @@ def eval_accuracy(
     prompts = list(data.keys())
     answers = list(data.values())
     correct = total = 0
+    printed = 0
+    label_note = f" ({eval_label.strip()})" if eval_label.strip() else ""
 
     original_side = tokenizer.padding_side
     tokenizer.padding_side = "left"
@@ -653,7 +659,18 @@ def eval_accuracy(
         )
         decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
-        for pred_text, gold in zip(decoded, batch_answers):
+        for j, (pred_text, gold) in enumerate(zip(decoded, batch_answers)):
+            if printed < print_samples:
+                idx = i + j
+                print(
+                    f"\n--- eval greedy sample {printed + 1}/{print_samples}{label_note} "
+                    f"[test index {idx}] ---",
+                )
+                print(f"prompt:\n{batch_prompts[j]}")
+                print(f"full decode (prompt + generation):\n{pred_text}")
+                pred_dbg = _extract_int_after_equals(pred_text)
+                print(f"gold={gold}  parsed_pred={pred_dbg}")
+                printed += 1
             pred = _extract_int_after_equals(pred_text)
             if pred == gold:
                 correct += 1
@@ -1146,11 +1163,15 @@ class ClusterDistillationTrainer:
                 self.student, self.tokenizer, self.test_data,
                 batch_size=cfg.eval_batch_size,
                 max_new_tokens=cfg.eval_max_new_tokens,
+                print_samples=cfg.eval_print_samples,
+                eval_label="student baseline",
             )
             teacher_base = eval_accuracy(
                 self.teacher, self.tokenizer, self.test_data,
                 batch_size=cfg.eval_batch_size,
                 max_new_tokens=cfg.eval_max_new_tokens,
+                print_samples=cfg.eval_print_samples,
+                eval_label="teacher baseline",
             )
             print(f"  Student baseline accuracy: {student_base:.4f}")
             print(f"  Teacher baseline accuracy: {teacher_base:.4f}")
@@ -1179,6 +1200,11 @@ class ClusterDistillationTrainer:
         print(f"  Temperature:      {cfg.temperature}")
         print(f"  eval batch size:  {cfg.eval_batch_size}")
         print(f"  eval max_new_tokens: {cfg.eval_max_new_tokens}")
+        if cfg.eval_print_samples > 0:
+            print(
+                f"  eval print samples: {cfg.eval_print_samples} "
+                "(greedy prompt+decode per eval call)",
+            )
         if not self._standard:
             print(f"  lambda_cluster:   {cfg.lambda_cluster}")
             print(f"  Cluster pairs:    {len(self.cluster_pairs)}")
@@ -1225,6 +1251,8 @@ class ClusterDistillationTrainer:
                     self.student, self.tokenizer, self.test_data,
                     batch_size=cfg.eval_batch_size,
                     max_new_tokens=cfg.eval_max_new_tokens,
+                    print_samples=cfg.eval_print_samples,
+                    eval_label=f"epoch {epoch + 1} student",
                 )
                 epoch_metrics["accuracy"] = acc
 

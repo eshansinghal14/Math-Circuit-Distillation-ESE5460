@@ -122,6 +122,16 @@ def main() -> None:
         help=f"Greedy eval during training (default: {EVAL_MAX_NEW_TOKENS})",
     )
     parser.add_argument(
+        "--eval-print-samples",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "Each eval: print first N test prompts and full greedy decodes (0=off). "
+            "Baselines print N for student and N for teacher."
+        ),
+    )
+    parser.add_argument(
         "--count-flops-every",
         type=int,
         default=0,
@@ -372,6 +382,7 @@ def main() -> None:
         save_every=args.save_every,
         save_best=args.save_best,
         eval_max_new_tokens=eval_max_new_tokens,
+        eval_print_samples=args.eval_print_samples,
         save_dir=run_dir,
         count_flops_every=args.count_flops_every,
         log_kl_cka_grad_norms=args.log_kl_cka_grad_norms,

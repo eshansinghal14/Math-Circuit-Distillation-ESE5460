@@ -353,6 +353,16 @@ def main():
         help=f"Greedy eval during training (default: {EVAL_MAX_NEW_TOKENS})",
     )
     parser.add_argument(
+        "--eval-print-samples",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "Each time eval runs (baselines + periodic student eval), print the first N "
+            "test prompts and full greedy decodes (0=off)."
+        ),
+    )
+    parser.add_argument(
         "--eval-batch-size",
         type=int,
         default=50,
@@ -414,6 +424,8 @@ def main():
         if args.eval_max_new_tokens is not None
         else EVAL_MAX_NEW_TOKENS
     )
+    if args.eval_print_samples < 0:
+        raise SystemExit("--eval-print-samples must be >= 0")
     args.save_dir = os.path.abspath(args.save_dir)
 
     run_dir, student_source = resolve_distillation_run_dir(
@@ -592,6 +604,7 @@ def main():
         save_every=args.save_every,
         save_best=args.save_best,
         eval_max_new_tokens=eval_max_new_tokens,
+        eval_print_samples=args.eval_print_samples,
         eval_batch_size=args.eval_batch_size,
         save_dir=run_dir,
         count_flops_every=args.count_flops_every,
