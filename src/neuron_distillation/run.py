@@ -292,6 +292,16 @@ def main():
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--lambda-cluster", type=float, default=0.01)
     parser.add_argument(
+        "--hard-ce-weight",
+        type=float,
+        default=0.0,
+        metavar="W",
+        help=(
+            "If in (0, 1], add masked CE at kl_mask positions with weight W and scale the KL term "
+            "by (1 - W). Must be in [0, 1]."
+        ),
+    )
+    parser.add_argument(
         "--cluster-size-weighting",
         action="store_true",
         help=(
@@ -411,6 +421,8 @@ def main():
         raise SystemExit("--count-flops-every must be >= 0 (use 0 to disable FLOP counting)")
     if args.eval_batch_size < 1:
         raise SystemExit("--eval-batch-size must be >= 1")
+    if not (0.0 <= args.hard_ce_weight <= 1.0):
+        raise SystemExit("--hard-ce-weight must be in [0, 1]")
 
     try:
         train_path, test_path, dataset_prefix = resolve_train_test_paths(
@@ -601,6 +613,7 @@ def main():
         temperature=args.temperature,
         grad_clip=args.grad_clip,
         lambda_cluster=args.lambda_cluster,
+        hard_ce_weight=args.hard_ce_weight,
         cluster_size_weighting=args.cluster_size_weighting,
         save_every=args.save_every,
         save_best=args.save_best,

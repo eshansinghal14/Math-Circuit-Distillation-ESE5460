@@ -124,6 +124,8 @@ class ClusterDistillationConfig:
     grad_clip: float = 1.0
 
     lambda_cluster: float = 0.01
+    # If in (0, 1], add masked CE with weight ``hard_ce_weight`` and scale KL by ``1 - hard_ce_weight``.
+    hard_ce_weight: float = 0.0
     importance_weighting: bool = True
     # If True, multiply each pair's CKA loss weight by (|student cluster| / full student MLP width).
     cluster_size_weighting: bool = False
@@ -901,14 +903,35 @@ class ClusterDistillationTrainer:
 
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _masked_hard_ce_loss(
+        student_logits: torch.Tensor,
+        input_ids: torch.Tensor,
+        kl_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """CE between logits and integer next-token targets at positions where ``kl_mask`` is 1."""
+        B, L, V = student_logits.shape
+        if L < 2:
+            return student_logits.sum() * 0.0
+        logits_pred = student_logits[:, :-1, :]
+        targets = input_ids[:, 1:]
+        ce_mask = kl_mask[:, :-1]
+        ce_per = F.cross_entropy(
+            logits_pred.reshape(-1, V),
+            targets.reshape(-1),
+            reduction="none",
+        ).view(B, L - 1)
+        denom = ce_mask.sum().clamp_min(1.0)
+        return (ce_per * ce_mask).sum() / denom
+
     def _forward_and_loss(
         self, batch: Dict,
-    ) -> Tuple[torch.Tensor, Dict, torch.Tensor, Optional[torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, Dict, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """One forward pass through student + teacher.
 
         Returns:
-            ``(total, metrics, kl_loss, cluster_loss)``. ``cluster_loss`` is ``None`` in
-            standard mode.
+            ``(total, metrics, kl_loss, cluster_loss, hard_ce_loss)``. ``cluster_loss`` is
+            ``None`` in standard mode. ``hard_ce_loss`` is ``None`` when ``hard_ce_weight`` is 0.
         """
         input_ids = batch["input_ids"].to(self.device)
         attention_mask = batch["attention_mask"].to(self.device)
@@ -932,15 +955,24 @@ class ClusterDistillationTrainer:
                     / kl_mask.sum().clamp_min(1.0)
                     * (T**2)
                 )
+                w_h = self.config.hard_ce_weight
+                hard_ce = (
+                    self._masked_hard_ce_loss(student_logits, input_ids, kl_mask)
+                    if w_h > 0
+                    else None
+                )
                 total = kl_loss
+                if hard_ce is not None:
+                    total = total + w_h * hard_ce
                 metrics = {
                     "kl_loss": kl_loss.item(),
                     "cluster_loss": 0.0,
                     "total_loss": total.item(),
                     "mean_cka": 0.0,
                     "kc_lam1": {},
+                    "hard_ce_loss": hard_ce.item() if hard_ce is not None else 0.0,
                 }
-                return total, metrics, kl_loss, None
+                return total, metrics, kl_loss, None, hard_ce
 
             self.teacher_cache.register_hooks(self.teacher, detach=True)
             self.student_cache.register_hooks(self.student, detach=False)
@@ -966,6 +998,13 @@ class ClusterDistillationTrainer:
                 * (T**2)
             )
 
+            w_h = self.config.hard_ce_weight
+            hard_ce = (
+                self._masked_hard_ce_loss(student_logits, input_ids, kl_mask)
+                if w_h > 0
+                else None
+            )
+
             cluster_loss, cka_scores, kc_lam1_scores = self.cluster_loss_fn(
                 student_acts, teacher_acts, self.cluster_pairs,
                 attention_mask=attention_mask,
@@ -975,6 +1014,12 @@ class ClusterDistillationTrainer:
             )
 
             total = kl_loss + self.config.lambda_cluster * cluster_loss
+            if hard_ce is not None:
+                total = (
+                    (1.0 - w_h) * kl_loss
+                    + self.config.lambda_cluster * cluster_loss
+                    + w_h * hard_ce
+                )
 
             kc_lam1 = {
                 kc_lam1_metric_key(sk, sc, tc): float(v)
@@ -989,8 +1034,9 @@ class ClusterDistillationTrainer:
                     if cka_scores else 0.0
                 ),
                 "kc_lam1": kc_lam1,
+                "hard_ce_loss": hard_ce.item() if hard_ce is not None else 0.0,
             }
-            return total, metrics, kl_loss, cluster_loss
+            return total, metrics, kl_loss, cluster_loss, hard_ce
 
         finally:
             self.student_cache.clear()
@@ -1003,8 +1049,11 @@ class ClusterDistillationTrainer:
     ) -> Tuple[float, float, float]:
         """Set ``param.grad`` from KL and λ·CKA (circuit: CKA grads scaled by ``‖g_KL‖/‖g_{λ·CKA}‖``).
 
+        ``kl_loss`` may be the combined distillation objective
+        ``(1 - w) * kl + w * hard_ce`` (``w = hard_ce_weight``) when hard CE is enabled.
+
         Circuit mode: ``p.grad = g_KL + r · g_{λ·CKA}`` with
-        ``r = ||g_KL|| / (||g_{λ·CKA}|| + ε)``. Standard mode only backprops KL; ``r`` is ``1.0``.
+        ``r = ||g_KL|| / (||g_{λ·CKA}|| + ε)``. Standard mode only backprops ``kl_loss``; ``r`` is ``1.0``.
 
         Returns:
             ``(||g_KL||_2, ||g_{λ·CKA}||_2, r)``. Standard KL-only: third value is ``1.0``.
@@ -1060,14 +1109,18 @@ class ClusterDistillationTrainer:
                 assert FlopCounterMode is not None
                 fcm = FlopCounterMode(display=False)
                 with fcm:
-                    loss, metrics, kl_loss, cluster_loss = self._forward_and_loss(batch)
+                    loss, metrics, kl_loss, cluster_loss, hard_ce = self._forward_and_loss(batch)
                     if loss is None:
                         pass
                     elif torch.isfinite(loss).item():
                         self.optimizer.zero_grad()
                         if cfg.log_kl_cka_grad_norms:
+                            kl_for_backward = kl_loss
+                            if hard_ce is not None:
+                                w_h = cfg.hard_ce_weight
+                                kl_for_backward = (1.0 - w_h) * kl_loss + w_h * hard_ce
                             kl_gn, cka_gn, kl_over_cka = self._assign_grad_from_kl_cka(
-                                kl_loss, cluster_loss,
+                                kl_for_backward, cluster_loss,
                             )
                             metrics["kl_grad_norm"] = kl_gn
                             metrics["cka_grad_norm"] = cka_gn
@@ -1082,7 +1135,7 @@ class ClusterDistillationTrainer:
                 if loss is None:
                     continue
             else:
-                loss, metrics, kl_loss, cluster_loss = self._forward_and_loss(batch)
+                loss, metrics, kl_loss, cluster_loss, hard_ce = self._forward_and_loss(batch)
                 if loss is None:
                     continue
                 if not torch.isfinite(loss).item():
@@ -1090,8 +1143,12 @@ class ClusterDistillationTrainer:
                     continue
                 self.optimizer.zero_grad()
                 if cfg.log_kl_cka_grad_norms:
+                    kl_for_backward = kl_loss
+                    if hard_ce is not None:
+                        w_h = cfg.hard_ce_weight
+                        kl_for_backward = (1.0 - w_h) * kl_loss + w_h * hard_ce
                     kl_gn, cka_gn, kl_over_cka = self._assign_grad_from_kl_cka(
-                        kl_loss, cluster_loss,
+                        kl_for_backward, cluster_loss,
                     )
                     metrics["kl_grad_norm"] = kl_gn
                     metrics["cka_grad_norm"] = cka_gn
@@ -1136,10 +1193,13 @@ class ClusterDistillationTrainer:
                         if kc:
                             parts = [f"{pk}={pv:.4f}" for pk, pv in sorted(kc.items())]
                             grad_s += " | λ_max(K_c) " + " ".join(parts)
+                hard_s = ""
+                if cfg.hard_ce_weight > 0:
+                    hard_s = f" | hardCE {metrics.get('hard_ce_loss', 0.0):.4f}"
                 if self._standard:
                     print(
                         f"  step {step:04d} | KL {metrics['kl_loss']:.4f}"
-                        f"{grad_s}{flop_s}",
+                        f"{hard_s}{grad_s}{flop_s}",
                     )
                 else:
                     print(
@@ -1147,7 +1207,7 @@ class ClusterDistillationTrainer:
                         f"KL {metrics['kl_loss']:.4f} | "
                         f"Cluster {metrics['cluster_loss']:.4f} | "
                         f"CKA {metrics['mean_cka']:.4f}"
-                        f"{grad_s}{flop_s}",
+                        f"{hard_s}{grad_s}{flop_s}",
                     )
 
         if n == 0:
