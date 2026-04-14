@@ -127,8 +127,8 @@ def main() -> None:
         default=0,
         metavar="N",
         help=(
-            "Each eval: print first N test prompts and full greedy decodes (0=off). "
-            "Baselines print N for student and N for teacher."
+            "Each eval: print first N prompts and top-5 next-token softmax for student & teacher "
+            "(0=off)."
         ),
     )
     parser.add_argument(

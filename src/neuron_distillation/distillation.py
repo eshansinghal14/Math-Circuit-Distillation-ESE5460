@@ -136,7 +136,7 @@ class ClusterDistillationConfig:
     save_every: int = 5
     save_best: bool = False
     eval_max_new_tokens: int = EVAL_MAX_NEW_TOKENS
-    # Greedy-eval debug: print first N test prompts + full decodes per eval call (0 = off).
+    # Greedy-eval debug: print first N prompts + top-5 next-token softmax (student & teacher).
     eval_print_samples: int = 0
     save_dir: str = "results/cluster-distillation"
     # Count FLOPs (FlopCounterMode) only on epochs where ``epoch_index % N == 0`` (0-based).
@@ -621,6 +621,39 @@ def preclassify_training_data(
 # ---------------------------------------------------------------------------
 
 
+def _topk_next_token_probs(
+    lm: nn.Module,
+    tokenizer,
+    prompt: str,
+    device: torch.device,
+    k: int = 5,
+) -> List[Tuple[str, float]]:
+    """Softmax top-``k`` at the last prefill position (next token after ``prompt``)."""
+    enc = tokenizer(
+        prompt,
+        return_tensors="pt",
+        padding=False,
+        add_special_tokens=False,
+    )
+    enc = {key: val.to(device) for key, val in enc.items()}
+    with torch.no_grad():
+        out = lm(**enc)
+    logits = out.logits[0, -1].float()
+    probs = torch.softmax(logits, dim=-1)
+    top_p, top_i = torch.topk(probs, min(k, probs.numel()))
+    rows: List[Tuple[str, float]] = []
+    for prob, idx in zip(top_p.tolist(), top_i.tolist()):
+        tok = tokenizer.decode([idx], skip_special_tokens=False)
+        rows.append((tok, float(prob)))
+    return rows
+
+
+def _print_topk_lines(name: str, rows: List[Tuple[str, float]]) -> None:
+    print(f"  {name} top-{len(rows)} next-token (softmax):")
+    for rank, (tok, p) in enumerate(rows, start=1):
+        print(f"    {rank}. p={p:.4f} {tok!r}")
+
+
 @torch.no_grad()
 def eval_accuracy(
     model,
@@ -630,10 +663,13 @@ def eval_accuracy(
     max_new_tokens: Optional[int] = None,
     print_samples: int = 0,
     eval_label: str = "",
+    teacher_for_topk_print: Optional[nn.Module] = None,
 ) -> float:
     if max_new_tokens is None:
         max_new_tokens = EVAL_MAX_NEW_TOKENS
     model.eval()
+    if teacher_for_topk_print is not None:
+        teacher_for_topk_print.eval()
     prompts = list(data.keys())
     answers = list(data.values())
     correct = total = 0
@@ -663,13 +699,28 @@ def eval_accuracy(
             if printed < print_samples:
                 idx = i + j
                 print(
-                    f"\n--- eval greedy sample {printed + 1}/{print_samples}{label_note} "
+                    f"\n--- eval sample {printed + 1}/{print_samples}{label_note} "
                     f"[test index {idx}] ---",
                 )
                 print(f"prompt:\n{batch_prompts[j]}")
-                print(f"full decode (prompt + generation):\n{pred_text}")
-                pred_dbg = _extract_int_after_equals(pred_text)
-                print(f"gold={gold}  parsed_pred={pred_dbg}")
+                primary_name = (
+                    "student"
+                    if teacher_for_topk_print is not None
+                    else ("teacher" if "teacher" in eval_label.lower() else "student")
+                )
+                s_rows = _topk_next_token_probs(
+                    model, tokenizer, batch_prompts[j], model.device, k=5,
+                )
+                _print_topk_lines(primary_name, s_rows)
+                if teacher_for_topk_print is not None:
+                    t_rows = _topk_next_token_probs(
+                        teacher_for_topk_print,
+                        tokenizer,
+                        batch_prompts[j],
+                        teacher_for_topk_print.device,
+                        k=5,
+                    )
+                    _print_topk_lines("teacher", t_rows)
                 printed += 1
             pred = _extract_int_after_equals(pred_text)
             if pred == gold:
@@ -1165,12 +1216,15 @@ class ClusterDistillationTrainer:
                 max_new_tokens=cfg.eval_max_new_tokens,
                 print_samples=cfg.eval_print_samples,
                 eval_label="student baseline",
+                teacher_for_topk_print=(
+                    self.teacher if cfg.eval_print_samples > 0 else None
+                ),
             )
             teacher_base = eval_accuracy(
                 self.teacher, self.tokenizer, self.test_data,
                 batch_size=cfg.eval_batch_size,
                 max_new_tokens=cfg.eval_max_new_tokens,
-                print_samples=cfg.eval_print_samples,
+                print_samples=0,
                 eval_label="teacher baseline",
             )
             print(f"  Student baseline accuracy: {student_base:.4f}")
@@ -1203,7 +1257,7 @@ class ClusterDistillationTrainer:
         if cfg.eval_print_samples > 0:
             print(
                 f"  eval print samples: {cfg.eval_print_samples} "
-                "(greedy prompt+decode per eval call)",
+                "(prompt + top-5 next-token softmax for student & teacher)",
             )
         if not self._standard:
             print(f"  lambda_cluster:   {cfg.lambda_cluster}")
@@ -1253,6 +1307,9 @@ class ClusterDistillationTrainer:
                     max_new_tokens=cfg.eval_max_new_tokens,
                     print_samples=cfg.eval_print_samples,
                     eval_label=f"epoch {epoch + 1} student",
+                    teacher_for_topk_print=(
+                        self.teacher if cfg.eval_print_samples > 0 else None
+                    ),
                 )
                 epoch_metrics["accuracy"] = acc
 

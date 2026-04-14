@@ -1,3 +1,4 @@
+import itertools
 import json
 import random
 import re
@@ -7,7 +8,7 @@ import shutil
 import subprocess
 import torch
 import numpy as np
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 try:
     import constants as _constants
@@ -487,95 +488,158 @@ def mlp_flatten_dim_from_pretrained_id(model_id: str) -> int:
     return int(cfg.num_hidden_layers) * int(cfg.intermediate_size)
 
 
-def _normalize_operand_digits(
-    operand_digits: Union[int, Tuple[int, int]],
-) -> Tuple[int, int]:
-    if isinstance(operand_digits, int):
-        if operand_digits < 1:
-            raise ValueError("operand_digits must be >= 1")
-        return (operand_digits, operand_digits)
-    if len(operand_digits) != 2:
-        raise ValueError("operand_digits tuple must be (left_digits, right_digits)")
-    a, b = int(operand_digits[0]), int(operand_digits[1])
-    if min(a, b) < 1:
-        raise ValueError("operand digit counts must be >= 1")
-    return (a, b)
+def normalize_op_patterns(
+    operations: Sequence[Sequence[str]],
+    num_gaps: int,
+) -> List[List[str]]:
+    """Validate 2D ``operations``: each row is one full operator sequence between operands.
+
+    Each row must have length ``num_gaps`` (``len(digits) - 1``), or length 1 to broadcast that
+    operator to every gap. Only ``+``, ``*``, and ``×`` are allowed.
+    """
+    if num_gaps < 1:
+        raise ValueError("num_gaps must be >= 1.")
+    if not operations:
+        raise ValueError("operations must be a non-empty list of operator rows.")
+    allowed = {"+", "*", "×"}
+    out: List[List[str]] = []
+    for row in operations:
+        ops = [o.strip() for o in row if o and str(o).strip()]
+        if len(ops) == 1 and num_gaps > 1:
+            ops = [ops[0]] * num_gaps
+        elif len(ops) != num_gaps:
+            raise ValueError(
+                f"each operator row must have length {num_gaps} "
+                f"(or length 1 to broadcast); got {len(ops)} in {list(row)!r}",
+            )
+        for o in ops:
+            if o not in allowed:
+                raise ValueError(
+                    f"operations must use only '+' or '*' (or '×'); got {o!r}.",
+                )
+        out.append(ops)
+    return out
 
 
-def _iter_math_pairs(
-    da: int,
-    db: int,
-    operation: str,
-    pair_mode: str,
-) -> List[Tuple[str, int]]:
-    """Return list of (prompt ending with '=', int answer)."""
+def _eval_pemdas_plus_mul(numbers: Sequence[int], op_syms: Sequence[str]) -> int:
+    """Evaluate with multiplication before addition (PEMDAS for ``+`` and ``*`` only)."""
+    values = list(numbers)
+    ops: List[str] = []
+    for o in op_syms:
+        s = o.strip()
+        if s == "×":
+            s = "*"
+        ops.append(s)
 
-    def emit(num1: int, num2: int) -> Optional[Tuple[str, int]]:
-        op = operation.strip()
-        if op == "+":
-            ans = num1 + num2
-        elif op == "-":
-            ans = num1 - num2
-        elif op in ("*", "×"):
-            ans = num1 * num2
-        elif op in ("/", "//"):
-            if num2 == 0:
-                return None
-            if num1 % num2 != 0:
-                return None
-            ans = num1 // num2
+    i = 0
+    while i < len(ops):
+        if ops[i] == "*":
+            values[i] = values[i] * values[i + 1]
+            del values[i + 1]
+            del ops[i]
         else:
-            raise ValueError(
-                f"Unsupported operation {operation!r}; use +, -, *, or / (integer division).",
-            )
-        sym = "*" if op == "×" else op
-        return (f"{num1}{sym}{num2}=", ans)
+            i += 1
+    return sum(values)
 
+
+def _format_chain_prompt(
+    nums: Sequence[int],
+    op_syms: Sequence[str],
+    mod_n: Optional[int],
+) -> str:
+    parts: List[str] = [str(nums[0])]
+    for i, sym in enumerate(op_syms):
+        parts.append(f" {sym} {nums[i + 1]}")
+    body = "".join(parts)
+    if mod_n is not None:
+        return f"{body} mod {mod_n} = "
+    return f"{body} = "
+
+
+def _iter_chain_pairs(
+    digits: Sequence[int],
+    operations: Sequence[Sequence[str]],
+    mod_n: Optional[int],
+) -> List[Tuple[str, int]]:
+    """Cartesian product over operand ranges; each row picks one operator pattern at random.
+
+    **PEMDAS:** ``*`` / ``×`` before ``+``. ``operations`` is a 2D list: each inner list is one
+    allowed ordering of ``len(digits)-1`` operators; one ordering is chosen uniformly at random
+    per problem. If ``mod_n`` is set, the gold answer is ``(value) % mod_n`` and the prompt
+    ends with ``... mod n = ``.
+    """
+    if len(digits) < 2:
+        raise ValueError("digits must list at least two operand widths.")
+    if any(d < 1 for d in digits):
+        raise ValueError("each entry in digits must be >= 1.")
+    num_gaps = len(digits) - 1
+    op_patterns = normalize_op_patterns(operations, num_gaps)
+    if mod_n is not None and mod_n < 1:
+        raise ValueError("mod_n must be >= 1 when set.")
+
+    ranges = [range(10**int(d)) for d in digits]
     pairs: List[Tuple[str, int]] = []
-
-    if pair_mode == "2d1d_mult":
-        if operation not in ("*", "×"):
-            raise ValueError("pair_mode='2d1d_mult' requires multiplication (*).")
-        if (da, db) != (2, 1) and (da, db) != (1, 2):
-            raise ValueError(
-                "pair_mode='2d1d_mult' expects operand_digits (2, 1) or (1, 2) "
-                "(legacy union of 100×10 and 10×100 grids).",
-            )
-        for num1 in range(10**2):
-            for num2 in range(10**1):
-                p = emit(num1, num2)
-                if p:
-                    pairs.append(p)
-        for num1 in range(10**1):
-            for num2 in range(10**2):
-                p = emit(num1, num2)
-                if p:
-                    pairs.append(p)
-        return pairs
-
-    if pair_mode != "grid":
-        raise ValueError(f"Unknown pair_mode {pair_mode!r}; use 'grid' or '2d1d_mult'.")
-
-    na, nb = 10**da, 10**db
-    for num1 in range(na):
-        for num2 in range(nb):
-            p = emit(num1, num2)
-            if p:
-                pairs.append(p)
+    for nums in itertools.product(*ranges):
+        nlist = list(nums)
+        op_syms = list(random.choice(op_patterns))
+        inner = _eval_pemdas_plus_mul(nlist, op_syms)
+        ans = inner % mod_n if mod_n is not None else inner
+        pairs.append((_format_chain_prompt(nlist, op_syms, mod_n), ans))
     return pairs
+
+
+def _sample_chain_pairs(
+    digits: Sequence[int],
+    operations: Sequence[Sequence[str]],
+    mod_n: Optional[int],
+    samples: int,
+    shuffle: bool,
+) -> List[Tuple[str, int]]:
+    """Draw ``samples`` unique random problems without enumerating the full Cartesian product."""
+    if samples < 1:
+        raise ValueError("samples must be >= 1.")
+    if len(digits) < 2:
+        raise ValueError("digits must list at least two operand widths.")
+    if any(d < 1 for d in digits):
+        raise ValueError("each entry in digits must be >= 1.")
+    num_gaps = len(digits) - 1
+    op_patterns = normalize_op_patterns(operations, num_gaps)
+    if mod_n is not None and mod_n < 1:
+        raise ValueError("mod_n must be >= 1 when set.")
+
+    selected: List[Tuple[str, int]] = []
+    seen = set()
+    cap = max(1_000_000, samples * 10_000)
+    for _ in range(cap):
+        if len(selected) >= samples:
+            break
+        nlist = [random.randrange(10**int(d)) for d in digits]
+        op_syms = list(random.choice(op_patterns))
+        inner = _eval_pemdas_plus_mul(nlist, op_syms)
+        ans = inner % mod_n if mod_n is not None else inner
+        prompt = _format_chain_prompt(nlist, op_syms, mod_n)
+        key = (prompt, ans)
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append((prompt, ans))
+    if len(selected) < samples:
+        raise ValueError(
+            f"Could only draw {len(selected)} unique problems (requested {samples}); "
+            "the search space may be too small for that count.",
+        )
+    if shuffle:
+        random.shuffle(selected)
+    return selected
 
 
 def generate_math_dataset(
     dataset_fname: str,
     tokenizer,
     *,
-    dataset_type: str = "arithmetic",
-    operand_digits: Union[int, Tuple[int, int]] = 2,
-    operation: str = "+",
-    pair_mode: str = "grid",
-    modulus_digits: int = 2,
-    fixed_modulus: Optional[int] = None,
-    variable_name: str = "x",
+    digits: List[int],
+    operations: List[List[str]],
+    mod_n: Optional[int] = None,
     shuffle: bool = True,
     samples: Optional[int] = None,
     split_test_frac: Optional[float] = None,
@@ -583,30 +647,24 @@ def generate_math_dataset(
 ) -> None:
     """Build a math JSON dataset ``{{q_str, a_str, ids}}`` compatible with the rest of the repo.
 
+    Chained prompts: operand ``i`` uses ``digits[i]`` decimal digits (values ``0 .. 10**digits[i]-1``).
+    ``operations`` is a list of rows; each row is one allowed operator ordering (length
+    ``len(digits)-1``). For each problem, one row is chosen uniformly at random.
+    Evaluation uses **PEMDAS** for ``+`` and ``*`` (or ``×``): multiplication before addition.
+    If ``mod_n`` is set, the prompt ends with ``... mod n = `` and the answer is
+    ``(PEMDAS value) % mod_n``.
+
     Args:
         dataset_fname: Primary output path. If the path has no directory (e.g. ``2d_add_all.json``),
             it is written under the repo ``datasets/`` directory (or ``datasets_dir`` if given).
             If ``split_test_frac`` is set, must end with ``_all.json``; train/test files are written
-            alongside using ``_train_<100-pct>`` / ``_test_<pct>`` suffixes (same convention as
-            historical splits).
+            alongside using ``_train_<100-pct>`` / ``_test_<pct>`` suffixes.
         tokenizer: HuggingFace tokenizer (``encode`` for ``ids``).
-        dataset_type: ``arithmetic`` (default), ``mod`` for ``a op b mod n = `` (space after ``=``),
-            ``greater_than`` for
-            boolean comparison prompts, or ``linear_eq`` for ``If x + b = c, x =`` prompts.
-        operand_digits: Decimal width per operand: one int (both operands ``0..10^d-1``) or
-            ``(left, right)`` for a rectangular grid.
-        operation: ``+``, ``-``, ``*`` (or ``×``), or ``/`` / ``//`` for integer division
-            (only exact integer quotients are kept). Used for ``dataset_type='arithmetic'``.
-        pair_mode: ``grid`` = full Cartesian product of operand ranges; ``2d1d_mult`` = union of
-            ``10^2×10^1`` and ``10^1×10^2`` multiplication prompts (expects ``operand_digits``
-            ``(2,1)`` or ``(1,2)``). Used for ``dataset_type='arithmetic'``.
-        modulus_digits: For ``dataset_type='mod'`` when ``fixed_modulus`` is omitted, sample ``z``
-            from ``1..10^modulus_digits-1``. Ignored if ``fixed_modulus`` is set.
-        fixed_modulus: For ``dataset_type='mod'``, use this ``z`` for every row (constant modulus).
-            Must be ``>= 1``. When set, ``modulus_digits`` is unused for choosing ``z``.
-        variable_name: Variable token for ``dataset_type='linear_eq'`` prompts.
-        shuffle: Shuffle row order before optional subsampling (ignored when ``samples`` forces
-            ``random.sample``, which is already unordered).
+        digits: Length ``>= 2``: decimal width per operand.
+        operations: Non-empty list of operator rows; each row has one ``+`` / ``*`` / ``×`` per gap
+            between operands (or a single op broadcast to every gap).
+        mod_n: Optional modulus appended before ``= ``; gold answer uses ``% mod_n``.
+        shuffle: Shuffle the final row list (after sampling or after full enumeration).
         samples: If set and smaller than the number of generated pairs, keep a random subset
             of exactly this many (without replacement).
         split_test_frac: If set (e.g. ``0.2``), write ``dataset_fname`` as the full set, then
@@ -614,59 +672,12 @@ def generate_math_dataset(
         datasets_dir: Optional root for bare ``dataset_fname``; defaults to repo ``datasets/``.
     """
     dataset_fname = _resolve_dataset_output_path(dataset_fname, datasets_dir)
-    da, db = _normalize_operand_digits(operand_digits)
-    if dataset_type == "arithmetic":
-        all_pairs = _iter_math_pairs(da, db, operation, pair_mode)
-    elif dataset_type == "mod":
-        op = operation.strip()
-        if op not in ("+", "-", "*", "×"):
-            raise ValueError("dataset_type='mod' supports operation in {'+', '-', '*', '×'}.")
-        op_sym = "*" if op == "×" else op
-        all_pairs = []
-        na, nb = 10**da, 10**db
-        if fixed_modulus is not None:
-            if fixed_modulus < 1:
-                raise ValueError("fixed_modulus must be >= 1.")
-            mod_list = [fixed_modulus]
-        else:
-            if modulus_digits < 1:
-                raise ValueError("modulus_digits must be >= 1 when fixed_modulus is omitted.")
-            nz = 10**modulus_digits
-            mod_list = list(range(1, nz))
-        for num1 in range(na):
-            for num2 in range(nb):
-                for mod in mod_list:
-                    if op in ("*", "×"):
-                        inner = num1 * num2
-                    elif op == "+":
-                        inner = num1 + num2
-                    else:
-                        inner = num1 - num2
-                    all_pairs.append((f"{num1} {op_sym} {num2} mod {mod} = ", inner % mod))
-    elif dataset_type == "greater_than":
-        all_pairs = []
-        na, nb = 10**da, 10**db
-        for num1 in range(na):
-            for num2 in range(nb):
-                all_pairs.append((f"Is {num1} > {num2}? ", "True" if num1 > num2 else "False"))
-    elif dataset_type == "linear_eq":
-        all_pairs = []
-        na, nb = 10**da, 10**db
-        var = variable_name.strip() or "x"
-        for x in range(na):
-            for b in range(nb):
-                c = x + b
-                all_pairs.append((f"If {var} + {b} = {c}, {var} =", x))
-    else:
-        raise ValueError(
-            f"Unknown dataset_type {dataset_type!r}; "
-            "use 'arithmetic', 'mod', 'greater_than', or 'linear_eq'.",
+    if samples is not None:
+        selected = _sample_chain_pairs(
+            digits, operations, mod_n, samples, shuffle,
         )
-
-    if samples is not None and samples < len(all_pairs):
-        selected = random.sample(all_pairs, samples)
     else:
-        selected = list(all_pairs)
+        selected = _iter_chain_pairs(digits, operations, mod_n)
         if shuffle:
             random.shuffle(selected)
 
@@ -868,14 +879,11 @@ if __name__ == "__main__":
 
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
     generate_math_dataset(
-        dataset_all_json_path("3d_mod_add_7"),
+        dataset_all_json_path("2222_add"),
         tokenizer,
-        dataset_type="mod",
-        operand_digits=3,
-        operation="+",
-        modulus_digits=3,
+        digits=[2, 2, 2, 2],
+        operations=[["+", "+", "+"]],
         shuffle=True,
         samples=10000,
         split_test_frac=0.2,
-        fixed_modulus=5,
     )
