@@ -46,7 +46,11 @@ def train_circuit_discovery(
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    tokenizer = AutoTokenizer.from_pretrained(llama_1b)
+    from utils import patch_tokenizer_no_special_tokens
+
+    tokenizer = patch_tokenizer_no_special_tokens(
+        AutoTokenizer.from_pretrained(llama_1b),
+    )
 
     if resume_model is None:
         model = CircuitDiscoveryModel(k_classes=k_classes, mask_temperature=mask_temperature).to(device)

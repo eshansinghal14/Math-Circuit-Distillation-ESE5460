@@ -78,6 +78,7 @@ from utils import (
     _extract_int_after_equals,
     json_to_prompt_answer_dict,
     load_training_state,
+    patch_tokenizer_no_special_tokens,
     rm_dir_tree,
     save_training_state,
     training_state_path,
@@ -739,7 +740,10 @@ def eval_accuracy(
         batch_answers = answers[i : i + batch_size]
 
         inputs = tokenizer(
-            batch_prompts, return_tensors="pt", padding=True,
+            batch_prompts,
+            return_tensors="pt",
+            padding=True,
+            add_special_tokens=False,
         ).to(model.device)
 
         outputs = model.generate(
@@ -843,6 +847,7 @@ class ClusterDistillationTrainer:
         else:
             self.tokenizer = AutoTokenizer.from_pretrained(config.student_model)
             self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer = patch_tokenizer_no_special_tokens(self.tokenizer)
 
         # Models — student in float32 on CUDA for stable KL + gradients (train loop uses
         # .float()). fp16 student + composite loss often goes

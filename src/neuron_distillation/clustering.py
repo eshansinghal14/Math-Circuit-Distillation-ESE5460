@@ -16,7 +16,12 @@ import torch.nn.functional as F
 from transformers import AutoTokenizer
 import matplotlib.pyplot as plt
 
-from utils import default_datasets_dir, load_model_checkpoint, _stack_layer_activations
+from utils import (
+    default_datasets_dir,
+    load_model_checkpoint,
+    patch_tokenizer_no_special_tokens,
+    _stack_layer_activations,
+)
 from circuit_discovery.utils import parse_equation
 from neuron_distillation.activations import NeuronActivationsGenerator
 
@@ -471,7 +476,9 @@ if __name__ == "__main__":
     results_dir = os.path.abspath(results_dir)
     os.makedirs(results_dir, exist_ok=True)
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = patch_tokenizer_no_special_tokens(
+        AutoTokenizer.from_pretrained(model_name),
+    )
 
     print_problem_counts_per_class(model, tokenizer, k_classes, device)
 

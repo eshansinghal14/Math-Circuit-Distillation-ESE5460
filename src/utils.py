@@ -236,7 +236,12 @@ def evaluate(
     for i in range(0, len(prompts), batch_size):
         batch_p = prompts[i : i + batch_size]
         batch_a = answers[i : i + batch_size]
-        inputs = tokenizer(batch_p, return_tensors="pt", padding=True).to(model.device)
+        inputs = tokenizer(
+            batch_p,
+            return_tensors="pt",
+            padding=True,
+            add_special_tokens=False,
+        ).to(model.device)
         outputs = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
@@ -369,6 +374,31 @@ def resolve_test_path(
     return p, prefix
 
 
+def patch_tokenizer_no_special_tokens(tokenizer):
+    """Default ``add_special_tokens=False`` on ``__call__`` and ``encode`` (idempotent).
+
+    Avoids silently prepending BOS / appending EOS on encode paths so training and eval
+    match raw string tokenization.
+    """
+    if getattr(tokenizer, "_math_circuit_no_special_tokens_patched", False):
+        return tokenizer
+    orig_call = tokenizer.__call__
+    orig_encode = tokenizer.encode
+
+    def _call(*args, **kwargs):
+        kwargs.setdefault("add_special_tokens", False)
+        return orig_call(*args, **kwargs)
+
+    def _encode(*args, **kwargs):
+        kwargs.setdefault("add_special_tokens", False)
+        return orig_encode(*args, **kwargs)
+
+    tokenizer.__call__ = _call
+    tokenizer.encode = _encode
+    tokenizer._math_circuit_no_special_tokens_patched = True
+    return tokenizer
+
+
 def load_model(model_name):
 
     hf_logging.set_verbosity_error()
@@ -390,7 +420,7 @@ def load_model(model_name):
     tokenizer.pad_token = tokenizer.eos_token
     # Match neuron_distillation AddDataset/collate_fn (right-pad); eval/generate use same side.
     tokenizer.padding_side = "right"
-    return model, tokenizer
+    return model, patch_tokenizer_no_special_tokens(tokenizer)
 
 
 def load_student_model_for_distillation(
@@ -444,7 +474,11 @@ def test_model(model, tokenizer, dataset_fname, results_fname, batch_size=50, ma
                 batched_prompts = prompts[i:end]
                 batched_answers = answers[i:end]
                 input_ids = tokenizer(
-                    batched_prompts, return_tensors="pt", padding=True, truncation=True,
+                    batched_prompts,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    add_special_tokens=False,
                 ).to(model.device)
                 outputs = model.generate(
                     **input_ids,
@@ -903,7 +937,9 @@ def expected_performance_drop_from_random_ablation_poly(
 if __name__ == "__main__":
     from transformers import AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
+    tokenizer = patch_tokenizer_no_special_tokens(
+        AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B"),
+    )
     generate_math_dataset(
         dataset_all_json_path("222_add_tight"),
         tokenizer,
