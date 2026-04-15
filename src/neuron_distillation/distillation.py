@@ -126,6 +126,9 @@ class ClusterDistillationConfig:
     lambda_cluster: float = 0.01
     # If in (0, 1], add masked CE with weight ``hard_ce_weight`` and scale KL by ``1 - hard_ce_weight``.
     hard_ce_weight: float = 0.0
+    # If set ``(lo, hi)`` (inclusive), KL uses only token IDs that appear when tokenizing each
+    # integer ``n`` in ``range(lo, hi + 1)`` (softmax + KL on this restricted distribution).
+    kl_mask_range: Optional[Tuple[int, int]] = None
     importance_weighting: bool = True
     # If True, multiply each pair's CKA loss weight by (|student cluster| / full student MLP width).
     cluster_size_weighting: bool = False
@@ -159,6 +162,43 @@ class ClusterDistillationConfig:
     def checkpoint_every(self) -> int:
         """Alias for ``save_every`` (older code / notebooks referenced this name)."""
         return self.save_every
+
+
+def token_ids_for_integer_range(tokenizer, lo: int, hi: int) -> torch.LongTensor:
+    """Token ID set for decimal strings ``str(n)``, for each ``n`` in ``[lo, hi]`` inclusive."""
+    if lo > hi:
+        raise ValueError(f"kl_mask_range requires lo <= hi, got ({lo}, {hi})")
+    seen = set()
+    for n in range(lo, hi + 1):
+        for tid in tokenizer.encode(str(n), add_special_tokens=False):
+            seen.add(int(tid))
+    return torch.tensor(sorted(seen), dtype=torch.long)
+
+
+def _masked_kl_loss_restricted(
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    kl_mask: torch.Tensor,
+    temperature: float,
+    restrict_token_ids: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """Masked KL with optional vocab restriction (same ``kl_mask`` as full-vocab KL)."""
+    t = temperature
+    if restrict_token_ids is not None:
+        r = restrict_token_ids
+        s_logits = torch.index_select(student_logits, -1, r)
+        t_logits = torch.index_select(teacher_logits, -1, r)
+    else:
+        s_logits = student_logits
+        t_logits = teacher_logits
+    log_p_s = F.log_softmax(s_logits.float() / t, dim=-1)
+    p_t = F.softmax(t_logits.float() / t, dim=-1)
+    kl_per_token = F.kl_div(log_p_s, p_t, reduction="none").sum(dim=-1)
+    return (
+        (kl_per_token * kl_mask).sum()
+        / kl_mask.sum().clamp_min(1.0)
+        * (t**2)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -861,6 +901,25 @@ class ClusterDistillationTrainer:
         # History
         self.history: Dict[str, List] = defaultdict(list)
 
+        # Optional KL vocab restriction (token IDs must exist in both student/teacher logits)
+        self._kl_restrict_token_ids: Optional[torch.Tensor] = None
+        if config.kl_mask_range is not None:
+            lo, hi = config.kl_mask_range
+            raw = token_ids_for_integer_range(self.tokenizer, lo, hi)
+            vm = min(
+                int(self.student.config.vocab_size),
+                int(self.teacher.config.vocab_size),
+            )
+            raw = raw[raw < vm]
+            if raw.numel() == 0:
+                raise ValueError(
+                    "kl_mask_range produced no token IDs valid for both models' vocab sizes.",
+                )
+            self._kl_restrict_token_ids = raw.to(self.device)
+            print(
+                f"KL vocab restriction: {raw.numel()} token IDs from integers in [{lo}, {hi}].",
+            )
+
     def _align_epoch_flops_with_epoch(self) -> None:
         """Pad ``epoch_flops`` so length matches ``epoch`` (resume from old JSON)."""
         n = len(self.history.get("epoch", []))
@@ -947,13 +1006,12 @@ class ClusterDistillationTrainer:
                 student_logits = self.student(
                     input_ids=input_ids, attention_mask=attention_mask,
                 ).logits
-                log_p_s = F.log_softmax(student_logits.float() / T, dim=-1)
-                p_t = F.softmax(teacher_logits.float() / T, dim=-1)
-                kl_per_token = F.kl_div(log_p_s, p_t, reduction="none").sum(dim=-1)
-                kl_loss = (
-                    (kl_per_token * kl_mask).sum()
-                    / kl_mask.sum().clamp_min(1.0)
-                    * (T**2)
+                kl_loss = _masked_kl_loss_restricted(
+                    student_logits,
+                    teacher_logits,
+                    kl_mask,
+                    T,
+                    self._kl_restrict_token_ids,
                 )
                 w_h = self.config.hard_ce_weight
                 hard_ce = (
@@ -989,13 +1047,12 @@ class ClusterDistillationTrainer:
             student_acts = self.student_cache.get_flattened_per_token()
 
             # Masked KL at all answer-token prediction positions (same mask as standard mode).
-            log_p_s = F.log_softmax(student_logits.float() / T, dim=-1)
-            p_t = F.softmax(teacher_logits.float() / T, dim=-1)
-            kl_per_token = F.kl_div(log_p_s, p_t, reduction="none").sum(dim=-1)
-            kl_loss = (
-                (kl_per_token * kl_mask).sum()
-                / kl_mask.sum().clamp_min(1.0)
-                * (T**2)
+            kl_loss = _masked_kl_loss_restricted(
+                student_logits,
+                teacher_logits,
+                kl_mask,
+                T,
+                self._kl_restrict_token_ids,
             )
 
             w_h = self.config.hard_ce_weight
@@ -1325,6 +1382,12 @@ class ClusterDistillationTrainer:
         print(f"  RNG seed:         {cfg.seed}")
         print(f"  LR:               {cfg.learning_rate}")
         print(f"  Temperature:      {cfg.temperature}")
+        if cfg.kl_mask_range is not None:
+            km_lo, km_hi = cfg.kl_mask_range
+            print(
+                f"  kl_mask_range:    [{km_lo}, {km_hi}] "
+                f"(KL softmax + KL over union of token IDs for ints in range)",
+            )
         print(f"  eval batch size:  {cfg.eval_batch_size}")
         print(f"  eval max_new_tokens: {cfg.eval_max_new_tokens}")
         if cfg.eval_print_samples > 0:

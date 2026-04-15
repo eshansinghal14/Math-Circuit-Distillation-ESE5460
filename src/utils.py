@@ -879,11 +879,11 @@ if __name__ == "__main__":
 
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
     generate_math_dataset(
-        dataset_all_json_path("2222_add"),
+        dataset_all_json_path("222_add"),
         tokenizer,
-        digits=[2, 2, 2, 2],
-        operations=[["+", "+", "+"]],
+        digits=[2, 2, 2],
+        operations=[["+", "+"]],
         shuffle=True,
-        samples=10000,
+        samples=6000,
         split_test_frac=0.2,
     )

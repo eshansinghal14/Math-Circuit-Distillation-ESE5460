@@ -302,6 +302,17 @@ def main():
         ),
     )
     parser.add_argument(
+        "--kl-mask-range",
+        type=int,
+        nargs=2,
+        default=None,
+        metavar=("LO", "HI"),
+        help=(
+            "Restrict KL to softmax + KL over token IDs from tokenizing each int in [LO, HI] "
+            "(inclusive). Omit for full vocabulary."
+        ),
+    )
+    parser.add_argument(
         "--cluster-size-weighting",
         action="store_true",
         help=(
@@ -614,6 +625,9 @@ def main():
         grad_clip=args.grad_clip,
         lambda_cluster=args.lambda_cluster,
         hard_ce_weight=args.hard_ce_weight,
+        kl_mask_range=(
+            tuple(args.kl_mask_range) if args.kl_mask_range is not None else None
+        ),
         cluster_size_weighting=args.cluster_size_weighting,
         save_every=args.save_every,
         save_best=args.save_best,
