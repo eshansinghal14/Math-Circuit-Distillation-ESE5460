@@ -551,7 +551,7 @@ class ClusterAlignmentLoss(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Dataset & collate (masked KL at all answer-token prediction positions)
+# Dataset & collate (masked KL over the full causal sequence)
 # ---------------------------------------------------------------------------
 
 class AddDataset(Dataset):
@@ -590,12 +590,12 @@ class AddDataset(Dataset):
 
 
 def collate_fn(examples, pad_id: int):
-    """Right-pad batch sequences and build ``kl_mask`` for answer next-token positions only.
+    """Right-pad batch sequences and build ``kl_mask`` for all valid next-token positions.
 
     For causal LM, ``logits[:, t, :]`` predicts ``input_ids[:, t + 1]``.  The final
     sequence token is EOS (after ``answer + eos`` in :class:`AddDataset`).  KL is
-    applied at ``t = prompt_len-1 .. L-3`` so we align on every **answer** token
-    but **not** on the step that predicts EOS (``t = L-2`` → ``input_ids[L-1]``).
+    applied at ``t = 0 .. L-2`` so we align on every available next-token target
+    in the sequence, including prompt continuation, answer tokens, and EOS.
     """
     max_len = max(ex["input_ids"].size(0) for ex in examples)
     B = len(examples)
@@ -609,9 +609,8 @@ def collate_fn(examples, pad_id: int):
         L = ids.size(0)
         input_ids[i, :L] = ids
         attention_mask[i, :L] = 1
-        p = ex["prompt_len"]
-        # Next-token KL for answer tokens only (exclude the step that predicts EOS at L-1).
-        for pos in range(max(p - 1, 0), L - 2):
+        # Distill the full causal sequence: every valid next-token prediction.
+        for pos in range(0, max(L - 1, 0)):
             kl_mask[i, pos] = 1.0
 
     return {
@@ -883,7 +882,7 @@ class ClusterDistillationTrainer:
         # Optimizer
         self.optimizer = AdamW(params=self.student.parameters(), lr=config.learning_rate)
 
-        # Dataset / loader (padding + kl_mask over answer tokens, not EOS prediction)
+        # Dataset / loader (padding + kl_mask over the full next-token sequence)
         self.dataset = AddDataset(train_data, self.tokenizer)
         self.loader = DataLoader(
             self.dataset,
@@ -1061,7 +1060,7 @@ class ClusterDistillationTrainer:
             student_logits = student_out.logits
             student_acts = self.student_cache.get_flattened_per_token()
 
-            # Masked KL at all answer-token prediction positions (same mask as standard mode).
+            # Masked KL over the full next-token sequence (same mask as standard mode).
             kl_loss = _masked_kl_loss_restricted(
                 student_logits,
                 teacher_logits,

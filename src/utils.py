@@ -201,6 +201,89 @@ def load_prompt_answer_json(path: str) -> Dict[str, int]:
         return json_to_prompt_answer_dict(json.load(f))
 
 
+def _load_dataset_rows(path: str) -> List[Dict]:
+    """Load a dataset JSON as a list of row dicts for mix/export helpers."""
+    with open(path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+    if not isinstance(raw, list):
+        raise TypeError(
+            f"Expected list-format dataset at {path!r} for mixing, got {type(raw)}."
+        )
+    rows: List[Dict] = []
+    for i, row in enumerate(raw):
+        if not isinstance(row, dict):
+            raise TypeError(f"Dataset row {i} in {path!r} must be a dict, got {type(row)}")
+        if "q_str" not in row or "a_str" not in row:
+            raise ValueError(
+                f"Dataset row {i} in {path!r} must include q_str and a_str; "
+                f"got keys {list(row.keys())}",
+            )
+        rows.append(dict(row))
+    return rows
+
+
+def mix_datasets(
+    dataset_stems: Sequence[str],
+    output_stem: str,
+    *,
+    datasets_dir: Optional[str] = None,
+    shuffle: bool = True,
+) -> Dict[str, str]:
+    """Mix existing dataset families into combined ``_all``, ``_train``, and ``_test`` JSONs.
+
+    Args:
+        dataset_stems: Source dataset prefixes, e.g. ``["22_add", "222_add_tight"]``.
+        output_stem: Prefix for the mixed outputs, e.g. ``"mixed_add"``.
+        datasets_dir: Optional datasets root; defaults to :func:`default_datasets_dir`.
+        shuffle: If True (default), shuffle each combined split after concatenation.
+
+    Returns:
+        Mapping ``{"all": ..., "train": ..., "test": ...}`` with output file paths.
+    """
+    stems = [str(stem).strip() for stem in dataset_stems if str(stem).strip()]
+    if not stems:
+        raise ValueError("dataset_stems must contain at least one non-empty dataset prefix.")
+    out_stem = str(output_stem).strip()
+    if not out_stem:
+        raise ValueError("output_stem must be a non-empty dataset prefix.")
+
+    d = os.path.abspath(datasets_dir) if datasets_dir else default_datasets_dir()
+    mixed = {"all": [], "train": [], "test": []}
+    split_paths = {
+        "all": dataset_all_json_path,
+        "train": dataset_train_json_path,
+        "test": dataset_test_json_path,
+    }
+
+    for stem in stems:
+        for split, path_fn in split_paths.items():
+            path = path_fn(stem, d)
+            if not os.path.isfile(path):
+                raise FileNotFoundError(
+                    f"Dataset {split} file not found for prefix {stem!r}: {path}",
+                )
+            mixed[split].extend(_load_dataset_rows(path))
+
+    if shuffle:
+        for rows in mixed.values():
+            random.shuffle(rows)
+
+    out_paths = {
+        "all": dataset_all_json_path(out_stem, d),
+        "train": dataset_train_json_path(out_stem, d),
+        "test": dataset_test_json_path(out_stem, d),
+    }
+
+    for split, path in out_paths.items():
+        out_dir = os.path.dirname(os.path.abspath(path))
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(mixed[split], f, indent=4)
+
+    return out_paths
+
+
 def _extract_int_after_equals(text: str) -> Optional[int]:
     m = re.search(r"=\s*(\d+)", text)
     return int(m.group(1)) if m else None
@@ -270,9 +353,9 @@ def evaluate(
     return correct / max(total, 1)
 
 
-# --- Dataset file naming: ``{prefix}_train_80.json``, ``{prefix}_test_20.json``, ``{prefix}_all.json`` ---
-DATASET_TRAIN_SUFFIX = "_train_80"
-DATASET_TEST_SUFFIX = "_test_20"
+# --- Dataset file naming: ``{prefix}_train.json``, ``{prefix}_test.json``, ``{prefix}_all.json`` ---
+DATASET_TRAIN_SUFFIX = "_train"
+DATASET_TEST_SUFFIX = "_test"
 DATASET_ALL_SUFFIX = "_all.json"  # ``{prefix}_all.json``
 
 
@@ -716,7 +799,7 @@ def generate_math_dataset(
         dataset_fname: Primary output path. If the path has no directory (e.g. ``2d_add_all.json``),
             it is written under the repo ``datasets/`` directory (or ``datasets_dir`` if given).
             If ``split_test_frac`` is set, must end with ``_all.json``; train/test files are written
-            alongside using ``_train_<100-pct>`` / ``_test_<pct>`` suffixes.
+            alongside using ``_train.json`` / ``_test.json`` suffixes.
         tokenizer: HuggingFace tokenizer (``encode`` for ``ids``).
         digits: Length ``>= 2``: decimal width per operand.
         operations: Non-empty list of operator rows; each row has one ``+`` / ``*`` / ``×`` per gap
@@ -771,10 +854,8 @@ def generate_math_dataset(
             )
         n = len(rows)
         split_i = int(n * (1.0 - split_test_frac))
-        train_pct = 100 - int(round(split_test_frac * 100))
-        test_pct = int(round(split_test_frac * 100))
-        train_path = dataset_fname.replace("_all.json", f"_train_{train_pct}.json")
-        test_path = dataset_fname.replace("_all.json", f"_test_{test_pct}.json")
+        train_path = dataset_fname.replace("_all.json", f"{DATASET_TRAIN_SUFFIX}.json")
+        test_path = dataset_fname.replace("_all.json", f"{DATASET_TEST_SUFFIX}.json")
         _write(train_path, rows[:split_i])
         _write(test_path, rows[split_i:])
 
@@ -940,13 +1021,20 @@ if __name__ == "__main__":
     tokenizer = patch_tokenizer_no_special_tokens(
         AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B"),
     )
-    generate_math_dataset(
-        dataset_all_json_path("222_add_tight"),
-        tokenizer,
-        digits=[2, 2, 2],
-        operations=[["+", "+"]],
-        spaces=False,
+    # generate_math_dataset(
+    #     dataset_all_json_path("2222_add"),
+    #     tokenizer,
+    #     digits=[2, 2, 2, 2],
+    #     operations=[["+", "+", "+"]],
+    #     spaces=True,
+    #     shuffle=True,
+    #     samples=7000,
+    #     split_test_frac=0.7,
+    # )
+
+    mix_datasets(
+        dataset_stems=["22_add", "222_add", "2222_add"],
+        output_stem="2-4_add",
+        datasets_dir=default_datasets_dir(),
         shuffle=True,
-        samples=6000,
-        split_test_frac=0.2,
     )

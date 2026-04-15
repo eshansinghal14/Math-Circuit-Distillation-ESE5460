@@ -53,11 +53,11 @@ def main() -> None:
     parser.add_argument("--teacher-model", type=str, default="meta-llama/Meta-Llama-3-8B")
     parser.add_argument(
         "--dataset", type=str, default=None, metavar="PREFIX",
-        help="Dataset family prefix, e.g. 2d_add → datasets/2d_add_train_80.json + _test_20.json",
+        help="Dataset family prefix, e.g. 2d_add → datasets/2d_add_train.json + _test.json",
     )
     parser.add_argument(
         "--datasets-dir", type=str, default=None,
-        help="Directory containing *_train_80.json (default: repo datasets/)",
+        help="Directory containing *_train.json (default: repo datasets/)",
     )
     parser.add_argument(
         "--k", type=int, default=None, metavar="INT",

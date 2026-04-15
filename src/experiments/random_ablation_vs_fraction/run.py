@@ -3,11 +3,11 @@
 Run from ``src/``::
 
   python -m experiments.random_ablation_vs_fraction.run \\
-    --dataset ../datasets/2d_add_test_20.json --n-points 25 --batch-size 32
+    --dataset ../datasets/2d_add_test.json --n-points 25 --batch-size 32
 
   # Sweep fractions 0 … 0.3 only:
   python -m experiments.random_ablation_vs_fraction.run \\
-    --dataset ../datasets/2d_add_test_20.json --n-points 20 --batch-size 32 --max-frac 0.3
+    --dataset ../datasets/2d_add_test.json --n-points 20 --batch-size 32 --max-frac 0.3
 
 Outputs go under ``experiments/random_ablation_vs_fraction/results/``.
 If ``random_ablation_vs_fraction.json`` already exists there, new points are **appended**
