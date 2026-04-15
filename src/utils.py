@@ -881,7 +881,7 @@ if __name__ == "__main__":
     generate_math_dataset(
         dataset_all_json_path("222_add"),
         tokenizer,
-        digits=[2, 2, 2],
+        digits=[2, 2],
         operations=[["+", "+"]],
         shuffle=True,
         samples=6000,

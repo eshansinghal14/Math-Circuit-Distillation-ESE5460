@@ -126,8 +126,9 @@ class ClusterDistillationConfig:
     lambda_cluster: float = 0.01
     # If in (0, 1], add masked CE with weight ``hard_ce_weight`` and scale KL by ``1 - hard_ce_weight``.
     hard_ce_weight: float = 0.0
-    # If set ``(lo, hi)`` (inclusive), KL uses only token IDs that appear when tokenizing each
-    # integer ``n`` in ``range(lo, hi + 1)`` (softmax + KL on this restricted distribution).
+    # If set ``(lo, hi)`` (inclusive), build vocab indices from ``str(n)`` for ``n`` in that
+    # range; KL sums ``p_t * (log p_t - log q_s)`` only over those vocab columns (full softmax
+    # on both sides; mask zeros other dimensions in the per-vocab KL sum).
     kl_mask_range: Optional[Tuple[int, int]] = None
     importance_weighting: bool = True
     # If True, multiply each pair's CKA loss weight by (|student cluster| / full student MLP width).
@@ -182,18 +183,24 @@ def _masked_kl_loss_restricted(
     temperature: float,
     restrict_token_ids: Optional[torch.Tensor],
 ) -> torch.Tensor:
-    """Masked KL with optional vocab restriction (same ``kl_mask`` as full-vocab KL)."""
+    """KL from full teacher/student distributions, optional vocab mask on the KL sum.
+
+    Uses ``p_t * (log p_t - log q_s)`` per vocab entry (``p_t`` = teacher softmax, ``log q_s`` =
+    student log-softmax), then sums over vocab—optionally zeroing non-``restrict_token_ids``
+    columns so only those dimensions contribute. Sequence masking ``kl_mask`` is unchanged.
+    """
     t = temperature
+    log_p_t = F.log_softmax(teacher_logits.float() / t, dim=-1)
+    p_t = log_p_t.exp()
+    log_q_s = F.log_softmax(student_logits.float() / t, dim=-1)
+    kl_per_vocab = p_t * (log_p_t - log_q_s)
     if restrict_token_ids is not None:
-        r = restrict_token_ids
-        s_logits = torch.index_select(student_logits, -1, r)
-        t_logits = torch.index_select(teacher_logits, -1, r)
-    else:
-        s_logits = student_logits
-        t_logits = teacher_logits
-    log_p_s = F.log_softmax(s_logits.float() / t, dim=-1)
-    p_t = F.softmax(t_logits.float() / t, dim=-1)
-    kl_per_token = F.kl_div(log_p_s, p_t, reduction="none").sum(dim=-1)
+        device = kl_per_vocab.device
+        r = restrict_token_ids.to(device=device, dtype=torch.long)
+        vocab_mask = torch.zeros_like(kl_per_vocab)
+        vocab_mask[..., r] = 1.0
+        kl_per_vocab = kl_per_vocab * vocab_mask
+    kl_per_token = kl_per_vocab.sum(dim=-1)
     return (
         (kl_per_token * kl_mask).sum()
         / kl_mask.sum().clamp_min(1.0)
@@ -917,7 +924,8 @@ class ClusterDistillationTrainer:
                 )
             self._kl_restrict_token_ids = raw.to(self.device)
             print(
-                f"KL vocab restriction: {raw.numel()} token IDs from integers in [{lo}, {hi}].",
+                f"KL vocab mask: {raw.numel()} columns (token IDs from ints in [{lo}, {hi}]); "
+                f"full softmax, KL sum masked to those columns.",
             )
 
     def _align_epoch_flops_with_epoch(self) -> None:
@@ -1386,7 +1394,7 @@ class ClusterDistillationTrainer:
             km_lo, km_hi = cfg.kl_mask_range
             print(
                 f"  kl_mask_range:    [{km_lo}, {km_hi}] "
-                f"(KL softmax + KL over union of token IDs for ints in range)",
+                f"(KL sum over vocab columns for those ints; full softmax)",
             )
         print(f"  eval batch size:  {cfg.eval_batch_size}")
         print(f"  eval max_new_tokens: {cfg.eval_max_new_tokens}")
