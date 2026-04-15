@@ -216,7 +216,11 @@ def evaluate(
     debug_decode: int = 0,
     debug_tag: Optional[str] = None,
 ) -> float:
-    """Greedy generation accuracy on a math test JSON (left padding; int after ``=``)."""
+    """Greedy generation accuracy on a math test JSON (right padding; int after ``=``).
+
+    Uses the same padding side as :class:`neuron_distillation.distillation.AddDataset` /
+    ``collate_fn`` so RoPE positions match distillation training.
+    """
     if max_new_tokens is None:
         max_new_tokens = EVAL_MAX_NEW_TOKENS
     with open(test_path, "r", encoding="utf-8") as f:
@@ -227,7 +231,7 @@ def evaluate(
     model.eval()
     correct = total = 0
     original_side = tokenizer.padding_side
-    tokenizer.padding_side = "left"
+    tokenizer.padding_side = "right"
 
     for i in range(0, len(prompts), batch_size):
         batch_p = prompts[i : i + batch_size]
@@ -384,7 +388,8 @@ def load_model(model_name):
     ).to(device)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_size = 'left'
+    # Match neuron_distillation AddDataset/collate_fn (right-pad); eval/generate use same side.
+    tokenizer.padding_side = "right"
     return model, tokenizer
 
 
@@ -410,7 +415,7 @@ def load_student_model_for_distillation(
         print(f"  From Hugging Face: {student_model_id!r}")
         student, tokenizer = load_model(student_model_id)
     student = student.to("cpu").float().to(device)
-    tokenizer.padding_side = "left"
+    tokenizer.padding_side = "right"
     return student, tokenizer
 
 
@@ -428,26 +433,31 @@ def test_model(model, tokenizer, dataset_fname, results_fname, batch_size=50, ma
     answers = [int(v) for v in data.values()]
     n = len(prompts)
     results = []
-    for i in range(0, n, batch_size):
-        with torch.no_grad():
-            if log:
-                print(f"processing {i}/{n}")
-            end = min(i + batch_size, n)
-            batched_prompts = prompts[i:end]
-            batched_answers = answers[i:end]
-            input_ids = tokenizer(
-                batched_prompts, return_tensors="pt", padding=True, truncation=True,
-            ).to(model.device)
-            outputs = model.generate(
-                **input_ids,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-                pad_token_id=tokenizer.pad_token_id,
-            )
-            responses = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+    original_side = tokenizer.padding_side
+    tokenizer.padding_side = "right"
+    try:
+        for i in range(0, n, batch_size):
+            with torch.no_grad():
+                if log:
+                    print(f"processing {i}/{n}")
+                end = min(i + batch_size, n)
+                batched_prompts = prompts[i:end]
+                batched_answers = answers[i:end]
+                input_ids = tokenizer(
+                    batched_prompts, return_tensors="pt", padding=True, truncation=True,
+                ).to(model.device)
+                outputs = model.generate(
+                    **input_ids,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=False,
+                    pad_token_id=tokenizer.pad_token_id,
+                )
+                responses = tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
-            for k, resp in enumerate(responses):
-                results.append({"response": resp, "answer": str(batched_answers[k])})
+                for k, resp in enumerate(responses):
+                    results.append({"response": resp, "answer": str(batched_answers[k])})
+    finally:
+        tokenizer.padding_side = original_side
 
     with open(results_fname, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=4)
@@ -879,10 +889,10 @@ if __name__ == "__main__":
 
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
     generate_math_dataset(
-        dataset_all_json_path("222_add"),
+        dataset_all_json_path("22_add"),
         tokenizer,
         digits=[2, 2],
-        operations=[["+", "+"]],
+        operations=[["+"]],
         shuffle=True,
         samples=6000,
         split_test_frac=0.2,

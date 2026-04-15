@@ -85,7 +85,6 @@ def main() -> None:
     dataset_path = os.path.abspath(args.dataset)
 
     model, tokenizer = load_model(args.model_name)
-    tokenizer.padding_side = "left"
     total = mlp_flatten_dim_from_model(model)
     fracs = np.linspace(0.0, float(args.max_frac), args.n_points)
 

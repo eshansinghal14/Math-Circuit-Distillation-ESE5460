@@ -729,8 +729,9 @@ def eval_accuracy(
     printed = 0
     label_note = f" ({eval_label.strip()})" if eval_label.strip() else ""
 
+    # Match AddDataset/collate_fn (right-pad) so RoPE positions align with training.
     original_side = tokenizer.padding_side
-    tokenizer.padding_side = "left"
+    tokenizer.padding_side = "right"
 
     for i in range(0, len(prompts), batch_size):
         batch_prompts = prompts[i : i + batch_size]
