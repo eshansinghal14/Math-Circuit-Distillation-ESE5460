@@ -12,8 +12,8 @@ full outputs, this module:
   3. For each paired cluster (discovered via ablation-based importance
      matching), extracts the corresponding neuron subsets and computes
      CKA between student and teacher.
-  4. The total loss uses masked per-position KL at every answer token
-     (next-token positions over the full answer span, including EOS),
+  4. The total loss uses masked per-position KL at answer-token predictions only
+     (not the step that predicts EOS after the answer),
      plus ``lambda * L_cluster_align`` (CKA). No ``batchmean`` over the full vocab grid.
 
 Pipeline prerequisites (run before this module):
@@ -589,11 +589,12 @@ class AddDataset(Dataset):
 
 
 def collate_fn(examples, pad_id: int):
-    """Right-pad batch sequences and build ``kl_mask`` for all answer next-token positions.
+    """Right-pad batch sequences and build ``kl_mask`` for answer next-token positions only.
 
-    For causal LM, ``logits[:, t, :]`` predicts ``input_ids[:, t + 1]``.  Answer tokens
-    occupy indices ``prompt_len .. L-1``; include KL at ``t = prompt_len-1 .. L-2``
-    (covers every answer token including EOS).
+    For causal LM, ``logits[:, t, :]`` predicts ``input_ids[:, t + 1]``.  The final
+    sequence token is EOS (after ``answer + eos`` in :class:`AddDataset`).  KL is
+    applied at ``t = prompt_len-1 .. L-3`` so we align on every **answer** token
+    but **not** on the step that predicts EOS (``t = L-2`` → ``input_ids[L-1]``).
     """
     max_len = max(ex["input_ids"].size(0) for ex in examples)
     B = len(examples)
@@ -608,8 +609,8 @@ def collate_fn(examples, pad_id: int):
         input_ids[i, :L] = ids
         attention_mask[i, :L] = 1
         p = ex["prompt_len"]
-        # Next-token KL for each answer position: logits t predict token t+1 for t in [p-1, L-2].
-        for pos in range(max(p - 1, 0), L - 1):
+        # Next-token KL for answer tokens only (exclude the step that predicts EOS at L-1).
+        for pos in range(max(p - 1, 0), L - 2):
             kl_mask[i, pos] = 1.0
 
     return {
@@ -877,7 +878,7 @@ class ClusterDistillationTrainer:
         # Optimizer
         self.optimizer = AdamW(params=self.student.parameters(), lr=config.learning_rate)
 
-        # Dataset / loader (padding + kl_mask over all answer prediction positions)
+        # Dataset / loader (padding + kl_mask over answer tokens, not EOS prediction)
         self.dataset = AddDataset(train_data, self.tokenizer)
         self.loader = DataLoader(
             self.dataset,

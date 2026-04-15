@@ -556,20 +556,31 @@ def _format_chain_prompt(
     nums: Sequence[int],
     op_syms: Sequence[str],
     mod_n: Optional[int],
+    *,
+    spaces: bool = True,
 ) -> str:
     parts: List[str] = [str(nums[0])]
     for i, sym in enumerate(op_syms):
-        parts.append(f" {sym} {nums[i + 1]}")
+        if spaces:
+            parts.append(f" {sym} {nums[i + 1]}")
+        else:
+            parts.append(f"{sym}{nums[i + 1]}")
     body = "".join(parts)
     if mod_n is not None:
-        return f"{body} mod {mod_n} = "
-    return f"{body} = "
+        if spaces:
+            return f"{body} mod {mod_n} = "
+        return f"{body}mod{mod_n}="
+    if spaces:
+        return f"{body} = "
+    return f"{body}="
 
 
 def _iter_chain_pairs(
     digits: Sequence[int],
     operations: Sequence[Sequence[str]],
     mod_n: Optional[int],
+    *,
+    spaces: bool = True,
 ) -> List[Tuple[str, int]]:
     """Cartesian product over operand ranges; each row picks one operator pattern at random.
 
@@ -594,7 +605,7 @@ def _iter_chain_pairs(
         op_syms = list(random.choice(op_patterns))
         inner = _eval_pemdas_plus_mul(nlist, op_syms)
         ans = inner % mod_n if mod_n is not None else inner
-        pairs.append((_format_chain_prompt(nlist, op_syms, mod_n), ans))
+        pairs.append((_format_chain_prompt(nlist, op_syms, mod_n, spaces=spaces), ans))
     return pairs
 
 
@@ -604,6 +615,8 @@ def _sample_chain_pairs(
     mod_n: Optional[int],
     samples: int,
     shuffle: bool,
+    *,
+    spaces: bool = True,
 ) -> List[Tuple[str, int]]:
     """Draw ``samples`` unique random problems without enumerating the full Cartesian product."""
     if samples < 1:
@@ -627,7 +640,7 @@ def _sample_chain_pairs(
         op_syms = list(random.choice(op_patterns))
         inner = _eval_pemdas_plus_mul(nlist, op_syms)
         ans = inner % mod_n if mod_n is not None else inner
-        prompt = _format_chain_prompt(nlist, op_syms, mod_n)
+        prompt = _format_chain_prompt(nlist, op_syms, mod_n, spaces=spaces)
         key = (prompt, ans)
         if key in seen:
             continue
@@ -654,6 +667,7 @@ def generate_math_dataset(
     samples: Optional[int] = None,
     split_test_frac: Optional[float] = None,
     datasets_dir: Optional[str] = None,
+    spaces: bool = True,
 ) -> None:
     """Build a math JSON dataset ``{{q_str, a_str, ids}}`` compatible with the rest of the repo.
 
@@ -680,14 +694,16 @@ def generate_math_dataset(
         split_test_frac: If set (e.g. ``0.2``), write ``dataset_fname`` as the full set, then
             write train/test JSON by splitting the shuffled list (first ``1-fraction`` train).
         datasets_dir: Optional root for bare ``dataset_fname``; defaults to repo ``datasets/``.
+        spaces: If True (default), prompts use spaces around operators, e.g. ``12 + 34 = ``.
+            If False, tight formatting, e.g. ``12+34=``.
     """
     dataset_fname = _resolve_dataset_output_path(dataset_fname, datasets_dir)
     if samples is not None:
         selected = _sample_chain_pairs(
-            digits, operations, mod_n, samples, shuffle,
+            digits, operations, mod_n, samples, shuffle, spaces=spaces,
         )
     else:
-        selected = _iter_chain_pairs(digits, operations, mod_n)
+        selected = _iter_chain_pairs(digits, operations, mod_n, spaces=spaces)
         if shuffle:
             random.shuffle(selected)
 
@@ -889,10 +905,11 @@ if __name__ == "__main__":
 
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
     generate_math_dataset(
-        dataset_all_json_path("22_add"),
+        dataset_all_json_path("222_add_tight"),
         tokenizer,
-        digits=[2, 2],
-        operations=[["+"]],
+        digits=[2, 2, 2],
+        operations=[["+", "+"]],
+        spaces=False,
         shuffle=True,
         samples=6000,
         split_test_frac=0.2,
