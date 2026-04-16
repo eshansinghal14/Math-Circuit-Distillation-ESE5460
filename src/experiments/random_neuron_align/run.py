@@ -90,6 +90,16 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--add-replay-loss",
+        nargs=2,
+        default=None,
+        metavar=("PATH", "W"),
+        help=(
+            "Add replay CE loss from JSON dataset PATH with weight W. "
+            "The replay dataset uses ground-truth next-token CE on the student's logits."
+        ),
+    )
+    parser.add_argument(
         "--hard-ce-weight",
         type=float,
         default=0.0,
@@ -201,6 +211,17 @@ def main() -> None:
         raise SystemExit("--count-flops-every must be >= 0")
     if not (0.0 <= args.hard_ce_weight <= 1.0):
         raise SystemExit("--hard-ce-weight must be in [0, 1]")
+    replay_data = None
+    replay_loss_weight = 0.0
+    if args.add_replay_loss is not None:
+        replay_path = os.path.abspath(args.add_replay_loss[0])
+        try:
+            replay_loss_weight = float(args.add_replay_loss[1])
+        except ValueError as e:
+            raise SystemExit("--add-replay-loss requires PATH and numeric weight W") from e
+        if replay_loss_weight < 0:
+            raise SystemExit("--add-replay-loss weight W must be >= 0")
+        replay_data = load_prompt_answer_json(replay_path)
     if args.kl_mask_range is not None:
         lo_kl, hi_kl = args.kl_mask_range
         if lo_kl > hi_kl:
@@ -412,6 +433,7 @@ def main() -> None:
         grad_clip=args.grad_clip,
         lambda_cluster=args.lambda_cluster,
         lambda_original_kl=args.lambda_original_kl,
+        replay_loss_weight=replay_loss_weight,
         hard_ce_weight=args.hard_ce_weight,
         kl_mask_range=(
             tuple(args.kl_mask_range) if args.kl_mask_range is not None else None
@@ -431,6 +453,7 @@ def main() -> None:
         cluster_pairs=cluster_pairs,
         train_data=train_data,
         test_data=test_data,
+        replay_data=replay_data,
         tokenizer=tokenizer,
         student=student,
         resume=is_resume,
