@@ -4,6 +4,7 @@ from typing import List, Optional
 
 from utils import (
     EVAL_MAX_NEW_TOKENS,
+    LLAMA_1B_MODEL_NAME,
     default_datasets_dir,
     load_model,
     parse_answer,
@@ -19,7 +20,7 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--model-name",
         type=str,
         required=True,
-        help="HuggingFace model identifier (e.g. meta-llama/Llama-3.2-1B)",
+        help=f"HuggingFace model identifier (e.g. {LLAMA_1B_MODEL_NAME})",
     )
     p.add_argument(
         "--dataset",

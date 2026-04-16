@@ -17,6 +17,7 @@ from transformers import AutoTokenizer
 import matplotlib.pyplot as plt
 
 from utils import (
+    LLAMA_1B_MODEL_NAME,
     default_datasets_dir,
     load_model_checkpoint,
     patch_tokenizer_no_special_tokens,
@@ -29,7 +30,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def _model_path_segments(model_name: str) -> Tuple[str, ...]:
-    """HF model id as nested path segments (``meta-llama/Llama-3.2-1B`` → two folders)."""
+    """HF model id as nested path segments (e.g. ``org/model`` → two folders)."""
     norm = model_name.replace("\\", "/").strip("/")
     return tuple(p.replace(":", "_") for p in norm.split("/") if p)
 
@@ -40,7 +41,7 @@ def _parse_args(argv):
         "--model-name",
         type=str,
         required=True,
-        help="HuggingFace model identifier (e.g. meta-llama/Llama-3.2-1B)",
+        help=f"HuggingFace model identifier (e.g. {LLAMA_1B_MODEL_NAME})",
     )
     parser.add_argument(
         "--checkpoint-path",
@@ -484,7 +485,7 @@ if __name__ == "__main__":
 
     mask_on_threshold = args.mask_activate_thresh
     T = model.mask_temperature
-    if model_name == "meta-llama/Llama-3.2-1B":
+    if model_name == LLAMA_1B_MODEL_NAME:
         neuron_masks = model.neuron_masks_1b.class_masks(T)
     else:
         neuron_masks = model.neuron_masks_8b.class_masks(T)

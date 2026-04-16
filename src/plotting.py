@@ -289,7 +289,7 @@ def _cluster_pt_paths_under_data_dir(
     *,
     subclass: int = 0,
 ) -> Tuple[str, str]:
-    """``.../neuron-clustering/meta-llama/Llama-3.2-1B|Meta-Llama-3-8B/clusters/.../k{k}.pt``."""
+    """``.../neuron-clustering/<tower-model>/clusters/.../k{k}.pt``."""
     for key in ("1b", "8b"):
         if key not in k_by_tower:
             raise KeyError(f"k map must include {key!r}, got {list(k_by_tower.keys())!r}")

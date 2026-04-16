@@ -39,6 +39,7 @@ from neuron_distillation.ablation import (  # noqa: E402
 from plotting import _NEURIPS_RC  # noqa: E402
 from utils import (  # noqa: E402
     EVAL_MAX_NEW_TOKENS,
+    LLAMA_1B_MODEL_NAME,
     eval_model,
     load_model,
     mlp_flatten_dim_from_model,
@@ -67,7 +68,7 @@ def main() -> None:
     p.add_argument(
         "--model-name",
         type=str,
-        default="meta-llama/Llama-3.2-1B",
+        default=LLAMA_1B_MODEL_NAME,
         help="HF model id (default: 1B Llama)",
     )
     p.add_argument("--seed", type=int, default=42)

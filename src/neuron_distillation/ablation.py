@@ -20,6 +20,7 @@ import torch
 
 from utils import (
     EVAL_MAX_NEW_TOKENS,
+    LLAMA_1B_MODEL_NAME,
     default_datasets_dir,
     eval_model,
     load_model,
@@ -108,7 +109,7 @@ def ablation(
     in turn, and records the accuracy relative to the un-ablated baseline.
 
     Args:
-        model_name: HuggingFace model identifier (e.g. ``meta-llama/Llama-3.2-1B``).
+        model_name: HuggingFace model identifier (e.g. 1B Llama).
         tokenizer: Tokenizer matching ``model_name``.
         class_to_problems: Output of ``classify_problems``.
         class_clusters: List of *k* values per subclass.  Defaults to ``[6]*8``.
@@ -402,7 +403,7 @@ if __name__ == "__main__":
         "--model-name",
         type=str,
         required=True,
-        help="HuggingFace model identifier (e.g. meta-llama/Llama-3.2-1B)",
+        help=f"HuggingFace model identifier (e.g. {LLAMA_1B_MODEL_NAME})",
     )
     parser.add_argument(
         "--checkpoint",

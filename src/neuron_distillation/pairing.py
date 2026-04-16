@@ -49,6 +49,8 @@ from typing import Dict, List, Tuple, Optional
 import torch
 
 from utils import (
+    LLAMA_1B_MODEL_NAME,
+    LLAMA_8B_MODEL_NAME,
     default_datasets_dir,
     expected_performance_drop_from_random_ablation_poly,
     mlp_flatten_dim_from_pretrained_id,
@@ -404,8 +406,8 @@ if __name__ == "__main__":
         )
         sys.exit(1)
 
-    student_model_name = "meta-llama/Llama-3.2-1B"
-    teacher_model_name = "meta-llama/Meta-Llama-3-8B"
+    student_model_name = LLAMA_1B_MODEL_NAME
+    teacher_model_name = LLAMA_8B_MODEL_NAME
 
     top_k_per_subclass: Optional[int]
     if len(sys.argv) == 2:

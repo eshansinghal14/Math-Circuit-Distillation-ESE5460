@@ -4,7 +4,7 @@ import torch
 from transformers import AutoConfig
 from huggingface_hub import login
 
-from utils import _stack_layer_activations
+from utils import LLAMA_1B_MODEL_NAME, LLAMA_8B_MODEL_NAME, _stack_layer_activations
 
 try:
     import constants as _constants
@@ -20,8 +20,8 @@ if not HF_READ_TOKEN:
 
 if HF_READ_TOKEN:
     login(HF_READ_TOKEN)
-llama_1b = "meta-llama/Llama-3.2-1B"
-llama_8b = "meta-llama/Meta-Llama-3-8B"
+llama_1b = LLAMA_1B_MODEL_NAME
+llama_8b = LLAMA_8B_MODEL_NAME
 
 config = {
     "1b": AutoConfig.from_pretrained(llama_1b),

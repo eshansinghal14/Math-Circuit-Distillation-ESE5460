@@ -35,9 +35,12 @@ STUDENT_MODEL_DIR = "student_model"
 # Fast mid-training snapshot (state_dict only); final artifact is ``student_model/`` (HF format).
 STUDENT_WEIGHTS_FILE = "student_weights.pt"
 
+LLAMA_1B_MODEL_NAME = "meta-llama/Llama-3.2-1B"
+LLAMA_8B_MODEL_NAME = "meta-llama/Meta-Llama-3-8B"
+
 # Subpaths under ``<run>/neuron-clustering/`` (literal ``meta-llama/...`` folders on disk).
-NEURON_CLUSTERING_STUDENT_SUBPATH = "meta-llama/Llama-3.2-1B"
-NEURON_CLUSTERING_TEACHER_SUBPATH = "meta-llama/Meta-Llama-3-8B"
+NEURON_CLUSTERING_STUDENT_SUBPATH = LLAMA_1B_MODEL_NAME
+NEURON_CLUSTERING_TEACHER_SUBPATH = LLAMA_8B_MODEL_NAME
 
 
 def rm_dir_tree(path: str) -> None:
@@ -1019,7 +1022,7 @@ if __name__ == "__main__":
     from transformers import AutoTokenizer
 
     tokenizer = patch_tokenizer_no_special_tokens(
-        AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B"),
+        AutoTokenizer.from_pretrained(LLAMA_1B_MODEL_NAME),
     )
 
     generate_math_dataset(

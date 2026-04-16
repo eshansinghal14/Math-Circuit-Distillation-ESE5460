@@ -73,6 +73,8 @@ from neuron_distillation.pairing import (
 )
 from utils import (
     EVAL_MAX_NEW_TOKENS,
+    LLAMA_1B_MODEL_NAME,
+    LLAMA_8B_MODEL_NAME,
     STUDENT_MODEL_DIR,
     STUDENT_WEIGHTS_FILE,
     _extract_int_after_equals,
@@ -113,8 +115,8 @@ class ClusterPairInfo:
 
 @dataclass
 class ClusterDistillationConfig:
-    teacher_model: str = "meta-llama/Meta-Llama-3-8B"
-    student_model: str = "meta-llama/Llama-3.2-1B"
+    teacher_model: str = LLAMA_8B_MODEL_NAME
+    student_model: str = LLAMA_1B_MODEL_NAME
     # ``circuit``: KL + cluster CKA (hooks). ``standard``: KL only (no hooks / no ablation).
     distillation_mode: str = "circuit"
 

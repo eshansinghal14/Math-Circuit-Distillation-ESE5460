@@ -49,6 +49,8 @@ from neuron_distillation.pairing import (
 )
 from utils import (
     EVAL_MAX_NEW_TOKENS,
+    LLAMA_1B_MODEL_NAME,
+    LLAMA_8B_MODEL_NAME,
     _extract_circuit_model_state_dict,
     load_model,
     load_model_checkpoint,
@@ -267,8 +269,8 @@ def main():
         default="circuit",
         help="circuit: ablation + CKA + KL; standard: KL only (same run layout under --save-dir)",
     )
-    parser.add_argument("--student-model", type=str, default="meta-llama/Llama-3.2-1B")
-    parser.add_argument("--teacher-model", type=str, default="meta-llama/Meta-Llama-3-8B")
+    parser.add_argument("--student-model", type=str, default=LLAMA_1B_MODEL_NAME)
+    parser.add_argument("--teacher-model", type=str, default=LLAMA_8B_MODEL_NAME)
     parser.add_argument(
         "--dataset", type=str, default=None, metavar="PREFIX",
         help="Dataset family prefix, e.g. 2d_add → datasets/2d_add_train.json + _test.json",
