@@ -1021,20 +1021,21 @@ if __name__ == "__main__":
     tokenizer = patch_tokenizer_no_special_tokens(
         AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B"),
     )
-    # generate_math_dataset(
-    #     dataset_all_json_path("2222_add"),
-    #     tokenizer,
-    #     digits=[2, 2, 2, 2],
-    #     operations=[["+", "+", "+"]],
-    #     spaces=True,
-    #     shuffle=True,
-    #     samples=7000,
-    #     split_test_frac=0.7,
-    # )
 
-    mix_datasets(
-        dataset_stems=["22_add", "222_add", "2222_add"],
-        output_stem="2-4_add",
-        datasets_dir=default_datasets_dir(),
+    generate_math_dataset(
+        dataset_all_json_path("2222_add_tight"),
+        tokenizer,
+        digits=[2, 2, 2, 2],
+        operations=[["+", "+", "+"]],
+        spaces=False,
         shuffle=True,
+        samples=7500,
+        split_test_frac=0.66,
     )
+
+    # mix_datasets(
+    #     dataset_stems=["22_add_tight", "222_add_tight"],
+    #     output_stem="2-3_add",
+    #     datasets_dir=default_datasets_dir(),
+    #     shuffle=True,
+    # )

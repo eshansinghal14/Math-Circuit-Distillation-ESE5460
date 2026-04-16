@@ -292,6 +292,16 @@ def main():
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--lambda-cluster", type=float, default=0.01)
     parser.add_argument(
+        "--lambda-original-kl",
+        type=float,
+        default=0.0,
+        metavar="W",
+        help=(
+            "Add W * KL(original_student || current_student) on the same kl_mask positions, "
+            "where original_student is a frozen copy of the student at the start of training."
+        ),
+    )
+    parser.add_argument(
         "--hard-ce-weight",
         type=float,
         default=0.0,
@@ -624,6 +634,7 @@ def main():
         temperature=args.temperature,
         grad_clip=args.grad_clip,
         lambda_cluster=args.lambda_cluster,
+        lambda_original_kl=args.lambda_original_kl,
         hard_ce_weight=args.hard_ce_weight,
         kl_mask_range=(
             tuple(args.kl_mask_range) if args.kl_mask_range is not None else None

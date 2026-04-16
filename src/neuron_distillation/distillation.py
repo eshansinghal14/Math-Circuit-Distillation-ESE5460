@@ -12,8 +12,7 @@ full outputs, this module:
   3. For each paired cluster (discovered via ablation-based importance
      matching), extracts the corresponding neuron subsets and computes
      CKA between student and teacher.
-  4. The total loss uses masked per-position KL at answer-token predictions only
-     (not the step that predicts EOS after the answer),
+  4. The total loss uses masked per-position KL over the full causal sequence,
      plus ``lambda * L_cluster_align`` (CKA). No ``batchmean`` over the full vocab grid.
 
 Pipeline prerequisites (run before this module):
@@ -27,6 +26,7 @@ import math
 import os
 import random
 from collections import defaultdict
+from copy import deepcopy
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -125,6 +125,8 @@ class ClusterDistillationConfig:
     grad_clip: float = 1.0
 
     lambda_cluster: float = 0.01
+    # Optional anchor KL from the initial/frozen student to the current student.
+    lambda_original_kl: float = 0.0
     # If in (0, 1], add masked CE with weight ``hard_ce_weight`` and scale KL by ``1 - hard_ce_weight``.
     hard_ce_weight: float = 0.0
     # If set ``(lo, hi)`` (inclusive), build vocab indices from ``str(n)`` for ``n`` in that
@@ -853,6 +855,7 @@ class ClusterDistillationTrainer:
         # non-finite after the first optimizer step.
         student_dtype = torch.float32
         teacher_dtype = torch.float16 if config.device == "cuda" else torch.float32
+        original_dtype = torch.float16 if config.device == "cuda" else torch.float32
         if student is not None:
             self.student = student
         else:
@@ -871,6 +874,15 @@ class ClusterDistillationTrainer:
         self.teacher.eval()
         for p in self.teacher.parameters():
             p.requires_grad = False
+
+        self.original_student: Optional[nn.Module] = None
+        if config.lambda_original_kl > 0:
+            self.original_student = deepcopy(self.student).to(
+                device=config.device, dtype=original_dtype,
+            )
+            self.original_student.eval()
+            for p in self.original_student.parameters():
+                p.requires_grad = False
 
         # Activation caches
         self.student_cache = ClusterActivationCache()
@@ -1003,8 +1015,10 @@ class ClusterDistillationTrainer:
         """One forward pass through student + teacher.
 
         Returns:
-            ``(total, metrics, kl_loss, cluster_loss, hard_ce_loss)``. ``cluster_loss`` is
-            ``None`` in standard mode. ``hard_ce_loss`` is ``None`` when ``hard_ce_weight`` is 0.
+            ``(total, metrics, distill_kl_loss, cluster_loss, hard_ce_loss)``.
+            ``distill_kl_loss`` is teacher KL plus optional original-model anchor KL.
+            ``cluster_loss`` is ``None`` in standard mode. ``hard_ce_loss`` is
+            ``None`` when ``hard_ce_weight`` is 0.
         """
         input_ids = batch["input_ids"].to(self.device)
         attention_mask = batch["attention_mask"].to(self.device)
@@ -1027,24 +1041,43 @@ class ClusterDistillationTrainer:
                     T,
                     self._kl_restrict_token_ids,
                 )
+                original_kl = None
+                if self.original_student is not None:
+                    with torch.no_grad():
+                        original_logits = self.original_student(
+                            input_ids=input_ids, attention_mask=attention_mask,
+                        ).logits
+                    original_kl = _masked_kl_loss_restricted(
+                        student_logits,
+                        original_logits,
+                        kl_mask,
+                        T,
+                        self._kl_restrict_token_ids,
+                    )
+                distill_kl = kl_loss
+                if original_kl is not None:
+                    distill_kl = distill_kl + self.config.lambda_original_kl * original_kl
                 w_h = self.config.hard_ce_weight
                 hard_ce = (
                     self._masked_hard_ce_loss(student_logits, input_ids, kl_mask)
                     if w_h > 0
                     else None
                 )
-                total = kl_loss
+                total = distill_kl
                 if hard_ce is not None:
                     total = total + w_h * hard_ce
                 metrics = {
                     "kl_loss": kl_loss.item(),
+                    "original_kl_loss": (
+                        original_kl.item() if original_kl is not None else 0.0
+                    ),
                     "cluster_loss": 0.0,
                     "total_loss": total.item(),
                     "mean_cka": 0.0,
                     "kc_lam1": {},
                     "hard_ce_loss": hard_ce.item() if hard_ce is not None else 0.0,
                 }
-                return total, metrics, kl_loss, None, hard_ce
+                return total, metrics, distill_kl, None, hard_ce
 
             self.teacher_cache.register_hooks(self.teacher, detach=True)
             self.student_cache.register_hooks(self.student, detach=False)
@@ -1068,6 +1101,22 @@ class ClusterDistillationTrainer:
                 T,
                 self._kl_restrict_token_ids,
             )
+            original_kl = None
+            if self.original_student is not None:
+                with torch.no_grad():
+                    original_logits = self.original_student(
+                        input_ids=input_ids, attention_mask=attention_mask,
+                    ).logits
+                original_kl = _masked_kl_loss_restricted(
+                    student_logits,
+                    original_logits,
+                    kl_mask,
+                    T,
+                    self._kl_restrict_token_ids,
+                )
+            distill_kl = kl_loss
+            if original_kl is not None:
+                distill_kl = distill_kl + self.config.lambda_original_kl * original_kl
 
             w_h = self.config.hard_ce_weight
             hard_ce = (
@@ -1084,10 +1133,10 @@ class ClusterDistillationTrainer:
                 compute_kc_leading_eigenvalue=self.config.log_kl_cka_grad_norms,
             )
 
-            total = kl_loss + self.config.lambda_cluster * cluster_loss
+            total = distill_kl + self.config.lambda_cluster * cluster_loss
             if hard_ce is not None:
                 total = (
-                    (1.0 - w_h) * kl_loss
+                    (1.0 - w_h) * distill_kl
                     + self.config.lambda_cluster * cluster_loss
                     + w_h * hard_ce
                 )
@@ -1098,6 +1147,9 @@ class ClusterDistillationTrainer:
             }
             metrics = {
                 "kl_loss": kl_loss.item(),
+                "original_kl_loss": (
+                    original_kl.item() if original_kl is not None else 0.0
+                ),
                 "cluster_loss": cluster_loss.item(),
                 "total_loss": total.item(),
                 "mean_cka": (
@@ -1107,7 +1159,7 @@ class ClusterDistillationTrainer:
                 "kc_lam1": kc_lam1,
                 "hard_ce_loss": hard_ce.item() if hard_ce is not None else 0.0,
             }
-            return total, metrics, kl_loss, cluster_loss, hard_ce
+            return total, metrics, distill_kl, cluster_loss, hard_ce
 
         finally:
             self.student_cache.clear()
@@ -1264,13 +1316,16 @@ class ClusterDistillationTrainer:
                         if kc:
                             parts = [f"{pk}={pv:.4f}" for pk, pv in sorted(kc.items())]
                             grad_s += " | λ_max(K_c) " + " ".join(parts)
+                orig_s = ""
+                if cfg.lambda_original_kl > 0:
+                    orig_s = f" | origKL {metrics.get('original_kl_loss', 0.0):.4f}"
                 hard_s = ""
                 if cfg.hard_ce_weight > 0:
                     hard_s = f" | hardCE {metrics.get('hard_ce_loss', 0.0):.4f}"
                 if self._standard:
                     print(
                         f"  step {step:04d} | KL {metrics['kl_loss']:.4f}"
-                        f"{hard_s}{grad_s}{flop_s}",
+                        f"{orig_s}{hard_s}{grad_s}{flop_s}",
                     )
                 else:
                     print(
@@ -1278,7 +1333,7 @@ class ClusterDistillationTrainer:
                         f"KL {metrics['kl_loss']:.4f} | "
                         f"Cluster {metrics['cluster_loss']:.4f} | "
                         f"CKA {metrics['mean_cka']:.4f}"
-                        f"{hard_s}{grad_s}{flop_s}",
+                        f"{orig_s}{hard_s}{grad_s}{flop_s}",
                     )
 
         if n == 0:
@@ -1314,6 +1369,7 @@ class ClusterDistillationTrainer:
             for key in (
                 "epoch",
                 "kl_loss",
+                "original_kl_loss",
                 "hard_ce_loss",
                 "accuracy",
                 "cluster_loss",
@@ -1396,6 +1452,8 @@ class ClusterDistillationTrainer:
         print(f"  RNG seed:         {cfg.seed}")
         print(f"  LR:               {cfg.learning_rate}")
         print(f"  Temperature:      {cfg.temperature}")
+        if cfg.lambda_original_kl > 0:
+            print(f"  lambda_original_kl: {cfg.lambda_original_kl}")
         if cfg.kl_mask_range is not None:
             km_lo, km_hi = cfg.kl_mask_range
             print(
@@ -1504,6 +1562,11 @@ class ClusterDistillationTrainer:
                             f", ||g||_KL={epoch_metrics['kl_grad_norm']:.4f}"
                         )
                     ce_s = ""
+                    orig_s = ""
+                    if cfg.lambda_original_kl > 0:
+                        orig_s = (
+                            f", origKL={epoch_metrics.get('original_kl_loss', float('nan')):.4f}"
+                        )
                     if cfg.hard_ce_weight > 0:
                         ce_s = (
                             f", hardCE={epoch_metrics.get('hard_ce_loss', float('nan')):.4f}"
@@ -1511,7 +1574,7 @@ class ClusterDistillationTrainer:
                     print(
                         f"Epoch {epoch + 1}/{end_epoch}: "
                         f"KL={epoch_metrics.get('kl_loss', float('nan')):.4f}"
-                        f"{ce_s}{g_line}, Acc={acc:.4f}{flop_s}"
+                        f"{orig_s}{ce_s}{g_line}, Acc={acc:.4f}{flop_s}"
                     )
                 else:
                     g_line = ""
@@ -1533,6 +1596,11 @@ class ClusterDistillationTrainer:
                             f"{kc_s}"
                         )
                     ce_s = ""
+                    orig_s = ""
+                    if cfg.lambda_original_kl > 0:
+                        orig_s = (
+                            f", origKL={epoch_metrics.get('original_kl_loss', float('nan')):.4f}"
+                        )
                     if cfg.hard_ce_weight > 0:
                         ce_s = (
                             f", hardCE={epoch_metrics.get('hard_ce_loss', float('nan')):.4f}"
@@ -1542,7 +1610,7 @@ class ClusterDistillationTrainer:
                         f"KL={epoch_metrics.get('kl_loss', float('nan')):.4f}, "
                         f"Cluster={epoch_metrics.get('cluster_loss', float('nan')):.4f}, "
                         f"CKA={epoch_metrics.get('mean_cka', float('nan')):.4f}"
-                        f"{ce_s}{g_line}, Acc={acc:.4f}{flop_s}"
+                        f"{orig_s}{ce_s}{g_line}, Acc={acc:.4f}{flop_s}"
                     )
             else:
                 tag = "KL=n/a" if self._standard else "KL/Cluster/CKA=n/a"
