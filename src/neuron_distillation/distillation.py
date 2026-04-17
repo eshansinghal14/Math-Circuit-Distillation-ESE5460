@@ -140,9 +140,7 @@ class ClusterDistillationConfig:
 
     # Greedy test accuracy: prompts batched for ``generate`` (independent of training batch size).
     eval_batch_size: int = 50
-    # Compute/save evaluation accuracy every N epochs.
-    save_every: int = 1
-    # In-epoch step log every N batches.
+    # In-epoch: print metrics and run full test eval every N training batches.
     step_log_interval: int = 50
     save_best: bool = False
     eval_max_new_tokens: int = EVAL_MAX_NEW_TOKENS
@@ -946,6 +944,9 @@ class ClusterDistillationTrainer:
 
         # History
         self.history: Dict[str, List] = defaultdict(list)
+        # Greedy test accuracy: shown in step logs; set from baseline / last eval in train().
+        self._step_log_eval_accuracy: float = 0.0
+        self._best_eval_accuracy: float = 0.0
 
         # Optional KL vocab restriction (token IDs must exist in both student/teacher logits)
         self._kl_restrict_token_ids: Optional[torch.Tensor] = None
@@ -1020,6 +1021,53 @@ class ClusterDistillationTrainer:
             if key == "kc_lam1" or isinstance(val, dict):
                 continue
             self.history[f"step_{key}"].append(float(val))
+
+    def _run_training_eval(self, epoch: int, batch_step: int) -> float:
+        """Greedy test accuracy; updates ``_step_log_eval_accuracy``, history, optional checkpoint."""
+        cfg = self.config
+        label = (
+            f"epoch {epoch + 1} step {batch_step} train_step {self._train_step} student"
+        )
+        acc = eval_accuracy(
+            self.student,
+            self.tokenizer,
+            self.test_data,
+            batch_size=cfg.eval_batch_size,
+            max_new_tokens=cfg.eval_max_new_tokens,
+            print_samples=cfg.eval_print_samples,
+            eval_label=label,
+            teacher_for_topk_print=(
+                self.teacher if cfg.eval_print_samples > 0 else None
+            ),
+            temperature=cfg.temperature,
+        )
+        self.student.train()
+        acc_f = float(acc)
+        self._step_log_eval_accuracy = acc_f
+        self.history["accuracy"].append(acc_f)
+        self.history["eval_train_step"].append(int(self._train_step))
+        for prefix, data in self.extra_eval_data.items():
+            extra_acc = eval_accuracy(
+                self.student,
+                self.tokenizer,
+                data,
+                batch_size=cfg.eval_batch_size,
+                max_new_tokens=cfg.eval_max_new_tokens,
+                print_samples=0,
+                eval_label=f"{label} [{prefix}]",
+                temperature=cfg.temperature,
+            )
+            self.history[self._extra_eval_history_key(prefix)].append(float(extra_acc))
+            self.student.train()
+        if acc_f > self._best_eval_accuracy:
+            self._best_eval_accuracy = acc_f
+            if cfg.save_best:
+                self._save_checkpoint()
+                print(
+                    f"  Saved {STUDENT_MODEL_DIR}/ "
+                    f"(new best accuracy {self._best_eval_accuracy:.4f})",
+                )
+        return acc_f
 
     def _extra_eval_history_key(self, prefix: str) -> str:
         return f"accuracy_extra_{prefix}"
@@ -1376,6 +1424,7 @@ class ClusterDistillationTrainer:
             n += 1
 
             if step % max(1, self.config.step_log_interval) == 0:
+                self._run_training_eval(epoch, step)
                 flop_s = (
                     f" | cum {format_flops(epoch_flops)}"
                     if count_flops_this_epoch
@@ -1404,10 +1453,11 @@ class ClusterDistillationTrainer:
                 hard_s = ""
                 if cfg.hard_ce_weight > 0:
                     hard_s = f" | hardCE {metrics.get('hard_ce_loss', 0.0):.4f}"
+                acc_s = f" | Acc {self._step_log_eval_accuracy:.4f}"
                 if self._standard:
                     print(
                         f"  step {step:04d} | KL {metrics['kl_loss']:.4f}"
-                        f"{orig_s}{replay_s}{hard_s}{grad_s}{flop_s}",
+                        f"{orig_s}{replay_s}{hard_s}{acc_s}{grad_s}{flop_s}",
                     )
                 else:
                     print(
@@ -1415,7 +1465,7 @@ class ClusterDistillationTrainer:
                         f"KL {metrics['kl_loss']:.4f} | "
                         f"Cluster {metrics['cluster_loss']:.4f} | "
                         f"CKA {metrics['mean_cka']:.4f}"
-                        f"{orig_s}{replay_s}{hard_s}{grad_s}{flop_s}",
+                        f"{orig_s}{replay_s}{hard_s}{acc_s}{grad_s}{flop_s}",
                     )
 
         if n == 0:
@@ -1438,7 +1488,6 @@ class ClusterDistillationTrainer:
 
         hist_path = os.path.join(cfg.save_dir, "training_history.json")
         start_epoch = 0
-        best_acc = 0.0
         for prefix in self.extra_eval_data.keys():
             key = self._extra_eval_history_key(prefix)
             if key not in self.history:
@@ -1454,6 +1503,7 @@ class ClusterDistillationTrainer:
             for key in (
                 "epoch",
                 "eval_epoch",
+                "eval_train_step",
                 "kl_loss",
                 "original_kl_loss",
                 "replay_ce_loss",
@@ -1474,14 +1524,15 @@ class ClusterDistillationTrainer:
                     self.history[key] = []
 
             start_epoch = len(self.history.get("epoch", []))
-            best_acc = (
+            self._best_eval_accuracy = (
                 max(self.history["accuracy"])
                 if self.history.get("accuracy")
                 else 0.0
             )
             print(
                 f"Warm-starting from student_model with new optimizer "
-                f"(continuing from epoch {start_epoch + 1}, best_acc={best_acc:.4f})."
+                f"(continuing from epoch {start_epoch + 1}, "
+                f"best_acc={self._best_eval_accuracy:.4f})."
             )
 
             print("Skipping baseline eval (resumed run).")
@@ -1581,8 +1632,9 @@ class ClusterDistillationTrainer:
         if not self._standard:
             print(f"  lambda_cluster:   {cfg.lambda_cluster}")
             print(f"  Cluster pairs:    {len(self.cluster_pairs)}")
-        print(f"  Eval every:       {cfg.save_every}")
-        print(f"  Step log interval:{cfg.step_log_interval}")
+        print(
+            f"  Step log / test eval every: {cfg.step_log_interval} training batches",
+        )
         if cfg.log_kl_cka_grad_norms:
             print(
                 "  KL/CKA grad norms: on (split grads; ~2× work); circuit mode scales λ·CKA grads "
@@ -1614,43 +1666,15 @@ class ClusterDistillationTrainer:
             self._save_history()
             return dict(self.history)
 
+        acc_hist = self.history.get("accuracy") or []
+        self._step_log_eval_accuracy = (
+            float(acc_hist[-1])
+            if acc_hist
+            else float(self.history.get("student_baseline", 0.0))
+        )
+
         for epoch in range(start_epoch, end_epoch):
             epoch_metrics = self.train_epoch(epoch)
-
-            acc: Optional[float] = None
-            if (epoch + 1) % cfg.save_every == 0:
-                acc = eval_accuracy(
-                    self.student, self.tokenizer, self.test_data,
-                    batch_size=cfg.eval_batch_size,
-                    max_new_tokens=cfg.eval_max_new_tokens,
-                    print_samples=cfg.eval_print_samples,
-                    eval_label=f"epoch {epoch + 1} student",
-                    teacher_for_topk_print=(
-                        self.teacher if cfg.eval_print_samples > 0 else None
-                    ),
-                    temperature=cfg.temperature,
-                )
-                self.history["eval_epoch"].append(epoch + 1)
-                self.history["accuracy"].append(acc)
-                for prefix, data in self.extra_eval_data.items():
-                    extra_acc = eval_accuracy(
-                        self.student, self.tokenizer, data,
-                        batch_size=cfg.eval_batch_size,
-                        max_new_tokens=cfg.eval_max_new_tokens,
-                        print_samples=0,
-                        eval_label=f"epoch {epoch + 1} {prefix}",
-                        temperature=cfg.temperature,
-                    )
-                    self.history[self._extra_eval_history_key(prefix)].append(extra_acc)
-
-                if acc > best_acc:
-                    best_acc = acc
-                    if cfg.save_best:
-                        self._save_checkpoint()
-                        print(
-                            f"  Saved {STUDENT_MODEL_DIR}/ "
-                            f"(new best accuracy)",
-                        )
 
             self.history["epoch"].append(epoch + 1)
             for k, v in epoch_metrics.items():
@@ -1661,9 +1685,10 @@ class ClusterDistillationTrainer:
                 flop_s = ""
                 if ef is not None:
                     flop_s = f", FLOPs={format_flops(float(ef))}"
-                acc_s = f"{acc:.4f}" if acc is not None else "n/a"
+                _acc_show = self._step_log_eval_accuracy
+                acc_s = f"{_acc_show:.4f}"
                 extra_acc_s = ""
-                if acc is not None and self.extra_eval_data:
+                if self.extra_eval_data:
                     parts = []
                     for prefix in sorted(self.extra_eval_data.keys()):
                         vals = self.history.get(self._extra_eval_history_key(prefix), [])
@@ -1740,7 +1765,8 @@ class ClusterDistillationTrainer:
                     )
             else:
                 tag = "KL=n/a" if self._standard else "KL/Cluster/CKA=n/a"
-                acc_s = f"{acc:.4f}" if acc is not None else "n/a"
+                _acc_show = self._step_log_eval_accuracy
+                acc_s = f"{_acc_show:.4f}"
                 print(
                     f"Epoch {epoch + 1}/{end_epoch}: "
                     f"{tag} (no valid steps), Acc={acc_s}"
@@ -1753,7 +1779,7 @@ class ClusterDistillationTrainer:
         self._save_checkpoint()
         print(f"  Saved {STUDENT_MODEL_DIR}/ (final)")
 
-        print(f"\nDone. Best accuracy: {best_acc:.4f}")
+        print(f"\nDone. Best accuracy: {self._best_eval_accuracy:.4f}")
         print(f"Results saved to: {cfg.save_dir}")
         return dict(self.history)
 
@@ -1777,8 +1803,14 @@ class ClusterDistillationTrainer:
         loss_steps = history.get("train_step") or epochs
         kl_series = history.get("step_kl_loss") or history.get("kl_loss", [])
         cluster_series = history.get("step_cluster_loss") or history.get("cluster_loss", [])
-        eval_epochs = history.get("eval_epoch") or epochs[: len(history.get("accuracy", []))]
         acc_series = history.get("accuracy", [])
+        eval_x = history.get("eval_train_step")
+        if eval_x and len(eval_x) == len(acc_series):
+            acc_x = eval_x
+            acc_xlabel = "Train step (at eval)"
+        else:
+            acc_x = history.get("eval_epoch") or epochs[: len(acc_series)]
+            acc_xlabel = "Epoch"
 
         if self._standard:
             fig, axes = plt.subplots(1, 2, figsize=(12, 4))
@@ -1787,10 +1819,10 @@ class ClusterDistillationTrainer:
             axes[0].set_xlabel("Train Step")
             axes[0].set_ylabel("KL Loss")
             axes[0].grid(True, alpha=0.3)
-            axes[1].plot(eval_epochs, acc_series, marker="o", markersize=3,
+            axes[1].plot(acc_x, acc_series, marker="o", markersize=3,
                          linewidth=1.5, color="tab:orange")
             axes[1].set_title("Test Accuracy")
-            axes[1].set_xlabel("Epoch")
+            axes[1].set_xlabel(acc_xlabel)
             axes[1].set_ylabel("Accuracy")
             axes[1].set_ylim(0, 1)
             axes[1].grid(True, alpha=0.3)
@@ -1808,10 +1840,10 @@ class ClusterDistillationTrainer:
             axes[1].set_xlabel("Train Step")
             axes[1].set_ylabel("Cluster Loss")
             axes[1].grid(True, alpha=0.3)
-            axes[2].plot(eval_epochs, acc_series, marker="o", markersize=3,
+            axes[2].plot(acc_x, acc_series, marker="o", markersize=3,
                          linewidth=1.5, color="tab:orange")
             axes[2].set_title("Test Accuracy")
-            axes[2].set_xlabel("Epoch")
+            axes[2].set_xlabel(acc_xlabel)
             axes[2].set_ylabel("Accuracy")
             axes[2].set_ylim(0, 1)
             axes[2].grid(True, alpha=0.3)

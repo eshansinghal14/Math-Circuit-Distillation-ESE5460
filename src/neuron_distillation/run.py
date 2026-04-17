@@ -371,16 +371,13 @@ def main():
         help="Overwrite student_model/ when eval accuracy improves (off by default)",
     )
     parser.add_argument(
-        "--save-every",
-        type=int,
-        default=1,
-        help="Compute and record evaluation accuracy every N epochs (default: 1)",
-    )
-    parser.add_argument(
         "--step-log-interval",
         type=int,
         default=50,
-        help="Print in-epoch metrics every N batches",
+        help=(
+            "Every N training batches: print in-epoch metrics and run full greedy test eval "
+            "(same interval for both; default 50)"
+        ),
     )
     parser.add_argument(
         "--log-kl-cka-grad-norms",
@@ -465,8 +462,8 @@ def main():
         raise SystemExit("--count-flops-every must be >= 0 (use 0 to disable FLOP counting)")
     if args.eval_batch_size < 1:
         raise SystemExit("--eval-batch-size must be >= 1")
-    if args.save_every < 1:
-        raise SystemExit("--save-every must be >= 1")
+    if args.step_log_interval < 1:
+        raise SystemExit("--step-log-interval must be >= 1")
     if args.weight_decay < 0:
         raise SystemExit("--weight-decay must be >= 0")
     if not (0.0 <= args.hard_ce_weight <= 1.0):
@@ -697,7 +694,6 @@ def main():
         eval_max_new_tokens=eval_max_new_tokens,
         eval_print_samples=args.eval_print_samples,
         eval_batch_size=args.eval_batch_size,
-        save_every=args.save_every,
         save_dir=run_dir,
         count_flops_every=args.count_flops_every,
         log_kl_cka_grad_norms=args.log_kl_cka_grad_norms,
