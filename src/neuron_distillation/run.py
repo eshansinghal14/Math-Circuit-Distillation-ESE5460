@@ -5,13 +5,12 @@
 - ``--mode circuit`` (default): neuron-cluster ablation, pairing, KL + cluster CKA (same as before).
 - ``--mode standard``: pure KL distillation (no circuit checkpoint, ablation, or CKA).
 
-**Resume**: ``--resume`` loads weights from ``<save-dir>/student_model/`` (or
-``student_weights.pt``). Use ``--checkpoint-run <path>`` only for a legacy nested run folder;
+**Resume**: ``--resume`` loads weights from ``<save-dir>/student_model/``.
+Use ``--checkpoint-run <path>`` only for a legacy nested run folder;
 otherwise omit if checkpoints live in ``--save-dir``.
 
 Outputs per run: ``student_model/``, ``training_history.json`` (``epoch_flops``: floats when
-measured, ``null`` when skipped by ``--count-flops-every``), ``training_state.pt`` (written
-when ``student_weights.pt`` is saved or at the final ``student_model/`` save),
+measured, ``null`` when skipped by ``--count-flops-every``), and
 ``training_curves.png``. Circuit runs also use ``ablation/``, ``cluster_mapping.json``,
 and global ``neuron-clustering/``.
 
@@ -365,12 +364,6 @@ def main():
         help="Override default random_ablation_poly_8b.json for residual cluster importance",
     )
     parser.add_argument(
-        "--save-every",
-        type=int,
-        default=5,
-        help="Overwrite student_model/ every N epochs (0=disable periodic save)",
-    )
-    parser.add_argument(
         "--save-best",
         action="store_true",
         help="Overwrite student_model/ when eval accuracy improves (off by default)",
@@ -426,12 +419,12 @@ def main():
     parser.add_argument(
         "--save-dir", type=str,
         default=os.path.join(os.path.dirname(__file__), "..", "..", "results", "cluster-distillation"),
-        help="Directory for ablation/, student_model/, training_history.json, training_state.pt, etc.",
+        help="Directory for ablation/, student_model/, training_history.json, etc.",
     )
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="Resume from save-dir/student_model/ (or student_weights.pt); --checkpoint-run for nested legacy path",
+        help="Resume from save-dir/student_model/; --checkpoint-run for nested legacy path",
     )
     parser.add_argument(
         "--checkpoint-run",
@@ -664,7 +657,6 @@ def main():
             tuple(args.kl_mask_range) if args.kl_mask_range is not None else None
         ),
         cluster_size_weighting=args.cluster_size_weighting,
-        save_every=args.save_every,
         save_best=args.save_best,
         eval_max_new_tokens=eval_max_new_tokens,
         eval_print_samples=args.eval_print_samples,

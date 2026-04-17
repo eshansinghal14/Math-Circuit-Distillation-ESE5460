@@ -32,7 +32,7 @@ EVAL_MAX_NEW_TOKENS = 1
 
 # --- Distillation run dirs / checkpoints (used by ``neuron_distillation``) ------------
 STUDENT_MODEL_DIR = "student_model"
-# Fast mid-training snapshot (state_dict only); final artifact is ``student_model/`` (HF format).
+# Legacy fast-checkpoint filename (older runs may still contain this file).
 STUDENT_WEIGHTS_FILE = "student_weights.pt"
 
 LLAMA_1B_MODEL_NAME = "meta-llama/Llama-3.2-1B"
@@ -125,7 +125,7 @@ def resolve_distillation_run_dir(
 
     New run: ``run_dir`` is that directory; ``student_source`` is None.
 
-    Resume: load from ``<run_dir>/student_model/`` or ``<run_dir>/student_weights.pt``.
+    Resume: load from ``<run_dir>/student_model/`` (or legacy ``student_weights.pt``).
     Pass ``checkpoint_run`` as a path relative to ``save_dir`` to resume a **legacy** nested
     run (e.g. ``2026-04-07_22-15-56`` or ``neuron-cluster/2026-04-07_22-15-56``). If omitted,
     uses ``save_dir`` (or the ``runs_subdir`` base) when checkpoints exist there; otherwise

@@ -76,14 +76,10 @@ from utils import (
     LLAMA_1B_MODEL_NAME,
     LLAMA_8B_MODEL_NAME,
     STUDENT_MODEL_DIR,
-    STUDENT_WEIGHTS_FILE,
     _extract_int_after_equals,
     json_to_prompt_answer_dict,
-    load_training_state,
     patch_tokenizer_no_special_tokens,
     rm_dir_tree,
-    save_training_state,
-    training_state_path,
 )
 
 
@@ -146,7 +142,6 @@ class ClusterDistillationConfig:
     eval_batch_size: int = 50
     # In-epoch step log every N batches.
     step_log_interval: int = 50
-    save_every: int = 5
     save_best: bool = False
     eval_max_new_tokens: int = EVAL_MAX_NEW_TOKENS
     # Greedy-eval debug: print first N prompts + top-5 softmax at ``temperature`` (student & teacher).
@@ -165,12 +160,6 @@ class ClusterDistillationConfig:
     seed: int = 42
 
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
-
-    @property
-    def checkpoint_every(self) -> int:
-        """Alias for ``save_every`` (older code / notebooks referenced this name)."""
-        return self.save_every
-
 
 def token_ids_for_integer_range(tokenizer, lo: int, hi: int) -> torch.LongTensor:
     """Token ID set for decimal strings ``str(n)``, for each ``n`` in ``[lo, hi]`` inclusive."""
@@ -982,36 +971,6 @@ class ClusterDistillationTrainer:
                 [None] * (n - len(self.history["epoch_flops"])),
             )
 
-    def _truncate_history_to_resume_checkpoint(self, start_epoch: int) -> None:
-        """If ``training_history.json`` has more rows than ``training_state.pt`` says were
-        completed, truncate lists so appending does not duplicate epoch indices.
-
-        ``start_epoch`` is ``next_epoch`` from the checkpoint (number of finished epochs;
-        next loop index).
-        """
-        ep = self.history.get("epoch")
-        if not isinstance(ep, list) or not ep:
-            return
-        n_hist = len(ep)
-        if n_hist <= start_epoch:
-            if n_hist < start_epoch:
-                print(
-                    f"WARN: training_history.json has {n_hist} epoch rows but checkpoint "
-                    f"next_epoch={start_epoch}; optimizer is ahead of saved metrics "
-                    "(epoch indices may jump until history catches up)."
-                )
-            return
-        print(
-            f"WARN: training_history.json has {n_hist} epoch rows but checkpoint "
-            f"next_epoch={start_epoch}; truncating history to {start_epoch} rows to "
-            "match the checkpoint (fixes duplicate epoch entries on resume)."
-        )
-        for k, v in list(self.history.items()):
-            if isinstance(v, list) and len(v) > start_epoch:
-                self.history[k] = v[:start_epoch]
-
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _masked_hard_ce_loss(
         student_logits: torch.Tensor,
@@ -1456,7 +1415,6 @@ class ClusterDistillationTrainer:
         cfg = self.config
 
         hist_path = os.path.join(cfg.save_dir, "training_history.json")
-        state_path = training_state_path(cfg.save_dir)
         start_epoch = 0
         best_acc = 0.0
 
@@ -1484,26 +1442,16 @@ class ClusterDistillationTrainer:
                 if key not in self.history:
                     self.history[key] = []
 
-            if os.path.isfile(state_path):
-                start_epoch, best_acc = load_training_state(
-                    state_path, self.optimizer, self.device,
-                )
-                print(
-                    f"Resumed optimizer state (starting at global epoch {start_epoch + 1}, "
-                    f"best_acc={best_acc:.4f})"
-                )
-                self._truncate_history_to_resume_checkpoint(start_epoch)
-            else:
-                start_epoch = len(self.history.get("epoch", []))
-                best_acc = (
-                    max(self.history["accuracy"])
-                    if self.history.get("accuracy")
-                    else 0.0
-                )
-                print(
-                    f"No training_state.pt in {cfg.save_dir} — warm-starting from student_model "
-                    f"with new optimizer (continuing from epoch {start_epoch + 1})."
-                )
+            start_epoch = len(self.history.get("epoch", []))
+            best_acc = (
+                max(self.history["accuracy"])
+                if self.history.get("accuracy")
+                else 0.0
+            )
+            print(
+                f"Warm-starting from student_model with new optimizer "
+                f"(continuing from epoch {start_epoch + 1}, best_acc={best_acc:.4f})."
+            )
 
             print("Skipping baseline eval (resumed run).")
             student_base = float(self.history.get("student_baseline", 0.0))
@@ -1574,7 +1522,6 @@ class ClusterDistillationTrainer:
         if not self._standard:
             print(f"  lambda_cluster:   {cfg.lambda_cluster}")
             print(f"  Cluster pairs:    {len(self.cluster_pairs)}")
-        print(f"  Save every:       {cfg.save_every}")
         print(f"  Step log interval:{cfg.step_log_interval}")
         if cfg.log_kl_cka_grad_norms:
             print(
@@ -1611,7 +1558,6 @@ class ClusterDistillationTrainer:
             epoch_metrics = self.train_epoch(epoch)
 
             acc = 0.0
-            saved_fast_weights = False
             if (epoch + 1) % cfg.eval_every == 0:
                 acc = eval_accuracy(
                     self.student, self.tokenizer, self.test_data,
@@ -1629,29 +1575,17 @@ class ClusterDistillationTrainer:
                 if acc > best_acc:
                     best_acc = acc
                     if cfg.save_best:
-                        self._save_fast_weights_and_training_state(epoch + 1, best_acc)
+                        self._save_checkpoint()
                         print(
-                            f"  Saved {STUDENT_WEIGHTS_FILE} + training_state.pt "
+                            f"  Saved {STUDENT_MODEL_DIR}/ "
                             f"(new best accuracy)",
                         )
-                        saved_fast_weights = True
-
-            if (
-                cfg.save_every > 0
-                and (epoch + 1) % cfg.save_every == 0
-                and not saved_fast_weights
-            ):
-                self._save_fast_weights_and_training_state(epoch + 1, best_acc)
-                print(
-                    f"  Saved {STUDENT_WEIGHTS_FILE} + training_state.pt "
-                    f"(epoch {epoch + 1})",
-                )
 
             self.history["epoch"].append(epoch + 1)
             for k, v in epoch_metrics.items():
                 self.history[k].append(v)
 
-            # Per-epoch history only (training_state.pt matches fast weights / final save)
+            # Per-epoch history only.
             self._save_history()
 
             if epoch_metrics:
@@ -1738,15 +1672,7 @@ class ClusterDistillationTrainer:
         self._save_curves()
 
         self._save_checkpoint()
-        save_training_state(cfg.save_dir, self.optimizer, end_epoch, best_acc)
-        print(f"  Saved {STUDENT_MODEL_DIR}/ + training_state.pt (final)")
-
-        # Clean up fast weights file (superseded by full checkpoint)
-        wt_path = os.path.join(cfg.save_dir, STUDENT_WEIGHTS_FILE)
-        try:
-            os.remove(wt_path)
-        except FileNotFoundError:
-            pass
+        print(f"  Saved {STUDENT_MODEL_DIR}/ (final)")
 
         print(f"\nDone. Best accuracy: {best_acc:.4f}")
         print(f"Results saved to: {cfg.save_dir}")
@@ -1812,20 +1738,6 @@ class ClusterDistillationTrainer:
         fig.savefig(out, dpi=150)
         plt.close(fig)
         print(f"Saved training curves → {out}")
-
-    def _save_weights_fast(self) -> None:
-        """Save only state_dict to a single .pt — 10-20x faster than save_pretrained."""
-        path = os.path.join(self.config.save_dir, STUDENT_WEIGHTS_FILE)
-        torch.save(self.student.state_dict(), path)
-
-    def _save_fast_weights_and_training_state(
-        self, completed_epochs: int, best_acc: float,
-    ) -> None:
-        """``student_weights.pt`` plus matching ``training_state.pt`` (resume pair)."""
-        self._save_weights_fast()
-        save_training_state(
-            self.config.save_dir, self.optimizer, completed_epochs, best_acc,
-        )
 
     def _save_checkpoint(self) -> None:
         """Overwrite ``save_dir/student_model/`` with current student + tokenizer.

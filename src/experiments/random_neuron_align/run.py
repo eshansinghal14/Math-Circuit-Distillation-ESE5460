@@ -140,8 +140,6 @@ def main() -> None:
         metavar="PATH",
         help="Override default random_ablation_poly_8b.json for residual importance",
     )
-    parser.add_argument("--save-every", type=int, default=5,
-                        help="Overwrite student_model/ every N epochs (0=disable)")
     parser.add_argument("--save-best", action="store_true")
     parser.add_argument("--step-log-interval", type=int, default=50)
     parser.add_argument(
@@ -439,7 +437,6 @@ def main() -> None:
             tuple(args.kl_mask_range) if args.kl_mask_range is not None else None
         ),
         cluster_size_weighting=args.cluster_size_weighting,
-        save_every=args.save_every,
         save_best=args.save_best,
         eval_max_new_tokens=eval_max_new_tokens,
         eval_print_samples=args.eval_print_samples,
