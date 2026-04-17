@@ -35,8 +35,8 @@ STUDENT_MODEL_DIR = "student_model"
 # Legacy fast-checkpoint filename (older runs may still contain this file).
 STUDENT_WEIGHTS_FILE = "student_weights.pt"
 
-LLAMA_1B_MODEL_NAME = "meta-llama/Llama-3.2-1B"
-LLAMA_8B_MODEL_NAME = "meta-llama/Meta-Llama-3-8B"
+LLAMA_1B_MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
+LLAMA_8B_MODEL_NAME = "meta-llama/Meta-Llama-3-8B-Instruct"
 
 # Subpaths under ``<run>/neuron-clustering/`` (literal ``meta-llama/...`` folders on disk).
 NEURON_CLUSTERING_STUDENT_SUBPATH = LLAMA_1B_MODEL_NAME
