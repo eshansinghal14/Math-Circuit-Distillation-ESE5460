@@ -28,7 +28,7 @@ import json
 import os
 import re
 import sys
-from typing import Optional
+from typing import Dict, Optional
 
 import torch
 
@@ -56,6 +56,7 @@ from utils import (
     load_prompt_answer_json,
     load_student_model_for_distillation,
     resolve_distillation_run_dir,
+    resolve_test_path,
     resolve_train_test_paths,
 )
 
@@ -289,6 +290,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--temperature", type=float, default=2.0)
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--lambda-cluster", type=float, default=0.01)
@@ -369,6 +371,12 @@ def main():
         help="Overwrite student_model/ when eval accuracy improves (off by default)",
     )
     parser.add_argument(
+        "--save-every",
+        type=int,
+        default=1,
+        help="Compute and record evaluation accuracy every N epochs (default: 1)",
+    )
+    parser.add_argument(
         "--step-log-interval",
         type=int,
         default=50,
@@ -405,6 +413,16 @@ def main():
         default=50,
         metavar="N",
         help="Batch size for greedy test accuracy during training (default: 50)",
+    )
+    parser.add_argument(
+        "--eval-datasets",
+        nargs="*",
+        default=None,
+        metavar="DATASET",
+        help=(
+            "Additional dataset prefixes to evaluate whenever the main test set is evaluated. "
+            "Uses each dataset's _test.json split."
+        ),
     )
     parser.add_argument(
         "--count-flops-every",
@@ -447,6 +465,10 @@ def main():
         raise SystemExit("--count-flops-every must be >= 0 (use 0 to disable FLOP counting)")
     if args.eval_batch_size < 1:
         raise SystemExit("--eval-batch-size must be >= 1")
+    if args.save_every < 1:
+        raise SystemExit("--save-every must be >= 1")
+    if args.weight_decay < 0:
+        raise SystemExit("--weight-decay must be >= 0")
     if not (0.0 <= args.hard_ce_weight <= 1.0):
         raise SystemExit("--hard-ce-weight must be in [0, 1]")
     replay_data = None
@@ -630,6 +652,19 @@ def main():
     test_data = load_prompt_answer_json(test_path)
     print(f"  Train: {len(train_data)} examples")
     print(f"  Test:  {len(test_data)} examples")
+    extra_eval_data: Dict[str, Dict[str, int]] = {}
+    if args.eval_datasets:
+        print("  Extra eval datasets:")
+        for eval_dataset in args.eval_datasets:
+            try:
+                eval_test_path, eval_prefix = resolve_test_path(
+                    dataset=eval_dataset,
+                    datasets_dir=args.datasets_dir,
+                )
+            except FileNotFoundError as e:
+                raise SystemExit(str(e)) from e
+            extra_eval_data[eval_prefix] = load_prompt_answer_json(eval_test_path)
+            print(f"    {eval_prefix}: {len(extra_eval_data[eval_prefix])} examples")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     student, tokenizer = load_student_model_for_distillation(
@@ -647,6 +682,7 @@ def main():
         batch_size=args.batch_size,
         step_log_interval=args.step_log_interval,
         learning_rate=args.lr,
+        weight_decay=args.weight_decay,
         temperature=args.temperature,
         grad_clip=args.grad_clip,
         lambda_cluster=args.lambda_cluster,
@@ -661,6 +697,7 @@ def main():
         eval_max_new_tokens=eval_max_new_tokens,
         eval_print_samples=args.eval_print_samples,
         eval_batch_size=args.eval_batch_size,
+        save_every=args.save_every,
         save_dir=run_dir,
         count_flops_every=args.count_flops_every,
         log_kl_cka_grad_norms=args.log_kl_cka_grad_norms,
@@ -671,6 +708,7 @@ def main():
         cluster_pairs=cluster_pairs,
         train_data=train_data,
         test_data=test_data,
+        extra_eval_data=extra_eval_data,
         replay_data=replay_data,
         tokenizer=tokenizer,
         student=student,
