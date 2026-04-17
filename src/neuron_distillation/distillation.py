@@ -948,6 +948,8 @@ class ClusterDistillationTrainer:
         # Greedy test accuracy: shown in step logs; set from baseline / last eval in train().
         self._step_log_eval_accuracy: float = 0.0
         self._best_eval_accuracy: float = 0.0
+        # Latest extra-eval-dataset accuracies (for step logs); keys = dataset prefix.
+        self._step_log_extra_eval_acc: Dict[str, float] = {}
 
         # Optional KL vocab restriction (token IDs must exist in both student/teacher logits)
         self._kl_restrict_token_ids: Optional[torch.Tensor] = None
@@ -1058,7 +1060,9 @@ class ClusterDistillationTrainer:
                 eval_label=f"{label} [{prefix}]",
                 temperature=cfg.temperature,
             )
-            self.history[self._extra_eval_history_key(prefix)].append(float(extra_acc))
+            extra_f = float(extra_acc)
+            self.history[self._extra_eval_history_key(prefix)].append(extra_f)
+            self._step_log_extra_eval_acc[prefix] = extra_f
             self.student.train()
         if acc_f > self._best_eval_accuracy:
             self._best_eval_accuracy = acc_f
@@ -1466,10 +1470,16 @@ class ClusterDistillationTrainer:
                 if cfg.hard_ce_weight > 0:
                     hard_s = f" | hardCE {metrics.get('hard_ce_loss', 0.0):.4f}"
                 acc_s = f" | Acc {self._step_log_eval_accuracy:.4f}"
+                extra_eval_s = ""
+                if self._step_log_extra_eval_acc:
+                    extra_eval_s = " | extra " + ", ".join(
+                        f"{p}={self._step_log_extra_eval_acc[p]:.4f}"
+                        for p in sorted(self._step_log_extra_eval_acc.keys())
+                    )
                 if self._standard:
                     print(
                         f"  step {step:04d} | KL {metrics['kl_loss']:.4f}"
-                        f"{orig_s}{replay_s}{hard_s}{acc_s}{grad_s}{flop_s}",
+                        f"{orig_s}{replay_s}{hard_s}{acc_s}{extra_eval_s}{grad_s}{flop_s}",
                     )
                 else:
                     print(
@@ -1477,7 +1487,7 @@ class ClusterDistillationTrainer:
                         f"KL {metrics['kl_loss']:.4f} | "
                         f"Cluster {metrics['cluster_loss']:.4f} | "
                         f"CKA {metrics['mean_cka']:.4f}"
-                        f"{orig_s}{replay_s}{hard_s}{acc_s}{grad_s}{flop_s}",
+                        f"{orig_s}{replay_s}{hard_s}{acc_s}{extra_eval_s}{grad_s}{flop_s}",
                     )
 
         if n == 0:
@@ -1797,6 +1807,73 @@ class ClusterDistillationTrainer:
 
     # ------------------------------------------------------------------
 
+    def _plot_accuracy_axes(
+        self,
+        ax,
+        history: Dict[str, Any],
+        epochs: List,
+    ) -> None:
+        """Main test accuracy plus each ``--eval-datasets`` series on one panel with legend."""
+        acc_series = history.get("accuracy") or []
+        if not acc_series:
+            ax.set_title("Test Accuracy (no eval data)")
+            ax.set_ylim(0, 1)
+            ax.grid(True, alpha=0.3)
+            return
+
+        eval_x = history.get("eval_train_step")
+        if eval_x and len(eval_x) == len(acc_series):
+            acc_x = eval_x
+            acc_xlabel = "Train step (at eval)"
+        else:
+            acc_x = history.get("eval_epoch") or epochs[: len(acc_series)]
+            acc_xlabel = "Epoch"
+
+        n = min(len(acc_x), len(acc_series))
+        acc_x = acc_x[:n]
+        acc_main = acc_series[:n]
+        ax.plot(
+            acc_x,
+            acc_main,
+            marker="o",
+            markersize=3,
+            linewidth=1.5,
+            color="tab:orange",
+            label="Main test",
+        )
+        colors = [
+            "tab:blue",
+            "tab:green",
+            "tab:red",
+            "tab:purple",
+            "tab:brown",
+            "tab:pink",
+            "tab:gray",
+            "tab:olive",
+            "tab:cyan",
+        ]
+        for i, prefix in enumerate(sorted(self.extra_eval_data.keys())):
+            key = self._extra_eval_history_key(prefix)
+            extra_series = history.get(key) or []
+            if not extra_series:
+                continue
+            m = min(n, len(extra_series))
+            ax.plot(
+                acc_x[:m],
+                extra_series[:m],
+                marker="o",
+                markersize=3,
+                linewidth=1.5,
+                color=colors[i % len(colors)],
+                label=str(prefix),
+            )
+        ax.set_title("Test Accuracy")
+        ax.set_xlabel(acc_xlabel)
+        ax.set_ylabel("Accuracy")
+        ax.set_ylim(0, 1)
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="best", fontsize=8)
+
     def _save_curves(self) -> None:
         """Save KL-loss, cluster-loss, and accuracy curves as a PNG."""
         try:
@@ -1815,14 +1892,6 @@ class ClusterDistillationTrainer:
         loss_steps = history.get("train_step") or epochs
         kl_series = history.get("step_kl_loss") or history.get("kl_loss", [])
         cluster_series = history.get("step_cluster_loss") or history.get("cluster_loss", [])
-        acc_series = history.get("accuracy", [])
-        eval_x = history.get("eval_train_step")
-        if eval_x and len(eval_x) == len(acc_series):
-            acc_x = eval_x
-            acc_xlabel = "Train step (at eval)"
-        else:
-            acc_x = history.get("eval_epoch") or epochs[: len(acc_series)]
-            acc_xlabel = "Epoch"
 
         if self._standard:
             fig, axes = plt.subplots(1, 2, figsize=(12, 4))
@@ -1831,13 +1900,7 @@ class ClusterDistillationTrainer:
             axes[0].set_xlabel("Train Step")
             axes[0].set_ylabel("KL Loss")
             axes[0].grid(True, alpha=0.3)
-            axes[1].plot(acc_x, acc_series, marker="o", markersize=3,
-                         linewidth=1.5, color="tab:orange")
-            axes[1].set_title("Test Accuracy")
-            axes[1].set_xlabel(acc_xlabel)
-            axes[1].set_ylabel("Accuracy")
-            axes[1].set_ylim(0, 1)
-            axes[1].grid(True, alpha=0.3)
+            self._plot_accuracy_axes(axes[1], history, epochs)
             fig.suptitle("Standard KL Distillation", fontsize=13)
         else:
             fig, axes = plt.subplots(1, 3, figsize=(15, 4))
@@ -1852,13 +1915,7 @@ class ClusterDistillationTrainer:
             axes[1].set_xlabel("Train Step")
             axes[1].set_ylabel("Cluster Loss")
             axes[1].grid(True, alpha=0.3)
-            axes[2].plot(acc_x, acc_series, marker="o", markersize=3,
-                         linewidth=1.5, color="tab:orange")
-            axes[2].set_title("Test Accuracy")
-            axes[2].set_xlabel(acc_xlabel)
-            axes[2].set_ylabel("Accuracy")
-            axes[2].set_ylim(0, 1)
-            axes[2].grid(True, alpha=0.3)
+            self._plot_accuracy_axes(axes[2], history, epochs)
             fig.suptitle("Neuron-Cluster KL + CKA Distillation", fontsize=13)
         fig.tight_layout()
 
