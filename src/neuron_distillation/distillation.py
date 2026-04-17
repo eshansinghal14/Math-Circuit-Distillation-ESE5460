@@ -21,6 +21,7 @@ Pipeline prerequisites (run before this module):
   - Cluster pairing    (pairing.py)
 """
 
+import gc
 import json
 import math
 import os
@@ -1067,7 +1068,15 @@ class ClusterDistillationTrainer:
                     f"  Saved {STUDENT_MODEL_DIR}/ "
                     f"(new best accuracy {self._best_eval_accuracy:.4f})",
                 )
+        self._cuda_clear_after_eval()
         return acc_f
+
+    def _cuda_clear_after_eval(self) -> None:
+        """Free generation/cache memory after full-test ``generate()`` eval."""
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
 
     def _extra_eval_history_key(self, prefix: str) -> str:
         return f"accuracy_extra_{prefix}"
@@ -1340,6 +1349,7 @@ class ClusterDistillationTrainer:
             if count_flops_this_epoch:
                 assert FlopCounterMode is not None
                 fcm = FlopCounterMode(display=False)
+                stepped = False
                 with fcm:
                     loss, metrics, kl_loss, cluster_loss, hard_ce, replay_ce = self._forward_and_loss(batch)
                     if loss is None:
@@ -1372,7 +1382,9 @@ class ClusterDistillationTrainer:
                         torch.nn.utils.clip_grad_norm_(
                             self.student.parameters(), self.config.grad_clip,
                         )
-                        self.optimizer.step()
+                        stepped = True
+                if stepped:
+                    self.optimizer.step()
                 epoch_flops += int(fcm.get_total_flops())
                 if loss is None:
                     continue
