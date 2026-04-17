@@ -1,5 +1,6 @@
 import argparse
 import os
+import sys
 from typing import List, Optional
 
 from utils import (
@@ -8,13 +9,19 @@ from utils import (
     default_datasets_dir,
     load_model,
     parse_answer,
+    run_hf_benchmark,
     test_model,
 )
+
+_HF_DATASET_ALIASES = frozenset({"gsm8k", "svamp"})
 
 
 def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Run a model on a dataset JSON and print accuracy (saves generations under results/model_outputs/<model>/).",
+        description=(
+            "Run a model on a local math JSON (datasets/) or on GSM8K / SVAMP via load_dataset. "
+            "Saves generations under results/model_outputs/<model>/."
+        ),
     )
     p.add_argument(
         "--model-name",
@@ -26,20 +33,34 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--dataset",
         type=str,
         required=True,
-        metavar="FILE",
-        help="Dataset JSON filename in datasets/ (e.g. 3d_add_test.json)",
+        metavar="FILE_OR_NAME",
+        help=(
+            "Local JSON filename in datasets/ (e.g. 3d_add_test.json), or gsm8k / svamp "
+            "(Hugging Face; no local JSON required)."
+        ),
     )
     p.add_argument(
         "--batch-size",
         type=int,
         default=50,
-        help="Batch size for generation (default: 50)",
+        help="Batch size for generation (default: 50; use smaller for long HF generations)",
     )
     p.add_argument(
         "--max-new-tokens",
         type=int,
-        default=EVAL_MAX_NEW_TOKENS,
-        help=f"Greedy decode length after prompt (default: {EVAL_MAX_NEW_TOKENS}, from utils)",
+        default=None,
+        metavar="K",
+        help=(
+            "Greedy decode length after prompt. Omitted: 256 for gsm8k/svamp, "
+            f"{EVAL_MAX_NEW_TOKENS} for local JSON (short '='-style answers)."
+        ),
+    )
+    p.add_argument(
+        "--max-problems",
+        type=int,
+        default=None,
+        metavar="N",
+        help="HF only: evaluate at most N examples (default: full split)",
     )
     return p.parse_args(argv)
 
@@ -52,7 +73,46 @@ def main(argv: Optional[List[str]] = None) -> None:
     args = _parse_args(argv)
     raw = (args.dataset or "").strip()
     if not raw:
-        raise SystemExit("ERROR: --dataset must be a non-empty JSON filename")
+        raise SystemExit("ERROR: --dataset must be non-empty")
+
+    datasets_dir = default_datasets_dir()
+    repo_root = os.path.dirname(datasets_dir)
+    results_dir = os.path.join(
+        repo_root, "results", "model_outputs", _safe_model_dir(args.model_name),
+    )
+    os.makedirs(results_dir, exist_ok=True)
+
+    model_name = args.model_name
+    model, tokenizer = load_model(model_name)
+
+    key = raw.lower()
+    if key in _HF_DATASET_ALIASES:
+        max_new = args.max_new_tokens if args.max_new_tokens is not None else 256
+        if max_new <= max(8, EVAL_MAX_NEW_TOKENS):
+            print(
+                "WARN: gsm8k/svamp usually need --max-new-tokens 128–512 "
+                f"(got {max_new}).",
+                file=sys.stderr,
+            )
+        results_name = f"{key}_results.json"
+        results_path = os.path.join(results_dir, results_name)
+        results, acc = run_hf_benchmark(
+            model,
+            tokenizer,
+            key,
+            results_path,
+            batch_size=args.batch_size,
+            max_new_tokens=max_new,
+            limit=args.max_problems,
+            log=True,
+        )
+        n = len(results)
+        correct = int(round(acc * n)) if n else 0
+        print(f"Model:   {model_name}")
+        print(f"Dataset: Hugging Face ({key}; load_dataset, no local JSON)")
+        print(f"Results: {results_path}")
+        print(f"Accuracy: {acc:.4f} ({correct}/{n})")
+        return
 
     if "/" in raw or "\\" in raw:
         raise SystemExit(
@@ -62,34 +122,30 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     dataset_file = raw
     if not dataset_file.endswith(".json"):
-        raise SystemExit("ERROR: --dataset must be a .json filename (e.g. 3d_add_test.json)")
+        raise SystemExit(
+            "ERROR: --dataset must be a .json filename (e.g. 3d_add_test.json) "
+            "or gsm8k / svamp",
+        )
 
-    datasets_dir = default_datasets_dir()
     dataset_path = os.path.join(datasets_dir, dataset_file)
     if not os.path.isfile(dataset_path):
         raise SystemExit(f"Dataset not found: {dataset_path}")
 
-    model_name = args.model_name
-    model, tokenizer = load_model(model_name)
-
-    repo_root = os.path.dirname(datasets_dir)
-    results_dir = os.path.join(
-        repo_root, "results", "model_outputs", _safe_model_dir(model_name),
-    )
-    os.makedirs(results_dir, exist_ok=True)
+    max_new = args.max_new_tokens if args.max_new_tokens is not None else EVAL_MAX_NEW_TOKENS
     results_path = os.path.join(results_dir, dataset_file)
-
     results = test_model(
         model,
         tokenizer,
         dataset_path,
         results_path,
         batch_size=args.batch_size,
-        max_new_tokens=args.max_new_tokens,
+        max_new_tokens=max_new,
     )
 
     correct = sum(
-        1 for r in results if parse_answer(r["response"]) == int(r["answer"])
+        1
+        for r in results
+        if (p := parse_answer(r["response"])) is not None and p == int(r["answer"])
     )
     n = len(results)
     acc = correct / n if n else 0.0

@@ -1,5 +1,6 @@
 import itertools
 import json
+import math
 import random
 import re
 import os
@@ -290,6 +291,179 @@ def mix_datasets(
 def _extract_int_after_equals(text: str) -> Optional[int]:
     m = re.search(r"=\s*(\d+)", text)
     return int(m.group(1)) if m else None
+
+
+def _normalize_numeric_str(s: str) -> str:
+    """Canonical string for comparing numeric answers (e.g. ``3.0`` → ``3``)."""
+    s = str(s).strip()
+    if not s:
+        return s
+    try:
+        x = float(s)
+        if math.isfinite(x) and x == int(x):
+            return str(int(x))
+        return str(x)
+    except ValueError:
+        return s
+
+
+def extract_numeric_answer_from_text(text: str) -> Optional[str]:
+    """Parse a numeric answer from model output (GSM8K/SVAMP-style).
+
+    Prefers phrases like ``The answer is``, ``Answer:``, ``is``; otherwise last number in text.
+    Returns normalized string (see :func:`_normalize_numeric_str`) or ``None``.
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+    m = re.search(
+        r"(?:(?:The\s+answer\s+is)|(?:^|\s)Answer\s*:?|(?:^|\s)is\s*:?)\s*(-?\d+(?:\.\d+)?)",
+        text,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    if m:
+        return _normalize_numeric_str(m.group(1))
+    matches = re.findall(r"-?\d+(?:\.\d+)?", text)
+    if matches:
+        return _normalize_numeric_str(matches[-1])
+    return None
+
+
+def _gsm8k_gold_answer_str(answer_field: str) -> Optional[str]:
+    m = re.search(r"####\s*(\d+)", answer_field)
+    return _normalize_numeric_str(m.group(1)) if m else None
+
+
+def _slice_text_after_reasoning(full_decoded: str) -> str:
+    """Use the segment after ``Reasoning:`` for extraction (model repeats prompt)."""
+    idx = full_decoded.find("Reasoning:")
+    if idx != -1:
+        return full_decoded[idx + len("Reasoning:") :].strip()
+    return full_decoded.strip()
+
+
+def load_hf_benchmark_rows(
+    name: str,
+    *,
+    limit: Optional[int] = None,
+) -> List[Tuple[str, str]]:
+    """``load_dataset`` for ``gsm8k`` or ``svamp``; return ``(prompt, gold_str)`` rows.
+
+    Prompt format: ``Question: …\\nReasoning:``. Gold is a normalized numeric string.
+    """
+    try:
+        from datasets import load_dataset
+    except ImportError as e:
+        raise ImportError(
+            "gsm8k/svamp require `datasets`. Install with: pip install datasets",
+        ) from e
+
+    key = name.strip().lower()
+    rows: List[Tuple[str, str]] = []
+
+    if key == "gsm8k":
+        ds = load_dataset("gsm8k", "main", split="test")
+        for ex in ds:
+            q = ex["question"].strip()
+            gold = _gsm8k_gold_answer_str(ex["answer"])
+            if gold is None:
+                continue
+            prompt = f"Question: {q}\nReasoning:"
+            rows.append((prompt, gold))
+            if limit is not None and len(rows) >= limit:
+                break
+    elif key == "svamp":
+        ddict = load_dataset("ChilleD/SVAMP")
+        split = "test" if "test" in ddict else "train"
+        for ex in ddict[split]:
+            if ex.get("question_concat"):
+                q = str(ex["question_concat"]).strip()
+            else:
+                q = f"{str(ex.get('Body', '')).strip()}\n{str(ex.get('Question', '')).strip()}"
+            raw_a = ex.get("Answer", ex.get("answer"))
+            if raw_a is None:
+                continue
+            try:
+                gold = _normalize_numeric_str(str(raw_a).strip())
+            except Exception:
+                continue
+            prompt = f"Question: {q}\nReasoning:"
+            rows.append((prompt, gold))
+            if limit is not None and len(rows) >= limit:
+                break
+    else:
+        raise ValueError(f"Unknown HF benchmark dataset: {name!r}")
+
+    return rows
+
+
+@torch.no_grad()
+def run_hf_benchmark(
+    model,
+    tokenizer,
+    name: str,
+    results_fname: str,
+    *,
+    batch_size: int = 8,
+    max_new_tokens: int = 256,
+    limit: Optional[int] = None,
+    log: bool = True,
+) -> Tuple[List[Dict], float]:
+    """GSM8K / SVAMP via ``load_dataset``; greedy generate; save JSON like :func:`test_model`.
+
+    Returns ``(results, accuracy)`` where each result has ``response``, ``answer`` (gold str),
+    and ``parsed`` (predicted numeric str or ``null``).
+    """
+    rows = load_hf_benchmark_rows(name, limit=limit)
+    n = len(rows)
+    results: List[Dict] = []
+    correct = 0
+    original_side = tokenizer.padding_side
+    tokenizer.padding_side = "left"
+    model.eval()
+    try:
+        for i in range(0, n, batch_size):
+            batch = rows[i : i + batch_size]
+            prompts = [p for p, _ in batch]
+            golds = [g for _, g in batch]
+            inputs = tokenizer(
+                prompts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                add_special_tokens=False,
+            ).to(model.device)
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                pad_token_id=tokenizer.pad_token_id,
+            )
+            decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+            for j, full_text in enumerate(decoded):
+                tail = _slice_text_after_reasoning(full_text)
+                pred = extract_numeric_answer_from_text(tail)
+                gold = golds[j]
+                if pred is not None and pred == gold:
+                    correct += 1
+                results.append(
+                    {
+                        "response": full_text,
+                        "answer": gold,
+                        "parsed": pred,
+                    },
+                )
+            if log:
+                end = min(i + batch_size, n)
+                print(f"processing {end}/{n}")
+    finally:
+        tokenizer.padding_side = original_side
+
+    acc = correct / n if n else 0.0
+    with open(results_fname, "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=4)
+
+    return results, acc
 
 
 @torch.no_grad()
