@@ -4,6 +4,10 @@ Usage (from src/):
     python eval_baseline.py 22_add_tight 222_add_tight --samples 10
     python eval_baseline.py 22_add_tight --samples 5 --max-new-tokens 3
     python eval_baseline.py 2d_add --models student  # student only
+
+    # Pass raw file paths with --file:
+    python eval_baseline.py --file /path/to/2d_add_test_20.json --samples 10
+    python eval_baseline.py 22_add_tight --file /path/to/2d_add_test_20.json --samples 5
 """
 
 import argparse
@@ -83,12 +87,16 @@ def eval_and_print(model, tokenizer, data, max_new_tokens, n_samples, label):
 
 def main():
     parser = argparse.ArgumentParser(description="Baseline eval + sample debug")
-    parser.add_argument("datasets", nargs="+", help="Dataset prefixes (e.g. 22_add_tight)")
+    parser.add_argument("datasets", nargs="*", default=[], help="Dataset prefixes (e.g. 22_add_tight)")
+    parser.add_argument("--file", "-f", action="append", default=[], help="Raw JSON file paths (e.g. /path/to/2d_add_test_20.json). Can repeat.")
     parser.add_argument("--samples", "-n", type=int, default=10, help="Number of samples to print per dataset")
     parser.add_argument("--max-new-tokens", type=int, default=2, help="Max tokens to generate")
     parser.add_argument("--models", choices=["both", "student", "teacher"], default="both")
     parser.add_argument("--datasets-dir", type=str, default=None)
     args = parser.parse_args()
+
+    if not args.datasets and not args.file:
+        parser.error("Provide at least one dataset prefix or --file path")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
@@ -124,32 +132,42 @@ def main():
         teacher.eval()
         models_to_eval.append(("Teacher (8B)", teacher))
 
+    # Build list of (label, path) to evaluate
+    eval_sets = []
     for ds_prefix in args.datasets:
         try:
             test_path, prefix = resolve_test_path(
                 dataset=ds_prefix, datasets_dir=args.datasets_dir,
             )
+            eval_sets.append((ds_prefix, test_path))
         except (FileNotFoundError, SystemExit) as e:
             print(f"\n⚠ Skipping {ds_prefix}: {e}")
-            continue
 
+    for fpath in args.file:
+        fpath = os.path.abspath(fpath)
+        if not os.path.isfile(fpath):
+            print(f"\n⚠ Skipping --file {fpath}: not found")
+            continue
+        label = os.path.splitext(os.path.basename(fpath))[0]
+        eval_sets.append((label, fpath))
+
+    for ds_label, test_path in eval_sets:
         data = load_prompt_answer_json(test_path)
         print(f"\n{'='*60}")
-        print(f"Dataset: {ds_prefix}  ({len(data)} test examples)")
+        print(f"Dataset: {ds_label}  ({len(data)} test examples)")
         print(f"  Path: {test_path}")
-        # Show first few raw entries
         items = list(data.items())[:3]
         for p, a in items:
             print(f"  Example: prompt={p!r}  answer={a}")
         print(f"{'='*60}")
 
         for model_label, model in models_to_eval:
-            print(f"\n--- {model_label} on {ds_prefix} (max_new_tokens={args.max_new_tokens}) ---")
+            print(f"\n--- {model_label} on {ds_label} (max_new_tokens={args.max_new_tokens}) ---")
             eval_and_print(
                 model, tokenizer, data,
                 max_new_tokens=args.max_new_tokens,
                 n_samples=args.samples,
-                label=f"{model_label} [{ds_prefix}]",
+                label=f"{model_label} [{ds_label}]",
             )
 
 
