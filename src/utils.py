@@ -784,7 +784,7 @@ def test_model(model, tokenizer, dataset_fname, results_fname, batch_size=50, ma
                     return_tensors="pt",
                     padding=True,
                     truncation=True,
-                    add_special_tokens=False,
+                    add_special_tokens=True,
                 ).to(model.device)
                 outputs = model.generate(
                     **input_ids,
