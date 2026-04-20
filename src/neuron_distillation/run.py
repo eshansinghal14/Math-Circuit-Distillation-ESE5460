@@ -651,13 +651,13 @@ def main():
             print(f"\n  Student: {args.student_model}")
             student_abl = run_ablation_if_needed(
                 args.student_model, args.checkpoint, student_clusters,
-                args.k, args.k_classes, student_ablation_dir,
+                int(args.k[0]), args.k_classes, student_ablation_dir,
                 ablation_batch_size=args.ablation_batch_size,
             )
             print(f"\n  Teacher: {args.teacher_model}")
             teacher_abl = run_ablation_if_needed(
                 args.teacher_model, args.checkpoint, teacher_clusters,
-                args.k, args.k_classes, teacher_ablation_dir,
+                int(args.k[1]), args.k_classes, teacher_ablation_dir,
                 ablation_batch_size=args.ablation_batch_size,
             )
         else:
