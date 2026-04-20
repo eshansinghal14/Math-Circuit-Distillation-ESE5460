@@ -66,6 +66,31 @@ def stable_rank_centered_gram(X: Tensor, eps: float = 1e-12) -> Tensor:
     return num / den
 
 
+def centered_gram_fro_over_input_fro(X: Tensor, eps: float = 1e-12) -> Tensor:
+    """Return ``||X_c X_c.T||_F / ||X_c||_F`` for column-centered ``X_c``.
+
+    This matches ``||H X X^T H||_F / ||H X||_F`` with ``H = I - (1/n) 11^T`` and
+    ``X_c =`` :func:`center_columns` ``(X)``.
+
+    Args:
+        X: ``(n_samples, n_features)`` — one row per sample.
+
+    Returns:
+        Scalar tensor; ``nan`` if ``X`` is empty or has zero width/height.
+    """
+    if X.ndim != 2 or X.shape[0] < 1 or X.shape[1] < 1:
+        return torch.tensor(float("nan"), dtype=X.dtype if X.numel() else torch.float32)
+    Xc = center_columns(X).float()
+    n, d = Xc.shape
+    if n >= d:
+        W = Xc.T @ Xc
+    else:
+        W = Xc @ Xc.T
+    num = torch.linalg.matrix_norm(W, ord="fro")
+    den = torch.linalg.matrix_norm(Xc, ord="fro")
+    return num / den.clamp_min(eps)
+
+
 def linear_cka_efficient(X: Tensor, Y: Tensor, eps: float = 1e-8) -> Tensor:
     assert X.shape[0] == Y.shape[0], f"Batch sizes must match: {X.shape[0]} vs {Y.shape[0]}"
 

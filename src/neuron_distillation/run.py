@@ -354,11 +354,11 @@ def main():
         ),
     )
     parser.add_argument(
-        "--cluster-lam-weighting",
+        "--cluster-grad-weighting",
         action="store_true",
         help=(
-            "CKA: scale each pair's weight by λ_max(student centered Gram) for activations as "
-            "(B, T_valid×|C|) per pair, normalized as λ_i/Σ_j λ_j across pairs "
+            "CKA: scale each pair's weight by ||H X X^T H||_F / ||H X||_F for student "
+            "activations as (B, T_valid×|C|) per pair, normalized as g_i/Σ_j g_j across pairs "
             "(combines with importance; then weights sum to 1)"
         ),
     )
@@ -742,7 +742,7 @@ def main():
         kl_mask_range=(
             tuple(args.kl_mask_range) if args.kl_mask_range is not None else None
         ),
-        cluster_lam_weighting=args.cluster_lam_weighting,
+        cluster_grad_weighting=args.cluster_grad_weighting,
         save_best=args.save_best,
         eval_max_new_tokens=eval_max_new_tokens,
         eval_print_samples=args.eval_print_samples,

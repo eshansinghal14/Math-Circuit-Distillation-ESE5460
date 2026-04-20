@@ -65,6 +65,7 @@ except ImportError:
     FlopCounterMode = None  # type: ignore[misc, assignment]
 
 from cka_loss import (
+    centered_gram_fro_over_input_fro,
     leading_eigenvalue_hkh,
     linear_cka_efficient,
     stable_rank_centered_gram,
@@ -140,10 +141,10 @@ class ClusterDistillationConfig:
     # on both sides; mask zeros other dimensions in the per-vocab KL sum).
     kl_mask_range: Optional[Tuple[int, int]] = None
     importance_weighting: bool = True
-    # If True, scale each pair's CKA weight by λ_i / Σ_j λ_j where λ_i is λ_max of the student's
-    # centered Gram for activations as ``(B, T_valid * |C|)`` (batch × flattened time×neurons;
-    # see ``_leading_eigen_student_flat_batch_tokens`` / ``leading_eigenvalue_hkh``).
-    cluster_lam_weighting: bool = False
+    # If True, scale each pair's CKA weight by ``g_i / Σ_j g_j`` where
+    # ``g_i = ||H X_i X_i^T H||_F / ||H X_i||_F`` for student activations shaped as
+    # ``(B, T_valid * |C|)`` (batch × flattened time×neurons).
+    cluster_grad_weighting: bool = False
 
     # Greedy test accuracy: prompts batched for ``generate`` (independent of training batch size).
     eval_batch_size: int = 50
@@ -479,6 +480,23 @@ def _stable_rank_student_flat_batch_tokens(
     return v if math.isfinite(v) else float("nan")
 
 
+def _cluster_grad_weight_student_flat_batch_tokens(
+    s_cluster: torch.Tensor,
+    valid_positions: torch.Tensor,
+) -> float:
+    """``||H X X^T H||_F / ||H X||_F`` for student activations ``X`` shaped as ``(B, T_valid * |C|)``."""
+    if valid_positions.numel() == 0:
+        return 0.0
+    idx = valid_positions.long()
+    sel = s_cluster[:, idx, :]
+    b, tv, cw = sel.shape
+    x = sel.reshape(b, tv * cw)
+    with torch.no_grad():
+        grad_w = centered_gram_fro_over_input_fro(x)
+    v = float(grad_w.item())
+    return v if math.isfinite(v) and v >= 0.0 else 0.0
+
+
 # ---------------------------------------------------------------------------
 # Cluster-level CKA alignment loss
 # ---------------------------------------------------------------------------
@@ -503,7 +521,7 @@ class ClusterAlignmentLoss(nn.Module):
         cluster_pairs: List[ClusterPairInfo],
         attention_mask: Optional[torch.Tensor] = None,
         importance_weighting: bool = True,
-        cluster_lam_weighting: bool = False,
+        cluster_grad_weighting: bool = False,
         compute_kc_leading_eigenvalue: bool = False,
         compute_stable_rank: bool = False,
     ) -> Tuple[torch.Tensor, Dict, Dict, Dict[int, float]]:
@@ -514,11 +532,11 @@ class ClusterAlignmentLoss(nn.Module):
             cluster_pairs: List of :class:`ClusterPairInfo`.
             attention_mask: ``(B, T)`` binary mask; 1 = real token, 0 = pad.
             importance_weighting: Scale each pair's loss by its importance.
-            cluster_lam_weighting: If True, multiply each pair's weight by
-                ``λ_i / Σ_j λ_j`` where ``λ_i`` is λ_max of the centered Gram for student
-                activations ``X`` shaped ``(B, T_valid * |C|)`` (one row per sequence, columns
-                = valid time positions × neurons, flattened). See
-                :func:`_leading_eigen_student_flat_batch_tokens`.
+            cluster_grad_weighting: If True, multiply each pair's weight by
+                ``g_i / Σ_j g_j`` where ``g_i = ||H X_i X_i^T H||_F / ||H X_i||_F`` for
+                student activations ``X_i`` shaped ``(B, T_valid * |C|)`` (one row per
+                sequence, columns = valid time positions × neurons, flattened). See
+                :func:`_cluster_grad_weight_student_flat_batch_tokens`.
             compute_kc_leading_eigenvalue: If True, log the same per-pair ``λ_max(K_c)``
                 (``K_c`` from column-centered ``X`` as above); used for logging only.
             compute_stable_rank: If True, log per-pair stable rank of the same centered Gram
@@ -552,7 +570,7 @@ class ClusterAlignmentLoss(nn.Module):
 
         pair_losses: List[torch.Tensor] = []
         pair_w_importance: List[float] = []
-        pair_lam_mean: List[float] = []
+        pair_grad_weight: List[float] = []
         cka_scores: Dict[Tuple[int, int, int], float] = {}
         kc_lam1_scores: Dict[Tuple[int, int, int], float] = {}
         stable_rank_by_index: Dict[int, float] = {}
@@ -582,14 +600,16 @@ class ClusterAlignmentLoss(nn.Module):
             pair_losses.append(1.0 - mean_cka)
             w_imp = float(pair.importance if importance_weighting else 1.0)
             pair_w_importance.append(w_imp)
-            if cluster_lam_weighting or compute_kc_leading_eigenvalue:
+            if cluster_grad_weighting:
+                grad_w = _cluster_grad_weight_student_flat_batch_tokens(
+                    s_cluster, valid_positions
+                )
+                pair_grad_weight.append(grad_w)
+            if compute_kc_leading_eigenvalue:
                 lam_m = _leading_eigen_student_flat_batch_tokens(
                     s_cluster, valid_positions
                 )
-                if cluster_lam_weighting:
-                    pair_lam_mean.append(lam_m)
-                if compute_kc_leading_eigenvalue:
-                    kc_lam1_scores[key] = lam_m
+                kc_lam1_scores[key] = lam_m
             if compute_stable_rank:
                 sr = _stable_rank_student_flat_batch_tokens(
                     s_cluster, valid_positions,
@@ -598,16 +618,16 @@ class ClusterAlignmentLoss(nn.Module):
                 sr_idx += 1
             cka_scores[key] = mean_cka.item()
 
-        if cluster_lam_weighting and pair_lam_mean:
-            lam_sum = float(sum(pair_lam_mean)) + 1e-12
-            if lam_sum <= 1e-30 or all(m <= 0.0 for m in pair_lam_mean):
-                n = max(len(pair_lam_mean), 1)
+        if cluster_grad_weighting and pair_grad_weight:
+            grad_sum = float(sum(pair_grad_weight)) + 1e-12
+            if grad_sum <= 1e-30 or all(m <= 0.0 for m in pair_grad_weight):
+                n = max(len(pair_grad_weight), 1)
                 pair_weights = [
                     pair_w_importance[i] * (1.0 / n) for i in range(len(pair_losses))
                 ]
             else:
                 pair_weights = [
-                    pair_w_importance[i] * (pair_lam_mean[i] / lam_sum)
+                    pair_w_importance[i] * (pair_grad_weight[i] / grad_sum)
                     for i in range(len(pair_losses))
                 ]
         else:
@@ -1009,12 +1029,12 @@ class ClusterDistillationTrainer:
 
         if (
             not self._standard
-            and self.config.cluster_lam_weighting
+            and self.config.cluster_grad_weighting
             and self.cluster_pairs
         ):
             print(
-                "\nCluster-lam-weighting: λ_max(student centered Gram) for X shaped "
-                "(B, T_valid×|C|), with λ_i / Σ_j λ_j across pairs each step "
+                "\nCluster-grad-weighting: ||H X X^T H||_F / ||H X||_F for student X shaped "
+                "(B, T_valid×|C|), with g_i / Σ_j g_j across pairs each step "
                 "(then global normalize with importance).",
             )
 
@@ -1327,7 +1347,7 @@ class ClusterDistillationTrainer:
                     student_acts, teacher_acts, self.cluster_pairs,
                     attention_mask=attention_mask,
                     importance_weighting=self.config.importance_weighting,
-                    cluster_lam_weighting=self.config.cluster_lam_weighting,
+                    cluster_grad_weighting=self.config.cluster_grad_weighting,
                     compute_kc_leading_eigenvalue=self._should_log_kl_cka_detail(
                         batch_step,
                     ),
