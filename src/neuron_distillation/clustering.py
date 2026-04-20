@@ -133,21 +133,14 @@ def _model_path_segments(model_name: str) -> Tuple[str, ...]:
     return tuple(p.replace(":", "_") for p in norm.split("/") if p)
 
 
-def _neuron_clustering_run_dir(model_name: str, extra_subdir: Optional[str] = None) -> str:
-    """``results/[tag/]neuron_clustering/<hf-model-as-dirs>/``.
+def _neuron_clustering_run_dir(model_name: str, output_dir: Optional[str] = None) -> str:
+    """``<output_dir>/neuron_clustering/<hf-model-as-dirs>/`` (no ``results/`` prefix).
 
-    If ``extra_subdir`` is set (e.g. ``frac0.01`` or ``222_add/frac0.01``), ``tag`` is the
-    **last** path segment only, so outputs land under ``.../frac0.01/neuron_clustering/...``
-    not ``.../222_add/frac0.01/...``. If ``extra_subdir`` is omitted, the path is
-    ``results/neuron_clustering/<model>/``.
+    ``output_dir`` is the run root you pass via ``--output-dir`` (e.g. a ``frac0.001`` folder).
+    If omitted, uses the current working directory (``./neuron_clustering/...``).
     """
-    parts: List[str] = ["results"]
-    if extra_subdir is not None and str(extra_subdir).strip():
-        tail = str(extra_subdir).strip().replace("\\", "/")
-        leaf = tail.split("/")[-1]
-        if leaf:
-            parts.append(leaf)
-    parts.append("neuron_clustering")
+    base = (output_dir or ".").strip() or "."
+    parts: List[str] = [base, "neuron_clustering"]
     parts.extend(_model_path_segments(model_name))
     return os.path.abspath(os.path.join(*parts))
 
@@ -198,9 +191,8 @@ def _parse_args(argv):
         default=None,
         metavar="DIR",
         help=(
-            "Run tag folder under results/ before neuron_clustering/ (e.g. frac0.01). "
-            "If you pass a path like 222_add/frac0.01, only the last segment (frac0.01) is used. "
-            "Omit for results/neuron_clustering/<hf-id-as-dirs>/",
+            "Run root directory; outputs go to <output_dir>/neuron_clustering/<hf-id-as-dirs>/ "
+            "(e.g. .../frac0.001/neuron_clustering/meta-llama/...). Omit to use cwd.",
         ),
     )
     parser.add_argument(
