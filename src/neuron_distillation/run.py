@@ -113,6 +113,7 @@ def build_cluster_pairs(
     importance_vs_poly: bool = True,
     student_poly_json: Optional[str] = None,
     teacher_poly_json: Optional[str] = None,
+    poly_json_dataset: Optional[str] = None,
     student_model_name: Optional[str] = None,
     teacher_model_name: Optional[str] = None,
 ):
@@ -122,7 +123,8 @@ def build_cluster_pairs(
     If ``mapping_cache_path`` exists, load pairs from that JSON instead.
 
     When ``importance_vs_poly`` is True (default), pairing uses signed residual importance
-    ``actual_drop − poly(|C|/D)`` with the random-ablation poly JSONs
+    ``actual_drop − poly(|C|/D)`` with the random-ablation poly JSONs under
+    ``results/random_ablation_poly/<poly_json_dataset>/`` when defaults are used
     (see :func:`pairing.adjust_ablation_drops_for_poly_importance`). Cached
     mappings skip this step (importance values come from the JSON).
     """
@@ -173,7 +175,9 @@ def build_cluster_pairs(
                 "Poly-based cluster importance requires student_model_name and "
                 "teacher_model_name (HF ids). Pass them into build_cluster_pairs.",
             )
-        sp_default, tp_default = default_random_ablation_poly_json_paths()
+        sp_default, tp_default = default_random_ablation_poly_json_paths(
+            poly_json_dataset,
+        )
         sp = student_poly_json or sp_default
         tp = teacher_poly_json or tp_default
         class_clusters_s = [k_student] * k_classes
@@ -362,7 +366,7 @@ def main():
         action="store_true",
         help=(
             "Pairing: use raw ablation drops (baseline−accuracy); do not subtract poly expected "
-            "drop at |C|/D (see results/random_ablation_poly/*/random_ablation_poly_*.json)"
+            "drop at |C|/D (see results/random_ablation_poly/<dataset>/random_ablation_poly_*.json)"
         ),
     )
     parser.add_argument(
@@ -370,14 +374,20 @@ def main():
         type=str,
         default=None,
         metavar="PATH",
-        help="Override default random_ablation_poly_1b.json for residual cluster importance",
+        help=(
+            "Override default results/random_ablation_poly/<dataset>/random_ablation_poly_1b.json "
+            "for residual cluster importance"
+        ),
     )
     parser.add_argument(
         "--teacher-poly-json",
         type=str,
         default=None,
         metavar="PATH",
-        help="Override default random_ablation_poly_8b.json for residual cluster importance",
+        help=(
+            "Override default results/random_ablation_poly/<dataset>/random_ablation_poly_8b.json "
+            "for residual cluster importance"
+        ),
     )
     parser.add_argument(
         "--save-best",
@@ -668,6 +678,7 @@ def main():
             importance_vs_poly=not args.no_poly_importance,
             student_poly_json=args.student_poly_json,
             teacher_poly_json=args.teacher_poly_json,
+            poly_json_dataset=dataset_prefix,
             student_model_name=args.student_model,
             teacher_model_name=args.teacher_model,
         )

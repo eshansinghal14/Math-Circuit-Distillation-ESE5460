@@ -141,7 +141,10 @@ def _write_random_ablation_poly_json(
         json.dump(payload, f, indent=2)
 
 
-def save_random_ablation_1b_8b_plot(directory: Optional[str] = None) -> None:
+def save_random_ablation_1b_8b_plot(
+    directory: Optional[str] = None,
+    dataset: Optional[str] = None,
+) -> None:
     """Plot 1B vs 8B random-ablation JSONs and one polynomial regression curve per model.
 
     Parameters
@@ -152,6 +155,11 @@ def save_random_ablation_1b_8b_plot(directory: Optional[str] = None) -> None:
         ``random_ablation_1b_8b.png``. Defaults to
         ``src/experiments/random_ablation_vs_fraction/results`` under this repo’s ``src``.
 
+    dataset
+        Dataset prefix for poly JSON output: files go under
+        ``results/random_ablation_poly/<dataset>/``. If omitted, uses the last path segment
+        of ``directory`` when it is not named ``results`` (e.g. ``.../222_add`` → ``222_add``).
+
     After each experiment run, copy ``random_ablation_vs_fraction.json`` to the matching
     ``*_1b.json`` / ``*_8b.json`` filename so both models are present.
 
@@ -160,10 +168,8 @@ def save_random_ablation_1b_8b_plot(directory: Optional[str] = None) -> None:
     stay blue / orange).
 
     Also writes ``random_ablation_poly_1b.json`` / ``random_ablation_poly_8b.json`` under
-    ``results/random_ablation_poly/<last_segment_of_directory>/`` (see
-    :func:`utils.random_ablation_poly_output_dir`; ``last_segment`` matches the final
-    component of ``directory``, e.g. ``directory.split("/")[-1]`` on POSIX) with
-    ``numpy.polyfit`` coefficients (evaluate with
+    ``results/random_ablation_poly/<dataset>/`` (see :func:`utils.random_ablation_poly_output_dir`)
+    with ``numpy.polyfit`` coefficients (evaluate with
     :func:`utils.expected_performance_drop_from_random_ablation_poly`).
     """
     if directory is None:
@@ -214,7 +220,12 @@ def save_random_ablation_1b_8b_plot(directory: Optional[str] = None) -> None:
             )
 
         _max_poly_deg = 8
-        poly_dir = random_ablation_poly_output_dir(directory)
+        poly_dataset = dataset
+        if poly_dataset is None:
+            _leaf = os.path.basename(os.path.normpath(directory))
+            if _leaf != "results":
+                poly_dataset = _leaf
+        poly_dir = random_ablation_poly_output_dir(dataset=poly_dataset)
         os.makedirs(poly_dir, exist_ok=True)
         poly_1b = os.path.join(poly_dir, "random_ablation_poly_1b.json")
         poly_8b = os.path.join(poly_dir, "random_ablation_poly_8b.json")

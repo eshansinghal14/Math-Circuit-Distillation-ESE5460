@@ -27,7 +27,7 @@ polynomial at the same ablated fraction ``|cluster| / D`` (flattened MLP width):
 
     importance(subclass, cluster) = Δ - poly(|cluster|/D)
 
-where ``poly`` comes from ``random_ablation_poly_1b.json`` / ``_8b.json``.
+where ``poly`` comes from ``results/random_ablation_poly/<dataset>/random_ablation_poly_1b.json`` / ``_8b.json``.
 (Values may be negative if the cluster hurts less than the random baseline curve.)
 Clusters are then matched between models by minimizing |importance_s − importance_t|
 within each subclass (after optional per-subclass normalization).
@@ -69,9 +69,14 @@ class ClusterMapping:
     distance: float  # |delta_s - delta_t|
 
 
-def default_random_ablation_poly_json_paths() -> Tuple[str, str]:
-    """Default poly paths: ``results/random_ablation_poly/random_ablation_poly_{1b,8b}.json`` (see :func:`utils.random_ablation_poly_output_dir`)."""
-    root = random_ablation_poly_output_dir()
+def default_random_ablation_poly_json_paths(
+    dataset_prefix: Optional[str] = None,
+) -> Tuple[str, str]:
+    """Poly paths under ``results/random_ablation_poly/<dataset_prefix>/`` when prefix is set.
+
+    If ``dataset_prefix`` is omitted, uses ``results/random_ablation_poly/`` only (legacy).
+    """
+    root = random_ablation_poly_output_dir(dataset=dataset_prefix)
     return (
         os.path.join(root, "random_ablation_poly_1b.json"),
         os.path.join(root, "random_ablation_poly_8b.json"),

@@ -228,6 +228,7 @@ def load_cluster_pairs(
     importance_vs_poly: bool = True,
     student_poly_json: Optional[str] = None,
     teacher_poly_json: Optional[str] = None,
+    poly_json_dataset: Optional[str] = None,
     student_model_name: Optional[str] = None,
     teacher_model_name: Optional[str] = None,
 ) -> List[ClusterPairInfo]:
@@ -246,6 +247,7 @@ def load_cluster_pairs(
         importance_vs_poly: If True (default), replace raw drops with
             ``drop − poly(|C|/D)`` (signed residual) using default or given poly JSON paths.
         student_poly_json / teacher_poly_json: Optional overrides for poly files.
+        poly_json_dataset: Dataset prefix for default poly dir ``random_ablation_poly/<prefix>/``.
         student_model_name / teacher_model_name: HF ids (required if poly adjustment on).
 
     Returns:
@@ -260,8 +262,12 @@ def load_cluster_pairs(
                 "load_cluster_pairs(..., importance_vs_poly=True) requires "
                 "student_model_name and teacher_model_name.",
             )
-        sp = student_poly_json or default_random_ablation_poly_json_paths()[0]
-        tp = teacher_poly_json or default_random_ablation_poly_json_paths()[1]
+        sp = student_poly_json or default_random_ablation_poly_json_paths(
+            poly_json_dataset,
+        )[0]
+        tp = teacher_poly_json or default_random_ablation_poly_json_paths(
+            poly_json_dataset,
+        )[1]
         delta_s, delta_t = adjust_ablation_drops_for_poly_importance(
             delta_s,
             delta_t,

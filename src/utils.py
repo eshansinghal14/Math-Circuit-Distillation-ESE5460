@@ -555,33 +555,47 @@ def default_datasets_dir() -> str:
     return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datasets"))
 
 
-def random_ablation_poly_output_dir(plot_input_directory: Optional[str] = None) -> str:
+def _safe_dataset_segment(name: Optional[str]) -> Optional[str]:
+    """Single path segment for ``random_ablation_poly/<segment>/`` (no ``..`` or separators)."""
+    if not name:
+        return None
+    s = os.path.basename(str(name).strip())
+    if not s or s in (".", ".."):
+        return None
+    return s
+
+
+def random_ablation_poly_output_dir(
+    plot_input_directory: Optional[str] = None,
+    *,
+    dataset: Optional[str] = None,
+) -> str:
     """Directory for polynomial JSONs produced by :func:`plotting.save_random_ablation_1b_8b_plot`.
 
-    Resolves to ``<repo>/results/random_ablation_poly/<leaf>/`` where ``leaf`` is the last
-    path segment of ``plot_input_directory`` (same as ``directory.split("/")[-1]`` on POSIX
-    for a normalized path).
+    Preferred layout: ``<repo>/results/random_ablation_poly/<dataset>/`` with JSON files
+    ``random_ablation_poly_1b.json`` / ``random_ablation_poly_8b.json`` inside. Pass
+    ``dataset`` (e.g. training prefix ``222_add``) for that layout.
 
-    When ``plot_input_directory`` is omitted, returns ``<repo>/results/random_ablation_poly``
-    (no extra subfolder). That matches the default layout for
-    ``default_random_ablation_poly_json_paths`` (``random_ablation_poly_1b.json`` directly
-    under ``results/random_ablation_poly/``). When a directory is passed from plotting, the
-    last path segment is ``leaf`` unless it is named ``results`` (the usual experiment output
-    folder name), in which case the same flat directory is used so paths are not
-    ``.../random_ablation_poly/results/``. Other leaves (e.g. ``222_add``) still nest under
-    ``random_ablation_poly/<leaf>/``.
+    If ``dataset`` is set, its sanitized basename is used and ``plot_input_directory`` is
+    ignored for the output path.
+
+    If ``dataset`` is omitted, falls back to ``<leaf>/`` under ``random_ablation_poly/`` where
+    ``leaf`` is the last segment of ``plot_input_directory``, unless that segment is named
+    ``results`` (then no extra subfolder). If ``plot_input_directory`` is also omitted,
+    returns ``random_ablation_poly`` with no leaf.
     """
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    base = os.path.join(repo_root, "results", "random_ablation_poly")
+    poly_base = os.path.join(repo_root, "results", "random_ablation_poly")
+    ds = _safe_dataset_segment(dataset)
+    if ds:
+        return os.path.join(poly_base, ds)
     if plot_input_directory is None:
-        return base
+        return poly_base
     plot_input_directory = os.path.abspath(plot_input_directory)
     leaf = os.path.basename(os.path.normpath(plot_input_directory))
-    # Default experiment output folder is often named ``results``; using it as ``leaf`` would
-    # duplicate ``.../random_ablation_poly/results/``. Flatten to ``.../random_ablation_poly/``.
     if leaf == "results":
-        return base
-    return os.path.join(base, leaf)
+        return poly_base
+    return os.path.join(poly_base, leaf)
 
 
 def dataset_train_json_path(prefix: str, datasets_dir: Optional[str] = None) -> str:
@@ -1199,7 +1213,7 @@ def expected_performance_drop_from_random_ablation_poly(
     """Evaluate the saved random-ablation polynomial at ``fraction_ablated``.
 
     Expects JSON written by :func:`plotting.save_random_ablation_1b_8b_plot` (under
-    ``results/random_ablation_poly/<dir_leaf>/``, e.g. ``random_ablation_poly_1b.json`` or
+    ``results/random_ablation_poly/<dataset>/``, e.g. ``random_ablation_poly_1b.json`` or
     ``random_ablation_poly_8b.json``; see :func:`random_ablation_poly_output_dir`), with
     ``coefficients`` in ``numpy.polyfit`` order (highest degree first).
 
