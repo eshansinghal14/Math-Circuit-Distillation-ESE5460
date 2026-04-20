@@ -133,6 +133,15 @@ def _model_path_segments(model_name: str) -> Tuple[str, ...]:
     return tuple(p.replace(":", "_") for p in norm.split("/") if p)
 
 
+def _neuron_clustering_run_dir(model_name: str, extra_subdir: Optional[str] = None) -> str:
+    """``results/neuron-clustering/[extra_subdir/]<hf-model-as-dirs>/`` (no fixed ``default/``)."""
+    parts: List[str] = ["results", "neuron-clustering"]
+    if extra_subdir is not None and str(extra_subdir).strip():
+        parts.append(str(extra_subdir).strip())
+    parts.extend(_model_path_segments(model_name))
+    return os.path.abspath(os.path.join(*parts))
+
+
 def _parse_args(argv):
     parser = argparse.ArgumentParser(description="Neuron clustering")
     parser.add_argument(
@@ -179,8 +188,8 @@ def _parse_args(argv):
         default=None,
         metavar="DIR",
         help=(
-            "Subdirectory under results/neuron-clustering/ before the model-id path "
-            "(default: default). Full path: results/neuron-clustering/<this>/<hf-id-as-dirs>/",
+            "Optional extra subdirectory under results/neuron-clustering/ before the model-id "
+            "path. Omit for results/neuron-clustering/<hf-id-as-dirs>/",
         ),
     )
     parser.add_argument(
@@ -498,9 +507,7 @@ def run_neuron_kmeans(
     rng_seed: Optional[int] = None,
 ):
     if results_dir is None:
-        results_dir = os.path.join(
-            "results", "neuron-clustering", "default", *_model_path_segments(model_name),
-        )
+        results_dir = _neuron_clustering_run_dir(model_name)
     results_dir = os.path.abspath(results_dir)
     os.makedirs(results_dir, exist_ok=True)
 
@@ -632,11 +639,7 @@ if __name__ == "__main__":
     if args.mask_temperature is not None:
         model.mask_temperature.fill_(float(args.mask_temperature))
 
-    out_seg = args.output_dir if args.output_dir is not None else "default"
-    results_dir = os.path.join(
-        "results", "neuron-clustering", out_seg, *_model_path_segments(model_name),
-    )
-    results_dir = os.path.abspath(results_dir)
+    results_dir = _neuron_clustering_run_dir(model_name, args.output_dir)
     os.makedirs(results_dir, exist_ok=True)
 
     tokenizer = patch_tokenizer_no_special_tokens(
