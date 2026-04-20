@@ -1607,6 +1607,7 @@ class ClusterDistillationTrainer:
                         f"{orig_s}{replay_s}{hard_s}{acc_s}{extra_eval_s}{grad_s}{flop_s}",
                     )
                 else:
+                    stable_rank = metrics.get("cluster_stable_rank") or {}
                     print(
                         f"  step {step:04d} | "
                         f"KL {metrics['kl_loss']:.4f} | "
@@ -1614,6 +1615,12 @@ class ClusterDistillationTrainer:
                         f"CKA {metrics['mean_cka']:.4f}"
                         f"{orig_s}{replay_s}{hard_s}{acc_s}{extra_eval_s}{grad_s}{flop_s}",
                     )
+                    if stable_rank:
+                        stable_rank_s = " ".join(
+                            f"| {pk}: {pv:.4f}"
+                            for pk, pv in sorted(stable_rank.items())
+                        )
+                        print(f"             stable rank {stable_rank_s}")
 
         if n == 0:
             print(

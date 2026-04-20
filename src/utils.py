@@ -1246,14 +1246,14 @@ if __name__ == "__main__":
     )
 
     generate_math_dataset(
-        dataset_all_json_path("21_mult"),
+        dataset_all_json_path("2222_add"),
         tokenizer,
-        digits=[2, 1],
-        operations=[["*"]],
+        digits=[2, 2, 2, 2],
+        operations=[["+", "+", "+"]],
         spaces=True,
         shuffle=True,
-        samples=1000,
-        split_test_frac=0.999,
+        samples=10000,
+        split_test_frac=0.5,
     )
 
     # mix_datasets(
