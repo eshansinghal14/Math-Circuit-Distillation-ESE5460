@@ -367,8 +367,18 @@ def analyze_mapping(mappings: List[ClusterMapping]) -> Dict:
     }
 
 
-def save_mapping(mappings: List[ClusterMapping], output_path: str) -> None:
-    """Save mappings to JSON file."""
+def save_mapping(
+    mappings: List[ClusterMapping],
+    output_path: str,
+    *,
+    k_student: Optional[int] = None,
+    k_teacher: Optional[int] = None,
+) -> None:
+    """Save mappings to JSON file.
+
+    Optional ``k_student`` / ``k_teacher`` are stored on the first row for resume (cluster
+    checkpoint paths per tower).
+    """
 
     data = [
         {
@@ -381,6 +391,12 @@ def save_mapping(mappings: List[ClusterMapping], output_path: str) -> None:
         }
         for m in mappings
     ]
+    if data and (k_student is not None or k_teacher is not None):
+        if k_student is not None:
+            data[0]["k_student"] = int(k_student)
+            data[0]["k"] = int(k_student)
+        if k_teacher is not None:
+            data[0]["k_teacher"] = int(k_teacher)
 
     with open(output_path, "w") as f:
         json.dump(data, f, indent=2)

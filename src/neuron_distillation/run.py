@@ -16,7 +16,7 @@ and global ``neuron-clustering/``.
 
 Usage (from ``src/``)::
 
-  python -m neuron_distillation.run --dataset 2d_add --save-dir /path/to/results --k 7
+  python -m neuron_distillation.run --dataset 2d_add --save-dir /path/to/results --k 7 9
 
   python -m neuron_distillation.run --mode standard --dataset 2d_add --save-dir /path/to/results
 
@@ -106,7 +106,8 @@ def build_cluster_pairs(
     teacher_ablation_path: str,
     student_clusters_dir: str,
     teacher_clusters_dir: str,
-    k: int,
+    k_student: int,
+    k_teacher: int,
     k_classes: int = 8,
     mapping_cache_path: Optional[str] = None,
     importance_vs_poly: bool = True,
@@ -132,8 +133,8 @@ def build_cluster_pairs(
         pairs = []
         for item in raw:
             sc = item["subclass"]
-            s_path = os.path.join(student_clusters_dir, f"subclass_{sc}_clusters/k{k}.pt")
-            t_path = os.path.join(teacher_clusters_dir, f"subclass_{sc}_clusters/k{k}.pt")
+            s_path = os.path.join(student_clusters_dir, f"subclass_{sc}_clusters/k{k_student}.pt")
+            t_path = os.path.join(teacher_clusters_dir, f"subclass_{sc}_clusters/k{k_teacher}.pt")
             if not os.path.exists(s_path) or not os.path.exists(t_path):
                 continue
             s_ckpt = torch.load(s_path, map_location="cpu")
@@ -175,8 +176,8 @@ def build_cluster_pairs(
         sp_default, tp_default = default_random_ablation_poly_json_paths()
         sp = student_poly_json or sp_default
         tp = teacher_poly_json or tp_default
-        class_clusters_s = [k] * k_classes
-        class_clusters_t = [k] * k_classes
+        class_clusters_s = [k_student] * k_classes
+        class_clusters_t = [k_teacher] * k_classes
         print(
             "  Cluster importance: residual (actual ablation drop − poly expected at |C|/D)\n"
             f"    student poly: {sp}\n"
@@ -202,8 +203,8 @@ def build_cluster_pairs(
     pairs = []
     for m in mappings:
         sc = m.subclass
-        s_path = os.path.join(student_clusters_dir, f"subclass_{sc}_clusters/k{k}.pt")
-        t_path = os.path.join(teacher_clusters_dir, f"subclass_{sc}_clusters/k{k}.pt")
+        s_path = os.path.join(student_clusters_dir, f"subclass_{sc}_clusters/k{k_student}.pt")
+        t_path = os.path.join(teacher_clusters_dir, f"subclass_{sc}_clusters/k{k_teacher}.pt")
         if not os.path.exists(s_path) or not os.path.exists(t_path):
             print(f"    [skip] cluster file missing for subclass {sc}")
             continue
@@ -235,7 +236,12 @@ def build_cluster_pairs(
     print(f"\n  Built {len(pairs)} cluster pairs across "
           f"{len(set(p.subclass for p in pairs))} subclasses")
     if mapping_cache_path:
-        save_mapping(mappings, mapping_cache_path)
+        save_mapping(
+            mappings,
+            mapping_cache_path,
+            k_student=k_student,
+            k_teacher=k_teacher,
+        )
     return pairs
 
 
@@ -280,8 +286,15 @@ def main():
         help="Directory containing *_train.json (default: repo datasets/)",
     )
     parser.add_argument(
-        "--k", type=int, default=None, metavar="INT",
-        help="Clusters per subclass (circuit mode only; required for new circuit runs).",
+        "--k",
+        type=int,
+        nargs=2,
+        default=None,
+        metavar=("K_STUDENT", "K_TEACHER"),
+        help=(
+            "Clusters per subclass for student (1B) and teacher (8B) tower checkpoints "
+            "(circuit mode only; required for new circuit runs). Example: --k 7 9"
+        ),
     )
     parser.add_argument("--k-classes", type=int, default=None,
                         help="Number of latent subclasses (circuit; auto-detected from checkpoint if omitted)")
@@ -336,11 +349,12 @@ def main():
         ),
     )
     parser.add_argument(
-        "--cluster-size-weighting",
+        "--cluster-lam-weighting",
         action="store_true",
         help=(
-            "CKA: multiply each cluster pair's loss weight by the fraction of student MLP neurons "
-            "in that cluster vs full flattened width (combines with importance weighting when both on)"
+            "CKA: scale each pair's weight by λ_max(student centered Gram) for activations as "
+            "(B, T_valid×|C|) per pair, normalized as λ_i/Σ_j λ_j across pairs "
+            "(combines with importance; then weights sum to 1)"
         ),
     )
     parser.add_argument(
@@ -561,25 +575,42 @@ def main():
             sp = os.path.join(neuron_clustering_root, args.student_model, "plots")
             tp = os.path.join(neuron_clustering_root, args.teacher_model, "plots")
             raise SystemExit(
-                "ERROR: --k INT is required for circuit mode (clusters per subclass).\n"
+                "ERROR: --k K_STUDENT K_TEACHER is required for circuit mode "
+                "(clusters per subclass for 1B and 8B).\n"
                 f"  {sp}\n  {tp}"
             )
 
         if is_resume and args.k is None and os.path.isfile(mapping_cache):
             with open(mapping_cache) as f:
                 raw = json.load(f)
-            if raw:
-                args.k = raw[0].get("k", None) or 7
-                print(f"Inferred k={args.k} from cached mapping")
+            if raw and isinstance(raw, list):
+                row0 = raw[0]
+                ks = row0.get("k_student", row0.get("k"))
+                kt = row0.get("k_teacher", row0.get("k"))
+                if ks is not None and kt is not None:
+                    args.k = [int(ks), int(kt)]
+                    print(
+                        f"Inferred k_student={args.k[0]}, k_teacher={args.k[1]} from cached mapping",
+                    )
+                elif row0.get("k") is not None:
+                    kv = int(row0["k"])
+                    args.k = [kv, kv]
+                    print(f"Inferred k_student=k_teacher={kv} from cached mapping (legacy single k)")
 
         if is_resume and args.k is None:
-            raise SystemExit("ERROR: --k is required for circuit resume (could not infer from cache).")
+            raise SystemExit(
+                "ERROR: --k K_STUDENT K_TEACHER is required for circuit resume "
+                "(could not infer from cache).",
+            )
+
+        if args.k[0] < 1 or args.k[1] < 1:
+            raise SystemExit("ERROR: --k K_STUDENT K_TEACHER must both be integers >= 1")
 
         print("=" * 60)
         print("Configuration (circuit)")
         print("=" * 60)
         print(f"  k_classes:          {args.k_classes}")
-        print(f"  k (clusters):       {args.k}")
+        print(f"  k (1B / 8B):        {args.k[0]} / {args.k[1]}")
         print(f"  student_clusters:   {student_clusters}")
         print(f"  teacher_clusters:   {teacher_clusters}")
         print(f"  dataset (prefix):   {dataset_prefix}")
@@ -621,7 +652,8 @@ def main():
             teacher_ablation_path=teacher_abl,
             student_clusters_dir=student_clusters,
             teacher_clusters_dir=teacher_clusters,
-            k=args.k,
+            k_student=args.k[0],
+            k_teacher=args.k[1],
             k_classes=args.k_classes,
             mapping_cache_path=mapping_cache,
             importance_vs_poly=not args.no_poly_importance,
@@ -689,7 +721,7 @@ def main():
         kl_mask_range=(
             tuple(args.kl_mask_range) if args.kl_mask_range is not None else None
         ),
-        cluster_size_weighting=args.cluster_size_weighting,
+        cluster_lam_weighting=args.cluster_lam_weighting,
         save_best=args.save_best,
         eval_max_new_tokens=eval_max_new_tokens,
         eval_print_samples=args.eval_print_samples,
