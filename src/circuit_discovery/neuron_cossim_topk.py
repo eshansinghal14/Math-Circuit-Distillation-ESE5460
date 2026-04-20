@@ -7,6 +7,10 @@ using standard :class:`~circuit_discovery.models.NeuronMask` modules initialized
 binary top-k mask (checkpoint format matches training runs so ``load_model_checkpoint`` /
 ``clustering.py`` work with ``--k-classes 1``).
 
+Outputs: cossim JSON under ``<Math Circuit Distillation (ESE 5460)>/<dataset>/`` when
+Colab Drive is mounted (else ``results/circuit-discovery/<dataset>/``); sparse ``.pt`` under
+``.../<dataset>/frac<value>/`` when ``--frac-activated`` is set.
+
 Run from ``src`` (always builds a **single-class** ``k_classes=1`` model)::
 
     python -m circuit_discovery.neuron_cossim_topk
@@ -39,14 +43,41 @@ if _src not in sys.path:
 from circuit_discovery.utils import _stack_layer_activations, config, llama_1b, llama_8b
 from circuit_discovery.models import CircuitDiscoveryModel, neuron_mask_from_binary_mask
 
+# Colab: store under Drive when mounted; otherwise repo ``results/circuit-discovery``.
+_DRIVE_MCD_ROOT = "/content/drive/My Drive/Math Circuit Distillation (ESE 5460)"
 
-def _results_dir() -> str:
-    return os.path.join(os.path.dirname(__file__), "..", "..", "results", "circuit-discovery")
+
+def _repo_root() -> str:
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+
+def _neuron_cossim_workspace_root() -> str:
+    """``<Drive MCD root>`` if present, else ``<repo>/results/circuit-discovery``."""
+    drive = os.path.abspath(_DRIVE_MCD_ROOT)
+    if os.path.isdir(drive):
+        return drive
+    return os.path.join(_repo_root(), "results", "circuit-discovery")
+
+
+def _dataset_segment(dataset_prefix: str) -> str:
+    return dataset_prefix.replace(os.sep, "_").replace("/", "_")
+
+
+def dataset_cossim_dir(dataset_prefix: str) -> str:
+    """Directory for neuron mean pairwise cossim JSON: ``<workspace>/<dataset>/``."""
+    return os.path.join(_neuron_cossim_workspace_root(), _dataset_segment(dataset_prefix))
+
+
+def sparse_binary_checkpoint_dir(dataset_prefix: str, frac_activated: float) -> str:
+    """Sparse ``.pt`` dir: ``<workspace>/<dataset>/frac<value>/``."""
+    seg = _dataset_segment(dataset_prefix)
+    frac_folder = f"frac{frac_activated:g}"
+    return os.path.join(_neuron_cossim_workspace_root(), seg, frac_folder)
 
 
 def default_cossim_json_path(dataset_prefix: str) -> str:
-    safe = dataset_prefix.replace(os.sep, "_").replace("/", "_")
-    return os.path.join(_results_dir(), f"neuron_mean_pairwise_cossim_{safe}.json")
+    safe = _dataset_segment(dataset_prefix)
+    return os.path.join(dataset_cossim_dir(dataset_prefix), f"neuron_mean_pairwise_cossim_{safe}.json")
 
 
 def mean_pairwise_cossim_from_normalized_sum(
@@ -264,7 +295,7 @@ def run(
     *,
     dataset_prefix: str,
 ) -> None:
-    os.makedirs(_results_dir(), exist_ok=True)
+    os.makedirs(dataset_cossim_dir(dataset_prefix), exist_ok=True)
     record = ensure_cossim_file(
         cossim_json,
         batch_size,
@@ -300,9 +331,11 @@ def run(
         mask_temperature=1.0,
     )
 
-    safe_ds = dataset_prefix.replace(os.sep, "_").replace("/", "_")
+    safe_ds = _dataset_segment(dataset_prefix)
+    pt_dir = sparse_binary_checkpoint_dir(dataset_prefix, frac_activated)
+    os.makedirs(pt_dir, exist_ok=True)
     tag = f"sparse_binary_{safe_ds}_frac{frac_activated:g}_k1b{k1}_k8b{k8}.pt"
-    out_pt = os.path.join(_results_dir(), tag)
+    out_pt = os.path.join(pt_dir, tag)
     # Same keys as training checkpoints so ``utils.load_model_checkpoint`` / clustering work.
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     torch.save(
@@ -354,8 +387,8 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         type=str,
         default=None,
         help=(
-            "Path for neuron cossim JSON "
-            "(default: results/circuit-discovery/neuron_mean_pairwise_cossim_<PREFIX>.json)"
+            "Path for neuron cossim JSON (default: under Math Circuit Distillation (ESE 5460)/"
+            "<dataset>/ on Drive when mounted, else results/circuit-discovery/<dataset>/)"
         ),
     )
     p.add_argument(
