@@ -1130,6 +1130,8 @@ def generate_expression_json_dataset(
     allowed_ops: str = "+-*/",
     max_parentheses_pairs: int = 1,
     require_integer_answers: bool = True,
+    max_answer_abs: int = 10000,
+    min_parentheses_frac: float = 0.30,
     split_test_frac: Optional[float] = None,
     datasets_dir: Optional[str] = None,
 ) -> None:
@@ -1146,6 +1148,10 @@ def generate_expression_json_dataset(
         raise ValueError("max_int must be >= 1")
     if max_parentheses_pairs < 0 or max_parentheses_pairs > 1:
         raise ValueError("max_parentheses_pairs must be 0 or 1")
+    if max_answer_abs < 1:
+        raise ValueError("max_answer_abs must be >= 1")
+    if not (0.0 <= min_parentheses_frac <= 1.0):
+        raise ValueError("min_parentheses_frac must be in [0, 1]")
     ops = [op for op in allowed_ops if op in {"+", "-", "*", "/"}]
     if not ops:
         raise ValueError("allowed_ops must include at least one of '+', '-', '*', '/'")
@@ -1158,9 +1164,18 @@ def generate_expression_json_dataset(
     seen_q = set()
     rows: List[Dict] = []
     template_cycle = ["two_term", "three_term", "paren_left", "paren_right"]
+    paren_count = 0
 
     def _n() -> str:
-        return _rand_expr_number(allow_decimals, max_int)
+        # Mix easy + medium + harder magnitudes (not only 3-digit operands).
+        r = random.random()
+        if r < 0.50:
+            lim = min(max_int, 20)
+        elif r < 0.85:
+            lim = min(max_int, 99)
+        else:
+            lim = max_int
+        return _rand_expr_number(allow_decimals, lim)
 
     def _sample_expression(template: str) -> Tuple[str, Optional[float]]:
         # single-step: a+b
@@ -1208,12 +1223,17 @@ def generate_expression_json_dataset(
         attempts += 1
         if max_depth <= 1:
             tpl = "two_term"
-        elif max_depth == 2:
-            tpl = random.choice(["two_term", "three_term"])
         else:
-            tpl = random.choice(template_cycle)
+            candidates = ["two_term", "three_term"]
+            if max_parentheses_pairs > 0:
+                candidates += ["paren_left", "paren_right"]
+            tpl = random.choice(candidates)
             if ensure_diversity and len(rows) < len(template_cycle):
                 tpl = template_cycle[len(rows)]
+            # Ensure we actually get parenthesized forms.
+            target_paren = int(min_parentheses_frac * max(1, n_examples))
+            if max_parentheses_pairs > 0 and paren_count < target_paren and random.random() < 0.6:
+                tpl = random.choice(["paren_left", "paren_right"])
         e, val = _sample_expression(tpl)
         if val is None:
             continue
@@ -1222,10 +1242,14 @@ def generate_expression_json_dataset(
             continue
         if require_integer_answers and abs(val - round(val)) > 1e-10:
             continue
+        if abs(val) > max_answer_abs:
+            continue
         a = _fmt_expr_answer(val)
         ids = tokenizer.encode(q + a, add_special_tokens=False)
         rows.append({"q_str": q, "a_str": a, "ids": ids})
         seen_q.add(q)
+        if "(" in q:
+            paren_count += 1
 
     if len(rows) < n_examples:
         raise ValueError(f"Could only generate {len(rows)} unique expressions; requested {n_examples}.")
