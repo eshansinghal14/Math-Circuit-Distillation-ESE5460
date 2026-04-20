@@ -1130,6 +1130,7 @@ def generate_expression_json_dataset(
     allowed_ops: str = "+-*/",
     max_parentheses_pairs: int = 1,
     require_integer_answers: bool = True,
+    require_positive_answers: bool = True,
     max_answer_abs: int = 10000,
     min_parentheses_frac: float = 0.30,
     split_test_frac: Optional[float] = None,
@@ -1241,6 +1242,8 @@ def generate_expression_json_dataset(
         if q in seen_q:
             continue
         if require_integer_answers and abs(val - round(val)) > 1e-10:
+            continue
+        if require_positive_answers and val <= 0:
             continue
         if abs(val) > max_answer_abs:
             continue
