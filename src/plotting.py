@@ -13,7 +13,7 @@ from cka_loss import stable_rank_centered_gram
 from utils import (
     NEURON_CLUSTERING_STUDENT_SUBPATH,
     NEURON_CLUSTERING_TEACHER_SUBPATH,
-    default_datasets_dir,
+    random_ablation_poly_output_dir,
 )
 
 # Paths passed into this module should be absolute (or cwd-relative); nothing here assumes a repo ``src/`` root.
@@ -141,33 +141,40 @@ def _write_random_ablation_poly_json(
         json.dump(payload, f, indent=2)
 
 
-def save_random_ablation_1b_8b_plot() -> None:
-    """Plot 1B vs 8B random-ablation JSONs and one polynomial regression curve per model; save under ``plots/``.
+def save_random_ablation_1b_8b_plot(directory: Optional[str] = None) -> None:
+    """Plot 1B vs 8B random-ablation JSONs and one polynomial regression curve per model.
 
-    Reads (no arguments):
-
-    - ``src/experiments/random_ablation_vs_fraction/results/random_ablation_vs_fraction_1b.json``
-    - ``src/experiments/random_ablation_vs_fraction/results/random_ablation_vs_fraction_8b.json``
+    Parameters
+    ----------
+    directory
+        Folder that contains ``random_ablation_vs_fraction_1b.json`` and
+        ``random_ablation_vs_fraction_8b.json`` (when present) and receives
+        ``random_ablation_1b_8b.png``. Defaults to
+        ``src/experiments/random_ablation_vs_fraction/results`` under this repo’s ``src``.
 
     After each experiment run, copy ``random_ablation_vs_fraction.json`` to the matching
     ``*_1b.json`` / ``*_8b.json`` filename so both models are present.
 
-    Saves ``plots/random_ablation_1b_8b.png``. For each available JSON, draws a least-squares
-    polynomial (degree capped by number of points) fit to that model’s points alone;
-    both fit curves are drawn in black (scatters stay blue / orange).
+    For each available JSON, draws a least-squares polynomial (degree capped by number of
+    points) fit to that model’s points alone; both fit curves are drawn in black (scatters
+    stay blue / orange).
 
     Also writes ``random_ablation_poly_1b.json`` / ``random_ablation_poly_8b.json`` under
-    ``datasets/random_ablation_poly/`` with ``numpy.polyfit`` coefficients (evaluate
-    with :func:`utils.expected_performance_drop_from_random_ablation_poly`).
+    ``results/random_ablation_poly/<last_segment_of_directory>/`` (see
+    :func:`utils.random_ablation_poly_output_dir`; ``last_segment`` matches the final
+    component of ``directory``, e.g. ``directory.split("/")[-1]`` on POSIX) with
+    ``numpy.polyfit`` coefficients (evaluate with
+    :func:`utils.expected_performance_drop_from_random_ablation_poly`).
     """
-    res_dir = os.path.join(
-        _plotting_src_dir(), "experiments", "random_ablation_vs_fraction", "results",
-    )
-    p1 = os.path.join(res_dir, "random_ablation_vs_fraction_1b.json")
-    p8 = os.path.join(res_dir, "random_ablation_vs_fraction_8b.json")
-    out_dir = os.path.join(_repo_root_from_plotting(), "plots")
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, "random_ablation_1b_8b.png")
+    if directory is None:
+        directory = os.path.join(
+            _plotting_src_dir(), "experiments", "random_ablation_vs_fraction", "results",
+        )
+    directory = os.path.abspath(directory)
+    os.makedirs(directory, exist_ok=True)
+    p1 = os.path.join(directory, "random_ablation_vs_fraction_1b.json")
+    p8 = os.path.join(directory, "random_ablation_vs_fraction_8b.json")
+    out_path = os.path.join(directory, "random_ablation_1b_8b.png")
 
     xy1 = _load_random_ablation_xy(p1)
     xy8 = _load_random_ablation_xy(p8)
@@ -207,7 +214,7 @@ def save_random_ablation_1b_8b_plot() -> None:
             )
 
         _max_poly_deg = 8
-        poly_dir = os.path.join(default_datasets_dir(), "random_ablation_poly")
+        poly_dir = random_ablation_poly_output_dir(directory)
         os.makedirs(poly_dir, exist_ok=True)
         poly_1b = os.path.join(poly_dir, "random_ablation_poly_1b.json")
         poly_8b = os.path.join(poly_dir, "random_ablation_poly_8b.json")
@@ -1207,4 +1214,4 @@ if __name__ == "__main__":
     #     out=sys.stdout,
     # )
 
-    save_random_ablation_1b_8b_plot()
+    save_random_ablation_1b_8b_plot('src/experiments/random_ablation_vs_fraction/results/222_add')

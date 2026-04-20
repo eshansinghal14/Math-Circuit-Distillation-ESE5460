@@ -555,6 +555,30 @@ def default_datasets_dir() -> str:
     return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datasets"))
 
 
+def random_ablation_poly_output_dir(plot_input_directory: Optional[str] = None) -> str:
+    """Directory for polynomial JSONs produced by :func:`plotting.save_random_ablation_1b_8b_plot`.
+
+    Resolves to ``<repo>/results/random_ablation_poly/<leaf>/`` where ``leaf`` is the last
+    path segment of ``plot_input_directory`` (same as ``directory.split("/")[-1]`` on POSIX
+    for a normalized path).
+
+    When ``plot_input_directory`` is omitted, it defaults to the same path as that plotting
+    function (``src/experiments/random_ablation_vs_fraction/results``), so ``leaf`` is
+    ``results``.
+    """
+    if plot_input_directory is None:
+        plot_input_directory = os.path.join(
+            os.path.dirname(__file__),
+            "experiments",
+            "random_ablation_vs_fraction",
+            "results",
+        )
+    plot_input_directory = os.path.abspath(plot_input_directory)
+    leaf = os.path.basename(os.path.normpath(plot_input_directory))
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    return os.path.join(repo_root, "results", "random_ablation_poly", leaf)
+
+
 def dataset_train_json_path(prefix: str, datasets_dir: Optional[str] = None) -> str:
     d = os.path.abspath(datasets_dir) if datasets_dir else default_datasets_dir()
     return os.path.join(d, f"{prefix}{DATASET_TRAIN_SUFFIX}.json")
@@ -1170,8 +1194,8 @@ def expected_performance_drop_from_random_ablation_poly(
     """Evaluate the saved random-ablation polynomial at ``fraction_ablated``.
 
     Expects JSON written by :func:`plotting.save_random_ablation_1b_8b_plot` (under
-    ``datasets/random_ablation_poly/``, e.g. ``random_ablation_poly_1b.json`` or
-    ``random_ablation_poly_8b.json``), with
+    ``results/random_ablation_poly/<dir_leaf>/``, e.g. ``random_ablation_poly_1b.json`` or
+    ``random_ablation_poly_8b.json``; see :func:`random_ablation_poly_output_dir`), with
     ``coefficients`` in ``numpy.polyfit`` order (highest degree first).
 
     Returns the predicted performance drop (same units as the ablation JSON ``performance_drop``).
@@ -1200,14 +1224,14 @@ if __name__ == "__main__":
     )
 
     generate_math_dataset(
-        dataset_all_json_path("2222_add_tight"),
+        dataset_all_json_path("222_add"),
         tokenizer,
-        digits=[2, 2, 2, 2],
-        operations=[["+", "+", "+"]],
-        spaces=False,
+        digits=[2, 2, 2],
+        operations=[["+", "+"]],
+        spaces=True,
         shuffle=True,
-        samples=7500,
-        split_test_frac=0.66,
+        samples=50000,
+        split_test_frac=0.1,
     )
 
     # mix_datasets(

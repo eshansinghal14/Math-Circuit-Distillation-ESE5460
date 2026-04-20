@@ -51,9 +51,9 @@ import torch
 from utils import (
     LLAMA_1B_MODEL_NAME,
     LLAMA_8B_MODEL_NAME,
-    default_datasets_dir,
     expected_performance_drop_from_random_ablation_poly,
     mlp_flatten_dim_from_pretrained_id,
+    random_ablation_poly_output_dir,
 )
 
 
@@ -70,8 +70,8 @@ class ClusterMapping:
 
 
 def default_random_ablation_poly_json_paths() -> Tuple[str, str]:
-    """Default ``random_ablation_poly_1b.json`` / ``random_ablation_poly_8b.json`` under ``datasets/random_ablation_poly/``."""
-    root = os.path.join(default_datasets_dir(), "random_ablation_poly")
+    """Default poly paths under ``results/random_ablation_poly/<leaf>/`` (see :func:`utils.random_ablation_poly_output_dir`)."""
+    root = random_ablation_poly_output_dir()
     return (
         os.path.join(root, "random_ablation_poly_1b.json"),
         os.path.join(root, "random_ablation_poly_8b.json"),

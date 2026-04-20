@@ -1,0 +1,22 @@
+{
+  "format": "numpy_polyfit",
+  "coefficients_order": "high_to_low",
+  "degree": 8,
+  "coefficients": [
+    30.763911966649978,
+    -51.888776397747414,
+    -99.5868737561538,
+    352.39744370694376,
+    -405.8245802674568,
+    239.14275084120524,
+    -76.94687385994398,
+    12.817987196201406,
+    -0.020149815536750586
+  ],
+  "fraction_ablated_range": [
+    0.0,
+    1.0
+  ],
+  "max_poly_degree_cap": 8,
+  "source_points_json": "random_ablation_vs_fraction_8b.json"
+}

@@ -348,7 +348,7 @@ def main():
         action="store_true",
         help=(
             "Pairing: use raw ablation drops (baseline−accuracy); do not subtract poly expected "
-            "drop at |C|/D (see datasets/random_ablation_poly/random_ablation_poly_*.json)"
+            "drop at |C|/D (see results/random_ablation_poly/*/random_ablation_poly_*.json)"
         ),
     )
     parser.add_argument(
