@@ -1122,10 +1122,14 @@ def generate_expression_json_dataset(
     tokenizer,
     *,
     n_examples: int = 1000,
-    max_depth: int = 3,
-    allow_decimals: bool = True,
+    max_depth: int = 2,
+    allow_decimals: bool = False,
     max_int: int = 999,
     seed: Optional[int] = None,
+    ensure_diversity: bool = True,
+    allowed_ops: str = "+-*/",
+    max_parentheses_pairs: int = 1,
+    require_integer_answers: bool = True,
     split_test_frac: Optional[float] = None,
     datasets_dir: Optional[str] = None,
 ) -> None:
@@ -1140,42 +1144,83 @@ def generate_expression_json_dataset(
         raise ValueError("max_depth must be >= 1")
     if max_int < 1:
         raise ValueError("max_int must be >= 1")
+    if max_parentheses_pairs < 0 or max_parentheses_pairs > 1:
+        raise ValueError("max_parentheses_pairs must be 0 or 1")
+    ops = [op for op in allowed_ops if op in {"+", "-", "*", "/"}]
+    if not ops:
+        raise ValueError("allowed_ops must include at least one of '+', '-', '*', '/'")
 
     dataset_fname = _resolve_dataset_output_path(dataset_fname, datasets_dir)
     old_state = random.getstate()
     if seed is not None:
         random.seed(seed)
 
-    ops = ["+", "-", "*", "/"]
     seen_q = set()
     rows: List[Dict] = []
+    template_cycle = ["two_term", "three_term", "paren_left", "paren_right"]
 
-    def _expr(depth: int) -> Tuple[str, float]:
-        if depth <= 0 or random.random() < 0.35:
-            lit = _rand_expr_number(allow_decimals, max_int)
-            return lit, float(lit)
-        for _ in range(80):
-            ls, lv = _expr(depth - 1)
-            rs, rv = _expr(depth - 1)
+    def _n() -> str:
+        return _rand_expr_number(allow_decimals, max_int)
+
+    def _sample_expression(template: str) -> Tuple[str, Optional[float]]:
+        # single-step: a+b
+        if template == "two_term":
+            a, b = _n(), _n()
             op = random.choice(ops)
-            out = _safe_eval_bin(lv, op, rv)
-            if out is None:
-                continue
-            core = f"{ls}{op}{rs}"
-            if random.random() < 0.7:
-                core = f"({core})"
-            return core, out
-        lit = _rand_expr_number(allow_decimals, max_int)
-        return lit, float(lit)
+            expr = f"{a}{op}{b}"
+            return expr, _safe_eval_bin(float(a), op, float(b))
+
+        # multi-step, no parentheses: a+b*c
+        if template == "three_term":
+            a, b, c = _n(), _n(), _n()
+            op1, op2 = random.choice(ops), random.choice(ops)
+            expr = f"{a}{op1}{b}{op2}{c}"
+            try:
+                return expr, float(eval(expr))
+            except Exception:
+                return expr, None
+
+        if max_parentheses_pairs == 0:
+            return _sample_expression("three_term")
+
+        # one parenthesis pair max: (a+b)*c
+        if template == "paren_left":
+            a, b, c = _n(), _n(), _n()
+            op1, op2 = random.choice(ops), random.choice(ops)
+            expr = f"({a}{op1}{b}){op2}{c}"
+            try:
+                return expr, float(eval(expr))
+            except Exception:
+                return expr, None
+
+        # one parenthesis pair max: a*(b+c)
+        a, b, c = _n(), _n(), _n()
+        op1, op2 = random.choice(ops), random.choice(ops)
+        expr = f"{a}{op1}({b}{op2}{c})"
+        try:
+            return expr, float(eval(expr))
+        except Exception:
+            return expr, None
 
     max_attempts = max(20_000, n_examples * 120)
     attempts = 0
     while len(rows) < n_examples and attempts < max_attempts:
         attempts += 1
-        depth = 1 + ((len(rows) % max_depth))
-        e, val = _expr(depth)
+        if max_depth <= 1:
+            tpl = "two_term"
+        elif max_depth == 2:
+            tpl = random.choice(["two_term", "three_term"])
+        else:
+            tpl = random.choice(template_cycle)
+            if ensure_diversity and len(rows) < len(template_cycle):
+                tpl = template_cycle[len(rows)]
+        e, val = _sample_expression(tpl)
+        if val is None:
+            continue
         q = f"{e}="
         if q in seen_q:
+            continue
+        if require_integer_answers and abs(val - round(val)) > 1e-10:
             continue
         a = _fmt_expr_answer(val)
         ids = tokenizer.encode(q + a, add_special_tokens=False)
