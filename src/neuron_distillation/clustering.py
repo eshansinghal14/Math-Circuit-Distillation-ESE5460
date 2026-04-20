@@ -19,6 +19,7 @@ import matplotlib.pyplot as plt
 
 from utils import (
     LLAMA_1B_MODEL_NAME,
+    NEURON_CLUSTERING_SUBDIR,
     default_datasets_dir,
     load_model_checkpoint,
     patch_tokenizer_no_special_tokens,
@@ -140,7 +141,7 @@ def _neuron_clustering_run_dir(model_name: str, output_dir: Optional[str] = None
     If omitted, uses the current working directory (``./neuron_clustering/...``).
     """
     base = (output_dir or ".").strip() or "."
-    parts: List[str] = [base, "neuron_clustering"]
+    parts: List[str] = [base, NEURON_CLUSTERING_SUBDIR]
     parts.extend(_model_path_segments(model_name))
     return os.path.abspath(os.path.join(*parts))
 

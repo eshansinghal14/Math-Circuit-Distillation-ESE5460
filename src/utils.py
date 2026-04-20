@@ -39,7 +39,10 @@ STUDENT_WEIGHTS_FILE = "student_weights.pt"
 LLAMA_1B_MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 LLAMA_8B_MODEL_NAME = "meta-llama/Meta-Llama-3-8B-Instruct"
 
-# Subpaths under ``<run>/neuron-clustering/`` (literal ``meta-llama/...`` folders on disk).
+# Top-level folder under each run root where :mod:`neuron_distillation.clustering` writes
+# (must match ``_neuron_clustering_run_dir``).
+NEURON_CLUSTERING_SUBDIR = "neuron_clustering"
+# HF model ids as nested path segments under ``<run>/neuron_clustering/``.
 NEURON_CLUSTERING_STUDENT_SUBPATH = LLAMA_1B_MODEL_NAME
 NEURON_CLUSTERING_TEACHER_SUBPATH = LLAMA_8B_MODEL_NAME
 

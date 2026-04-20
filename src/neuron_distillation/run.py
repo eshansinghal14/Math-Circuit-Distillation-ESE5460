@@ -12,7 +12,7 @@ otherwise omit if checkpoints live in ``--save-dir``.
 Outputs per run: ``student_model/``, ``training_history.json`` (``epoch_flops``: floats when
 measured, ``null`` when skipped by ``--count-flops-every``), and
 ``training_curves.png``. Circuit runs also use ``ablation/``, ``cluster_mapping.json``,
-and global ``neuron-clustering/``.
+and global ``neuron_clustering/`` (same dirname as :mod:`neuron_distillation.clustering`).
 
 Usage (from ``src/``)::
 
@@ -50,6 +50,7 @@ from utils import (
     EVAL_MAX_NEW_TOKENS,
     LLAMA_1B_MODEL_NAME,
     LLAMA_8B_MODEL_NAME,
+    NEURON_CLUSTERING_SUBDIR,
     _extract_circuit_model_state_dict,
     load_model,
     load_model_checkpoint,
@@ -539,7 +540,7 @@ def main():
     is_resume = student_source is not None
 
     circuit = args.mode == "circuit"
-    neuron_clustering_root = os.path.join(args.save_dir, "neuron-clustering")
+    neuron_clustering_root = os.path.join(args.save_dir, NEURON_CLUSTERING_SUBDIR)
     student_clusters = os.path.join(neuron_clustering_root, args.student_model, "clusters")
     teacher_clusters = os.path.join(neuron_clustering_root, args.teacher_model, "clusters")
     student_ablation_dir = _ablation_dir_for_model(run_dir, args.student_model)

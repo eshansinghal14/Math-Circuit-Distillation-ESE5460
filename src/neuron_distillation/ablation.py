@@ -21,6 +21,7 @@ import torch
 from utils import (
     EVAL_MAX_NEW_TOKENS,
     LLAMA_1B_MODEL_NAME,
+    NEURON_CLUSTERING_SUBDIR,
     default_datasets_dir,
     eval_model,
     load_model,
@@ -114,7 +115,7 @@ def ablation(
         class_to_problems: Output of ``classify_problems``.
         class_clusters: List of *k* values per subclass.  Defaults to ``[6]*8``.
         results_base_dir: Root for ablation output files.
-        clusters_base_dir: Root where neuron-clustering results live.
+        clusters_base_dir: Root where neuron clustering results live (``neuron_clustering/``).
         batch_size: Evaluation batch size.
         max_new_tokens: Tokens to generate during eval.
 
@@ -131,7 +132,9 @@ def ablation(
     os.makedirs(results_base_dir, exist_ok=True)
 
     if clusters_base_dir is None:
-        clusters_base_dir = os.path.join(os.path.dirname(__file__), "..", "..", "results", "neuron-clustering", model_name)
+        clusters_base_dir = os.path.join(
+            os.path.dirname(__file__), "..", "..", "results", NEURON_CLUSTERING_SUBDIR, model_name,
+        )
 
     out_path = os.path.join(results_base_dir, "ablation_performance.json")
     buffer_results_path = os.path.join(results_base_dir, "ablation_results_buffer.json")
@@ -272,7 +275,7 @@ def apply_activation_ablation_hooks(model, neuron_indices):
 
     This avoids in-place weight mutation and allows reusing a single loaded model.
     Neurons are specified as flattened indices across all MLP layers, matching
-    the neuron-clustering output format.
+    the ``neuron_clustering/`` output format.
 
     Returns a list of hook handles; call ``remove_ablation_hooks`` after eval.
     """

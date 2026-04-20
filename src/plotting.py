@@ -12,6 +12,7 @@ import torch
 from cka_loss import stable_rank_centered_gram
 from utils import (
     NEURON_CLUSTERING_STUDENT_SUBPATH,
+    NEURON_CLUSTERING_SUBDIR,
     NEURON_CLUSTERING_TEACHER_SUBPATH,
     random_ablation_poly_output_dir,
 )
@@ -307,7 +308,7 @@ def _cluster_pt_paths_under_data_dir(
     *,
     subclass: int = 0,
 ) -> Tuple[str, str]:
-    """``.../neuron-clustering/<tower-model>/clusters/.../k{k}.pt``."""
+    """``.../neuron_clustering/<tower-model>/clusters/.../k{k}.pt``."""
     for key in ("1b", "8b"):
         if key not in k_by_tower:
             raise KeyError(f"k map must include {key!r}, got {list(k_by_tower.keys())!r}")
@@ -319,7 +320,7 @@ def _cluster_pt_paths_under_data_dir(
         k = int(k_by_tower[tw])
         p = os.path.join(
             base,
-            "neuron-clustering",
+            NEURON_CLUSTERING_SUBDIR,
             *rel.split("/"),
             "clusters",
             f"subclass_{subclass}_clusters",
@@ -327,7 +328,7 @@ def _cluster_pt_paths_under_data_dir(
         )
         if not os.path.isfile(p):
             raise FileNotFoundError(
-                f"Missing {tw} cluster checkpoint under neuron-clustering/{rel}: {p!r}",
+                f"Missing {tw} cluster checkpoint under {NEURON_CLUSTERING_SUBDIR}/{rel}: {p!r}",
             )
         out[tw] = p
     return out["1b"], out["8b"]
@@ -346,7 +347,7 @@ def print_clustering_cluster_counts_table(
     """Print a text table: rows = one per ``data_dir``, columns = cluster id, cells = ``1b/8b`` counts.
 
     For each ``data_dir``, ``num_clusters[i]`` is ``{'1b': k1, '8b': k2}``. Cluster ``.pt`` paths are
-    under ``neuron-clustering/`` using :data:`utils.NEURON_CLUSTERING_STUDENT_SUBPATH` and
+    under ``neuron_clustering/`` using :data:`utils.NEURON_CLUSTERING_STUDENT_SUBPATH` and
     :data:`utils.NEURON_CLUSTERING_TEACHER_SUBPATH`. Prefer **absolute** paths for each ``data_dir``.
 
     By default this only prints and returns ``None``. In Jupyter/IPython, returning the same string
@@ -460,7 +461,7 @@ def teacher_cluster_stable_ranks_centered_gram(
 
     Uses the same column centering as linear CKA (:func:`cka_loss.stable_rank_centered_gram`).
     ``cluster_pt_path`` should be the **8b (teacher)** cluster checkpoint. ``subclass_features_pt_path``
-    must be that model's ``subclass_features.pt`` in the same ``neuron-clustering/.../<model_dir>/`` tree.
+    must be that model's ``subclass_features.pt`` in the same ``neuron_clustering/.../<model_dir>/`` tree.
 
     Requires CUDA; raises :exc:`RuntimeError` if ``torch.cuda.is_available()`` is false.
 
@@ -1116,7 +1117,7 @@ def plot_frac_activated_vs_mean_cossim(
 def plot_k_vs_loss(model_name: str) -> None:
     from neuron_distillation.clustering import _save_k_vs_concordance_plot
 
-    base_dir = os.path.join("..", "results", "neuron-clustering", model_name)
+    base_dir = os.path.join("..", "results", NEURON_CLUSTERING_SUBDIR, model_name)
     json_path = os.path.join(base_dir, "k_gs_testing.json")
 
     if not os.path.exists(json_path):
