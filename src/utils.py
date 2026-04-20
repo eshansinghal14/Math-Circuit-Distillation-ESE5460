@@ -1083,6 +1083,135 @@ def generate_math_dataset(
         _write(test_path, rows[split_i:])
 
 
+def _rand_expr_number(allow_decimals: bool, max_int: int) -> str:
+    if allow_decimals and random.random() < 0.45:
+        return f"{random.randint(0, max_int)}.{random.randint(0, 9)}"
+    return str(random.randint(0, max_int))
+
+
+def _safe_eval_bin(a: float, op: str, b: float) -> Optional[float]:
+    try:
+        if op == "+":
+            out = a + b
+        elif op == "-":
+            out = a - b
+        elif op == "*":
+            out = a * b
+        elif op == "/":
+            if abs(b) < 1e-12:
+                return None
+            out = a / b
+        else:
+            return None
+    except Exception:
+        return None
+    if not np.isfinite(out):
+        return None
+    return out
+
+
+def _fmt_expr_answer(v: float) -> str:
+    if abs(v - round(v)) < 1e-10:
+        return str(int(round(v)))
+    s = f"{v:.6f}".rstrip("0").rstrip(".")
+    return "0" if s == "-0" else s
+
+
+def generate_expression_json_dataset(
+    dataset_fname: str,
+    tokenizer,
+    *,
+    n_examples: int = 1000,
+    max_depth: int = 3,
+    allow_decimals: bool = True,
+    max_int: int = 999,
+    seed: Optional[int] = None,
+    split_test_frac: Optional[float] = None,
+    datasets_dir: Optional[str] = None,
+) -> None:
+    """Generate expression dataset rows: ``{q_str, a_str, ids}``.
+
+    ``q_str`` is compact and ends with ``=`` (no spaces, no words), e.g. ``(19+4)*15=``.
+    ``a_str`` stores the computed result as a compact numeric string.
+    """
+    if n_examples < 1:
+        raise ValueError("n_examples must be >= 1")
+    if max_depth < 1:
+        raise ValueError("max_depth must be >= 1")
+    if max_int < 1:
+        raise ValueError("max_int must be >= 1")
+
+    dataset_fname = _resolve_dataset_output_path(dataset_fname, datasets_dir)
+    old_state = random.getstate()
+    if seed is not None:
+        random.seed(seed)
+
+    ops = ["+", "-", "*", "/"]
+    seen_q = set()
+    rows: List[Dict] = []
+
+    def _expr(depth: int) -> Tuple[str, float]:
+        if depth <= 0 or random.random() < 0.35:
+            lit = _rand_expr_number(allow_decimals, max_int)
+            return lit, float(lit)
+        for _ in range(80):
+            ls, lv = _expr(depth - 1)
+            rs, rv = _expr(depth - 1)
+            op = random.choice(ops)
+            out = _safe_eval_bin(lv, op, rv)
+            if out is None:
+                continue
+            core = f"{ls}{op}{rs}"
+            if random.random() < 0.7:
+                core = f"({core})"
+            return core, out
+        lit = _rand_expr_number(allow_decimals, max_int)
+        return lit, float(lit)
+
+    max_attempts = max(20_000, n_examples * 120)
+    attempts = 0
+    while len(rows) < n_examples and attempts < max_attempts:
+        attempts += 1
+        depth = 1 + ((len(rows) % max_depth))
+        e, val = _expr(depth)
+        q = f"{e}="
+        if q in seen_q:
+            continue
+        a = _fmt_expr_answer(val)
+        ids = tokenizer.encode(q + a, add_special_tokens=False)
+        rows.append({"q_str": q, "a_str": a, "ids": ids})
+        seen_q.add(q)
+
+    if len(rows) < n_examples:
+        raise ValueError(f"Could only generate {len(rows)} unique expressions; requested {n_examples}.")
+
+    def _write(path: str, data: List[Dict]) -> None:
+        d = os.path.dirname(os.path.abspath(path))
+        if d:
+            os.makedirs(d, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+
+    _write(dataset_fname, rows)
+
+    if split_test_frac is not None:
+        if not (0.0 < split_test_frac < 1.0):
+            raise ValueError("split_test_frac must be in (0, 1).")
+        if not dataset_fname.endswith("_all.json"):
+            raise ValueError(
+                "split_test_frac requires dataset_fname to end with '_all.json' "
+                "(e.g. datasets/svamp_style_expr_all.json).",
+            )
+        split_i = int(len(rows) * (1.0 - split_test_frac))
+        train_path = dataset_fname.replace("_all.json", f"{DATASET_TRAIN_SUFFIX}.json")
+        test_path = dataset_fname.replace("_all.json", f"{DATASET_TEST_SUFFIX}.json")
+        _write(train_path, rows[:split_i])
+        _write(test_path, rows[split_i:])
+
+    if seed is not None:
+        random.setstate(old_state)
+
+
 def _resolve_ckpt_path(checkpoint: str) -> str:
     """
     Resolve a checkpoint spec to a local .pt file.
