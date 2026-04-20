@@ -70,7 +70,7 @@ class ClusterMapping:
 
 
 def default_random_ablation_poly_json_paths() -> Tuple[str, str]:
-    """Default poly paths under ``results/random_ablation_poly/<leaf>/`` (see :func:`utils.random_ablation_poly_output_dir`)."""
+    """Default poly paths: ``results/random_ablation_poly/random_ablation_poly_{1b,8b}.json`` (see :func:`utils.random_ablation_poly_output_dir`)."""
     root = random_ablation_poly_output_dir()
     return (
         os.path.join(root, "random_ablation_poly_1b.json"),

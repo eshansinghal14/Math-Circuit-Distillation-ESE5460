@@ -562,21 +562,26 @@ def random_ablation_poly_output_dir(plot_input_directory: Optional[str] = None) 
     path segment of ``plot_input_directory`` (same as ``directory.split("/")[-1]`` on POSIX
     for a normalized path).
 
-    When ``plot_input_directory`` is omitted, it defaults to the same path as that plotting
-    function (``src/experiments/random_ablation_vs_fraction/results``), so ``leaf`` is
-    ``results``.
+    When ``plot_input_directory`` is omitted, returns ``<repo>/results/random_ablation_poly``
+    (no extra subfolder). That matches the default layout for
+    ``default_random_ablation_poly_json_paths`` (``random_ablation_poly_1b.json`` directly
+    under ``results/random_ablation_poly/``). When a directory is passed from plotting, the
+    last path segment is ``leaf`` unless it is named ``results`` (the usual experiment output
+    folder name), in which case the same flat directory is used so paths are not
+    ``.../random_ablation_poly/results/``. Other leaves (e.g. ``222_add``) still nest under
+    ``random_ablation_poly/<leaf>/``.
     """
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    base = os.path.join(repo_root, "results", "random_ablation_poly")
     if plot_input_directory is None:
-        plot_input_directory = os.path.join(
-            os.path.dirname(__file__),
-            "experiments",
-            "random_ablation_vs_fraction",
-            "results",
-        )
+        return base
     plot_input_directory = os.path.abspath(plot_input_directory)
     leaf = os.path.basename(os.path.normpath(plot_input_directory))
-    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    return os.path.join(repo_root, "results", "random_ablation_poly", leaf)
+    # Default experiment output folder is often named ``results``; using it as ``leaf`` would
+    # duplicate ``.../random_ablation_poly/results/``. Flatten to ``.../random_ablation_poly/``.
+    if leaf == "results":
+        return base
+    return os.path.join(base, leaf)
 
 
 def dataset_train_json_path(prefix: str, datasets_dir: Optional[str] = None) -> str:
