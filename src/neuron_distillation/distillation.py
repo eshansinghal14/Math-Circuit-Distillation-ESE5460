@@ -841,7 +841,7 @@ def eval_accuracy(
             batch_prompts,
             return_tensors="pt",
             padding=True,
-            add_special_tokens=False,
+            add_special_tokens=True,
         ).to(model.device)
 
         outputs = model.generate(

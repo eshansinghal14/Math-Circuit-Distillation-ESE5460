@@ -48,7 +48,7 @@ def eval_and_print(model, tokenizer, data, max_new_tokens, n_samples, label):
         ba = answers[i : i + batch_size]
 
         inputs = tokenizer(
-            bp, return_tensors="pt", padding=True, add_special_tokens=False,
+            bp, return_tensors="pt", padding=True, add_special_tokens=True,
         ).to(model.device)
 
         with torch.no_grad():
@@ -69,7 +69,7 @@ def eval_and_print(model, tokenizer, data, max_new_tokens, n_samples, label):
 
             if printed < n_samples:
                 prompt = bp[j]
-                prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
+                prompt_ids = tokenizer.encode(prompt, add_special_tokens=True)
                 gen_ids = outputs[j].tolist()
                 new_ids = gen_ids[len(prompt_ids):]
                 new_tokens = [tokenizer.decode([t]) for t in new_ids]

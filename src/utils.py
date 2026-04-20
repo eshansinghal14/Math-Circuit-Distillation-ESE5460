@@ -434,7 +434,7 @@ def run_hf_benchmark(
                 return_tensors="pt",
                 padding=True,
                 truncation=True,
-                add_special_tokens=False,
+                add_special_tokens=True,
             ).to(model.device)
             outputs = model.generate(
                 **inputs,
@@ -503,7 +503,7 @@ def evaluate(
             batch_p,
             return_tensors="pt",
             padding=True,
-            add_special_tokens=False,
+            add_special_tokens=True,
         ).to(model.device)
         outputs = model.generate(
             **inputs,
