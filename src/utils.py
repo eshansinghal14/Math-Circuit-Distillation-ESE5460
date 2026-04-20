@@ -1224,14 +1224,14 @@ if __name__ == "__main__":
     )
 
     generate_math_dataset(
-        dataset_all_json_path("222_add"),
+        dataset_all_json_path("21_mult"),
         tokenizer,
-        digits=[2, 2, 2],
-        operations=[["+", "+"]],
+        digits=[2, 1],
+        operations=[["*"]],
         spaces=True,
         shuffle=True,
-        samples=50000,
-        split_test_frac=0.1,
+        samples=1000,
+        split_test_frac=0.999,
     )
 
     # mix_datasets(

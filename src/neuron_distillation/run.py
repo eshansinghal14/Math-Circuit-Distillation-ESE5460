@@ -397,8 +397,17 @@ def main():
         "--log-kl-cka-grad-norms",
         action="store_true",
         help=(
-            "Log ‖g_KL‖ and ‖g_{λ·CKA}‖ (autograd.grad; ~2× work). In circuit mode, scale the "
-            "λ·CKA contribution to the gradient by ‖g_KL‖/‖g_{λ·CKA}‖"
+            "Every --step-log-interval batches: log ‖g_KL‖ and ‖g_{λ·CKA}‖ (autograd.grad; ~2× work "
+            "on those steps). Other steps use ordinary backward. In circuit mode, scale the λ·CKA "
+            "contribution by ‖g_KL‖/‖g_{λ·CKA}‖ on logging steps"
+        ),
+    )
+    parser.add_argument(
+        "--track-stable-rank",
+        action="store_true",
+        help=(
+            "Circuit: every --step-log-interval batches, print stable rank (‖G‖_F²/‖G‖_2²) "
+            "of the student centered Gram per cluster pair as |0: … | 1: … | …"
         ),
     )
     parser.add_argument(
@@ -729,6 +738,7 @@ def main():
         save_dir=run_dir,
         count_flops_every=args.count_flops_every,
         log_kl_cka_grad_norms=args.log_kl_cka_grad_norms,
+        track_stable_rank=args.track_stable_rank,
         seed=args.seed,
     )
     trainer = ClusterDistillationTrainer(
