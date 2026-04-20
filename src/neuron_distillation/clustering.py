@@ -134,10 +134,20 @@ def _model_path_segments(model_name: str) -> Tuple[str, ...]:
 
 
 def _neuron_clustering_run_dir(model_name: str, extra_subdir: Optional[str] = None) -> str:
-    """``results/neuron-clustering/[extra_subdir/]<hf-model-as-dirs>/`` (no fixed ``default/``)."""
-    parts: List[str] = ["results", "neuron-clustering"]
+    """``results/[tag/]neuron_clustering/<hf-model-as-dirs>/``.
+
+    If ``extra_subdir`` is set (e.g. ``frac0.01`` or ``222_add/frac0.01``), ``tag`` is the
+    **last** path segment only, so outputs land under ``.../frac0.01/neuron_clustering/...``
+    not ``.../222_add/frac0.01/...``. If ``extra_subdir`` is omitted, the path is
+    ``results/neuron_clustering/<model>/``.
+    """
+    parts: List[str] = ["results"]
     if extra_subdir is not None and str(extra_subdir).strip():
-        parts.append(str(extra_subdir).strip())
+        tail = str(extra_subdir).strip().replace("\\", "/")
+        leaf = tail.split("/")[-1]
+        if leaf:
+            parts.append(leaf)
+    parts.append("neuron_clustering")
     parts.extend(_model_path_segments(model_name))
     return os.path.abspath(os.path.join(*parts))
 
@@ -188,8 +198,9 @@ def _parse_args(argv):
         default=None,
         metavar="DIR",
         help=(
-            "Optional extra subdirectory under results/neuron-clustering/ before the model-id "
-            "path. Omit for results/neuron-clustering/<hf-id-as-dirs>/",
+            "Run tag folder under results/ before neuron_clustering/ (e.g. frac0.01). "
+            "If you pass a path like 222_add/frac0.01, only the last segment (frac0.01) is used. "
+            "Omit for results/neuron_clustering/<hf-id-as-dirs>/",
         ),
     )
     parser.add_argument(
