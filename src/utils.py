@@ -49,8 +49,8 @@ def test_model(model, tokenizer, dataset_fname, results_fname, batch_size=50, ma
     with open(dataset_fname, 'r') as f:
         dataset = json.load(f)
     prompts = []
-    for s in dataset:
-        prompts.append(s['q_str'])
+    for i, s in enumerate(dataset):
+        prompts.append(s[i])
     results = []
     for i in range(0, len(prompts), batch_size):
         with torch.no_grad():
