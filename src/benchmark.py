@@ -20,7 +20,7 @@ model, tokenizer = load_model(model_name)
 # gen_2d_add_dataset('../datasets/2d_add_test_20.json', samples=None, tokenizer=tokenizer)
 # gen_3d_add_dataset('../datasets/3d_add_test.json', samples=1000, tokenizer=tokenizer)
 
-dataset = '2d_add_test_20.json'
+dataset = '2d_add_all.json'
 test_model(model, tokenizer, f'../datasets/{dataset}', f'../results/{model_name}/{dataset}')
 
 eval_model(f'../results/meta-llama/Meta-Llama-3-8B/{dataset}')
