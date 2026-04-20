@@ -1096,6 +1096,8 @@ def plot_frac_activated_vs_mean_cossim(
 
 
 def plot_k_vs_loss(model_name: str) -> None:
+    from neuron_distillation.clustering import _save_k_vs_concordance_plot
+
     base_dir = os.path.join("..", "results", "neuron-clustering", model_name)
     json_path = os.path.join(base_dir, "k_gs_testing.json")
 
@@ -1105,23 +1107,46 @@ def plot_k_vs_loss(model_name: str) -> None:
     with open(json_path, "r") as f:
         k_gs_testing = json.load(f)
 
+    conc_path = os.path.join(base_dir, "k_gs_concordance.json")
+    k_gs_concordance: Optional[Dict[str, Any]] = None
+    if os.path.isfile(conc_path):
+        with open(conc_path, "r") as f:
+            k_gs_concordance = json.load(f)
+
     os.makedirs(base_dir, exist_ok=True)
+    label = os.path.basename(base_dir)
 
     for subclass_str, k_dict in k_gs_testing.items():
         ks = sorted(int(k) for k in k_dict.keys())
-        losses = [k_dict[str(k)] for k in ks]
+        losses = [float(k_dict[str(k)]) for k in ks]
 
         plt.figure(figsize=(6, 4))
         plt.plot(ks, losses, marker="o")
         plt.xlabel("k (number of clusters)")
         plt.ylabel("Mean cosine distance to centroids (loss)")
-        plt.title(f"k-means loss vs k for {os.path.basename(base_dir)}, subclass {subclass_str}")
+        plt.title(f"k-means loss vs k for {label}, subclass {subclass_str}")
         plt.grid(True, alpha=0.3)
 
         out_path = os.path.join(base_dir, f"k_vs_loss_subclass_{subclass_str}.png")
         plt.savefig(out_path, bbox_inches="tight")
         plt.close()
         print(f"Saved plot to {out_path}")
+
+        if k_gs_concordance is not None:
+            sub_c = k_gs_concordance.get(subclass_str)
+            if sub_c is None:
+                sub_c = k_gs_concordance.get(str(int(subclass_str)))
+            if sub_c:
+                concs = [float(sub_c[str(k)]) for k in ks]
+                _save_k_vs_concordance_plot(
+                    ks,
+                    concs,
+                    plots_dir=base_dir,
+                    model_name=label,
+                    subclass=int(subclass_str),
+                )
+                conc_out = os.path.join(base_dir, f"k_vs_concordance_subclass_{subclass_str}.png")
+                print(f"Saved plot to {conc_out}")
 
 if __name__ == "__main__":
     # plot_training_histories_param_sweep(

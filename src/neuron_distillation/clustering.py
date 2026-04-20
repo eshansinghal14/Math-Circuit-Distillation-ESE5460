@@ -9,8 +9,9 @@ if _SRC_ROOT not in sys.path:
 
 import argparse
 import warnings
-from typing import List, Tuple
+from typing import List, Optional, Sequence, Tuple
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer
@@ -27,6 +28,103 @@ from circuit_discovery.utils import parse_equation
 from neuron_distillation.activations import NeuronActivationsGenerator
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def _save_k_vs_concordance_plot(
+    ks: Sequence[int],
+    concordance: Sequence[float],
+    *,
+    plots_dir: str,
+    model_name: str,
+    subclass: int,
+) -> None:
+    """Mean Adjusted Rand index between paired k-means runs vs k (higher = more stable partitions)."""
+    ks = list(ks)
+    y = [float(x) for x in concordance]
+    if len(ks) < 1 or len(y) != len(ks):
+        return
+
+    plt.figure(figsize=(6, 4))
+    plt.plot(ks, y, marker="o")
+    plt.xlabel("k (number of clusters)")
+    plt.ylabel("Partition concordance (mean ARI)")
+    plt.title(f"k-means stability vs k for {model_name}, subclass {subclass}")
+    plt.grid(True, alpha=0.3)
+    plt.ylim(-0.05, 1.05)
+
+    plot_path = os.path.join(plots_dir, f"k_vs_concordance_subclass_{subclass}.png")
+    plt.savefig(plot_path, bbox_inches="tight")
+    plt.close()
+
+
+def _set_rng_seeds(seed: int, device: torch.device) -> None:
+    torch.manual_seed(seed)
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(seed)
+
+
+def _adjusted_rand_index_numpy(labels_a: np.ndarray, labels_b: np.ndarray) -> float:
+    """Adjusted Rand index between two cluster assignments (same points). Pure NumPy."""
+    a = np.asarray(labels_a, dtype=np.int64).ravel()
+    b = np.asarray(labels_b, dtype=np.int64).ravel()
+    if a.size != b.size:
+        raise ValueError("label arrays must have the same length")
+    n = int(a.size)
+    if n < 2:
+        return 1.0
+    a = np.unique(a, return_inverse=True)[1]
+    b = np.unique(b, return_inverse=True)[1]
+    n_a = int(a.max()) + 1
+    n_b = int(b.max()) + 1
+    contingency = np.zeros((n_a, n_b), dtype=np.int64)
+    np.add.at(contingency, (a, b), 1)
+    comb_ij = contingency.astype(np.float64) * (contingency.astype(np.float64) - 1.0) / 2.0
+    sum_comb = float(comb_ij.sum())
+    a_sum = contingency.sum(axis=1).astype(np.float64)
+    b_sum = contingency.sum(axis=0).astype(np.float64)
+    sum_comb_a = float((a_sum * (a_sum - 1.0) / 2.0).sum())
+    sum_comb_b = float((b_sum * (b_sum - 1.0) / 2.0).sum())
+    comb_n = n * (n - 1) / 2.0
+    if comb_n <= 0:
+        return 1.0
+    prod_combs = sum_comb_a * sum_comb_b / comb_n
+    mean_comb = (sum_comb_a + sum_comb_b) / 2.0
+    denom = mean_comb - prod_combs
+    if abs(denom) < 1e-15:
+        return 1.0 if abs(sum_comb - prod_combs) < 1e-15 else 0.0
+    return (sum_comb - prod_combs) / denom
+
+
+def partition_concordance_ari(
+    x: torch.Tensor,
+    k: int,
+    *,
+    num_iters: int = 100,
+    n_pairs: int = 5,
+) -> float:
+    """Mean ARI between ``n_pairs`` independent pairs of cosine k-means runs (replication concordance)."""
+    n_points = x.shape[0]
+    if k < 1 or k > n_points:
+        return float("nan")
+    device = x.device
+    aris: List[float] = []
+    base = 913_733
+    for p in range(n_pairs):
+        s1 = base + 10_000 * k + 2 * p
+        s2 = s1 + 1
+        _set_rng_seeds(s1, device)
+        x1 = x.clone()
+        ids1, _, _ = _kmeans_cosine(x1, k=k, num_iters=num_iters)
+        _set_rng_seeds(s2, device)
+        x2 = x.clone()
+        ids2, _, _ = _kmeans_cosine(x2, k=k, num_iters=num_iters)
+        aris.append(
+            _adjusted_rand_index_numpy(
+                ids1.detach().cpu().numpy(),
+                ids2.detach().cpu().numpy(),
+            ),
+        )
+    return float(np.mean(aris))
 
 
 def _model_path_segments(model_name: str) -> Tuple[str, ...]:
@@ -111,6 +209,16 @@ def _parse_args(argv):
         default=1,
         metavar="S",
         help="Spacing between k values (default: 2).",
+    )
+    parser.add_argument(
+        "--concordance-pairs",
+        type=int,
+        default=5,
+        metavar="P",
+        help=(
+            "Pairs of independent k-means runs per k for partition concordance (mean ARI); "
+            "higher suggests a more stable choice of k (default: 5).",
+        ),
     )
     return parser.parse_args(argv)
 
@@ -338,28 +446,21 @@ def _choose_kmeans_device_dtype(x: torch.Tensor) -> Tuple[torch.device, torch.dt
     return torch.device("cpu"), torch.float32
 
 
-def run_neuron_kmeans(
-    k,
+def load_subclass_features_bundle(
     subclass: int,
-    batch_size=5,
-    num_iters=100,
-    log=True,
-    subclass_features_path=None,
-    results_dir=None,
+    results_dir: str,
+    batch_size: int = 5,
     *,
     neuron_slice_chunk: int = 4096,
-):
-    if results_dir is None:
-        results_dir = os.path.join(
-            "results", "neuron-clustering", "default", *_model_path_segments(model_name),
-        )
+    subclass_features_path: Optional[str] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Load (or collect) neuron feature matrix and global indices for one subclass; used for k-sweeps."""
     results_dir = os.path.abspath(results_dir)
     os.makedirs(results_dir, exist_ok=True)
-
     if subclass_features_path is None:
         subclass_features_path = os.path.join(results_dir, "subclass_features.pt")
 
-    if subclass_features_path is not None and os.path.exists(subclass_features_path):
+    if os.path.exists(subclass_features_path):
         ckpt = torch.load(subclass_features_path, map_location="cpu")
         features_per_subclass = {int(c): v for c, v in ckpt["features_per_subclass"].items()}
         indices_per_subclass = {int(c): idx for c, idx in ckpt["indices_per_subclass"].items()}
@@ -376,10 +477,69 @@ def run_neuron_kmeans(
     x = features_per_subclass[subclass].float()
     km_dev, km_dtype = _choose_kmeans_device_dtype(x)
     x = x.to(device=km_dev, dtype=km_dtype)
-
     subclass_indices = indices_per_subclass[subclass]
     if subclass_indices.device != km_dev:
         subclass_indices = subclass_indices.to(km_dev)
+    return x, subclass_indices
+
+
+def run_neuron_kmeans(
+    k,
+    subclass: int,
+    batch_size=5,
+    num_iters=100,
+    log=True,
+    subclass_features_path=None,
+    results_dir=None,
+    *,
+    neuron_slice_chunk: int = 4096,
+    x_preloaded: Optional[torch.Tensor] = None,
+    subclass_indices_preloaded: Optional[torch.Tensor] = None,
+    rng_seed: Optional[int] = None,
+):
+    if results_dir is None:
+        results_dir = os.path.join(
+            "results", "neuron-clustering", "default", *_model_path_segments(model_name),
+        )
+    results_dir = os.path.abspath(results_dir)
+    os.makedirs(results_dir, exist_ok=True)
+
+    if subclass_features_path is None:
+        subclass_features_path = os.path.join(results_dir, "subclass_features.pt")
+
+    if x_preloaded is not None:
+        x = x_preloaded.clone()
+        km_dev = x.device
+        subclass_indices = subclass_indices_preloaded
+        if subclass_indices is None:
+            raise ValueError("subclass_indices_preloaded is required when x_preloaded is set")
+        if subclass_indices.device != km_dev:
+            subclass_indices = subclass_indices.to(km_dev)
+    else:
+        if subclass_features_path is not None and os.path.exists(subclass_features_path):
+            ckpt = torch.load(subclass_features_path, map_location="cpu")
+            features_per_subclass = {int(c): v for c, v in ckpt["features_per_subclass"].items()}
+            indices_per_subclass = {int(c): idx for c, idx in ckpt["indices_per_subclass"].items()}
+        else:
+            features_per_subclass, indices_per_subclass = _collect_neuron_features_per_subclass(
+                batch_size=batch_size,
+                save_path=subclass_features_path,
+                neuron_slice_chunk=neuron_slice_chunk,
+            )
+
+        if subclass not in features_per_subclass:
+            raise ValueError(f"No features found for subclass {subclass}")
+
+        x = features_per_subclass[subclass].float()
+        km_dev, km_dtype = _choose_kmeans_device_dtype(x)
+        x = x.to(device=km_dev, dtype=km_dtype)
+
+        subclass_indices = indices_per_subclass[subclass]
+        if subclass_indices.device != km_dev:
+            subclass_indices = subclass_indices.to(km_dev)
+
+    if rng_seed is not None:
+        _set_rng_seeds(int(rng_seed), km_dev)
 
     cluster_ids, centroids, loss = _kmeans_cosine(x, k=k, num_iters=num_iters)
 
@@ -461,6 +621,8 @@ if __name__ == "__main__":
         raise SystemExit("ERROR: --cluster-k-max must be >= 1")
     if args.cluster_k_step < 1:
         raise SystemExit("ERROR: --cluster-k-step must be >= 1")
+    if args.concordance_pairs < 1:
+        raise SystemExit("ERROR: --concordance-pairs must be >= 1")
 
     model_name = args.model_name
     k_classes = args.k_classes
@@ -496,13 +658,29 @@ if __name__ == "__main__":
         print(neuron_masks[i].count_nonzero().item())
 
     k_gs_testing = {}
+    k_gs_concordance = {}
     plots_dir = os.path.join(results_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
     for subclass in range(k_classes):
         if neuron_masks[subclass].any().item():
             print(f"Processing subclass {subclass}")
             k_gs_testing[subclass] = {}
+            k_gs_concordance[subclass] = {}
+            x_sub, idx_sub = load_subclass_features_bundle(
+                subclass,
+                results_dir,
+                batch_size=args.batch_size,
+                neuron_slice_chunk=args.neuron_slice_chunk,
+            )
             for k in range(1, args.cluster_k_max + 1, args.cluster_k_step):
+                conc = partition_concordance_ari(
+                    x_sub,
+                    k,
+                    num_iters=100,
+                    n_pairs=args.concordance_pairs,
+                )
+                k_gs_concordance[subclass][k] = conc
+                rng_seed = 40_000 + subclass * 1_000 + k
                 _, _, loss = run_neuron_kmeans(
                     k,
                     subclass=subclass,
@@ -510,12 +688,19 @@ if __name__ == "__main__":
                     batch_size=args.batch_size,
                     results_dir=results_dir,
                     neuron_slice_chunk=args.neuron_slice_chunk,
+                    x_preloaded=x_sub,
+                    subclass_indices_preloaded=idx_sub,
+                    rng_seed=rng_seed,
                 )
                 k_gs_testing[subclass][k] = loss
-                print(f"Subclass {subclass}, k={k}, loss={loss}")
+                print(
+                    f"Subclass {subclass}, k={k}, loss={loss}, "
+                    f"concordance(ARI)={conc:.4f}",
+                )
 
             ks = sorted(int(k) for k in k_gs_testing[subclass].keys())
             losses = [float(k_gs_testing[subclass][k]) for k in ks]
+            concs = [float(k_gs_concordance[subclass][k]) for k in ks]
 
             plt.figure(figsize=(6, 4))
             plt.plot(ks, losses, marker="o")
@@ -528,6 +713,28 @@ if __name__ == "__main__":
             plt.savefig(plot_path, bbox_inches="tight")
             plt.close()
 
+            _save_k_vs_concordance_plot(
+                ks,
+                concs,
+                plots_dir=plots_dir,
+                model_name=model_name,
+                subclass=subclass,
+            )
+            if concs:
+                # k=1 gives ARI=1 trivially; prefer max over k>=2 when available.
+                candidates = [(kv, cv) for kv, cv in zip(ks, concs) if kv > 1]
+                if not candidates:
+                    k_best, c_best = ks[0], concs[0]
+                else:
+                    k_best, c_best = max(candidates, key=lambda t: t[1])
+                print(
+                    f"Subclass {subclass}: k with max partition concordance (mean ARI, k≥2): "
+                    f"{k_best} (ARI={c_best:.4f})",
+                )
+
     out_path = os.path.join(results_dir, "k_gs_testing.json")
     with open(out_path, "w") as f:
         json.dump(k_gs_testing, f, indent=2)
+    conc_path = os.path.join(results_dir, "k_gs_concordance.json")
+    with open(conc_path, "w") as f:
+        json.dump(k_gs_concordance, f, indent=2)
