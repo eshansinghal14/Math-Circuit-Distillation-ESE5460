@@ -24,6 +24,7 @@ from utils import (
     patch_tokenizer_no_special_tokens,
     _stack_layer_activations,
 )
+from circuit_discovery.utils import parse_equation
 from neuron_distillation.activations import NeuronActivationsGenerator
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
