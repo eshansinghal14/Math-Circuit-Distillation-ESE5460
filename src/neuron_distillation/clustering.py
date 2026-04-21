@@ -679,9 +679,16 @@ if __name__ == "__main__":
                 batch_size=args.batch_size,
                 neuron_slice_chunk=args.neuron_slice_chunk,
             )
+            x_sub_conc = x_sub
+            if x_sub.device.type != "cpu":
+                print(
+                    "  Running partition concordance on CPU to avoid GPU OOM "
+                    f"(feature matrix stays on {x_sub.device} for main k-means)."
+                )
+                x_sub_conc = x_sub.detach().to(device="cpu", dtype=torch.float32)
             for k in range(1, args.cluster_k_max + 1, args.cluster_k_step):
                 conc = partition_concordance_ari(
-                    x_sub,
+                    x_sub_conc,
                     k,
                     num_iters=100,
                     n_pairs=args.concordance_pairs,

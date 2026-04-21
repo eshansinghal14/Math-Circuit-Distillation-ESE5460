@@ -1447,10 +1447,10 @@ if __name__ == "__main__":
     )
 
     generate_math_dataset(
-        dataset_all_json_path("2222_add"),
+        dataset_all_json_path("212_mult_add"),
         tokenizer,
-        digits=[2, 2, 2, 2],
-        operations=[["+", "+", "+"]],
+        digits=[2, 1, 2],
+        operations=[["*", "+"]],
         spaces=True,
         shuffle=True,
         samples=10000,
