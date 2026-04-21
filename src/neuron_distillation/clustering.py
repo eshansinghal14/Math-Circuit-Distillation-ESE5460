@@ -20,12 +20,10 @@ import matplotlib.pyplot as plt
 from utils import (
     LLAMA_1B_MODEL_NAME,
     NEURON_CLUSTERING_SUBDIR,
-    dataset_all_json_path,
     load_model_checkpoint,
     patch_tokenizer_no_special_tokens,
     _stack_layer_activations,
 )
-from circuit_discovery.utils import parse_equation
 from neuron_distillation.activations import NeuronActivationsGenerator
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -614,49 +612,6 @@ def run_neuron_kmeans(
         print(f"Saved cluster assignments to {clusters_path}")
 
     return cluster_ids, centroids, loss
-
-
-def print_problem_counts_per_class(
-    model,
-    tokenizer,
-    k_classes,
-    device,
-    *,
-    dataset_prefix: str,
-    batch_size=128,
-):
-    """Argmax class assignment over ``datasets/<prefix>_all.json``."""
-    dataset_path = dataset_all_json_path(dataset_prefix)
-    if not os.path.isfile(dataset_path):
-        print(f"Warning: dataset not found at {dataset_path}, skipping problems-per-class counts.")
-        return
-    with open(dataset_path, "r") as f:
-        dataset = json.load(f)
-    n = len(dataset)
-    pad_id = tokenizer.pad_token_id
-    if pad_id is None:
-        pad_id = tokenizer.eos_token_id or 0
-    counts = torch.zeros(k_classes, dtype=torch.long, device=device)
-    model.eval()
-    with torch.no_grad():
-        for start in range(0, n, batch_size):
-            end = min(start + batch_size, n)
-            rows = [dataset[i]["ids"] for i in range(start, end)]
-            max_len = max(len(r) for r in rows)
-            batch_rows = [r + [pad_id] * (max_len - len(r)) for r in rows]
-            batch_ids = torch.tensor(batch_rows, dtype=torch.long, device=device)
-            prompts = tokenizer.batch_decode(batch_ids, skip_special_tokens=True)
-            op1, op2, res = parse_equation(prompts, device=device)
-            logits = model.classify_problem(op1, op2, res)
-            pred = logits.argmax(dim=-1)
-            for c in range(k_classes):
-                counts[c] += (pred == c).sum()
-    print(f"Problems per class (classifier argmax on dataset {dataset_prefix!r}):")
-    for c in range(k_classes):
-        print(f"  class {c}: {int(counts[c].item())}")
-    print(f"  total: {int(counts.sum().item())} (dataset size {n})")
-
-
 if __name__ == "__main__":
 
     args = _parse_args(sys.argv[1:])
@@ -684,14 +639,6 @@ if __name__ == "__main__":
 
     tokenizer = patch_tokenizer_no_special_tokens(
         AutoTokenizer.from_pretrained(model_name),
-    )
-
-    print_problem_counts_per_class(
-        model,
-        tokenizer,
-        k_classes,
-        device,
-        dataset_prefix=args.dataset,
     )
 
     mask_on_threshold = args.mask_activate_thresh
