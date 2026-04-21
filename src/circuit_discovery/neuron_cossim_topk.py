@@ -1,6 +1,6 @@
 """
 Compute per-neuron mean pairwise cosine similarity of **full token trajectories** (no
-mean-pooling over sequence length) across all problems in ``datasets/<PREFIX>_all.json``
+mean-pooling over sequence length) across all problems in ``datasets/<PREFIX>_test.json``
 (default prefix ``2d_add``) for 1B and 8B, save to JSON, and optionally build a
 :class:`~circuit_discovery.models.CircuitDiscoveryModel`
 using standard :class:`~circuit_discovery.models.NeuronMask` modules initialized from a
@@ -413,7 +413,7 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         type=str,
         default="2d_add",
         metavar="PREFIX",
-        help="Dataset family prefix: loads repo datasets/<PREFIX>_all.json (default: 2d_add)",
+        help="Dataset family prefix: loads repo datasets/<PREFIX>_test.json (default: 2d_add)",
     )
     p.add_argument(
         "--cossim-json",

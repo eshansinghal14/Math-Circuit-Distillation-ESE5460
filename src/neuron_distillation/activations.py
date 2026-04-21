@@ -2,7 +2,7 @@ import json
 import os
 
 import torch
-from utils import dataset_all_json_path, load_model
+from utils import dataset_test_json_path, load_model
 
 class NeuronActivationsGenerator:
 
@@ -20,7 +20,7 @@ class NeuronActivationsGenerator:
         self.batch_size = batch_size
         self.res_token = res_token
 
-        dataset_path = dataset_all_json_path(dataset_prefix, None)
+        dataset_path = dataset_test_json_path(dataset_prefix, None)
         if not os.path.isfile(dataset_path):
             raise FileNotFoundError(
                 f"Dataset not found for prefix {dataset_prefix!r}: {dataset_path}",
