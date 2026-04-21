@@ -123,8 +123,6 @@ def _validate_and_collect_records(json_paths: Sequence[str]) -> List[Dict[str, A
     records: List[Dict[str, Any]] = []
     expected_dim_1b: Optional[int] = None
     expected_dim_8b: Optional[int] = None
-    expected_res_token: Optional[int] = None
-    expected_traj_mode: Optional[str] = None
 
     for path in json_paths:
         record = load_cossim_record(path)
@@ -135,25 +133,15 @@ def _validate_and_collect_records(json_paths: Sequence[str]) -> List[Dict[str, A
         if d1 == 0 or d8 == 0:
             raise ValueError(f"Cossim JSON {path!r} has an empty neuron score vector")
 
-        res_token = record.get("res_token")
-        traj_mode = record.get("trajectory_mode")
         if expected_dim_1b is None:
             expected_dim_1b = d1
             expected_dim_8b = d8
-            expected_res_token = res_token
-            expected_traj_mode = traj_mode
         else:
             if d1 != expected_dim_1b or d8 != expected_dim_8b:
                 raise ValueError(
                     f"Incompatible neuron dimensions while merging {path!r}: "
                     f"got (1b={d1}, 8b={d8}), expected "
                     f"(1b={expected_dim_1b}, 8b={expected_dim_8b})"
-                )
-            if res_token != expected_res_token or traj_mode != expected_traj_mode:
-                raise ValueError(
-                    f"Incompatible trajectory setting while merging {path!r}: "
-                    f"got res_token={res_token!r}, trajectory_mode={traj_mode!r}, expected "
-                    f"res_token={expected_res_token!r}, trajectory_mode={expected_traj_mode!r}"
                 )
 
         record["_source_json_path"] = os.path.abspath(path)
@@ -207,6 +195,18 @@ def _save_merged_score_json(
         "source_dataset_prefixes": [r.get("dataset_prefix") for r in records],
         "trajectory_mode": records[0].get("trajectory_mode"),
         "res_token": records[0].get("res_token"),
+        "source_trajectory_settings": [
+            {
+                "dataset_prefix": r.get("dataset_prefix"),
+                "trajectory_mode": r.get("trajectory_mode"),
+                "res_token": r.get("res_token"),
+                "cossim_json": r["_source_json_path"],
+            }
+            for r in records
+        ],
+        "mixed_trajectory_settings": len({
+            (r.get("trajectory_mode"), r.get("res_token")) for r in records
+        }) > 1,
         "num_problems_per_dataset": [r.get("num_problems") for r in records],
         "streaming_sum_accumulator": False,
         "1b": {
