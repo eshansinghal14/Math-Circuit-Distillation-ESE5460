@@ -159,10 +159,10 @@ class ClusterDistillationConfig:
     # 1 = every epoch; 0 = never; N>1 = every Nth epoch (0, N, 2N, …). ~10% step overhead when active.
     count_flops_every: int = 1
 
-    # Log global L2 grads for KL vs λ·CKA (``autograd.grad``; ~2× work on those batches). When
-    # True, every ``step_log_interval`` training batches: split grads and scale the λ·CKA part by
-    # ``||g_KL|| / ||g_{λ·CKA}||``; other batches use ordinary ``loss.backward()``.
-    log_kl_cka_grad_norms: bool = False
+    # If > 0, every N training batches: log global L2 grads for KL vs λ·CKA (``autograd.grad``;
+    # ~2× work on those batches), then reuse the same ``||g_KL|| / ||g_{λ·CKA}||`` to scale the
+    # λ·CKA term on the intervening batches before recomputing.
+    log_kl_cka_grad_norms: int = 0
     # If True, every ``step_log_interval`` batches: log stable rank (centered Gram) per cluster pair.
     track_stable_rank: bool = False
 
@@ -1045,6 +1045,7 @@ class ClusterDistillationTrainer:
         self._best_eval_accuracy: float = 0.0
         # Latest extra-eval-dataset accuracies (for step logs); keys = dataset prefix.
         self._step_log_extra_eval_acc: Dict[str, float] = {}
+        self._cached_cka_kl_grad_scale: float = 1.0
 
         # Optional KL vocab restriction (token IDs must exist in both student/teacher logits)
         self._kl_restrict_token_ids: Optional[torch.Tensor] = None
@@ -1196,11 +1197,51 @@ class ClusterDistillationTrainer:
         return batch_step % max(1, self.config.step_log_interval) == 0
 
     def _should_log_kl_cka_detail(self, batch_step: int) -> bool:
-        """If True, compute K_c λ for logging and use split KL vs CKA backward (costly)."""
+        """If True, recompute split KL/CKA grad norms and refresh the cached scale."""
         cfg = self.config
-        if not cfg.log_kl_cka_grad_norms:
+        interval = int(cfg.log_kl_cka_grad_norms)
+        if interval <= 0:
             return False
-        return self._on_step_log_interval(batch_step)
+        return batch_step % interval == 0
+
+    def _should_use_cached_kl_cka_scale(self) -> bool:
+        """If True, reuse the most recent KL/CKA grad scale between recomputation steps."""
+        return (not self._standard) and int(self.config.log_kl_cka_grad_norms) > 0
+
+    def _kl_objective_for_backward(
+        self,
+        kl_loss: torch.Tensor,
+        hard_ce: Optional[torch.Tensor],
+        replay_ce: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """KL-like objective used for the non-cluster part of backward."""
+        kl_for_backward = kl_loss
+        if replay_ce is not None:
+            kl_for_backward = kl_for_backward + self.config.replay_loss_weight * replay_ce
+        if hard_ce is not None:
+            w_h = self.config.hard_ce_weight
+            kl_for_backward = (1.0 - w_h) * kl_loss + w_h * hard_ce
+            if replay_ce is not None:
+                kl_for_backward = (
+                    kl_for_backward
+                    + self.config.replay_loss_weight * replay_ce
+                )
+        return kl_for_backward
+
+    def _backward_with_cached_kl_cka_scale(
+        self,
+        kl_loss: torch.Tensor,
+        cluster_loss: Optional[torch.Tensor],
+    ) -> None:
+        """Backward using the most recently recomputed KL/CKA scale."""
+        if self._standard or cluster_loss is None:
+            kl_loss.backward()
+            return
+        scaled_total = (
+            kl_loss
+            + float(self._cached_cka_kl_grad_scale) * self.config.lambda_cluster * cluster_loss
+        )
+        scaled_total.backward()
 
     def _forward_and_loss(
         self, batch: Dict, batch_step: int = 0,
@@ -1456,6 +1497,7 @@ class ClusterDistillationTrainer:
         ratio = kl_gn / (cka_gn + eps)
         if not math.isfinite(ratio):
             ratio = 1.0
+        self._cached_cka_kl_grad_scale = float(ratio)
         for p, gk, gc in zip(params, g_kl, g_cka):
             gk = torch.zeros_like(p) if gk is None else gk
             gc = torch.zeros_like(p) if gc is None else gc
@@ -1494,27 +1536,20 @@ class ClusterDistillationTrainer:
                         pass
                     elif torch.isfinite(loss).item():
                         self.optimizer.zero_grad()
+                        kl_for_backward = self._kl_objective_for_backward(
+                            kl_loss, hard_ce, replay_ce,
+                        )
                         if self._should_log_kl_cka_detail(step):
-                            kl_for_backward = kl_loss
-                            if replay_ce is not None:
-                                kl_for_backward = (
-                                    kl_for_backward
-                                    + cfg.replay_loss_weight * replay_ce
-                                )
-                            if hard_ce is not None:
-                                w_h = cfg.hard_ce_weight
-                                kl_for_backward = (1.0 - w_h) * kl_loss + w_h * hard_ce
-                                if replay_ce is not None:
-                                    kl_for_backward = (
-                                        kl_for_backward
-                                        + cfg.replay_loss_weight * replay_ce
-                                    )
                             kl_gn, cka_gn, kl_over_cka = self._assign_grad_from_kl_cka(
                                 kl_for_backward, cluster_loss,
                             )
                             metrics["kl_grad_norm"] = kl_gn
                             metrics["cka_grad_norm"] = cka_gn
                             metrics["cka_kl_grad_scale"] = kl_over_cka
+                        elif self._should_use_cached_kl_cka_scale():
+                            self._backward_with_cached_kl_cka_scale(
+                                kl_for_backward, cluster_loss,
+                            )
                         else:
                             loss.backward()
                         torch.nn.utils.clip_grad_norm_(
@@ -1536,24 +1571,20 @@ class ClusterDistillationTrainer:
                     skipped_nonfinite += 1
                     continue
                 self.optimizer.zero_grad()
+                kl_for_backward = self._kl_objective_for_backward(
+                    kl_loss, hard_ce, replay_ce,
+                )
                 if self._should_log_kl_cka_detail(step):
-                    kl_for_backward = kl_loss
-                    if replay_ce is not None:
-                        kl_for_backward = kl_for_backward + cfg.replay_loss_weight * replay_ce
-                    if hard_ce is not None:
-                        w_h = cfg.hard_ce_weight
-                        kl_for_backward = (1.0 - w_h) * kl_loss + w_h * hard_ce
-                        if replay_ce is not None:
-                            kl_for_backward = (
-                                kl_for_backward
-                                + cfg.replay_loss_weight * replay_ce
-                            )
                     kl_gn, cka_gn, kl_over_cka = self._assign_grad_from_kl_cka(
                         kl_for_backward, cluster_loss,
                     )
                     metrics["kl_grad_norm"] = kl_gn
                     metrics["cka_grad_norm"] = cka_gn
                     metrics["cka_kl_grad_scale"] = kl_over_cka
+                elif self._should_use_cached_kl_cka_scale():
+                    self._backward_with_cached_kl_cka_scale(
+                        kl_for_backward, cluster_loss,
+                    )
                 else:
                     loss.backward()
                 torch.nn.utils.clip_grad_norm_(
@@ -1824,14 +1855,14 @@ class ClusterDistillationTrainer:
         )
         if cfg.log_kl_cka_grad_norms:
             print(
-                "  KL/CKA grad norms: on every "
-                f"{max(1, cfg.step_log_interval)} batches (split grads; ~2× work those steps); "
-                "circuit mode scales λ·CKA grads by ‖g_KL‖/‖g_{λ·CKA}‖",
+                "  KL/CKA grad norms: recompute every "
+                f"{int(cfg.log_kl_cka_grad_norms)} batches (split grads; ~2× work those steps); "
+                "reuse the same ‖g_KL‖/‖g_{λ·CKA}‖ scale between recomputes",
             )
             if not self._standard:
                 print(
                     "  K_c spectrum:     λ_max(H X X^T H) per cluster (student), "
-                    "(B, T_valid×|C|) layout; same interval as step logs",
+                    "(B, T_valid×|C|) layout; same interval as grad-norm recomputes",
                 )
         if cfg.track_stable_rank and not self._standard:
             print(

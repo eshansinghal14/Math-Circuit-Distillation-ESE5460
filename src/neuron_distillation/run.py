@@ -406,11 +406,14 @@ def main():
     )
     parser.add_argument(
         "--log-kl-cka-grad-norms",
-        action="store_true",
+        type=int,
+        default=0,
+        metavar="N",
         help=(
-            "Every --step-log-interval batches: log ‖g_KL‖ and ‖g_{λ·CKA}‖ (autograd.grad; ~2× work "
-            "on those steps). Other steps use ordinary backward. In circuit mode, scale the λ·CKA "
-            "contribution by ‖g_KL‖/‖g_{λ·CKA}‖ on logging steps"
+            "If N > 0, every N training batches: log ‖g_KL‖ and ‖g_{λ·CKA}‖ "
+            "(autograd.grad; ~2× work on those steps), then reuse the same "
+            "‖g_KL‖/‖g_{λ·CKA}‖ scale for the next batches until recomputing. "
+            "Use 0 to disable."
         ),
     )
     parser.add_argument(
@@ -498,6 +501,8 @@ def main():
         raise SystemExit("--eval-batch-size must be >= 1")
     if args.step_log_interval < 1:
         raise SystemExit("--step-log-interval must be >= 1")
+    if args.log_kl_cka_grad_norms < 0:
+        raise SystemExit("--log-kl-cka-grad-norms must be >= 0 (use 0 to disable)")
     if args.weight_decay < 0:
         raise SystemExit("--weight-decay must be >= 0")
     if not (0.0 <= args.hard_ce_weight <= 1.0):
