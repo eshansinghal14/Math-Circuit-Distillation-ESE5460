@@ -20,7 +20,7 @@ import matplotlib.pyplot as plt
 from utils import (
     LLAMA_1B_MODEL_NAME,
     NEURON_CLUSTERING_SUBDIR,
-    default_datasets_dir,
+    dataset_all_json_path,
     load_model_checkpoint,
     patch_tokenizer_no_special_tokens,
     _stack_layer_activations,
@@ -148,6 +148,12 @@ def _neuron_clustering_run_dir(model_name: str, output_dir: Optional[str] = None
 
 def _parse_args(argv):
     parser = argparse.ArgumentParser(description="Neuron clustering")
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        required=True,
+        help="Dataset family prefix, e.g. 2d_add -> datasets/2d_add_all.json and related splits",
+    )
     parser.add_argument(
         "--model-name",
         type=str,
@@ -356,9 +362,14 @@ def _collect_neuron_features_per_subclass(
     batch_size=5,
     save_path=None,
     *,
+    dataset_prefix: str,
     neuron_slice_chunk: int = 4096,
 ):
-    activations_generator = NeuronActivationsGenerator(model_name, batch_size=batch_size)
+    activations_generator = NeuronActivationsGenerator(
+        model_name,
+        batch_size=batch_size,
+        dataset_prefix=dataset_prefix,
+    )
     num_batches = (activations_generator.ids.shape[0] + batch_size - 1) // batch_size
 
     k_classes = neuron_masks.size(0)
@@ -420,6 +431,7 @@ def _collect_neuron_features_per_subclass(
         torch.save(
             {
                 "model_name": model_name,
+                "dataset_prefix": dataset_prefix,
                 "features_per_subclass": {c: v.detach().cpu() for c, v in features_per_subclass.items()},
                 "indices_per_subclass": {c: idx.detach().cpu() for c, idx in indices_per_subclass.items()},
             },
@@ -464,6 +476,7 @@ def load_subclass_features_bundle(
     results_dir: str,
     batch_size: int = 5,
     *,
+    dataset_prefix: str,
     neuron_slice_chunk: int = 4096,
     subclass_features_path: Optional[str] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -475,12 +488,19 @@ def load_subclass_features_bundle(
 
     if os.path.exists(subclass_features_path):
         ckpt = torch.load(subclass_features_path, map_location="cpu")
+        ckpt_dataset = ckpt.get("dataset_prefix")
+        if ckpt_dataset is not None and ckpt_dataset != dataset_prefix:
+            raise ValueError(
+                f"Cached subclass features were built for dataset {ckpt_dataset!r}, "
+                f"not {dataset_prefix!r}: {subclass_features_path}"
+            )
         features_per_subclass = {int(c): v for c, v in ckpt["features_per_subclass"].items()}
         indices_per_subclass = {int(c): idx for c, idx in ckpt["indices_per_subclass"].items()}
     else:
         features_per_subclass, indices_per_subclass = _collect_neuron_features_per_subclass(
             batch_size=batch_size,
             save_path=subclass_features_path,
+            dataset_prefix=dataset_prefix,
             neuron_slice_chunk=neuron_slice_chunk,
         )
 
@@ -505,6 +525,7 @@ def run_neuron_kmeans(
     subclass_features_path=None,
     results_dir=None,
     *,
+    dataset_prefix: str,
     neuron_slice_chunk: int = 4096,
     x_preloaded: Optional[torch.Tensor] = None,
     subclass_indices_preloaded: Optional[torch.Tensor] = None,
@@ -529,12 +550,19 @@ def run_neuron_kmeans(
     else:
         if subclass_features_path is not None and os.path.exists(subclass_features_path):
             ckpt = torch.load(subclass_features_path, map_location="cpu")
+            ckpt_dataset = ckpt.get("dataset_prefix")
+            if ckpt_dataset is not None and ckpt_dataset != dataset_prefix:
+                raise ValueError(
+                    f"Cached subclass features were built for dataset {ckpt_dataset!r}, "
+                    f"not {dataset_prefix!r}: {subclass_features_path}"
+                )
             features_per_subclass = {int(c): v for c, v in ckpt["features_per_subclass"].items()}
             indices_per_subclass = {int(c): idx for c, idx in ckpt["indices_per_subclass"].items()}
         else:
             features_per_subclass, indices_per_subclass = _collect_neuron_features_per_subclass(
                 batch_size=batch_size,
                 save_path=subclass_features_path,
+                dataset_prefix=dataset_prefix,
                 neuron_slice_chunk=neuron_slice_chunk,
             )
 
@@ -588,9 +616,17 @@ def run_neuron_kmeans(
     return cluster_ids, centroids, loss
 
 
-def print_problem_counts_per_class(model, tokenizer, k_classes, device, batch_size=128):
-    """Argmax class assignment over `datasets/2d_add_all.json` (same source as activation gen)."""
-    dataset_path = os.path.join(default_datasets_dir(), "2d_add_all.json")
+def print_problem_counts_per_class(
+    model,
+    tokenizer,
+    k_classes,
+    device,
+    *,
+    dataset_prefix: str,
+    batch_size=128,
+):
+    """Argmax class assignment over ``datasets/<prefix>_all.json``."""
+    dataset_path = dataset_all_json_path(dataset_prefix)
     if not os.path.isfile(dataset_path):
         print(f"Warning: dataset not found at {dataset_path}, skipping problems-per-class counts.")
         return
@@ -615,7 +651,7 @@ def print_problem_counts_per_class(model, tokenizer, k_classes, device, batch_si
             pred = logits.argmax(dim=-1)
             for c in range(k_classes):
                 counts[c] += (pred == c).sum()
-    print("Problems per class (classifier argmax on full dataset):")
+    print(f"Problems per class (classifier argmax on dataset {dataset_prefix!r}):")
     for c in range(k_classes):
         print(f"  class {c}: {int(counts[c].item())}")
     print(f"  total: {int(counts.sum().item())} (dataset size {n})")
@@ -650,7 +686,13 @@ if __name__ == "__main__":
         AutoTokenizer.from_pretrained(model_name),
     )
 
-    print_problem_counts_per_class(model, tokenizer, k_classes, device)
+    print_problem_counts_per_class(
+        model,
+        tokenizer,
+        k_classes,
+        device,
+        dataset_prefix=args.dataset,
+    )
 
     mask_on_threshold = args.mask_activate_thresh
     T = model.mask_temperature
@@ -677,6 +719,7 @@ if __name__ == "__main__":
                 subclass,
                 results_dir,
                 batch_size=args.batch_size,
+                dataset_prefix=args.dataset,
                 neuron_slice_chunk=args.neuron_slice_chunk,
             )
             x_sub_conc = x_sub
@@ -701,6 +744,7 @@ if __name__ == "__main__":
                     log=False,
                     batch_size=args.batch_size,
                     results_dir=results_dir,
+                    dataset_prefix=args.dataset,
                     neuron_slice_chunk=args.neuron_slice_chunk,
                     x_preloaded=x_sub,
                     subclass_indices_preloaded=idx_sub,

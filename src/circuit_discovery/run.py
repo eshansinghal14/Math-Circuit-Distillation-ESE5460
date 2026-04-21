@@ -2,11 +2,11 @@
 
 Run from ``src/``::
 
-  python -m circuit_discovery.run --k-classes 8
+  python -m circuit_discovery.run --k-classes 8 --dataset 2d_add
 
 Or::
 
-  python -m circuit_discovery --k-classes 8
+  python -m circuit_discovery --k-classes 8 --dataset 2d_add
 """
 
 from __future__ import annotations
@@ -23,6 +23,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         required=True,
         help="Number of circuit classes",
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        required=True,
+        help="Dataset family prefix used to load activations (e.g. 2d_add)",
     )
     parser.add_argument(
         "--epochs",
@@ -90,6 +96,7 @@ def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     train_circuit_discovery(
         k_classes=args.k_classes,
+        dataset_prefix=args.dataset,
         epochs=args.epochs,
         resume_model=args.checkpoint_path,
         lambda_usage=args.lambda_usage,

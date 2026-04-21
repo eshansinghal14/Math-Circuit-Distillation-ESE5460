@@ -11,9 +11,11 @@ class NeuronActivationsGenerator:
         model_name,
         batch_size=50,
         *,
-        dataset_prefix: str = "2d_add",
+        dataset_prefix: str | None = None,
         res_token: int | None = None,
     ):
+        if not dataset_prefix:
+            raise ValueError("dataset_prefix is required; no default dataset is assumed")
         self.model, self.tokenizer = load_model(model_name)
         self.model.eval()
         self.model_name = model_name

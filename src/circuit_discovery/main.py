@@ -19,6 +19,7 @@ from .models import CircuitDiscoveryModel, CircuitLoss
 
 def train_circuit_discovery(
     k_classes,
+    dataset_prefix,
     epochs=1,
     resume_model=None,
     lr=1e-3,
@@ -78,8 +79,12 @@ def train_circuit_discovery(
         class_reweight=class_reweight,
     ).to(device)
 
-    act_generator_1b = NeuronActivationsGenerator(llama_1b, batch_size=50)
-    act_generator_8b = NeuronActivationsGenerator(llama_8b, batch_size=50)
+    act_generator_1b = NeuronActivationsGenerator(
+        llama_1b, batch_size=50, dataset_prefix=dataset_prefix,
+    )
+    act_generator_8b = NeuronActivationsGenerator(
+        llama_8b, batch_size=50, dataset_prefix=dataset_prefix,
+    )
     act_generators = {
         "1b": act_generator_1b,
         "8b": act_generator_8b,
