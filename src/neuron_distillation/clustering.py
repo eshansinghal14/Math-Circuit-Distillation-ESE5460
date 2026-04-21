@@ -387,21 +387,25 @@ def _collect_neuron_features_per_subclass(
         batch = activations_generator.generate_batch_activations(batch_idx, log=True)
 
         ids, activations_dict = batch["ids"], batch["activations"]
-        full_strs = batch.get("full_strs")
-        if full_strs is None or any(s is None for s in full_strs):
-            if isinstance(ids, torch.Tensor):
-                input_id_list = ids.tolist()
-            else:
-                input_id_list = ids
-            prompts = tokenizer.batch_decode(input_id_list, skip_special_tokens=True)
-        else:
-            prompts = [str(s) for s in full_strs]
         activations = _stack_layer_activations(activations_dict).to(device)
+        if k_classes == 1:
+            # Single-class masks do not need problem-dependent routing.
+            subclass = torch.zeros(activations.size(0), dtype=torch.long, device=device)
+        else:
+            full_strs = batch.get("full_strs")
+            if full_strs is None or any(s is None for s in full_strs):
+                if isinstance(ids, torch.Tensor):
+                    input_id_list = ids.tolist()
+                else:
+                    input_id_list = ids
+                prompts = tokenizer.batch_decode(input_id_list, skip_special_tokens=True)
+            else:
+                prompts = [str(s) for s in full_strs]
 
-        op1, op2, res = parse_equation(prompts, device=device)
-        classifier_logits = model.classify_problem(op1, op2, res)
-        hard = F.gumbel_softmax(classifier_logits, tau=model.tau, dim=-1, hard=True)
-        subclass = hard.argmax(dim=-1)
+            op1, op2, res = parse_equation(prompts, device=device)
+            classifier_logits = model.classify_problem(op1, op2, res)
+            hard = F.gumbel_softmax(classifier_logits, tau=model.tau, dim=-1, hard=True)
+            subclass = hard.argmax(dim=-1)
 
         for c, idx in indices_per_subclass.items():
             ex_mask = subclass == c
