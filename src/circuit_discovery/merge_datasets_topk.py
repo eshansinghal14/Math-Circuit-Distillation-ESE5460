@@ -1,6 +1,6 @@
 """
-Merge per-neuron cossim rankings across multiple datasets, then export a sparse
-binary circuit checkpoint with the top-k neurons.
+Merge per-neuron cossim rankings across multiple datasets and write a single
+JSON record containing the merged neuron scores.
 
 The merge operates on **percentile ranks** per dataset rather than raw cossim
 values so different datasets can be combined more robustly. Two aggregation
@@ -17,14 +17,14 @@ Example::
     python -m circuit_discovery.merge_datasets_topk \
         --datasets 222_add 23_add 34_add \
         --method geo_mean \
-        --name addition_shared \
-        --frac-activated 0.01
+        --name addition_shared
 """
 
 from __future__ import annotations
 
 import argparse
 import glob
+import json
 import os
 import sys
 from typing import Any, Dict, List, Optional, Sequence
@@ -36,12 +36,8 @@ if _src not in sys.path:
     sys.path.insert(0, _src)
 
 from circuit_discovery.neuron_cossim_topk import (
-    K_CLASSES,
     _neuron_cossim_workspace_root,
-    build_sparse_circuit_model,
     load_cossim_record,
-    mean_cossim_topk_neurons,
-    topk_binary_mask,
 )
 
 
@@ -186,16 +182,60 @@ def _output_root(name: str) -> str:
     return os.path.abspath(os.path.join(_neuron_cossim_workspace_root(), cleaned))
 
 
+def _save_merged_score_json(
+    out_dir: str,
+    *,
+    datasets: Sequence[str],
+    records: Sequence[Dict[str, Any]],
+    method: str,
+    scores_1b: torch.Tensor,
+    scores_8b: torch.Tensor,
+) -> str:
+    """Write merged per-neuron scores using the neuron-cossim JSON layout."""
+    out_json = os.path.join(
+        out_dir,
+        f"neuron_mean_pairwise_cossim_merged_{method}.json",
+    )
+    payload = {
+        "schema": "neuron_mean_pairwise_cossim_merged_v1",
+        "dataset_prefix": "+".join(str(d) for d in datasets),
+        "merged_datasets": [str(d) for d in datasets],
+        "merge_method": method,
+        "merge_space": "percentile_rank",
+        "num_datasets": len(records),
+        "source_cossim_jsons": [r["_source_json_path"] for r in records],
+        "source_dataset_prefixes": [r.get("dataset_prefix") for r in records],
+        "trajectory_mode": records[0].get("trajectory_mode"),
+        "res_token": records[0].get("res_token"),
+        "num_problems_per_dataset": [r.get("num_problems") for r in records],
+        "streaming_sum_accumulator": False,
+        "1b": {
+            "dim": int(scores_1b.numel()),
+            "seq_len": records[0]["1b"].get("seq_len"),
+            "intermediate_size": records[0]["1b"].get("intermediate_size"),
+            "num_hidden_layers": records[0]["1b"].get("num_hidden_layers"),
+            "mean_pairwise_cossim": scores_1b.tolist(),
+        },
+        "8b": {
+            "dim": int(scores_8b.numel()),
+            "seq_len": records[0]["8b"].get("seq_len"),
+            "intermediate_size": records[0]["8b"].get("intermediate_size"),
+            "num_hidden_layers": records[0]["8b"].get("num_hidden_layers"),
+            "mean_pairwise_cossim": scores_8b.tolist(),
+        },
+    }
+    with open(out_json, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    return out_json
+
+
 def run(
     datasets: Sequence[str],
     method: str,
     name: str,
-    frac_activated: float,
 ) -> str:
     if len(datasets) < 1:
         raise ValueError("Need at least one dataset folder or JSON path")
-    if not (0.0 < frac_activated <= 1.0):
-        raise ValueError("frac_activated must be in (0, 1]")
 
     json_paths = [_resolve_dataset_json(ds) for ds in datasets]
     records = _validate_and_collect_records(json_paths)
@@ -203,10 +243,6 @@ def run(
 
     score_1b = merged["1b"]
     score_8b = merged["8b"]
-    d1 = int(score_1b.numel())
-    d8 = int(score_8b.numel())
-    k1 = max(1, int(round(frac_activated * d1)))
-    k8 = max(1, int(round(frac_activated * d8)))
 
     print(f"Merging {len(records)} datasets with method={method!r} in percentile-rank space")
     for rec in records:
@@ -214,70 +250,26 @@ def run(
             f"  - {rec.get('dataset_prefix', '<unknown>')} "
             f"({rec['_source_json_path']})"
         )
-    print(f"Building binary masks: top-{k1}/{d1} (1b), top-{k8}/{d8} (8b)")
 
-    score_1b_list = score_1b.tolist()
-    score_8b_list = score_8b.tolist()
-    mask_1b = topk_binary_mask(d1, score_1b_list, k1)
-    mask_8b = topk_binary_mask(d8, score_8b_list, k8)
-
-    avg_1b = mean_cossim_topk_neurons(score_1b_list, k1)
-    avg_8b = mean_cossim_topk_neurons(score_8b_list, k8)
-    print(
-        "Mean merged percentile-rank score (activated / top-k neurons): "
-        f"1b={avg_1b:.6f}, 8b={avg_8b:.6f}"
-    )
-
-    model = build_sparse_circuit_model(
-        mask_1b=mask_1b.cpu(),
-        mask_8b=mask_8b.cpu(),
-        mask_temperature=1.0,
-    )
-
-    out_dir = os.path.join(_output_root(name), f"frac{frac_activated:g}")
+    out_dir = _output_root(name)
     os.makedirs(out_dir, exist_ok=True)
-    out_pt = os.path.join(
+    out_json = _save_merged_score_json(
         out_dir,
-        f"merged_topk_{method}_frac{frac_activated:g}_k1b{k1}_k8b{k8}.pt",
+        datasets=datasets,
+        records=records,
+        method=method,
+        scores_1b=score_1b.cpu(),
+        scores_8b=score_8b.cpu(),
     )
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    torch.save(
-        {
-            "epoch": 0,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "metrics_log": [],
-            "sparse_binary_metadata": {
-                "k_classes": K_CLASSES,
-                "merge_method": method,
-                "merge_space": "percentile_rank",
-                "datasets": [str(d) for d in datasets],
-                "source_cossim_jsons": [r["_source_json_path"] for r in records],
-                "source_dataset_prefixes": [r.get("dataset_prefix") for r in records],
-                "trajectory_mode": records[0].get("trajectory_mode"),
-                "res_token": records[0].get("res_token"),
-                "frac_activated": frac_activated,
-                "k_1b": k1,
-                "k_8b": k8,
-                "dim_1b": d1,
-                "dim_8b": d8,
-                "mask_1b": mask_1b.cpu().clone(),
-                "mask_8b": mask_8b.cpu().clone(),
-            },
-        },
-        out_pt,
-    )
-    print(f"Saved merged sparse binary circuit model to {out_pt}")
-    print("  Load with: utils.load_model_checkpoint(path, k_classes=1, lr=1e-3)")
-    return out_pt
+    print(f"Saved merged neuron scores JSON to {out_json}")
+    return out_json
 
 
 def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
             "Merge neuron cossim JSONs from multiple dataset folders using percentile-rank "
-            "aggregation, then export a sparse binary circuit checkpoint."
+            "aggregation, then write a merged neuron-score JSON."
         ),
     )
     p.add_argument(
@@ -302,15 +294,9 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         type=str,
         required=True,
         help=(
-            "Output folder for the merged sparse .pt checkpoint; relative paths are placed under "
+            "Output folder for the merged JSON; relative paths are placed under "
             "results/circuit-discovery/"
         ),
-    )
-    p.add_argument(
-        "--frac-activated",
-        type=float,
-        required=True,
-        help="Fraction of neurons to keep (top-k by merged score per tower)",
     )
     return p.parse_args(argv)
 
@@ -321,7 +307,6 @@ def main(argv: Optional[List[str]] = None) -> None:
         datasets=args.datasets,
         method=args.method,
         name=args.name,
-        frac_activated=args.frac_activated,
     )
 
 
