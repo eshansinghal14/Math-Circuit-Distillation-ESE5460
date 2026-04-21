@@ -995,36 +995,31 @@ def plot_training_history_kl_cka_grad_ratios(
     return primary
 
 
-def _mean_topk_curve(cossim: Sequence[float], num_points: int) -> Tuple[np.ndarray, np.ndarray]:
+def _sorted_neuron_scores(cossim: Sequence[float], num_points: int) -> Tuple[np.ndarray, np.ndarray]:
     arr = np.asarray(cossim, dtype=np.float64)
     d = int(arr.size)
     if d < 1:
         raise ValueError("mean_pairwise_cossim is empty")
-    c_desc = np.sort(arr)[::-1]
-    cumsum = np.cumsum(c_desc)
-    ks = np.arange(1, d + 1, dtype=np.float64)
-    fracs = ks / float(d)
-    means = cumsum / ks
+    scores = np.sort(arr)[::-1]
+    ranks = np.arange(1, d + 1, dtype=np.float64)
     n = min(max(num_points, 2), d)
     idx = np.linspace(0, d - 1, n, dtype=int)
-    return fracs[idx], means[idx]
+    return ranks[idx], scores[idx]
 
 
-def plot_frac_activated_vs_mean_cossim(
+def plot_neuron_scores(
     data_dirs: Sequence[str],
     *,
     towers: Collection[str] = ("1b", "8b"),
     output_dir: Optional[str] = None,
-    out_name: str = "frac_activated_vs_mean_cossim",
+    out_name: str = "neuron_scores",
     figure_width_in: float = 5.5,
     figure_height_in: float = 2.8,
     num_points: int = 800,
-    anchor_zero: bool = True,
-    x_as_percent: bool = True,
     save_pdf: bool = True,
     save_png: bool = True,
 ) -> str:
-    """Plot mean pairwise cossim curves for one or more runs.
+    """Plot per-neuron scores sorted from highest to lowest for one or more runs.
 
     Each directory in ``data_dirs`` must contain **exactly one** ``*.json`` file (e.g. from
     ``circuit_discovery.neuron_cossim_topk``, schema ``neuron_mean_pairwise_cossim_v2``).
@@ -1068,28 +1063,20 @@ def plot_frac_activated_vs_mean_cossim(
                 cossim = block.get("mean_pairwise_cossim")
                 if not isinstance(cossim, list) or len(cossim) == 0:
                     continue
-                fracs, means = _mean_topk_curve(cossim, num_points)
-                if anchor_zero:
-                    fracs = np.concatenate([[0.0], fracs])
-                    means = np.concatenate([[0.0], means])
-                xs = fracs * 100.0 if x_as_percent else fracs
+                xs, ys = _sorted_neuron_scores(cossim, num_points)
                 color = cmap(pi % 10)
                 ax.plot(
                     xs,
-                    means,
+                    ys,
                     color=color,
                     linestyle=linestyles[tower],
                     label=f"{label_base} ({tower})",
                     clip_on=False,
                 )
 
-        ax.set_xlabel("Percent of neurons activated" if x_as_percent else "Fraction of neurons activated")
-        ax.set_ylabel(r"Mean pairwise cosine similarity (top-$k$)")
-        if not x_as_percent:
-            ax.set_xlim(0.0, 1.0)
-        else:
-            ax.set_xlim(0.0, 100.0)
-        ax.set_ylim(bottom=0.0)
+        ax.set_xlabel("Neuron rank")
+        ax.set_ylabel("Neuron score")
+        ax.set_xlim(left=1.0)
 
         handles, labels = ax.get_legend_handles_labels()
         if handles:
@@ -1197,7 +1184,7 @@ if __name__ == "__main__":
     #   smooth_window=10,
     # )
 
-    # plot_frac_activated_vs_mean_cossim(
+    # plot_neuron_scores(
     #   data_dirs=[
     #       "results/circuit-discovery/neuron_cossim_topk/frac0.001",
     #       "results/circuit-discovery/neuron_cossim_topk/frac0.01",
