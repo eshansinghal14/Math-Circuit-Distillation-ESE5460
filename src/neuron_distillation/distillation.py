@@ -1633,7 +1633,7 @@ class ClusterDistillationTrainer:
                             f" | ‖g_KL‖/‖g_CKA‖ {metrics.get('cka_kl_grad_scale', 1.0):.4f}"
                         )
                         kc = metrics.get("kc_lam1") or {}
-                        if kc:
+                        if cfg.cluster_grad_weighting and kc:
                             parts = [f"{pk}={pv:.4f}" for pk, pv in sorted(kc.items())]
                             grad_s += " | λ_max(K_c) " + " ".join(parts)
                 orig_s = ""
@@ -1859,7 +1859,7 @@ class ClusterDistillationTrainer:
                 f"{int(cfg.log_kl_cka_grad_norms)} batches (split grads; ~2× work those steps); "
                 "reuse the same ‖g_KL‖/‖g_{λ·CKA}‖ scale between recomputes",
             )
-            if not self._standard:
+            if not self._standard and cfg.cluster_grad_weighting:
                 print(
                     "  K_c spectrum:     λ_max(H X X^T H) per cluster (student), "
                     "(B, T_valid×|C|) layout; same interval as grad-norm recomputes",
@@ -1951,7 +1951,7 @@ class ClusterDistillationTrainer:
                     if cfg.log_kl_cka_grad_norms and "kl_grad_norm" in epoch_metrics:
                         kc = epoch_metrics.get("kc_lam1") or {}
                         kc_s = ""
-                        if kc:
+                        if cfg.cluster_grad_weighting and kc:
                             kc_s = (
                                 ", λ_max(K_c): "
                                 + ", ".join(
