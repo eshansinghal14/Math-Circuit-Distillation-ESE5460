@@ -16,6 +16,7 @@ Run from ``src`` (always builds a **single-class** ``k_classes=1`` model)::
     python -m circuit_discovery.neuron_cossim_topk
     python -m circuit_discovery.neuron_cossim_topk --dataset 2d1d_mult
     python -m circuit_discovery.neuron_cossim_topk --frac-activated 0.05
+    python -m circuit_discovery.neuron_cossim_topk --dataset 222_add --res-token 1
 
 Gated Llama weights use ``HF_READ_TOKEN`` from ``constants.py`` (see ``circuit_discovery.utils``), same as elsewhere in this repo.
 
@@ -63,21 +64,39 @@ def _dataset_segment(dataset_prefix: str) -> str:
     return dataset_prefix.replace(os.sep, "_").replace("/", "_")
 
 
-def dataset_cossim_dir(dataset_prefix: str) -> str:
-    """Directory for neuron mean pairwise cossim JSON: ``<workspace>/<dataset>/``."""
-    return os.path.join(_neuron_cossim_workspace_root(), _dataset_segment(dataset_prefix))
-
-
-def sparse_binary_checkpoint_dir(dataset_prefix: str, frac_activated: float) -> str:
-    """Sparse ``.pt`` dir: ``<workspace>/<dataset>/frac<value>/``."""
+def _dataset_res_segment(dataset_prefix: str, res_token: Optional[int] = None) -> str:
     seg = _dataset_segment(dataset_prefix)
+    if res_token is None:
+        return seg
+    return f"{seg}_{int(res_token)}"
+
+
+def dataset_cossim_dir(dataset_prefix: str, res_token: Optional[int] = None) -> str:
+    """Directory for neuron mean pairwise cossim JSON: ``<workspace>/<dataset[_res_token]>/``."""
+    return os.path.join(
+        _neuron_cossim_workspace_root(),
+        _dataset_res_segment(dataset_prefix, res_token),
+    )
+
+
+def sparse_binary_checkpoint_dir(
+    dataset_prefix: str,
+    frac_activated: float,
+    res_token: Optional[int] = None,
+) -> str:
+    """Sparse ``.pt`` dir: ``<workspace>/<dataset[_res_token]>/frac<value>/``."""
+    seg = _dataset_res_segment(dataset_prefix, res_token)
     frac_folder = f"frac{frac_activated:g}"
     return os.path.join(_neuron_cossim_workspace_root(), seg, frac_folder)
 
 
-def default_cossim_json_path(dataset_prefix: str) -> str:
+def default_cossim_json_path(dataset_prefix: str, res_token: Optional[int] = None) -> str:
     safe = _dataset_segment(dataset_prefix)
-    return os.path.join(dataset_cossim_dir(dataset_prefix), f"neuron_mean_pairwise_cossim_{safe}.json")
+    suffix = "" if res_token is None else f"_restok{int(res_token)}"
+    return os.path.join(
+        dataset_cossim_dir(dataset_prefix, res_token),
+        f"neuron_mean_pairwise_cossim_{safe}{suffix}.json",
+    )
 
 
 def mean_pairwise_cossim_from_normalized_sum(
@@ -122,6 +141,7 @@ def stream_normalized_sum_token_activations(
     batch_size: int,
     *,
     dataset_prefix: str,
+    res_token: Optional[int] = None,
     eps: float = 1e-8,
 ) -> Tuple[torch.Tensor, int, int, int]:
     """Accumulate ``\\sum_i v_i`` where ``v_i`` is the token-wise L2-normalized trajectory for problem ``i``.
@@ -135,6 +155,7 @@ def stream_normalized_sum_token_activations(
         model_name,
         batch_size=batch_size,
         dataset_prefix=dataset_prefix,
+        res_token=res_token,
     )
     n_ex = int(gen.ids.shape[0])
     if n_ex < 2:
@@ -181,6 +202,7 @@ def build_cossim_record(
     sum_norm_8b: torch.Tensor,
     n_8b: int,
     dataset_prefix: str,
+    res_token: Optional[int],
 ) -> Dict[str, Any]:
     if n_1b != n_8b:
         raise RuntimeError(f"Problem count mismatch 1b={n_1b} vs 8b={n_8b}")
@@ -189,6 +211,10 @@ def build_cossim_record(
     return {
         "schema": "neuron_mean_pairwise_cossim_v2",
         "dataset_prefix": dataset_prefix,
+        "res_token": (int(res_token) if res_token is not None else None),
+        "trajectory_mode": (
+            "prefix_for_response_token" if res_token is not None else "full_sequence"
+        ),
         "num_problems": int(n_1b),
         "streaming_sum_accumulator": True,
         "1b": {
@@ -260,6 +286,7 @@ def ensure_cossim_file(
     force: bool,
     *,
     dataset_prefix: str,
+    res_token: Optional[int] = None,
 ) -> Dict[str, Any]:
     if os.path.isfile(out_path) and not force:
         print(f"Using existing cossim file (skip recompute): {out_path}")
@@ -267,13 +294,14 @@ def ensure_cossim_file(
 
     print(
         f"Streaming per-token activations (O(T·D) RAM) and per-neuron mean pairwise cossim "
-        f"(full trajectories, 1b then 8b) on dataset prefix {dataset_prefix!r}..."
+        f"({('full trajectories' if res_token is None else f'prefix up to response token {int(res_token)}')}," 
+        f" 1b then 8b) on dataset prefix {dataset_prefix!r}..."
     )
     sum1, n1, _, _ = stream_normalized_sum_token_activations(
-        llama_1b, batch_size, dataset_prefix=dataset_prefix,
+        llama_1b, batch_size, dataset_prefix=dataset_prefix, res_token=res_token,
     )
     sum8, n8, _, _ = stream_normalized_sum_token_activations(
-        llama_8b, batch_size, dataset_prefix=dataset_prefix,
+        llama_8b, batch_size, dataset_prefix=dataset_prefix, res_token=res_token,
     )
     record = build_cossim_record(
         sum_norm_1b=sum1,
@@ -281,6 +309,7 @@ def ensure_cossim_file(
         sum_norm_8b=sum8,
         n_8b=n8,
         dataset_prefix=dataset_prefix,
+        res_token=res_token,
     )
     save_cossim_record(out_path, record)
     print(f"Wrote {out_path}")
@@ -294,13 +323,15 @@ def run(
     force_recompute_cossim: bool,
     *,
     dataset_prefix: str,
+    res_token: Optional[int] = None,
 ) -> None:
-    os.makedirs(dataset_cossim_dir(dataset_prefix), exist_ok=True)
+    os.makedirs(dataset_cossim_dir(dataset_prefix, res_token), exist_ok=True)
     record = ensure_cossim_file(
         cossim_json,
         batch_size,
         force=force_recompute_cossim,
         dataset_prefix=dataset_prefix,
+        res_token=res_token,
     )
 
     c1 = record["1b"]["mean_pairwise_cossim"]
@@ -332,9 +363,10 @@ def run(
     )
 
     safe_ds = _dataset_segment(dataset_prefix)
-    pt_dir = sparse_binary_checkpoint_dir(dataset_prefix, frac_activated)
+    pt_dir = sparse_binary_checkpoint_dir(dataset_prefix, frac_activated, res_token)
     os.makedirs(pt_dir, exist_ok=True)
-    tag = f"sparse_binary_{safe_ds}_frac{frac_activated:g}_k1b{k1}_k8b{k8}.pt"
+    res_tok_tag = "" if res_token is None else f"_restok{int(res_token)}"
+    tag = f"sparse_binary_{safe_ds}{res_tok_tag}_frac{frac_activated:g}_k1b{k1}_k8b{k8}.pt"
     out_pt = os.path.join(pt_dir, tag)
     # Same keys as training checkpoints so ``utils.load_model_checkpoint`` / clustering work.
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
@@ -348,6 +380,7 @@ def run(
                 "k_classes": K_CLASSES,
                 "dataset_prefix": dataset_prefix,
                 "frac_activated": frac_activated,
+                "res_token": (int(res_token) if res_token is not None else None),
                 "k_1b": k1,
                 "k_8b": k8,
                 "dim_1b": d1,
@@ -410,6 +443,17 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Recompute cossim JSON even if it already exists",
     )
+    p.add_argument(
+        "--res-token",
+        type=int,
+        default=None,
+        metavar="K",
+        help=(
+            "If set, use the forward-pass prefix for generating response token K "
+            "(1-indexed). Example: --res-token 1 runs on prompt only, so activations "
+            "correspond to generating the first answer token."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -418,13 +462,16 @@ def main(argv: Optional[List[str]] = None) -> None:
     ds = args.dataset.strip()
     if not ds:
         raise SystemExit("ERROR: --dataset PREFIX must be non-empty (e.g. 2d_add, 2d1d_mult).")
-    cossim_path = args.cossim_json or default_cossim_json_path(ds)
+    if args.res_token is not None and args.res_token < 1:
+        raise SystemExit("ERROR: --res-token must be >= 1")
+    cossim_path = args.cossim_json or default_cossim_json_path(ds, args.res_token)
     run(
         cossim_json=cossim_path,
         batch_size=args.batch_size,
         frac_activated=args.frac_activated,
         force_recompute_cossim=args.force_recompute_cossim,
         dataset_prefix=ds,
+        res_token=args.res_token,
     )
 
 

@@ -12,11 +12,13 @@ class NeuronActivationsGenerator:
         batch_size=50,
         *,
         dataset_prefix: str = "2d_add",
+        res_token: int | None = None,
     ):
         self.model, self.tokenizer = load_model(model_name)
         self.model.eval()
         self.model_name = model_name
         self.batch_size = batch_size
+        self.res_token = res_token
 
         dataset_path = dataset_all_json_path(dataset_prefix, None)
         if not os.path.isfile(dataset_path):
@@ -28,7 +30,24 @@ class NeuronActivationsGenerator:
 
         ids = []
         for record in dataset:
-            ids.append(record['ids'])
+            if res_token is None:
+                ids.append(record["ids"])
+                continue
+            if "q_str" not in record or "a_str" not in record:
+                raise ValueError(
+                    "Dataset rows must include q_str and a_str when res_token is set.",
+                )
+            prompt_ids = self.tokenizer.encode(str(record["q_str"]), add_special_tokens=False)
+            answer_ids = self.tokenizer.encode(str(record["a_str"]), add_special_tokens=False)
+            if len(answer_ids) < res_token:
+                continue
+            ids.append(prompt_ids + answer_ids[: max(0, res_token - 1)])
+        if not ids:
+            raise ValueError(
+                f"No dataset rows contain at least {res_token} response tokens."
+                if res_token is not None
+                else "Dataset is empty.",
+            )
         self.ids = torch.tensor(ids).to(self.model.device)
         self.layer_activations = {}
 
