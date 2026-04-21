@@ -322,17 +322,38 @@ def run(
     frac_activated: Optional[float],
     force_recompute_cossim: bool,
     *,
-    dataset_prefix: str,
+    dataset_prefix: Optional[str] = None,
     res_token: Optional[int] = None,
 ) -> None:
-    os.makedirs(dataset_cossim_dir(dataset_prefix, res_token), exist_ok=True)
-    record = ensure_cossim_file(
-        cossim_json,
-        batch_size,
-        force=force_recompute_cossim,
-        dataset_prefix=dataset_prefix,
-        res_token=res_token,
-    )
+    input_json_exists = os.path.isfile(cossim_json)
+    if dataset_prefix is None:
+        if force_recompute_cossim or not input_json_exists:
+            raise ValueError(
+                "--dataset is required unless --cossim-json points to an existing JSON file "
+                "and --force-recompute-cossim is not set"
+            )
+        record = load_cossim_record(cossim_json)
+        dataset_prefix = str(
+            record.get("dataset_prefix") or os.path.splitext(os.path.basename(cossim_json))[0]
+        )
+        record_res_token = record.get("res_token")
+        if res_token is not None and record_res_token != res_token:
+            raise ValueError(
+                f"--res-token={res_token} does not match res_token={record_res_token!r} "
+                f"stored in {cossim_json!r}"
+            )
+        res_token = record_res_token
+        out_root = os.path.dirname(os.path.abspath(cossim_json))
+    else:
+        os.makedirs(dataset_cossim_dir(dataset_prefix, res_token), exist_ok=True)
+        record = ensure_cossim_file(
+            cossim_json,
+            batch_size,
+            force=force_recompute_cossim,
+            dataset_prefix=dataset_prefix,
+            res_token=res_token,
+        )
+        out_root = sparse_binary_checkpoint_dir(dataset_prefix, frac_activated, res_token) if frac_activated is not None else dataset_cossim_dir(dataset_prefix, res_token)
 
     c1 = record["1b"]["mean_pairwise_cossim"]
     c2 = record["8b"]["mean_pairwise_cossim"]
@@ -363,7 +384,7 @@ def run(
     )
 
     safe_ds = _dataset_segment(dataset_prefix)
-    pt_dir = sparse_binary_checkpoint_dir(dataset_prefix, frac_activated, res_token)
+    pt_dir = out_root
     os.makedirs(pt_dir, exist_ok=True)
     res_tok_tag = "" if res_token is None else f"_restok{int(res_token)}"
     tag = f"sparse_binary_{safe_ds}{res_tok_tag}_frac{frac_activated:g}_k1b{k1}_k8b{k8}.pt"
@@ -411,9 +432,12 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument(
         "--dataset",
         type=str,
-        default="2d_add",
+        default=None,
         metavar="PREFIX",
-        help="Dataset family prefix: loads repo datasets/<PREFIX>_test.json (default: 2d_add)",
+        help=(
+            "Dataset family prefix: loads repo datasets/<PREFIX>_test.json. Optional when "
+            "--cossim-json points to an existing cossim-style JSON."
+        ),
     )
     p.add_argument(
         "--cossim-json",
@@ -459,11 +483,15 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[List[str]] = None) -> None:
     args = _parse_args(argv)
-    ds = args.dataset.strip()
-    if not ds:
-        raise SystemExit("ERROR: --dataset PREFIX must be non-empty (e.g. 2d_add, 2d1d_mult).")
+    ds = args.dataset.strip() if isinstance(args.dataset, str) else None
+    if ds == "":
+        ds = None
     if args.res_token is not None and args.res_token < 1:
         raise SystemExit("ERROR: --res-token must be >= 1")
+    if ds is None and args.cossim_json is None:
+        raise SystemExit(
+            "ERROR: provide --dataset or pass an existing cossim-style JSON via --cossim-json."
+        )
     cossim_path = args.cossim_json or default_cossim_json_path(ds, args.res_token)
     run(
         cossim_json=cossim_path,
