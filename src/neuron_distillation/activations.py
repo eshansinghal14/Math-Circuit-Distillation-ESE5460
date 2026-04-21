@@ -31,9 +31,15 @@ class NeuronActivationsGenerator:
             dataset = json.load(f)
 
         ids = []
+        full_strs = []
         for record in dataset:
+            if "q_str" in record and "a_str" in record:
+                full_str = f"{record['q_str']}{record['a_str']}"
+            else:
+                full_str = None
             if res_token is None:
                 ids.append(record["ids"])
+                full_strs.append(full_str)
                 continue
             if "q_str" not in record or "a_str" not in record:
                 raise ValueError(
@@ -44,6 +50,7 @@ class NeuronActivationsGenerator:
             if len(answer_ids) < res_token:
                 continue
             ids.append(prompt_ids + answer_ids[: max(0, res_token - 1)])
+            full_strs.append(full_str)
         if not ids:
             raise ValueError(
                 f"No dataset rows contain at least {res_token} response tokens."
@@ -51,6 +58,7 @@ class NeuronActivationsGenerator:
                 else "Dataset is empty.",
             )
         self.ids = torch.tensor(ids).to(self.model.device)
+        self.full_strs = full_strs
         self.layer_activations = {}
 
         self.handles = []
@@ -67,7 +75,9 @@ class NeuronActivationsGenerator:
     def generate_batch_activations(self, batch, log=True):
         with torch.no_grad():
             start_prob = batch * self.batch_size
-            batch_inputs = self.ids[start_prob: start_prob + min(self.batch_size, self.ids.shape[0] - start_prob)]
+            batch_end = start_prob + min(self.batch_size, self.ids.shape[0] - start_prob)
+            batch_inputs = self.ids[start_prob:batch_end]
+            batch_full_strs = self.full_strs[start_prob:batch_end]
             
             if log and batch % 100 == 0: 
                 print(f'processing batch {batch}/{self.ids.shape[0] // self.batch_size}')
@@ -80,6 +90,7 @@ class NeuronActivationsGenerator:
             
             activations = {
                 'ids': batch_inputs,
+                'full_strs': batch_full_strs,
                 'activations': batch_activations,
             }
             return activations
