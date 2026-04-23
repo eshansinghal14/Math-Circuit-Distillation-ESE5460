@@ -71,6 +71,10 @@ def _dataset_res_segment(dataset_prefix: str, res_token: Optional[int] = None) -
     return f"{seg}_{int(res_token)}"
 
 
+def _dataset_mode_segment(trajectory_space: str) -> str:
+    return "residual_write" if trajectory_space == "residual_write" else "activation"
+
+
 def dataset_cossim_dir(dataset_prefix: str, res_token: Optional[int] = None) -> str:
     """Directory for neuron mean pairwise cossim JSON: ``<workspace>/<dataset[_res_token]>/``."""
     return os.path.join(
@@ -90,12 +94,17 @@ def sparse_binary_checkpoint_dir(
     return os.path.join(_neuron_cossim_workspace_root(), seg, frac_folder)
 
 
-def default_cossim_json_path(dataset_prefix: str, res_token: Optional[int] = None) -> str:
+def default_cossim_json_path(
+    dataset_prefix: str,
+    res_token: Optional[int] = None,
+    trajectory_space: str = "activation",
+) -> str:
     safe = _dataset_segment(dataset_prefix)
+    mode_suffix = "" if trajectory_space == "activation" else f"_{_dataset_mode_segment(trajectory_space)}"
     suffix = "" if res_token is None else f"_restok{int(res_token)}"
     return os.path.join(
         dataset_cossim_dir(dataset_prefix, res_token),
-        f"neuron_mean_pairwise_cossim_{safe}{suffix}.json",
+        f"neuron_mean_pairwise_cossim_{safe}{suffix}{mode_suffix}.json",
     )
 
 
@@ -142,6 +151,7 @@ def stream_normalized_sum_token_activations(
     *,
     dataset_prefix: str,
     res_token: Optional[int] = None,
+    trajectory_space: str = "activation",
     eps: float = 1e-8,
 ) -> Tuple[torch.Tensor, int, int, int]:
     """Accumulate ``\\sum_i v_i`` where ``v_i`` is the token-wise L2-normalized trajectory for problem ``i``.
@@ -150,6 +160,11 @@ def stream_normalized_sum_token_activations(
     ``O(T \\cdot D)`` instead of ``O(N \\cdot T \\cdot D)`` for the full activation tensor.
     """
     from neuron_distillation.activations import NeuronActivationsGenerator
+
+    if trajectory_space not in {"activation", "residual_write"}:
+        raise ValueError(
+            "trajectory_space must be one of {'activation', 'residual_write'}"
+        )
 
     gen = NeuronActivationsGenerator(
         model_name,
@@ -165,12 +180,32 @@ def stream_normalized_sum_token_activations(
     acc: Optional[torch.Tensor] = None
     n_total = 0
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    residual_write_scale: Optional[torch.Tensor] = None
 
-    for b in range((n_ex + batch_size - 1) // batch_size):
+    if trajectory_space == "residual_write":
+        # For Llama MLPs, each neuron writes a fixed residual direction through down_proj.
+        # Per-neuron column norms let us represent residual-write trajectories as
+        # activation trajectories scaled per-neuron.
+        model = gen.model
+        scales = []
+        for layer in model.model.layers:
+            col_norm = layer.mlp.down_proj.weight.detach().float().norm(dim=0)
+            scales.append(col_norm)
+        residual_write_scale = torch.cat(scales, dim=0).to(dev)
+
+    for b in range(num_batches):
         batch = gen.generate_batch_activations(b, log=False)
         stacked = _stack_layer_activations(batch["activations"]).float()
         if stacked.device != dev:
             stacked = stacked.to(dev)
+        if residual_write_scale is not None:
+            if stacked.size(-1) != residual_write_scale.numel():
+                gen.remove_handles()
+                raise RuntimeError(
+                    f"Residual-write scale dim mismatch: activations have D={stacked.size(-1)} "
+                    f"but scales have D={residual_write_scale.numel()}"
+                )
+            stacked = stacked * residual_write_scale.view(1, 1, -1)
         vn = F.normalize(stacked, p=2, dim=1, eps=eps)
         chunk_sum = vn.sum(dim=0)
         if acc is None:
@@ -203,15 +238,17 @@ def build_cossim_record(
     n_8b: int,
     dataset_prefix: str,
     res_token: Optional[int],
+    trajectory_space: str,
 ) -> Dict[str, Any]:
     if n_1b != n_8b:
         raise RuntimeError(f"Problem count mismatch 1b={n_1b} vs 8b={n_8b}")
     c1 = mean_pairwise_cossim_from_normalized_sum(sum_norm_1b, n_1b)
     c2 = mean_pairwise_cossim_from_normalized_sum(sum_norm_8b, n_8b)
     return {
-        "schema": "neuron_mean_pairwise_cossim_v2",
+        "schema": "neuron_mean_pairwise_cossim_v3",
         "dataset_prefix": dataset_prefix,
         "res_token": (int(res_token) if res_token is not None else None),
+        "trajectory_space": trajectory_space,
         "trajectory_mode": (
             "prefix_for_response_token" if res_token is not None else "full_sequence"
         ),
@@ -287,21 +324,30 @@ def ensure_cossim_file(
     *,
     dataset_prefix: str,
     res_token: Optional[int] = None,
+    trajectory_space: str = "activation",
 ) -> Dict[str, Any]:
     if os.path.isfile(out_path) and not force:
         print(f"Using existing cossim file (skip recompute): {out_path}")
         return load_cossim_record(out_path)
 
     print(
-        f"Streaming per-token activations (O(T·D) RAM) and per-neuron mean pairwise cossim "
+        f"Streaming per-token {trajectory_space} trajectories (O(T·D) RAM) and per-neuron mean pairwise cossim "
         f"({('full trajectories' if res_token is None else f'prefix up to response token {int(res_token)}')}," 
         f" 1b then 8b) on dataset prefix {dataset_prefix!r}..."
     )
     sum1, n1, _, _ = stream_normalized_sum_token_activations(
-        llama_1b, batch_size, dataset_prefix=dataset_prefix, res_token=res_token,
+        llama_1b,
+        batch_size,
+        dataset_prefix=dataset_prefix,
+        res_token=res_token,
+        trajectory_space=trajectory_space,
     )
     sum8, n8, _, _ = stream_normalized_sum_token_activations(
-        llama_8b, batch_size, dataset_prefix=dataset_prefix, res_token=res_token,
+        llama_8b,
+        batch_size,
+        dataset_prefix=dataset_prefix,
+        res_token=res_token,
+        trajectory_space=trajectory_space,
     )
     record = build_cossim_record(
         sum_norm_1b=sum1,
@@ -310,6 +356,7 @@ def ensure_cossim_file(
         n_8b=n8,
         dataset_prefix=dataset_prefix,
         res_token=res_token,
+        trajectory_space=trajectory_space,
     )
     save_cossim_record(out_path, record)
     print(f"Wrote {out_path}")
@@ -324,6 +371,7 @@ def run(
     *,
     dataset_prefix: str,
     res_token: Optional[int] = None,
+    trajectory_space: str = "activation",
 ) -> None:
     os.makedirs(dataset_cossim_dir(dataset_prefix, res_token), exist_ok=True)
     record = ensure_cossim_file(
@@ -332,6 +380,7 @@ def run(
         force=force_recompute_cossim,
         dataset_prefix=dataset_prefix,
         res_token=res_token,
+        trajectory_space=trajectory_space,
     )
 
     c1 = record["1b"]["mean_pairwise_cossim"]
@@ -381,6 +430,7 @@ def run(
                 "dataset_prefix": dataset_prefix,
                 "frac_activated": frac_activated,
                 "res_token": (int(res_token) if res_token is not None else None),
+                "trajectory_space": trajectory_space,
                 "k_1b": k1,
                 "k_8b": k8,
                 "dim_1b": d1,
@@ -454,6 +504,18 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
             "correspond to generating the first answer token."
         ),
     )
+    p.add_argument(
+        "--trajectory-space",
+        type=str,
+        choices=["activation", "residual_write"],
+        default="activation",
+        help=(
+            "Vector used for per-neuron token trajectories before cosine. "
+            "'activation' uses raw MLP neuron activations; "
+            "'residual_write' scales each neuron activation by ||down_proj[:, i]|| "
+            "to represent residual-stream write magnitude."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -464,7 +526,11 @@ def main(argv: Optional[List[str]] = None) -> None:
         raise SystemExit("ERROR: --dataset PREFIX must be non-empty (e.g. 2d_add, 2d1d_mult).")
     if args.res_token is not None and args.res_token < 1:
         raise SystemExit("ERROR: --res-token must be >= 1")
-    cossim_path = args.cossim_json or default_cossim_json_path(ds, args.res_token)
+    cossim_path = args.cossim_json or default_cossim_json_path(
+        ds,
+        args.res_token,
+        args.trajectory_space,
+    )
     run(
         cossim_json=cossim_path,
         batch_size=args.batch_size,
@@ -472,6 +538,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         force_recompute_cossim=args.force_recompute_cossim,
         dataset_prefix=ds,
         res_token=args.res_token,
+        trajectory_space=args.trajectory_space,
     )
 
 
