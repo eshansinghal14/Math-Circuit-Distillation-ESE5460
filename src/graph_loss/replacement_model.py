@@ -276,7 +276,7 @@ class TransformerLensReplacementModel(HookedTransformer):
         return neuron_activations, target_encoders, source_vectors
 
     @torch.no_grad()
-    def setup_attribution(self, inputs: str | torch.Tensor):
+    def setup_attribution(self, inputs: str | torch.Tensor, prop_neurons_per_layer: float = 0.1):
         """Precompute prompt-specific neuron source vectors and target encoders."""
 
         if isinstance(inputs, str):
@@ -317,10 +317,13 @@ class TransformerLensReplacementModel(HookedTransformer):
                 dim=1,
             )
 
-            neuron_locations.append(layer_locations)
-            neuron_activations.append(layer_acts.reshape(-1))
-            target_encoders.append(layer_target_encoders.reshape(-1, self.cfg.d_model))
-            source_vectors.append(layer_source_vectors.reshape(-1, self.cfg.d_model))
+            keep_neurons = torch.topk(layer_source_vectors.norm(dim=-1), int(self.cfg.d_mlp * prop_neurons_per_layer), dim=-1).indices
+            keep_neurons = keep_neurons.reshape(-1)
+
+            neuron_locations.append(layer_locations[keep_neurons])
+            neuron_activations.append(layer_acts.reshape(-1)[keep_neurons])
+            target_encoders.append(layer_target_encoders.reshape(-1, self.cfg.d_model)[keep_neurons])
+            source_vectors.append(layer_source_vectors.reshape(-1, self.cfg.d_model)[keep_neurons])
 
         token_vectors = self.W_E[tokens].detach()
 

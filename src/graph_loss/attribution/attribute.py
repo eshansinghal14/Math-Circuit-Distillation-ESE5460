@@ -23,8 +23,8 @@ def attribute(
     model: TransformerLensReplacementModel,
     *,
     attribution_targets: Sequence[str] | Sequence[TargetSpec] | torch.Tensor | None = None,
-    max_n_logits: int = 10,
-    desired_logit_prob: float = 0.95,
+    logit_min_prob: float = 1e-5,
+    prop_neurons_per_layer: float = 0.1,
     batch_size: int = 512,
     max_feature_nodes: int | None = None,
     offload: Literal["cpu", "disk", None] = None,
@@ -62,8 +62,8 @@ def attribute(
             model=model,
             prompt=prompt,
             attribution_targets=attribution_targets,
-            max_n_logits=max_n_logits,
-            desired_logit_prob=desired_logit_prob,
+            logit_min_prob=logit_min_prob,
+            prop_neurons_per_layer=prop_neurons_per_layer,
             batch_size=batch_size,
             logger=logger,
             verbose=verbose,
@@ -121,8 +121,8 @@ def _run_attribution(
     model: TransformerLensReplacementModel,
     prompt,
     attribution_targets,
-    max_n_logits,
-    desired_logit_prob,
+    logit_min_prob,
+    prop_neurons_per_layer,
     batch_size,
     logger,
     verbose,
@@ -132,7 +132,7 @@ def _run_attribution(
     logger.info("Phase 0: Precomputing neuron activations and encoders")
     phase_start = time.time()
     input_ids = model.ensure_tokenized(prompt)
-    ctx = model.setup_attribution(input_ids)
+    ctx = model.setup_attribution(input_ids, prop_neurons_per_layer=prop_neurons_per_layer)
 
     logger.info(f"Precomputation completed in {time.time() - phase_start:.2f}s")
     logger.info(f"Enumerated {len(ctx.neuron_locations)} neuron nodes")
@@ -151,8 +151,7 @@ def _run_attribution(
         logits=ctx.logits[0, -1],
         unembed_proj=model.unembed.W_U,
         tokenizer=model.tokenizer,
-        max_n_logits=max_n_logits,
-        desired_logit_prob=desired_logit_prob,
+        logit_min_prob=logit_min_prob,
     )
     log_attribution_target_info(targets, attribution_targets, logger)
 
