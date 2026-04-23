@@ -180,7 +180,12 @@ def stream_normalized_sum_token_activations(
     num_batches = (n_ex + batch_size - 1) // batch_size
     acc: Optional[torch.Tensor] = None
     n_total = 0
+<<<<<<< HEAD
     dev = get_default_device()
+=======
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    residual_write_scale: Optional[torch.Tensor] = None
+>>>>>>> 71f9ea2a26b8e5db54e17dcb6fe971b88fb73533
 
     if trajectory_space == "residual_write":
         # For Llama MLPs, each neuron writes a fixed residual direction through down_proj.
