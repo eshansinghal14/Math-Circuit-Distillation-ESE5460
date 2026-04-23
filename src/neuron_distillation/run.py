@@ -63,8 +63,12 @@ from utils import (
 )
 
 
-def _ablation_dir_for_model(run_dir: str, model_name: str) -> str:
-    return os.path.join(run_dir, "ablation", *model_name.split("/"))
+def _ablation_dir_for_model(
+    run_dir: str,
+    model_name: str,
+    trajectory_space: str = "activation",
+) -> str:
+    return os.path.join(run_dir, "ablation", trajectory_space, *model_name.split("/"))
 
 
 def run_ablation_if_needed(
@@ -364,6 +368,17 @@ def main():
         ),
     )
     parser.add_argument(
+        "--trajectory-space",
+        type=str,
+        choices=["activation", "residual_write"],
+        default="activation",
+        help=(
+            "Neuron trajectory space for CKA. "
+            "'activation' uses raw up_proj outputs; "
+            "'residual_write' scales neurons by ||down_proj[:, i]||."
+        ),
+    )
+    parser.add_argument(
         "--no-poly-importance",
         action="store_true",
         help=(
@@ -546,12 +561,27 @@ def main():
     is_resume = student_source is not None
 
     circuit = args.mode == "circuit"
-    neuron_clustering_root = os.path.join(args.save_dir, NEURON_CLUSTERING_SUBDIR)
+    neuron_clustering_root = os.path.join(
+        args.save_dir,
+        NEURON_CLUSTERING_SUBDIR,
+        args.trajectory_space,
+    )
     student_clusters = os.path.join(neuron_clustering_root, args.student_model, "clusters")
     teacher_clusters = os.path.join(neuron_clustering_root, args.teacher_model, "clusters")
-    student_ablation_dir = _ablation_dir_for_model(run_dir, args.student_model)
-    teacher_ablation_dir = _ablation_dir_for_model(run_dir, args.teacher_model)
-    mapping_cache = os.path.join(run_dir, "cluster_mapping.json")
+    student_ablation_dir = _ablation_dir_for_model(
+        run_dir,
+        args.student_model,
+        args.trajectory_space,
+    )
+    teacher_ablation_dir = _ablation_dir_for_model(
+        run_dir,
+        args.teacher_model,
+        args.trajectory_space,
+    )
+    mapping_cache = os.path.join(
+        run_dir,
+        f"cluster_mapping_{args.trajectory_space}.json",
+    )
 
     print(f"Run dir: {run_dir}")
     print(f"  mode: {args.mode}")
@@ -640,6 +670,7 @@ def main():
         print(f"  student_clusters:   {student_clusters}")
         print(f"  teacher_clusters:   {teacher_clusters}")
         print(f"  dataset (prefix):   {dataset_prefix}")
+        print(f"  trajectory_space:   {args.trajectory_space}")
         print(f"  train_path:         {train_path}")
         print(f"  test_path:          {test_path}")
         print("=" * 60)
@@ -697,6 +728,7 @@ def main():
         print("Configuration (standard KL)")
         print("=" * 60)
         print(f"  dataset (prefix):   {dataset_prefix}")
+        print(f"  trajectory_space:   {args.trajectory_space}")
         print(f"  train_path:         {train_path}")
         print(f"  test_path:          {test_path}")
         print("=" * 60)
@@ -749,6 +781,7 @@ def main():
             tuple(args.kl_mask_range) if args.kl_mask_range is not None else None
         ),
         cluster_grad_weighting=args.cluster_grad_weighting,
+        trajectory_space=args.trajectory_space,
         save_best=args.save_best,
         eval_max_new_tokens=eval_max_new_tokens,
         eval_print_samples=args.eval_print_samples,
