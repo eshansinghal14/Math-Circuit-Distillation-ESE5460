@@ -20,6 +20,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from utils import (
     LLAMA_1B_MODEL_NAME,
     LLAMA_8B_MODEL_NAME,
+    get_default_device,
     load_prompt_answer_json,
     resolve_test_path,
     patch_tokenizer_no_special_tokens,
@@ -98,7 +99,7 @@ def main():
     if not args.datasets and not args.file:
         parser.error("Provide at least one dataset prefix or --file path")
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = get_default_device()
     print(f"Device: {device}")
 
     tokenizer = AutoTokenizer.from_pretrained(LLAMA_1B_MODEL_NAME)
@@ -118,7 +119,7 @@ def main():
         print(f"\nLoading student: {LLAMA_1B_MODEL_NAME}")
         student = AutoModelForCausalLM.from_pretrained(
             LLAMA_1B_MODEL_NAME,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            torch_dtype=torch.float16 if device.type == "cuda" else torch.float32,
         ).to(device)
         student.eval()
         models_to_eval.append(("Student (1B)", student))
@@ -127,7 +128,7 @@ def main():
         print(f"Loading teacher: {LLAMA_8B_MODEL_NAME}")
         teacher = AutoModelForCausalLM.from_pretrained(
             LLAMA_8B_MODEL_NAME,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            torch_dtype=torch.float16 if device.type == "cuda" else torch.float32,
         ).to(device)
         teacher.eval()
         models_to_eval.append(("Teacher (8B)", teacher))

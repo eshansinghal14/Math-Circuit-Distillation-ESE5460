@@ -43,6 +43,7 @@ if _src not in sys.path:
 
 from circuit_discovery.utils import _stack_layer_activations, config, llama_1b, llama_8b
 from circuit_discovery.models import CircuitDiscoveryModel, neuron_mask_from_binary_mask
+from utils import get_default_device
 
 # Colab: store under Drive when mounted; otherwise repo ``results/circuit-discovery``.
 _DRIVE_MCD_ROOT = "/content/drive/My Drive/Math Circuit Distillation (ESE 5460)"
@@ -164,7 +165,7 @@ def stream_normalized_sum_token_activations(
     num_batches = (n_ex + batch_size - 1) // batch_size
     acc: Optional[torch.Tensor] = None
     n_total = 0
-    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dev = get_default_device()
 
     for b in range((n_ex + batch_size - 1) // batch_size):
         batch = gen.generate_batch_activations(b, log=False)
@@ -272,7 +273,7 @@ def build_sparse_circuit_model(
     mask_temperature: float = 1.0,
 ) -> CircuitDiscoveryModel:
     """``CircuitDiscoveryModel`` with standard :class:`NeuronMask` modules (``k_classes=1``)."""
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = get_default_device()
     model = CircuitDiscoveryModel(k_classes=K_CLASSES, mask_temperature=mask_temperature).to(device)
     T = model.mask_temperature
     model.neuron_masks_1b = neuron_mask_from_binary_mask(mask_1b.to(device), T, k_classes=K_CLASSES).to(device)

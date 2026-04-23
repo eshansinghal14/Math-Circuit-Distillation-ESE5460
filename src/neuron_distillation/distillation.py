@@ -83,6 +83,7 @@ from utils import (
     LLAMA_8B_MODEL_NAME,
     STUDENT_MODEL_DIR,
     _extract_int_after_equals,
+    get_default_device,
     json_to_prompt_answer_dict,
     patch_tokenizer_no_special_tokens,
     rm_dir_tree,
@@ -169,7 +170,7 @@ class ClusterDistillationConfig:
     # Reproducible train loader shuffle / batch order (also call :func:`_seed_all` in the trainer).
     seed: int = 42
 
-    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    device: torch.device = get_default_device()
 
 def token_ids_for_integer_range(tokenizer, lo: int, hi: int) -> torch.LongTensor:
     """Token ID set for decimal strings ``str(n)``, for each ``n`` in ``[lo, hi]`` inclusive."""
@@ -937,7 +938,7 @@ class ClusterDistillationTrainer:
         self.test_data = test_data
         self.extra_eval_data = extra_eval_data or {}
         self.replay_data = replay_data
-        self.device = config.device
+        self.device = torch.device(config.device)
 
         _seed_all(config.seed)
         self._loader_generator = torch.Generator()
@@ -955,15 +956,15 @@ class ClusterDistillationTrainer:
         # .float()). fp16 student + composite loss often goes
         # non-finite after the first optimizer step.
         student_dtype = torch.float32
-        teacher_dtype = torch.float16 if config.device == "cuda" else torch.float32
-        original_dtype = torch.float16 if config.device == "cuda" else torch.float32
+        teacher_dtype = torch.float16 if self.device.type == "cuda" else torch.float32
+        original_dtype = torch.float16 if self.device.type == "cuda" else torch.float32
         if student is not None:
             self.student = student
         else:
             print(f"Loading student: {config.student_model}")
             self.student = AutoModelForCausalLM.from_pretrained(
                 config.student_model, dtype=student_dtype,
-            ).to(config.device)
+            ).to(self.device)
 
         if teacher is not None:
             self.teacher = teacher
@@ -971,7 +972,7 @@ class ClusterDistillationTrainer:
             print(f"Loading teacher: {config.teacher_model}")
             self.teacher = AutoModelForCausalLM.from_pretrained(
                 config.teacher_model, dtype=teacher_dtype,
-            ).to(config.device)
+            ).to(self.device)
         self.teacher.eval()
         for p in self.teacher.parameters():
             p.requires_grad = False
@@ -979,7 +980,7 @@ class ClusterDistillationTrainer:
         self.original_student: Optional[nn.Module] = None
         if config.lambda_original_kl > 0:
             self.original_student = deepcopy(self.student).to(
-                device=config.device, dtype=original_dtype,
+                device=self.device, dtype=original_dtype,
             )
             self.original_student.eval()
             for p in self.original_student.parameters():

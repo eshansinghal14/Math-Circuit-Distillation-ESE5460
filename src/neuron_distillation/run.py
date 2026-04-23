@@ -52,6 +52,7 @@ from utils import (
     LLAMA_8B_MODEL_NAME,
     NEURON_CLUSTERING_SUBDIR,
     _extract_circuit_model_state_dict,
+    get_default_device,
     load_model,
     load_model_checkpoint,
     load_prompt_answer_json,
@@ -721,7 +722,7 @@ def main():
             extra_eval_data[eval_prefix] = load_prompt_answer_json(eval_test_path)
             print(f"    {eval_prefix}: {len(extra_eval_data[eval_prefix])} examples")
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = get_default_device()
     student, tokenizer = load_student_model_for_distillation(
         student_source, args.student_model, device,
     )

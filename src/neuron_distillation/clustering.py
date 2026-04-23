@@ -20,6 +20,7 @@ import matplotlib.pyplot as plt
 from utils import (
     LLAMA_1B_MODEL_NAME,
     NEURON_CLUSTERING_SUBDIR,
+    get_default_device,
     load_model_checkpoint,
     patch_tokenizer_no_special_tokens,
     _stack_layer_activations,
@@ -27,7 +28,7 @@ from utils import (
 from circuit_discovery.utils import parse_equation
 from neuron_distillation.activations import NeuronActivationsGenerator
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
+device = get_default_device()
 
 
 def _save_k_vs_concordance_plot(

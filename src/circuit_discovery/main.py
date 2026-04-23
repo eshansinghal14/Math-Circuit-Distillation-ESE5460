@@ -35,7 +35,7 @@ def train_circuit_discovery(
     class_reweight=False,
     balance_tower_grads=True,
 ):
-    from utils import load_model_checkpoint
+    from utils import get_default_device, load_model_checkpoint
     from neuron_distillation.activations import NeuronActivationsGenerator
 
     def _generate_and_merge_batches(act_generator, batch_indices):
@@ -45,7 +45,7 @@ def train_circuit_discovery(
         return merge_activation_batches(batches)
 
     if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = get_default_device()
 
     from utils import patch_tokenizer_no_special_tokens
 
