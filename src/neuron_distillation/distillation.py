@@ -145,6 +145,10 @@ class ClusterDistillationConfig:
     # ``g_i = ||H X_i X_i^T H||_F / ||H X_i||_F`` for student activations shaped as
     # ``(B, T_valid * |C|)`` (batch × flattened time×neurons).
     cluster_grad_weighting: bool = False
+    # Neuron trajectory space for CKA features.
+    # ``activation``: raw up_proj outputs.
+    # ``residual_write``: activation scaled by ||down_proj[:, i]|| per neuron.
+    trajectory_space: str = "activation"
 
     # Greedy test accuracy: prompts batched for ``generate`` (independent of training batch size).
     eval_batch_size: int = 50
@@ -353,8 +357,14 @@ class ClusterActivationCache:
     collect all layers and concatenate.
     """
 
-    def __init__(self):
+    def __init__(self, trajectory_space: str = "activation"):
+        if trajectory_space not in {"activation", "residual_write"}:
+            raise ValueError(
+                "trajectory_space must be one of {'activation', 'residual_write'}"
+            )
+        self.trajectory_space = trajectory_space
         self.layer_activations: Dict[int, torch.Tensor] = {}
+        self.layer_residual_write_scale: Dict[int, torch.Tensor] = {}
         self.hooks: List = []
 
     def _make_hook(self, layer_idx: int, detach: bool):
@@ -371,6 +381,10 @@ class ClusterActivationCache:
                 computation graph (use for teacher).
         """
         self.clear()
+        if self.trajectory_space == "residual_write":
+            for i, layer in enumerate(model.model.layers):
+                scale = layer.mlp.down_proj.weight.detach().float().norm(dim=0)
+                self.layer_residual_write_scale[i] = scale
         for i, layer in enumerate(model.model.layers):
             h = layer.mlp.up_proj.register_forward_hook(
                 self._make_hook(i, detach=detach)
@@ -389,6 +403,9 @@ class ClusterActivationCache:
         parts = []
         for i in layers:
             act = self.layer_activations[i]  # (B, S, D_intermediate)
+            if self.trajectory_space == "residual_write":
+                scale = self.layer_residual_write_scale[i].to(act.device, dtype=act.dtype)
+                act = act * scale.view(1, 1, -1)
             if attention_mask is not None:
                 last_idx = attention_mask.sum(dim=1).long() - 1  # (B,)
                 last_tok = act[torch.arange(act.size(0), device=act.device), last_idx]
@@ -411,12 +428,17 @@ class ClusterActivationCache:
         layers = sorted(self.layer_activations.keys())
         parts = []
         for i in layers:
-            act = self.layer_activations[i].float()  # (B, T, D_intermediate)
+            act = self.layer_activations[i]
+            if self.trajectory_space == "residual_write":
+                scale = self.layer_residual_write_scale[i].to(act.device, dtype=act.dtype)
+                act = act * scale.view(1, 1, -1)
+            act = act.float()  # (B, T, D_intermediate)
             parts.append(act)
         return torch.cat(parts, dim=-1)  # (B, T, D_total)
 
     def clear(self):
         self.layer_activations.clear()
+        self.layer_residual_write_scale.clear()
         for h in self.hooks:
             h.remove()
         self.hooks.clear()
@@ -986,8 +1008,12 @@ class ClusterDistillationTrainer:
                 p.requires_grad = False
 
         # Activation caches
-        self.student_cache = ClusterActivationCache()
-        self.teacher_cache = ClusterActivationCache()
+        self.student_cache = ClusterActivationCache(
+            trajectory_space=config.trajectory_space,
+        )
+        self.teacher_cache = ClusterActivationCache(
+            trajectory_space=config.trajectory_space,
+        )
 
         # Losses
         self.cluster_loss_fn = ClusterAlignmentLoss()

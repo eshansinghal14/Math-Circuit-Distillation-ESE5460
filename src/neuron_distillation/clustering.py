@@ -238,6 +238,18 @@ def _parse_args(argv):
             "higher suggests a more stable choice of k (default: 5).",
         ),
     )
+    parser.add_argument(
+        "--trajectory-space",
+        type=str,
+        choices=["activation", "residual_write"],
+        default="activation",
+        help=(
+            "Neuron trajectory space for clustering features. "
+            "'activation' uses raw up_proj outputs; "
+            "'residual_write' scales each neuron by ||down_proj[:, i]|| "
+            "to reflect residual-stream write magnitude."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -363,7 +375,10 @@ def _collect_neuron_features_per_subclass(
     *,
     dataset_prefix: str,
     neuron_slice_chunk: int = 4096,
+    trajectory_space: str = "activation",
 ):
+    if trajectory_space not in {"activation", "residual_write"}:
+        raise ValueError("trajectory_space must be one of {'activation', 'residual_write'}")
     activations_generator = NeuronActivationsGenerator(
         model_name,
         batch_size=batch_size,
@@ -382,12 +397,27 @@ def _collect_neuron_features_per_subclass(
         indices_per_subclass[c] = idx
 
     features_lists = {c: [] for c in indices_per_subclass.keys()}
+    residual_write_scale = None
+    if trajectory_space == "residual_write":
+        scales = []
+        for layer in activations_generator.model.model.layers:
+            col_norm = layer.mlp.down_proj.weight.detach().float().norm(dim=0)
+            scales.append(col_norm)
+        residual_write_scale = torch.cat(scales, dim=0).to(device)
 
     for batch_idx in range(num_batches):
         batch = activations_generator.generate_batch_activations(batch_idx, log=True)
 
         ids, activations_dict = batch["ids"], batch["activations"]
         activations = _stack_layer_activations(activations_dict).to(device)
+        if residual_write_scale is not None:
+            if activations.size(-1) != residual_write_scale.numel():
+                activations_generator.remove_handles()
+                raise RuntimeError(
+                    f"Residual-write scale dim mismatch: activations have D={activations.size(-1)} "
+                    f"but scales have D={residual_write_scale.numel()}"
+                )
+            activations = activations * residual_write_scale.view(1, 1, -1)
         if k_classes == 1:
             # Single-class masks do not need problem-dependent routing.
             subclass = torch.zeros(activations.size(0), dtype=torch.long, device=device)
@@ -437,6 +467,7 @@ def _collect_neuron_features_per_subclass(
             {
                 "model_name": model_name,
                 "dataset_prefix": dataset_prefix,
+                "trajectory_space": trajectory_space,
                 "features_per_subclass": {c: v.detach().cpu() for c, v in features_per_subclass.items()},
                 "indices_per_subclass": {c: idx.detach().cpu() for c, idx in indices_per_subclass.items()},
             },
@@ -484,6 +515,7 @@ def load_subclass_features_bundle(
     dataset_prefix: str,
     neuron_slice_chunk: int = 4096,
     subclass_features_path: Optional[str] = None,
+    trajectory_space: str = "activation",
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Load (or collect) neuron feature matrix and global indices for one subclass; used for k-sweeps."""
     results_dir = os.path.abspath(results_dir)
@@ -499,6 +531,12 @@ def load_subclass_features_bundle(
                 f"Cached subclass features were built for dataset {ckpt_dataset!r}, "
                 f"not {dataset_prefix!r}: {subclass_features_path}"
             )
+        ckpt_space = ckpt.get("trajectory_space", "activation")
+        if ckpt_space != trajectory_space:
+            raise ValueError(
+                f"Cached subclass features use trajectory_space={ckpt_space!r}, not "
+                f"{trajectory_space!r}: {subclass_features_path}"
+            )
         features_per_subclass = {int(c): v for c, v in ckpt["features_per_subclass"].items()}
         indices_per_subclass = {int(c): idx for c, idx in ckpt["indices_per_subclass"].items()}
     else:
@@ -507,6 +545,7 @@ def load_subclass_features_bundle(
             save_path=subclass_features_path,
             dataset_prefix=dataset_prefix,
             neuron_slice_chunk=neuron_slice_chunk,
+            trajectory_space=trajectory_space,
         )
 
     if subclass not in features_per_subclass:
@@ -532,6 +571,7 @@ def run_neuron_kmeans(
     *,
     dataset_prefix: str,
     neuron_slice_chunk: int = 4096,
+    trajectory_space: str = "activation",
     x_preloaded: Optional[torch.Tensor] = None,
     subclass_indices_preloaded: Optional[torch.Tensor] = None,
     rng_seed: Optional[int] = None,
@@ -561,6 +601,12 @@ def run_neuron_kmeans(
                     f"Cached subclass features were built for dataset {ckpt_dataset!r}, "
                     f"not {dataset_prefix!r}: {subclass_features_path}"
                 )
+            ckpt_space = ckpt.get("trajectory_space", "activation")
+            if ckpt_space != trajectory_space:
+                raise ValueError(
+                    f"Cached subclass features use trajectory_space={ckpt_space!r}, not "
+                    f"{trajectory_space!r}: {subclass_features_path}"
+                )
             features_per_subclass = {int(c): v for c, v in ckpt["features_per_subclass"].items()}
             indices_per_subclass = {int(c): idx for c, idx in ckpt["indices_per_subclass"].items()}
         else:
@@ -569,6 +615,7 @@ def run_neuron_kmeans(
                 save_path=subclass_features_path,
                 dataset_prefix=dataset_prefix,
                 neuron_slice_chunk=neuron_slice_chunk,
+                trajectory_space=trajectory_space,
             )
 
         if subclass not in features_per_subclass:
@@ -600,6 +647,7 @@ def run_neuron_kmeans(
     torch.save(
         {
             "model_name": model_name,
+            "trajectory_space": trajectory_space,
             "subclass": subclass,
             "k": k,
             "cluster_ids": cluster_ids.cpu(),
@@ -657,6 +705,7 @@ if __name__ == "__main__":
     neuron_masks = neuron_masks > mask_on_threshold
 
     print("Active neurons ratio:", torch.mean(torch.mean(neuron_masks.float(), dim=1)).item())
+    print(f"Trajectory space: {args.trajectory_space}")
     for i in range(k_classes):
         print(neuron_masks[i].count_nonzero().item())
 
@@ -675,6 +724,7 @@ if __name__ == "__main__":
                 batch_size=args.batch_size,
                 dataset_prefix=args.dataset,
                 neuron_slice_chunk=args.neuron_slice_chunk,
+                trajectory_space=args.trajectory_space,
             )
             for k in range(1, args.cluster_k_max + 1, args.cluster_k_step):
                 conc = partition_concordance_ari(
@@ -693,6 +743,7 @@ if __name__ == "__main__":
                     results_dir=results_dir,
                     dataset_prefix=args.dataset,
                     neuron_slice_chunk=args.neuron_slice_chunk,
+                    trajectory_space=args.trajectory_space,
                     x_preloaded=x_sub,
                     subclass_indices_preloaded=idx_sub,
                     rng_seed=rng_seed,
