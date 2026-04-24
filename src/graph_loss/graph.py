@@ -197,9 +197,7 @@ def prune_graph(graph: Graph, node_threshold: float = 0.8, edge_threshold: float
 
 class SuperGraph:
     adjacency_matrix: torch.Tensor
-    node_types: list[str]          # "neuron", "token", "logit", or "supernode"
-    node_labels: list[str]
-    members: list[list[int]]       # old node ids inside each new node
+    supernodes: list[list[int]]       # old node ids inside each new node
 
 
 def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influence: float = 0.9) -> SuperGraph:
@@ -261,73 +259,16 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
             if node_influence_vectors[new_neighbors].sum(dim=0).norm(dim=-1) >= min_cum_logit_influence:
                 neighbors = list(set(neighbors) | set(new_neighbors))
 
-    # rebuild adj matrix with merging edges
-    members: list[list[int]] = []
-    node_types: list[str] = []
-    node_labels: list[str] = []
-    total_nodes = graph.adjacency_matrix.shape[0]
-    old_to_new = torch.empty(
-        total_nodes,
-        dtype=torch.long,
-        device=graph.adjacency_matrix.device,
-    )
+    adj_matrix_norm = normalize_matrix(graph.adjacency_matrix)
+    supernode_adj_matrix = torch.zeros(num_supernodes, num_supernodes, device=graph.adjacency_matrix.device)
+    supernodes = [[i for i in range(node_clusters) if node_clusters[i] == n] for n in range(1, num_supernodes + 1)]
+    for t in range(num_supernodes):
+        for s in range(num_supernodes):
+            frac_external = torch.abs(adj_matrix_norm[supernodes[t], supernodes[s]]).sum(dim=1) / torch.abs(adj_matrix_norm[supernodes[t]]).sum(dim=1)
+            sum_A = torch.abs(adj_matrix_norm[supernodes[t], supernodes[s]]).sum(dim=1)
+            supernode_adj_matrix[t, s] = (frac_external * sum_A).sum(dim=0) / frac_external.sum(dim=0)
 
-    for cluster_id in range(1, num_supernodes + 1):
-        cluster_members = [i for i, label in enumerate(node_clusters) if label == cluster_id]
-        if not cluster_members:
-            continue
-        new_idx = len(members)
-        members.append(cluster_members)
-        node_types.append("supernode" if len(cluster_members) > 1 else "neuron")
-        node_labels.append(
-            f"supernode_{new_idx}" if len(cluster_members) > 1 else f"neuron_{cluster_members[0]}"
-        )
-        old_to_new[cluster_members] = new_idx
-
-    for neuron_idx, cluster_id in enumerate(node_clusters):
-        if cluster_id > 0:
-            continue
-        new_idx = len(members)
-        members.append([neuron_idx])
-        node_types.append("neuron")
-        node_labels.append(f"neuron_{neuron_idx}")
-        old_to_new[neuron_idx] = new_idx
-
-    for token_offset in range(n_tokens):
-        old_idx = token_start + token_offset
-        new_idx = len(members)
-        members.append([old_idx])
-        node_types.append("token")
-        node_labels.append(f"token_{token_offset}")
-        old_to_new[old_idx] = new_idx
-
-    for logit_offset in range(n_logits):
-        old_idx = logit_start + logit_offset
-        new_idx = len(members)
-        members.append([old_idx])
-        node_types.append("logit")
-        node_labels.append(f"logit_{logit_offset}")
-        old_to_new[old_idx] = new_idx
-
-    projection = torch.zeros(
-        total_nodes,
-        len(members),
-        dtype=graph.adjacency_matrix.dtype,
-        device=graph.adjacency_matrix.device,
-    )
-    projection[
-        torch.arange(total_nodes, device=graph.adjacency_matrix.device),
-        old_to_new,
-    ] = 1
-    adjacency_matrix = projection.T @ graph.adjacency_matrix @ projection
-
-    return SuperGraph(
-        adjacency_matrix=adjacency_matrix,
-        node_types=node_types,
-        node_labels=node_labels,
-        members=members,
-    )
-
+    return SuperGraph(adjacency_matrix=supernode_adj_matrix, supernodes=supernodes)
 
 def range_query(node_influence_normalized: torch.Tensor, neuron_idx: int, epsilon: float) -> list[int]:
     """Find all nodes within epsilon of node_idx in the normalized node influence space."""
