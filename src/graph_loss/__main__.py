@@ -316,6 +316,11 @@ def main():
         help="Minimum cumulative logit influence norm required to form a supernode",
     )
     parser.add_argument(
+        "--prune",
+        action="store_true",
+        help="Whether to apply pruning before building supergraph",
+    )
+    parser.add_argument(
         "--prune_output_path",
         help="Optional path to save prune masks and cumulative scores (.pt)",
     )
@@ -355,23 +360,27 @@ def main():
         logger.info("Saving graph to %s", args.graph_output_path)
         graph.to_pt(args.graph_output_path)
 
-    # prune_result = None
-    logger.info("Running prune_graph")
-    prune_result = prune_graph(
-        graph,
-        node_threshold=args.node_threshold,
-        edge_threshold=args.edge_threshold,
-    )
-    _log_prune_summary(
-        graph,
-        prune_result,
-        node_threshold=args.node_threshold,
-        edge_threshold=args.edge_threshold,
-        logger=logger,
-    )
-    if args.prune_output_path:
-        logger.info("Saving prune result to %s", args.prune_output_path)
-        _save_prune_result(args.prune_output_path, prune_result)
+    prune_result = None
+    if args.prune:
+        logger.info("Running prune_graph")
+        prune_result = prune_graph(
+            graph,
+            node_threshold=args.node_threshold,
+            edge_threshold=args.edge_threshold,
+        )
+        _log_prune_summary(
+            graph,
+            prune_result,
+            node_threshold=args.node_threshold,
+            edge_threshold=args.edge_threshold,
+            logger=logger,
+        )
+        if args.prune_output_path:
+            logger.info("Saving prune result to %s", args.prune_output_path)
+            _save_prune_result(args.prune_output_path, prune_result)
+            
+        logger.info("Applying prune masks to graph")
+        graph = graph.apply_prune_result(prune_result)
 
     logger.info("Running build_super_graph")
     supergraph = build_super_graph(

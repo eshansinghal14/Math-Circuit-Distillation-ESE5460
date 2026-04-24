@@ -204,6 +204,36 @@ class Graph:
             vocab_size=data.get("vocab_size"),
         )
 
+    def apply_prune_result(self, prune_result: "PruneResult") -> "Graph":
+        """Returns a new Graph with edges and nodes zeroed out according to the PruneResult masks."""
+        adjacency_dense = self.adjacency_dense().clone()
+        
+        effective_edge_mask = (
+            prune_result.edge_mask 
+            & prune_result.node_mask[:, None] 
+            & prune_result.node_mask[None, :]
+        )
+        
+        adjacency_dense[~effective_edge_mask] = 0.0
+        
+        new_adjacency = (
+            adjacency_dense.to_sparse() 
+            if self.adjacency_matrix.is_sparse 
+            else adjacency_dense
+        )
+
+        return Graph(
+            input_string=self.input_string,
+            input_tokens=self.input_tokens,
+            neuron_locations=self.neuron_locations,
+            adjacency_matrix=new_adjacency,
+            cfg=self.cfg, # type: ignore
+            neuron_activations=self.neuron_activations,
+            logit_targets=self.logit_targets,
+            logit_probabilities=self.logit_probabilities,
+            vocab_size=self.vocab_size,
+        )
+
 
 def normalize_matrix(matrix: torch.Tensor) -> torch.Tensor:
     normalized = matrix.abs()
