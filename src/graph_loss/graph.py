@@ -434,10 +434,14 @@ def extract_supernode_members(supergraph: SuperGraph, graph: Graph, model) -> li
             layer = int(graph.neuron_locations[nid, 0].item())
             neuron_id = int(graph.neuron_locations[nid, 2].item())
             old_mlp = model.blocks[layer].mlp.old_mlp
+            
+            # W_out is typically very large. Slicing it keeps the entire original 
+            # storage block alive in RAM. We MUST use .clone() to detach the slice 
+            # so the garbage collector can clear the massive parent matrix!
             W_out = model._row_oriented_weight(
                 old_mlp.W_out.to(device=graph.adjacency_device)
             )
-            w_outs.append(W_out[neuron_id].detach())
+            w_outs.append(W_out[neuron_id].detach().clone())
         result.append({
             "cluster_id": i,
             "activations": acts,
