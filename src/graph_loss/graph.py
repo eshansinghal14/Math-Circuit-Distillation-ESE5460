@@ -222,8 +222,9 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
     ] = 1
 
     logit_influence = compute_node_influence(graph.adjacency_matrix, logit_basis)
+    logit_probabilities = graph.logit_probabilities.to(graph.adjacency_matrix.device)
     node_influence_vectors = (
-        logit_influence.T[:n_neurons] * (1 - graph.logit_probabilities) * graph.logit_probabilities
+        logit_influence.T[:n_neurons] * (1 - logit_probabilities) * logit_probabilities
     )
     node_influence_normalized = node_influence_vectors / node_influence_vectors.norm(
         dim=-1, keepdim=True
