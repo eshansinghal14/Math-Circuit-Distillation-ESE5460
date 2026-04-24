@@ -427,27 +427,32 @@ def extract_supernode_members(supergraph: SuperGraph, graph: Graph, model) -> li
         w_out_rows: list[Tensor] (W_out[neuron_id, :] ∈ R^{d_model} per member)
     """
     result = []
+    
+    # Cache the W_out matrices per layer to avoid transferring and transposing 
+    # massive 235MB tensors 4,500 times in the inner loop!
+    w_out_cache = {}
+    
     for i, members in enumerate(supergraph.supernodes):
-        acts = [graph.neuron_activations[nid].item() for nid in members]
+        acts = []
         w_outs = []
         for nid in members:
             layer = int(graph.neuron_locations[nid, 0].item())
             neuron_id = int(graph.neuron_locations[nid, 2].item())
-            old_mlp = model.blocks[layer].mlp.old_mlp
             
-            # W_out is typically very large. Slicing it keeps the entire original 
-            # storage block alive in RAM. We MUST use .clone() to detach the slice 
-            # so the garbage collector can clear the massive parent matrix!
-            W_out = model._row_oriented_weight(
-                old_mlp.W_out.to(device=graph.adjacency_device)
-            )
-            w_outs.append(W_out[neuron_id].detach().clone())
+            if layer not in w_out_cache:
+                old_mlp = model.blocks[layer].mlp.old_mlp
+                W_out = model._row_oriented_weight(
+                    old_mlp.W_out.to(device=graph.adjacency_device)
+                )
+                w_out_cache[layer] = W_out
+                
+            acts.append(graph.neuron_activations[nid].unsqueeze(0))
+            w_outs.append(w_out_cache[layer][neuron_id].detach().clone())
         result.append({
             "cluster_id": i,
             "activations": acts,
             "w_out_rows": w_outs,
         })
-    return result
 
 
 
