@@ -34,7 +34,7 @@ class Graph:
         logit_probabilities: torch.Tensor,
         vocab_size: int | None = None,
     ):
-        """Container for dense neuron/token/logit attribution graphs.
+        """Container for neuron/token/logit attribution graphs.
 
         Nodes are stored in the order:
         ``[neurons, token_embeddings, logits]``.
@@ -46,7 +46,9 @@ class Graph:
         self.vocab_size = vocab_size if vocab_size is not None else cfg.d_vocab
 
         self.input_string = input_string
-        self.adjacency_matrix = adjacency_matrix
+        self.adjacency_matrix = (
+            adjacency_matrix.coalesce() if adjacency_matrix.is_sparse else adjacency_matrix
+        )
         self.cfg = convert_nnsight_config_to_transformerlens(cfg)
         self.n_pos = len(input_tokens)
         self.neuron_locations = neuron_locations
@@ -65,11 +67,81 @@ class Graph:
     def n_logits(self) -> int:
         return len(self.logit_targets)
 
+    @property
+    def n_nodes(self) -> int:
+        return self.adjacency_matrix.shape[0]
+
+    @property
+    def adjacency_shape(self) -> tuple[int, int]:
+        return tuple(self.adjacency_matrix.shape)
+
+    @property
+    def adjacency_device(self):
+        return self.adjacency_matrix.device
+
     def to(self, device):
         self.adjacency_matrix = self.adjacency_matrix.to(device)
+        if self.adjacency_matrix.is_sparse:
+            self.adjacency_matrix = self.adjacency_matrix.coalesce()
         self.neuron_locations = self.neuron_locations.to(device)
         self.neuron_activations = self.neuron_activations.to(device)
         self.logit_probabilities = self.logit_probabilities.to(device)
+
+    def adjacency_dense(self) -> torch.Tensor:
+        return self.adjacency_matrix.to_dense() if self.adjacency_matrix.is_sparse else self.adjacency_matrix
+
+    def adjacency_nnz(self) -> int:
+        if self.adjacency_matrix.is_sparse:
+            return int(self.adjacency_matrix._nnz())
+        return int(self.adjacency_matrix.count_nonzero().item())
+
+    def adjacency_abs_sum(self) -> float:
+        if self.adjacency_matrix.is_sparse:
+            return float(self.adjacency_matrix.values().abs().sum().item())
+        return float(self.adjacency_matrix.abs().sum().item())
+
+    def block_nonzero_count(
+        self,
+        row_start: int,
+        row_end: int,
+        col_start: int,
+        col_end: int,
+    ) -> int:
+        if self.adjacency_matrix.is_sparse:
+            adjacency = self.adjacency_matrix.coalesce()
+            indices = adjacency.indices()
+            mask = (
+                (indices[0] >= row_start)
+                & (indices[0] < row_end)
+                & (indices[1] >= col_start)
+                & (indices[1] < col_end)
+            )
+            return int(mask.sum().item())
+        return int(
+            self.adjacency_matrix[row_start:row_end, col_start:col_end].count_nonzero().item()
+        )
+
+    def block_abs_sum(
+        self,
+        row_start: int,
+        row_end: int,
+        col_start: int,
+        col_end: int,
+    ) -> float:
+        if self.adjacency_matrix.is_sparse:
+            adjacency = self.adjacency_matrix.coalesce()
+            indices = adjacency.indices()
+            values = adjacency.values()
+            mask = (
+                (indices[0] >= row_start)
+                & (indices[0] < row_end)
+                & (indices[1] >= col_start)
+                & (indices[1] < col_end)
+            )
+            return float(values[mask].abs().sum().item())
+        return float(
+            self.adjacency_matrix[row_start:row_end, col_start:col_end].abs().sum().item()
+        )
 
     @property
     def logit_token_ids(self) -> torch.Tensor:
@@ -80,24 +152,57 @@ class Graph:
         )
 
     def to_pt(self, path: str):
-        torch.save(
-            {
-                "input_string": self.input_string,
-                "adjacency_matrix": self.adjacency_matrix,
-                "cfg": self.cfg,
-                "neuron_locations": self.neuron_locations,
-                "logit_targets": self.logit_targets,
-                "logit_probabilities": self.logit_probabilities,
-                "vocab_size": self.vocab_size,
-                "input_tokens": self.input_tokens,
-                "neuron_activations": self.neuron_activations,
-            },
-            path,
-        )
+        data = {
+            "input_string": self.input_string,
+            "cfg": self.cfg,
+            "neuron_locations": self.neuron_locations,
+            "logit_targets": self.logit_targets,
+            "logit_probabilities": self.logit_probabilities,
+            "vocab_size": self.vocab_size,
+            "input_tokens": self.input_tokens,
+            "neuron_activations": self.neuron_activations,
+        }
+        if self.adjacency_matrix.is_sparse:
+            adjacency = self.adjacency_matrix.coalesce()
+            data.update(
+                {
+                    "adjacency_layout": "sparse_coo",
+                    "adjacency_indices": adjacency.indices(),
+                    "adjacency_values": adjacency.values(),
+                    "adjacency_size": tuple(adjacency.shape),
+                }
+            )
+        else:
+            data.update(
+                {
+                    "adjacency_layout": "dense",
+                    "adjacency_matrix": self.adjacency_matrix,
+                }
+            )
+        torch.save(data, path)
 
     @staticmethod
     def from_pt(path: str, map_location="cpu") -> "Graph":
-        return Graph(**torch.load(path, weights_only=False, map_location=map_location))
+        data = torch.load(path, weights_only=False, map_location=map_location)
+        if data.get("adjacency_layout") == "sparse_coo":
+            adjacency_matrix = torch.sparse_coo_tensor(
+                data["adjacency_indices"],
+                data["adjacency_values"],
+                size=tuple(data["adjacency_size"]),
+            ).coalesce()
+        else:
+            adjacency_matrix = data["adjacency_matrix"]
+        return Graph(
+            input_string=data["input_string"],
+            input_tokens=data["input_tokens"],
+            neuron_locations=data["neuron_locations"],
+            adjacency_matrix=adjacency_matrix,
+            cfg=data["cfg"],
+            neuron_activations=data["neuron_activations"],
+            logit_targets=data["logit_targets"],
+            logit_probabilities=data["logit_probabilities"],
+            vocab_size=data.get("vocab_size"),
+        )
 
 
 def normalize_matrix(matrix: torch.Tensor) -> torch.Tensor:
@@ -159,16 +264,15 @@ def prune_graph(graph: Graph, node_threshold: float = 0.8, edge_threshold: float
     n_neurons = graph.n_neurons
     token_start = n_neurons
 
-    logit_weights = torch.zeros(
-        graph.adjacency_matrix.shape[0], device=graph.adjacency_matrix.device
-    )
-    logit_weights[-n_logits:] = graph.logit_probabilities
+    adjacency_matrix = graph.adjacency_dense()
+    logit_weights = torch.zeros(adjacency_matrix.shape[0], device=adjacency_matrix.device)
+    logit_weights[-n_logits:] = graph.logit_probabilities.to(adjacency_matrix.device)
 
-    node_influence = compute_node_influence(graph.adjacency_matrix, logit_weights)
+    node_influence = compute_node_influence(adjacency_matrix, logit_weights)
     node_mask = node_influence >= find_threshold(node_influence, node_threshold)
     node_mask[token_start:] = True
 
-    pruned_matrix = graph.adjacency_matrix.clone()
+    pruned_matrix = adjacency_matrix.clone()
     pruned_matrix[~node_mask] = 0
     pruned_matrix[:, ~node_mask] = 0
 
@@ -214,15 +318,15 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
     token_start = n_neurons
     logit_start = token_start + n_tokens
 
-    logit_basis = torch.zeros(n_logits, graph.adjacency_matrix.shape[0], 
-        device=graph.adjacency_matrix.device)
+    adjacency_matrix = graph.adjacency_dense()
+    logit_basis = torch.zeros(n_logits, adjacency_matrix.shape[0], device=adjacency_matrix.device)
     logit_basis[
-        torch.arange(n_logits, device=graph.adjacency_matrix.device), 
-        logit_start + torch.arange(n_logits, device=graph.adjacency_matrix.device)
+        torch.arange(n_logits, device=adjacency_matrix.device), 
+        logit_start + torch.arange(n_logits, device=adjacency_matrix.device)
     ] = 1
 
-    logit_influence = compute_node_influence(graph.adjacency_matrix, logit_basis)
-    logit_probabilities = graph.logit_probabilities.to(graph.adjacency_matrix.device)
+    logit_influence = compute_node_influence(adjacency_matrix, logit_basis)
+    logit_probabilities = graph.logit_probabilities.to(adjacency_matrix.device)
     node_influence_vectors = (
         logit_influence.T[:n_neurons] * (1 - logit_probabilities) * logit_probabilities
     )
@@ -260,8 +364,13 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
             if node_influence_vectors[new_neighbors].sum(dim=0).norm(dim=-1) >= min_cum_logit_influence:
                 neighbors = list(set(neighbors) | set(new_neighbors))
 
-    adj_matrix_norm = normalize_matrix(graph.adjacency_matrix)
-    supernode_adj_matrix = torch.zeros(num_supernodes, num_supernodes, dtype=graph.adjacency_matrix.dtype, device=graph.adjacency_matrix.device)
+    adj_matrix_norm = normalize_matrix(adjacency_matrix)
+    supernode_adj_matrix = torch.zeros(
+        num_supernodes,
+        num_supernodes,
+        dtype=adjacency_matrix.dtype,
+        device=adjacency_matrix.device,
+    )
     supernodes = [[i for i in range(n_neurons) if node_clusters[i] == n] for n in range(1, num_supernodes + 1)]
     for t in range(num_supernodes):
         total_input = torch.abs(adj_matrix_norm[:, supernodes[t]]).sum(dim=0)

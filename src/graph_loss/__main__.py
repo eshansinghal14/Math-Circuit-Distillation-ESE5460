@@ -9,6 +9,8 @@ from graph_loss.replacement_model import TransformerLensReplacementModel
 
 
 def _count_nonzero_edges(matrix: torch.Tensor) -> int:
+    if matrix.is_sparse:
+        return int(matrix._nnz())
     return int(matrix.count_nonzero().item())
 
 
@@ -32,11 +34,9 @@ def _format_top_logit_targets(graph: Graph, limit: int = 5) -> str:
 
 
 def _log_graph_summary(graph: Graph, *, logger: logging.Logger, stage: str) -> None:
-    total_nodes = graph.adjacency_matrix.shape[0]
-    total_edges = _count_nonzero_edges(graph.adjacency_matrix)
-    neuron_edges = _count_nonzero_edges(
-        graph.adjacency_matrix[: graph.n_neurons, : graph.n_neurons]
-    )
+    total_nodes = graph.n_nodes
+    total_edges = graph.adjacency_nnz()
+    neuron_edges = graph.block_nonzero_count(0, graph.n_neurons, 0, graph.n_neurons)
 
     logger.info("%s graph summary", stage)
     logger.info(
@@ -48,9 +48,9 @@ def _log_graph_summary(graph: Graph, *, logger: logging.Logger, stage: str) -> N
     )
     logger.info(
         "  adjacency: shape=%s dtype=%s device=%s",
-        tuple(graph.adjacency_matrix.shape),
+        graph.adjacency_shape,
         graph.adjacency_matrix.dtype,
-        graph.adjacency_matrix.device,
+        graph.adjacency_device,
     )
     logger.info(
         "  edges: total=%d density=%.6f neuron_to_neuron=%d neuron_density=%.6f",
@@ -61,10 +61,8 @@ def _log_graph_summary(graph: Graph, *, logger: logging.Logger, stage: str) -> N
     )
     logger.info(
         "  edge_weight_mass: abs_total=%.6f abs_neuron_to_neuron=%.6f",
-        float(graph.adjacency_matrix.abs().sum().item()),
-        float(
-            graph.adjacency_matrix[: graph.n_neurons, : graph.n_neurons].abs().sum().item()
-        ),
+        graph.adjacency_abs_sum(),
+        graph.block_abs_sum(0, graph.n_neurons, 0, graph.n_neurons),
     )
     logger.info(
         "  logits: vocab_size=%d top_targets=%s",
@@ -83,7 +81,8 @@ def _log_prune_summary(
 ) -> None:
     node_mask = prune_result.node_mask
     edge_mask = prune_result.edge_mask
-    adjacency_nonzero = graph.adjacency_matrix != 0
+    adjacency_matrix = graph.adjacency_dense()
+    adjacency_nonzero = adjacency_matrix != 0
     effective_edge_mask = edge_mask & adjacency_nonzero & node_mask[:, None] & node_mask[None, :]
 
     kept_neurons = int(node_mask[: graph.n_neurons].sum().item())
@@ -111,7 +110,7 @@ def _log_prune_summary(
         kept_logits,
         graph.n_logits,
         kept_total,
-        graph.adjacency_matrix.shape[0],
+        graph.n_nodes,
     )
     logger.info(
         "  kept_edges: total=%d/%d density=%.6f neuron_to_neuron=%d density_neuron=%.6f",
@@ -125,7 +124,7 @@ def _log_prune_summary(
         "  reductions: neurons_removed=%d edges_removed=%d node_retention=%.2f%% edge_retention=%.2f%%",
         graph.n_neurons - kept_neurons,
         total_edges - kept_edges,
-        100.0 * kept_total / max(graph.adjacency_matrix.shape[0], 1),
+        100.0 * kept_total / max(graph.n_nodes, 1),
         100.0 * kept_edges / max(total_edges, 1),
     )
     logger.info(
@@ -199,11 +198,11 @@ def _log_pipeline_comparison(
     *,
     logger: logging.Logger,
 ) -> None:
-    total_edges = _count_nonzero_edges(graph.adjacency_matrix)
+    total_edges = graph.adjacency_nnz()
     kept_edges = int(
         (
             prune_result.edge_mask
-            & (graph.adjacency_matrix != 0)
+            & (graph.adjacency_dense() != 0)
             & prune_result.node_mask[:, None]
             & prune_result.node_mask[None, :]
         ).sum().item()

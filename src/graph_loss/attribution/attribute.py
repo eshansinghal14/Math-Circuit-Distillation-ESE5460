@@ -1,4 +1,4 @@
-"""Build dense neuron-level attribution graphs for small prompts/models."""
+"""Build sparse-backed neuron-level attribution graphs for small prompts/models."""
 
 import logging
 import math
@@ -31,7 +31,7 @@ def attribute(
     verbose: bool = False,
     update_interval: int = 4,
 ) -> Graph:
-    """Compute a dense neuron graph for a prompt.
+    """Compute a sparse-backed neuron graph for a prompt.
 
     The dense adjacency layout is:
     ``[neurons, token_embeddings, logits]``.
@@ -91,7 +91,9 @@ def _run_target_batches(
     target_layers: torch.Tensor,
     target_positions: torch.Tensor,
     inject_values: torch.Tensor,
-    full_edge_matrix: torch.Tensor,
+    edge_row_chunks: list[torch.Tensor],
+    edge_col_chunks: list[torch.Tensor],
+    edge_value_chunks: list[torch.Tensor],
     batch_size: int,
     total_batches: int,
     processed_batches: int,
@@ -108,7 +110,13 @@ def _run_target_batches(
             inject_values=inject_values[start:end],
             retain_graph=retain_graph,
         )
-        full_edge_matrix[target_rows[start:end], :source_cols] = rows.cpu()
+        rows = rows.cpu()
+        nonzero = rows.nonzero(as_tuple=False)
+        if len(nonzero):
+            batch_targets = target_rows[start:end].to(dtype=torch.long).cpu()
+            edge_row_chunks.append(batch_targets[nonzero[:, 0]])
+            edge_col_chunks.append(nonzero[:, 1].to(dtype=torch.long))
+            edge_value_chunks.append(rows[nonzero[:, 0], nonzero[:, 1]])
         processed_batches += 1
         if progress_bar is not None:
             progress_bar.update(end - start)
@@ -173,7 +181,9 @@ def _run_attribution(
     logger.info(f"Neuron nodes: {n_neurons}, Token nodes: {n_tokens}, Logit nodes: {n_logits}")
 
     _check_dense_graph_size(total_nodes, ctx.source_vectors.dtype)
-    full_edge_matrix = torch.zeros(total_nodes, total_nodes, dtype=ctx.source_vectors.dtype)
+    edge_row_chunks: list[torch.Tensor] = []
+    edge_col_chunks: list[torch.Tensor] = []
+    edge_value_chunks: list[torch.Tensor] = []
     logger.info(f"Target setup completed in {time.time() - phase_start:.2f}s")
 
     logger.info("Phase 3: Computing neuron and logit attribution rows")
@@ -199,7 +209,9 @@ def _run_attribution(
         target_layers=neuron_layers,
         target_positions=neuron_positions,
         inject_values=ctx.target_encoders,
-        full_edge_matrix=full_edge_matrix,
+        edge_row_chunks=edge_row_chunks,
+        edge_col_chunks=edge_col_chunks,
+        edge_value_chunks=edge_value_chunks,
         batch_size=batch_size,
         total_batches=total_batches,
         processed_batches=processed_batches,
@@ -216,7 +228,9 @@ def _run_attribution(
         target_layers=logit_layers,
         target_positions=logit_positions,
         inject_values=targets.logit_vectors,
-        full_edge_matrix=full_edge_matrix,
+        edge_row_chunks=edge_row_chunks,
+        edge_col_chunks=edge_col_chunks,
+        edge_value_chunks=edge_value_chunks,
         batch_size=batch_size,
         total_batches=total_batches,
         processed_batches=processed_batches,
@@ -226,12 +240,28 @@ def _run_attribution(
     progress_bar.close()
     logger.info(f"Attribution rows completed in {time.time() - phase_start:.2f}s")
 
+    if edge_value_chunks:
+        adjacency_indices = torch.stack(
+            [torch.cat(edge_row_chunks), torch.cat(edge_col_chunks)],
+            dim=0,
+        )
+        adjacency_values = torch.cat(edge_value_chunks)
+    else:
+        adjacency_indices = torch.zeros((2, 0), dtype=torch.long)
+        adjacency_values = torch.zeros((0,), dtype=ctx.source_vectors.dtype)
+    adjacency_matrix = torch.sparse_coo_tensor(
+        adjacency_indices,
+        adjacency_values,
+        size=(total_nodes, total_nodes),
+        dtype=ctx.source_vectors.dtype,
+    ).coalesce()
+
     graph = Graph(
         input_string=model.tokenizer.decode(input_ids.detach().cpu().tolist()),
         input_tokens=input_ids,
         neuron_locations=ctx.neuron_locations,
         neuron_activations=ctx.neuron_activations,
-        adjacency_matrix=full_edge_matrix,
+        adjacency_matrix=adjacency_matrix,
         cfg=model.cfg,
         logit_targets=targets.logit_targets,
         logit_probabilities=targets.logit_probabilities,
