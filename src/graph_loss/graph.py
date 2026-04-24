@@ -452,6 +452,8 @@ def extract_supernode_members(supergraph: SuperGraph, graph: Graph, model) -> li
             "cluster_id": i,
             "activations": acts,
             "w_out_rows": w_outs,
-            "size": len(members),
         })
-    return result
+
+
+
+

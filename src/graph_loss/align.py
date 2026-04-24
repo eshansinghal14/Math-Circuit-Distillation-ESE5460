@@ -19,7 +19,7 @@ def compute_supernode_dla(
     d_model = W_U.shape[0]
     write_vec = torch.zeros(d_model, device=W_U.device, dtype=W_U.dtype)
     for act, w_out_row in zip(supernode["activations"], supernode["w_out_rows"]):
-        write_vec += act * w_out_row.to(W_U.device)
+        write_vec += act.to(W_U.device) * w_out_row.to(W_U.device)
     return write_vec @ W_U
 
 
