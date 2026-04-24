@@ -15,11 +15,20 @@ def compute_supernode_dla(
     supernode: dict,
     W_U: torch.Tensor,
 ) -> torch.Tensor:
-    # DLA = (Σ_i a_i · W_out[i]) @ W_U  →  R^{vocab}
+    # DLA = (Σ_i a_i · W_out[i])    device = W_U.device
+    device = W_U.device
+    dtype = W_U.dtype
     d_model = W_U.shape[0]
-    write_vec = torch.zeros(d_model, device=W_U.device, dtype=W_U.dtype)
+    write_vec = torch.zeros(d_model, device=device, dtype=dtype)
     for act, w_out_row in zip(supernode["activations"], supernode["w_out_rows"]):
-        write_vec += act.to(W_U.device) * w_out_row.to(W_U.device)
+        if not isinstance(act, torch.Tensor):
+            act = torch.tensor(act, device=device, dtype=dtype)
+        else:
+            act = act.to(device=device, dtype=dtype)
+            
+        w_row = w_out_row.to(device=device, dtype=dtype)
+        write_vec += act * w_row
+        
     return write_vec @ W_U
 
 
