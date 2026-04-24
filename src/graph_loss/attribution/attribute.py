@@ -160,6 +160,8 @@ def _run_attribution(
     n_logits = len(targets)
     total_nodes = n_neurons + n_tokens + n_logits
 
+    logger.info(f"Neuron nodes: {n_neurons}, Token nodes: {n_tokens}, Logit nodes: {n_logits}")
+
     _check_dense_graph_size(total_nodes, ctx.source_vectors.dtype)
     full_edge_matrix = torch.zeros(total_nodes, total_nodes, dtype=ctx.source_vectors.dtype)
     logger.info(f"Target setup completed in {time.time() - phase_start:.2f}s")

@@ -193,3 +193,148 @@ def prune_graph(graph: Graph, node_threshold: float = 0.8, edge_threshold: float
     final_scores[sorted_indices] = cumulative_scores
 
     return PruneResult(node_mask, edge_mask, final_scores)
+
+
+class SuperGraph:
+    adjacency_matrix: torch.Tensor
+    node_types: list[str]          # "neuron", "token", "logit", or "supernode"
+    node_labels: list[str]
+    members: list[list[int]]       # old node ids inside each new node
+
+
+def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influence: float = 0.9) -> SuperGraph:
+    """Create supernodes as clusters of nodes that have distance < epsilon and cumulative logit influence > min_cum_logit_influence."""
+
+    if epsilon > 1.0 or epsilon < 0.0:
+        raise ValueError("epsilon must be between 0.0 and 1.0")
+    if min_cum_logit_influence < 0.0:
+        raise ValueError("min_cum_logit_influence must be non-negative")
+
+    n_logits = graph.n_logits
+    n_tokens = graph.n_tokens
+    n_neurons = graph.n_neurons
+    token_start = n_neurons
+    logit_start = token_start + n_tokens
+
+    logit_basis = torch.zeros(n_logits, graph.adjacency_matrix.shape[0], 
+        device=graph.adjacency_matrix.device)
+    logit_basis[
+        torch.arange(n_logits, device=graph.adjacency_matrix.device), 
+        logit_start + torch.arange(n_logits, device=graph.adjacency_matrix.device)
+    ] = 1
+
+    logit_influence = compute_node_influence(graph.adjacency_matrix, logit_basis)
+    node_influence_vectors = (
+        logit_influence.T[:n_neurons] * (1 - graph.logit_probabilities) * graph.logit_probabilities
+    )
+    node_influence_normalized = node_influence_vectors / node_influence_vectors.norm(
+        dim=-1, keepdim=True
+    ).clamp(min=1e-12)
+
+    num_supernodes = 0
+    node_clusters = [0] * n_neurons
+    for n in range(n_neurons):
+        if node_clusters[n] != 0:
+            continue
+
+        neighbors = range_query(node_influence_normalized, n, epsilon)
+        if node_influence_vectors[neighbors].sum(dim=0).norm(dim=-1) < min_cum_logit_influence:
+            node_clusters[n] = -1
+            continue
+        
+        num_supernodes += 1
+        node_clusters[n] = num_supernodes
+        neighbors = [neighbor for neighbor in neighbors if neighbor != n]
+        idx = 0
+
+        while idx < len(neighbors):
+            s = neighbors[idx]
+            idx += 1
+            if node_clusters[s] == -1:
+                node_clusters[s] = num_supernodes
+            if node_clusters[s] != 0:
+                continue
+
+            node_clusters[s] = num_supernodes
+            new_neighbors = range_query(node_influence_normalized, s, epsilon)
+
+            if node_influence_vectors[new_neighbors].sum(dim=0).norm(dim=-1) >= min_cum_logit_influence:
+                neighbors = list(set(neighbors) | set(new_neighbors))
+
+    # rebuild adj matrix with merging edges
+    members: list[list[int]] = []
+    node_types: list[str] = []
+    node_labels: list[str] = []
+    total_nodes = graph.adjacency_matrix.shape[0]
+    old_to_new = torch.empty(
+        total_nodes,
+        dtype=torch.long,
+        device=graph.adjacency_matrix.device,
+    )
+
+    for cluster_id in range(1, num_supernodes + 1):
+        cluster_members = [i for i, label in enumerate(node_clusters) if label == cluster_id]
+        if not cluster_members:
+            continue
+        new_idx = len(members)
+        members.append(cluster_members)
+        node_types.append("supernode" if len(cluster_members) > 1 else "neuron")
+        node_labels.append(
+            f"supernode_{new_idx}" if len(cluster_members) > 1 else f"neuron_{cluster_members[0]}"
+        )
+        old_to_new[cluster_members] = new_idx
+
+    for neuron_idx, cluster_id in enumerate(node_clusters):
+        if cluster_id > 0:
+            continue
+        new_idx = len(members)
+        members.append([neuron_idx])
+        node_types.append("neuron")
+        node_labels.append(f"neuron_{neuron_idx}")
+        old_to_new[neuron_idx] = new_idx
+
+    for token_offset in range(n_tokens):
+        old_idx = token_start + token_offset
+        new_idx = len(members)
+        members.append([old_idx])
+        node_types.append("token")
+        node_labels.append(f"token_{token_offset}")
+        old_to_new[old_idx] = new_idx
+
+    for logit_offset in range(n_logits):
+        old_idx = logit_start + logit_offset
+        new_idx = len(members)
+        members.append([old_idx])
+        node_types.append("logit")
+        node_labels.append(f"logit_{logit_offset}")
+        old_to_new[old_idx] = new_idx
+
+    projection = torch.zeros(
+        total_nodes,
+        len(members),
+        dtype=graph.adjacency_matrix.dtype,
+        device=graph.adjacency_matrix.device,
+    )
+    projection[
+        torch.arange(total_nodes, device=graph.adjacency_matrix.device),
+        old_to_new,
+    ] = 1
+    adjacency_matrix = projection.T @ graph.adjacency_matrix @ projection
+
+    return SuperGraph(
+        adjacency_matrix=adjacency_matrix,
+        node_types=node_types,
+        node_labels=node_labels,
+        members=members,
+    )
+
+
+def range_query(node_influence_normalized: torch.Tensor, neuron_idx: int, epsilon: float) -> list[int]:
+    """Find all nodes within epsilon of node_idx in the normalized node influence space."""
+    return torch.where(1 - node_influence_normalized @ node_influence_normalized[neuron_idx] <= epsilon)[0].tolist()
+
+
+
+
+
+
