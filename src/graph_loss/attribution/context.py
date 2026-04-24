@@ -71,8 +71,19 @@ class AttributionContext:
         proxy = weakref.proxy(self)
 
         def _hook_fn(grads: torch.Tensor, hook: HookPoint) -> None:
-            grad_slice = grads.to(output_vecs.dtype)[:, positions]
-            scores = torch.einsum("bpd,pd->pb", grad_slice, output_vecs)
+            # Avoid allocating huge grads[:, positions] tensor to prevent CUDA OOM
+            scores = torch.empty(
+                grads.shape[0], 
+                len(positions), 
+                device=grads.device, 
+                dtype=output_vecs.dtype
+            )
+            for p in torch.unique(positions):
+                mask = positions == p
+                grad_p = grads[:, p, :].to(output_vecs.dtype)
+                out_p = output_vecs[mask]
+                scores[:, mask] = torch.matmul(grad_p, out_p.T)
+            
             proxy._batch_buffer[write_index] += scores
 
         return hook_name, _hook_fn
