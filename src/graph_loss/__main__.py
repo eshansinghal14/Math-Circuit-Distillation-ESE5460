@@ -355,23 +355,23 @@ def main():
         logger.info("Saving graph to %s", args.graph_output_path)
         graph.to_pt(args.graph_output_path)
 
-    prune_result = None
-    # logger.info("Running prune_graph")
-    # prune_result = prune_graph(
-    #     graph,
-    #     node_threshold=args.node_threshold,
-    #     edge_threshold=args.edge_threshold,
-    # )
-    # _log_prune_summary(
-    #     graph,
-    #     prune_result,
-    #     node_threshold=args.node_threshold,
-    #     edge_threshold=args.edge_threshold,
-    #     logger=logger,
-    # )
-    # if args.prune_output_path:
-    #     logger.info("Saving prune result to %s", args.prune_output_path)
-    #     _save_prune_result(args.prune_output_path, prune_result)
+    # prune_result = None
+    logger.info("Running prune_graph")
+    prune_result = prune_graph(
+        graph,
+        node_threshold=args.node_threshold,
+        edge_threshold=args.edge_threshold,
+    )
+    _log_prune_summary(
+        graph,
+        prune_result,
+        node_threshold=args.node_threshold,
+        edge_threshold=args.edge_threshold,
+        logger=logger,
+    )
+    if args.prune_output_path:
+        logger.info("Saving prune result to %s", args.prune_output_path)
+        _save_prune_result(args.prune_output_path, prune_result)
 
     logger.info("Running build_super_graph")
     supergraph = build_super_graph(
@@ -390,7 +390,7 @@ def main():
         logger.info("Saving supergraph to %s", args.supergraph_output_path)
         _save_supergraph(args.supergraph_output_path, supergraph)
 
-    _log_pipeline_comparison(graph, supergraph, logger=logger)
+    _log_pipeline_comparison(graph, supergraph, logger=logger, prune_result=prune_result)
     logger.info("Done")
 
 
