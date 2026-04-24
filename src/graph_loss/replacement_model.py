@@ -297,6 +297,7 @@ class TransformerLensReplacementModel(HookedTransformer):
         neuron_activations = []
         target_encoders = []
         source_vectors = []
+        layer_capture_stats = []
 
         n_pos = tokens.shape[0]
         positions = torch.arange(n_pos, device=tokens.device, dtype=torch.long)
@@ -307,6 +308,7 @@ class TransformerLensReplacementModel(HookedTransformer):
             layer_acts, layer_target_encoders, layer_source_vectors = self._compute_layer_neuron_data(
                 layer, layer_input
             )
+            layer_source_norms = layer_source_vectors.norm(dim=-1)
 
             layer_locations = torch.stack(
                 [
@@ -317,7 +319,23 @@ class TransformerLensReplacementModel(HookedTransformer):
                 dim=1,
             )
 
-            keep_neurons = torch.topk(layer_source_vectors.norm(dim=-1), int(self.cfg.d_mlp * prop_neurons_per_layer), dim=-1).indices
+            keep_neurons = torch.topk(
+                layer_source_norms,
+                int(self.cfg.d_mlp * prop_neurons_per_layer),
+                dim=-1,
+            ).indices
+            selected_norm_sum = float(layer_source_norms.gather(1, keep_neurons).sum().item())
+            total_norm_sum = float(layer_source_norms.sum().item())
+            layer_capture_stats.append(
+                {
+                    "layer": layer,
+                    "selected_neurons": int(keep_neurons.numel()),
+                    "total_neurons": int(layer_source_norms.numel()),
+                    "selected_residual_write_norm": selected_norm_sum,
+                    "total_residual_write_norm": total_norm_sum,
+                    "captured_fraction": selected_norm_sum / max(total_norm_sum, 1e-12),
+                }
+            )
             keep_neurons = keep_neurons.reshape(-1)
 
             neuron_locations.append(layer_locations[keep_neurons])
@@ -334,6 +352,7 @@ class TransformerLensReplacementModel(HookedTransformer):
             neuron_activations=torch.cat(neuron_activations, dim=0),
             target_encoders=torch.cat(target_encoders, dim=0),
             source_vectors=torch.cat(source_vectors, dim=0),
+            layer_capture_stats=layer_capture_stats,
         )
 
     def __del__(self):

@@ -78,9 +78,9 @@ def _check_dense_graph_size(total_nodes: int, dtype: torch.dtype):
     total_bytes = total_nodes * total_nodes * element_size
     gib = total_bytes / (1024**3)
     if gib > 4:
-        raise ValueError(
-            f"Dense adjacency would require about {gib:.2f} GiB. "
-            "Use a smaller prompt/model or switch to a sparse graph representation."
+        logging.getLogger("attribution").warning(
+            "Dense adjacency is estimated to require about %.2f GiB; continuing anyway.",
+            gib,
         )
 
 
@@ -136,6 +136,16 @@ def _run_attribution(
 
     logger.info(f"Precomputation completed in {time.time() - phase_start:.2f}s")
     logger.info(f"Enumerated {len(ctx.neuron_locations)} neuron nodes")
+    for stats in ctx.layer_capture_stats:
+        logger.info(
+            "Layer %d selection captured %.2f%% of residual write norm (%d/%d neurons, %.4f/%.4f)",
+            stats["layer"],
+            100.0 * stats["captured_fraction"],
+            stats["selected_neurons"],
+            stats["total_neurons"],
+            stats["selected_residual_write_norm"],
+            stats["total_residual_write_norm"],
+        )
 
     logger.info("Phase 1: Running hooked forward pass")
     phase_start = time.time()
