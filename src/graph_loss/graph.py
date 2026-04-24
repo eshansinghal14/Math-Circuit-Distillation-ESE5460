@@ -195,8 +195,8 @@ def prune_graph(graph: Graph, node_threshold: float = 0.8, edge_threshold: float
     return PruneResult(node_mask, edge_mask, final_scores)
 
 
-class SuperGraph:
-    adjacency_matrix: torch.Tensor
+class SuperGraph(NamedTuple):
+    supernode_adjacency_matrix: torch.Tensor
     supernodes: list[list[int]]       # old node ids inside each new node
 
 
@@ -260,15 +260,18 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
                 neighbors = list(set(neighbors) | set(new_neighbors))
 
     adj_matrix_norm = normalize_matrix(graph.adjacency_matrix)
-    supernode_adj_matrix = torch.zeros(num_supernodes, num_supernodes, device=graph.adjacency_matrix.device)
-    supernodes = [[i for i in range(node_clusters) if node_clusters[i] == n] for n in range(1, num_supernodes + 1)]
+    supernode_adj_matrix = torch.zeros(num_supernodes, num_supernodes, dtype=graph.adjacency_matrix.dtype, device=graph.adjacency_matrix.device)
+    supernodes = [[i for i in range(n_neurons) if node_clusters[i] == n] for n in range(1, num_supernodes + 1)]
     for t in range(num_supernodes):
+        total_input = torch.abs(adj_matrix_norm[:, supernodes[t]]).sum(dim=0)
+        internal_input = torch.abs(adj_matrix_norm[supernodes[t]][:, supernodes[t]]).sum(dim=0)
+        frac_external = (total_input - internal_input) / total_input.clamp(min=1e-10)
+        
         for s in range(num_supernodes):
-            frac_external = torch.abs(adj_matrix_norm[supernodes[t], supernodes[s]]).sum(dim=1) / torch.abs(adj_matrix_norm[supernodes[t]]).sum(dim=1)
-            sum_A = torch.abs(adj_matrix_norm[supernodes[t], supernodes[s]]).sum(dim=1)
-            supernode_adj_matrix[t, s] = (frac_external * sum_A).sum(dim=0) / frac_external.sum(dim=0)
+            sum_A = adj_matrix_norm[supernodes[t]][:, supernodes[s]].sum(dim=1)
+            supernode_adj_matrix[t, s] = (frac_external * sum_A).sum(dim=0) / frac_external.sum(dim=0).clamp(min=1e-10)
 
-    return SuperGraph(adjacency_matrix=supernode_adj_matrix, supernodes=supernodes)
+    return SuperGraph(supernode_adjacency_matrix=supernode_adj_matrix, supernodes=supernodes)
 
 def range_query(node_influence_normalized: torch.Tensor, neuron_idx: int, epsilon: float) -> list[int]:
     """Find all nodes within epsilon of node_idx in the normalized node influence space."""
