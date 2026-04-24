@@ -193,31 +193,32 @@ def _log_supergraph_summary(
 
 def _log_pipeline_comparison(
     graph: Graph,
-    prune_result: PruneResult,
     supergraph: SuperGraph,
     *,
     logger: logging.Logger,
+    prune_result: PruneResult | None,
 ) -> None:
     total_edges = graph.adjacency_nnz()
-    kept_edges = int(
-        (
-            prune_result.edge_mask
-            & (graph.adjacency_dense() != 0)
-            & prune_result.node_mask[:, None]
-            & prune_result.node_mask[None, :]
-        ).sum().item()
-    )
     super_edges = _count_nonzero_edges(supergraph.supernode_adjacency_matrix)
-    kept_neurons = int(prune_result.node_mask[: graph.n_neurons].sum().item())
 
     logger.info("Pipeline comparison")
-    logger.info(
-        "  build_to_prune: neurons %d -> %d, edges %d -> %d",
-        graph.n_neurons,
-        kept_neurons,
-        total_edges,
-        kept_edges,
-    )
+    if prune_result is not None:
+        kept_edges = int(
+            (
+                prune_result.edge_mask
+                & (graph.adjacency_dense() != 0)
+                & prune_result.node_mask[:, None]
+                & prune_result.node_mask[None, :]
+            ).sum().item()
+        )
+        kept_neurons = int(prune_result.node_mask[: graph.n_neurons].sum().item())
+        logger.info(
+            "  build_to_prune: neurons %d -> %d, edges %d -> %d",
+            graph.n_neurons,
+            kept_neurons,
+            total_edges,
+            kept_edges,
+        )
     logger.info(
         "  build_to_supergraph: neurons %d -> supernodes %d, edges %d -> %d",
         graph.n_neurons,
@@ -354,22 +355,23 @@ def main():
         logger.info("Saving graph to %s", args.graph_output_path)
         graph.to_pt(args.graph_output_path)
 
-    logger.info("Running prune_graph")
-    prune_result = prune_graph(
-        graph,
-        node_threshold=args.node_threshold,
-        edge_threshold=args.edge_threshold,
-    )
-    _log_prune_summary(
-        graph,
-        prune_result,
-        node_threshold=args.node_threshold,
-        edge_threshold=args.edge_threshold,
-        logger=logger,
-    )
-    if args.prune_output_path:
-        logger.info("Saving prune result to %s", args.prune_output_path)
-        _save_prune_result(args.prune_output_path, prune_result)
+    prune_result = None
+    # logger.info("Running prune_graph")
+    # prune_result = prune_graph(
+    #     graph,
+    #     node_threshold=args.node_threshold,
+    #     edge_threshold=args.edge_threshold,
+    # )
+    # _log_prune_summary(
+    #     graph,
+    #     prune_result,
+    #     node_threshold=args.node_threshold,
+    #     edge_threshold=args.edge_threshold,
+    #     logger=logger,
+    # )
+    # if args.prune_output_path:
+    #     logger.info("Saving prune result to %s", args.prune_output_path)
+    #     _save_prune_result(args.prune_output_path, prune_result)
 
     logger.info("Running build_super_graph")
     supergraph = build_super_graph(
@@ -388,7 +390,7 @@ def main():
         logger.info("Saving supergraph to %s", args.supergraph_output_path)
         _save_supergraph(args.supergraph_output_path, supergraph)
 
-    _log_pipeline_comparison(graph, prune_result, supergraph, logger=logger)
+    _log_pipeline_comparison(graph, supergraph, logger=logger)
     logger.info("Done")
 
 
