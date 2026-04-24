@@ -73,8 +73,8 @@ class AttributionContext:
         def _hook_fn(grads: torch.Tensor, hook: HookPoint) -> None:
             # Avoid allocating huge grads[:, positions] tensor to prevent CUDA OOM
             scores = torch.empty(
+                len(positions),
                 grads.shape[0], 
-                len(positions), 
                 device=grads.device, 
                 dtype=output_vecs.dtype
             )
@@ -82,7 +82,9 @@ class AttributionContext:
                 mask = positions == p
                 grad_p = grads[:, p, :].to(output_vecs.dtype)
                 out_p = output_vecs[mask]
-                scores[:, mask] = torch.matmul(grad_p, out_p.T)
+                
+                # out_p is (M, D), grad_p.T is (D, B) => out_p @ grad_p.T is (M, B)
+                scores[mask, :] = torch.matmul(out_p, grad_p.T)
             
             proxy._batch_buffer[write_index] += scores
 
