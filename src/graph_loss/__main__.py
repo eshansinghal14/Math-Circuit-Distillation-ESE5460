@@ -260,8 +260,7 @@ def main():
     parser.add_argument("--prompt", required=True, help="Prompt to analyze")
     parser.add_argument(
         "--graph_output_path",
-        required=True,
-        help="Where to save the graph (.pt)",
+        help="Optional path to save the graph (.pt)",
     )
     parser.add_argument(
         "--dtype",
@@ -352,8 +351,9 @@ def main():
     )
     _log_graph_summary(graph, logger=logger, stage="Built")
 
-    logger.info("Saving graph to %s", args.graph_output_path)
-    graph.to_pt(args.graph_output_path)
+    if args.graph_output_path:
+        logger.info("Saving graph to %s", args.graph_output_path)
+        graph.to_pt(args.graph_output_path)
 
     logger.info("Running prune_graph")
     prune_result = prune_graph(
