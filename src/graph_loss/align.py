@@ -70,6 +70,14 @@ def align_supernodes(
         above = [(sims[i].item(), s_ids[i]) for i in range(len(s_ids))
                  if sims[i].item() >= similarity_threshold]
         above.sort(reverse=True)
+
+        if len(above) >= 2:
+            gap = above[0][0] - above[1][0]
+            if gap < 0.05: # ambiguity_delta
+                result.mapping[tid] = {above[0][1]}
+                result.best_sim[tid] = above[0][0]
+                continue
+
         above = above[:max_fan_out]
 
         result.mapping[tid] = {sid for _, sid in above}

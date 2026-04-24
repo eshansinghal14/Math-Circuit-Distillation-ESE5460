@@ -56,16 +56,15 @@ def compute_L_graph(
     return loss
 
 
+
 def compute_L_error(
     student_errors: torch.Tensor,
-    teacher_errors: torch.Tensor,
+    mlp_output_norms: torch.Tensor,
+    relative_threshold: float = 0.05,
 ) -> torch.Tensor:
-    # penalize student exceeding teacher -> truncates to shorter depth if models differ in layer count
-    n_layers = min(student_errors.shape[0], teacher_errors.shape[0])
-    s = student_errors[:n_layers]
-    t = teacher_errors[:n_layers]
-    return F.relu(s - t).pow(2).mean()
-
+    # normalize errors by MLP output magnitude so threshold is scale-invariant
+    normalized = student_errors / mlp_output_norms.clamp(min=1e-10)
+    return F.relu(normalized - relative_threshold).pow(2).mean()
 
 def compute_L_total(
     L_task: torch.Tensor,
