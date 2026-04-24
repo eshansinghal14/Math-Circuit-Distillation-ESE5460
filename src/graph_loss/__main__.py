@@ -196,7 +196,7 @@ def _log_pipeline_comparison(
     supergraph: SuperGraph,
     *,
     logger: logging.Logger,
-    prune_result: PruneResult | None,
+    prune_result: PruneResult = None,
 ) -> None:
     total_edges = graph.adjacency_nnz()
     super_edges = _count_nonzero_edges(supergraph.supernode_adjacency_matrix)
