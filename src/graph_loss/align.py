@@ -4,13 +4,6 @@ from dataclasses import dataclass, field
 
 
 @dataclass
-class SupernodeMembers:
-    cluster_id: int
-    activations: list[float]
-    w_out_rows: list[torch.Tensor]  # W_out[i, :] per member
-
-
-@dataclass
 class AlignmentResult:
     mapping: dict[int, set[int]] = field(default_factory=dict)
     teacher_dla: dict[int, torch.Tensor] = field(default_factory=dict)
@@ -19,20 +12,20 @@ class AlignmentResult:
 
 
 def compute_supernode_dla(
-    supernode: SupernodeMembers,
+    supernode: dict,
     W_U: torch.Tensor,
 ) -> torch.Tensor:
     # DLA = (Σ_i a_i · W_out[i]) @ W_U  →  R^{vocab}
     d_model = W_U.shape[0]
     write_vec = torch.zeros(d_model, device=W_U.device, dtype=W_U.dtype)
-    for act, w_out_row in zip(supernode.activations, supernode.w_out_rows):
+    for act, w_out_row in zip(supernode["activations"], supernode["w_out_rows"]):
         write_vec += act * w_out_row.to(W_U.device)
     return write_vec @ W_U
 
 
 def align_supernodes(
-    teacher_supernodes: list[SupernodeMembers],
-    student_supernodes: list[SupernodeMembers],
+    teacher_supernodes: list[dict],
+    student_supernodes: list[dict],
     W_U_teacher: torch.Tensor,
     W_U_student: torch.Tensor,
     similarity_threshold: float = 0.7,
@@ -48,9 +41,9 @@ def align_supernodes(
     result = AlignmentResult()
 
     for sn in teacher_supernodes:
-        result.teacher_dla[sn.cluster_id] = compute_supernode_dla(sn, W_U_teacher)
+        result.teacher_dla[sn["cluster_id"]] = compute_supernode_dla(sn, W_U_teacher)
     for sn in student_supernodes:
-        result.student_dla[sn.cluster_id] = compute_supernode_dla(sn, W_U_student)
+        result.student_dla[sn["cluster_id"]] = compute_supernode_dla(sn, W_U_student)
 
     def _normalize(vecs):
         return {
@@ -62,6 +55,9 @@ def align_supernodes(
     s_norm = _normalize(result.student_dla)
 
     s_ids = list(s_norm.keys())
+    if not s_ids:
+        return result
+
     s_matrix = torch.stack([s_norm[sid] for sid in s_ids])
 
     for tid, t_vec in t_norm.items():
@@ -73,7 +69,7 @@ def align_supernodes(
 
         if len(above) >= 2:
             gap = above[0][0] - above[1][0]
-            if gap < 0.05: # ambiguity_delta
+            if gap < 0.05:
                 result.mapping[tid] = {above[0][1]}
                 result.best_sim[tid] = above[0][0]
                 continue

@@ -388,6 +388,32 @@ def range_query(node_influence_normalized: torch.Tensor, neuron_idx: int, epsilo
     return torch.where(1 - node_influence_normalized @ node_influence_normalized[neuron_idx] <= epsilon)[0].tolist()
 
 
+def extract_supernode_members(supergraph: SuperGraph, graph: Graph, model) -> list[dict]:
+    """Build per-supernode activation and W_out data for DLA alignment.
+
+    Returns a list of dicts, one per supernode, with:
+        cluster_id: int (index into supergraph.supernodes)
+        activations: list[float] (a_i for each member neuron)
+        w_out_rows: list[Tensor] (W_out[neuron_id, :] ∈ R^{d_model} per member)
+    """
+    result = []
+    for i, members in enumerate(supergraph.supernodes):
+        acts = [graph.neuron_activations[nid].item() for nid in members]
+        w_outs = []
+        for nid in members:
+            layer = int(graph.neuron_locations[nid, 0].item())
+            neuron_id = int(graph.neuron_locations[nid, 2].item())
+            old_mlp = model.blocks[layer].mlp.old_mlp
+            W_out = model._row_oriented_weight(
+                old_mlp.W_out.to(device=graph.adjacency_device)
+            )
+            w_outs.append(W_out[neuron_id].detach())
+        result.append({
+            "cluster_id": i,
+            "activations": acts,
+            "w_out_rows": w_outs,
+        })
+    return result
 
 
 
