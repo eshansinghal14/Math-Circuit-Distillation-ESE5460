@@ -6,6 +6,7 @@ import torch
 from graph_loss.attribution.attribute import attribute
 from graph_loss.graph import Graph, PruneResult, SuperGraph, build_super_graph, prune_graph
 from graph_loss.replacement_model import TransformerLensReplacementModel
+from utils import HF_READ_TOKEN
 
 
 def _count_nonzero_edges(matrix: torch.Tensor) -> int:
@@ -338,6 +339,7 @@ def main():
     model = TransformerLensReplacementModel.from_pretrained(
         args.model,
         dtype=dtype,
+        token=HF_READ_TOKEN,
     )
 
     logger.info("Running attribution graph build")
