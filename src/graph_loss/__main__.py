@@ -197,7 +197,7 @@ def _log_pipeline_comparison(
     supergraph: SuperGraph,
     *,
     logger: logging.Logger,
-    prune_result: PruneResult | None,
+    prune_result: PruneResult = None,
 ) -> None:
     total_edges = graph.adjacency_nnz()
     super_edges = _count_nonzero_edges(supergraph.supernode_adjacency_matrix)
@@ -317,6 +317,11 @@ def main():
         help="Minimum cumulative logit influence norm required to form a supernode",
     )
     parser.add_argument(
+        "--prune",
+        action="store_true",
+        help="Whether to apply pruning before building supergraph",
+    )
+    parser.add_argument(
         "--prune_output_path",
         help="Optional path to save prune masks and cumulative scores (.pt)",
     )
@@ -358,22 +363,26 @@ def main():
         graph.to_pt(args.graph_output_path)
 
     prune_result = None
-    # logger.info("Running prune_graph")
-    # prune_result = prune_graph(
-    #     graph,
-    #     node_threshold=args.node_threshold,
-    #     edge_threshold=args.edge_threshold,
-    # )
-    # _log_prune_summary(
-    #     graph,
-    #     prune_result,
-    #     node_threshold=args.node_threshold,
-    #     edge_threshold=args.edge_threshold,
-    #     logger=logger,
-    # )
-    # if args.prune_output_path:
-    #     logger.info("Saving prune result to %s", args.prune_output_path)
-    #     _save_prune_result(args.prune_output_path, prune_result)
+    if args.prune:
+        logger.info("Running prune_graph")
+        prune_result = prune_graph(
+            graph,
+            node_threshold=args.node_threshold,
+            edge_threshold=args.edge_threshold,
+        )
+        _log_prune_summary(
+            graph,
+            prune_result,
+            node_threshold=args.node_threshold,
+            edge_threshold=args.edge_threshold,
+            logger=logger,
+        )
+        if args.prune_output_path:
+            logger.info("Saving prune result to %s", args.prune_output_path)
+            _save_prune_result(args.prune_output_path, prune_result)
+            
+        logger.info("Applying prune masks to graph")
+        graph = graph.apply_prune_result(prune_result)
 
     logger.info("Running build_super_graph")
     supergraph = build_super_graph(
@@ -392,7 +401,7 @@ def main():
         logger.info("Saving supergraph to %s", args.supergraph_output_path)
         _save_supergraph(args.supergraph_output_path, supergraph)
 
-    _log_pipeline_comparison(graph, supergraph, logger=logger)
+    _log_pipeline_comparison(graph, supergraph, logger=logger, prune_result=prune_result)
     logger.info("Done")
 
 

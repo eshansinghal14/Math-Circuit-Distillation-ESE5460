@@ -204,6 +204,36 @@ class Graph:
             vocab_size=data.get("vocab_size"),
         )
 
+    def apply_prune_result(self, prune_result: "PruneResult") -> "Graph":
+        """Returns a new Graph with edges and nodes zeroed out according to the PruneResult masks."""
+        adjacency_dense = self.adjacency_dense().clone()
+        
+        effective_edge_mask = (
+            prune_result.edge_mask 
+            & prune_result.node_mask[:, None] 
+            & prune_result.node_mask[None, :]
+        )
+        
+        adjacency_dense[~effective_edge_mask] = 0.0
+        
+        new_adjacency = (
+            adjacency_dense.to_sparse() 
+            if self.adjacency_matrix.is_sparse 
+            else adjacency_dense
+        )
+
+        return Graph(
+            input_string=self.input_string,
+            input_tokens=self.input_tokens,
+            neuron_locations=self.neuron_locations,
+            adjacency_matrix=new_adjacency,
+            cfg=self.cfg, # type: ignore
+            neuron_activations=self.neuron_activations,
+            logit_targets=self.logit_targets,
+            logit_probabilities=self.logit_probabilities,
+            vocab_size=self.vocab_size,
+        )
+
 
 def normalize_matrix(matrix: torch.Tensor) -> torch.Tensor:
     normalized = matrix.abs()
@@ -397,24 +427,31 @@ def extract_supernode_members(supergraph: SuperGraph, graph: Graph, model) -> li
         w_out_rows: list[Tensor] (W_out[neuron_id, :] ∈ R^{d_model} per member)
     """
     result = []
+    
+    # Cache the W_out matrices per layer to avoid transferring and transposing 
+    # massive 235MB tensors 4,500 times in the inner loop!
+    w_out_cache = {}
+    
     for i, members in enumerate(supergraph.supernodes):
-        acts = [graph.neuron_activations[nid].item() for nid in members]
+        acts = []
         w_outs = []
         for nid in members:
             layer = int(graph.neuron_locations[nid, 0].item())
             neuron_id = int(graph.neuron_locations[nid, 2].item())
-            old_mlp = model.blocks[layer].mlp.old_mlp
-            W_out = model._row_oriented_weight(
-                old_mlp.W_out.to(device=graph.adjacency_device)
-            )
-            w_outs.append(W_out[neuron_id].detach())
+            
+            if layer not in w_out_cache:
+                old_mlp = model.blocks[layer].mlp.old_mlp
+                W_out = model._row_oriented_weight(
+                    old_mlp.W_out.to(device=graph.adjacency_device)
+                )
+                w_out_cache[layer] = W_out
+                
+            acts.append(graph.neuron_activations[nid].unsqueeze(0))
+            w_outs.append(w_out_cache[layer][neuron_id].detach().clone())
         result.append({
             "cluster_id": i,
             "activations": acts,
             "w_out_rows": w_outs,
+            "size": len(members),
         })
     return result
-
-
-
-
