@@ -2,6 +2,7 @@ import argparse
 import logging
 
 import torch
+from huggingface_hub import login
 
 from graph_loss.attribution.attribute import attribute
 from graph_loss.graph import Graph, PruneResult, SuperGraph, build_super_graph, prune_graph
@@ -340,11 +341,14 @@ def main():
     dtype_name = dtype_mapping.get(args.dtype, args.dtype)
     dtype = getattr(torch, dtype_name)
 
+    if HF_READ_TOKEN:
+        logger.info("Authenticating with Hugging Face token")
+        login(HF_READ_TOKEN)
+
     logger.info("Loading model: %s", args.model)
     model = TransformerLensReplacementModel.from_pretrained(
         args.model,
         dtype=dtype,
-        token=HF_READ_TOKEN,
     )
 
     logger.info("Running attribution graph build")
