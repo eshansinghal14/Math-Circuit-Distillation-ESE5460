@@ -319,12 +319,13 @@ class TransformerLensReplacementModel(HookedTransformer):
                 dim=1,
             )
 
+            flat_source_norms = layer_source_norms.reshape(-1)
             keep_neurons = torch.topk(
-                layer_source_norms,
-                int(self.cfg.d_mlp * prop_neurons_per_layer),
-                dim=-1,
+                flat_source_norms,
+                int(flat_source_norms.numel() * prop_neurons_per_layer),
+                dim=0,
             ).indices
-            selected_norm_sum = float(layer_source_norms.gather(1, keep_neurons).sum().item())
+            selected_norm_sum = float(flat_source_norms[keep_neurons].sum().item())
             total_norm_sum = float(layer_source_norms.sum().item())
             layer_capture_stats.append(
                 {
@@ -336,11 +337,6 @@ class TransformerLensReplacementModel(HookedTransformer):
                     "captured_fraction": selected_norm_sum / max(total_norm_sum, 1e-12),
                 }
             )
-
-            position_offsets = (
-                torch.arange(n_pos, device=tokens.device, dtype=torch.long).unsqueeze(1) * self.cfg.d_mlp
-            )
-            keep_neurons = (keep_neurons + position_offsets).reshape(-1)
 
             neuron_locations.append(layer_locations[keep_neurons])
             neuron_activations.append(layer_acts.reshape(-1)[keep_neurons])
