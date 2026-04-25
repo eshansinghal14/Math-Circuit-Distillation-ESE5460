@@ -68,13 +68,13 @@ class AttributionTargets:
         unembed_proj: torch.Tensor,
         tokenizer,
         *,
-        logit_min_prob: float = 1e-5,
+        top_k_logits: int | None = None,
     ):
         """Build attribution targets from user specification.
 
         Args:
             attribution_targets: Target specification in one of four formats:
-                - None: Auto-select salient logits based on probability threshold
+                - None: Auto-select the top-k logits by probability
                 - torch.Tensor: Tensor of vocabulary token IDs
                 - Sequence[str]: Token strings (tokenized, then auto-computes probability & vector)
                 - Sequence[TargetSpec]: Fully specified custom targets (CustomTarget or
@@ -83,7 +83,8 @@ class AttributionTargets:
             logits: ``(d_vocab,)`` logit vector for single position
             unembed_proj: ``(d_model, d_vocab)`` unembedding matrix
             tokenizer: Tokenizer for string→int conversion
-            logit_min_prob: Probability threshold for salient mode
+            top_k_logits: If provided, select this many highest-probability logits
+                for salient mode.
         """
         # Store tokenizer ref for decoding vocab indices to token strings
         self.tokenizer = tokenizer
@@ -91,7 +92,7 @@ class AttributionTargets:
 
         # Dispatch to appropriate constructor based on input type
         if attribution_targets is None:
-            salient_ctor = {"logit_min_prob": logit_min_prob}
+            salient_ctor = {"top_k_logits": top_k_logits}
             attr_spec = self._from_salient(**salient_ctor, **ctor_shared)
         elif isinstance(attribution_targets, torch.Tensor):
             attr_spec = self._from_indices(indices=attribution_targets, **ctor_shared)
@@ -183,29 +184,31 @@ class AttributionTargets:
     def _from_salient(
         logits: torch.Tensor,
         unembed_proj: torch.Tensor,
-        logit_min_prob: float,
+        top_k_logits: int | None,
         tokenizer,
     ) -> tuple[list[LogitTarget], torch.Tensor, torch.Tensor]:
-        """Auto-select salient logits by minimum probability.
+        """Auto-select salient logits by top-k probability.
 
         Args:
             logits: ``(d_vocab,)`` logit vector
             unembed_proj: ``(d_model, d_vocab)`` unembedding matrix
-            logit_min_prob: Probability threshold
+            top_k_logits: Number of highest-probability logits to include
             tokenizer: Tokenizer for decoding vocab indices to strings
 
         Returns:
             Tuple of (logit_targets, probabilities, vectors) where logit_targets
             contains LogitTarget instances with actual vocab indices
         """
+        if top_k_logits is None:
+            raise ValueError("top_k_logits must be provided when attribution_targets is None")
+        if top_k_logits <= 0:
+            raise ValueError("top_k_logits must be positive")
         probs = torch.softmax(logits, dim=-1)
-        threshold = torch.where(probs >= logit_min_prob)[0]
-        if len(threshold) == 0:
-            raise ValueError(
-                f"No logits met logit_min_prob={logit_min_prob}. "
-                "Lower the threshold or pass explicit attribution_targets."
-            )
-        threshold = threshold[torch.argsort(probs[threshold], descending=True)]
+        threshold = torch.topk(
+            probs,
+            k=min(top_k_logits, probs.numel()),
+            dim=-1,
+        ).indices
         indices, probs, vecs = AttributionTargets._compute_logit_vecs(
             threshold, logits, unembed_proj
         )

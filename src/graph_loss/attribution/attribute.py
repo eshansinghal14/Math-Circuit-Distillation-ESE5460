@@ -23,7 +23,7 @@ def attribute(
     model: TransformerLensReplacementModel,
     *,
     attribution_targets: Sequence[str] | Sequence[TargetSpec] | torch.Tensor | None = None,
-    logit_min_prob: float = 1e-5,
+    top_k_logits: int | None = None,
     prop_neurons_per_layer: float = 0.1,
     batch_size: int = 512,
     max_feature_nodes: int | None = None,
@@ -62,7 +62,7 @@ def attribute(
             model=model,
             prompt=prompt,
             attribution_targets=attribution_targets,
-            logit_min_prob=logit_min_prob,
+            top_k_logits=top_k_logits,
             prop_neurons_per_layer=prop_neurons_per_layer,
             batch_size=batch_size,
             logger=logger,
@@ -129,7 +129,7 @@ def _run_attribution(
     model: TransformerLensReplacementModel,
     prompt,
     attribution_targets,
-    logit_min_prob,
+    top_k_logits,
     prop_neurons_per_layer,
     batch_size,
     logger,
@@ -169,7 +169,7 @@ def _run_attribution(
         logits=ctx.logits[0, -1],
         unembed_proj=model.unembed.W_U,
         tokenizer=model.tokenizer,
-        logit_min_prob=logit_min_prob,
+        top_k_logits=top_k_logits,
     )
     log_attribution_target_info(targets, attribution_targets, logger)
 

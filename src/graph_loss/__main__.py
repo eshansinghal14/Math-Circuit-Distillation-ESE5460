@@ -271,10 +271,10 @@ def main():
         help="Model dtype",
     )
     parser.add_argument(
-        "--logit_min_prob",
-        type=float,
-        default=1e-5,
-        help="Only include logit nodes with probability >= this threshold",
+        "--top_k_logits",
+        type=int,
+        default=20,
+        help="If set, include exactly this many highest-probability logit nodes",
     )
     parser.add_argument(
         "--prop_neurons_per_layer",
@@ -355,7 +355,7 @@ def main():
     graph = attribute(
         prompt=args.prompt,
         model=model,
-        logit_min_prob=args.logit_min_prob,
+        top_k_logits=args.top_k_logits,
         prop_neurons_per_layer=args.prop_neurons_per_layer,
         batch_size=args.batch_size,
         verbose=args.verbose,
