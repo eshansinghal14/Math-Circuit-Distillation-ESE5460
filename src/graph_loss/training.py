@@ -269,6 +269,7 @@ def backward_batch_graph_loss(
     metric_sums: dict[str, float] = {}
     detached_losses = []
     denom = float(len(prompts))
+    graph_backward_prompts = 0
     for prompt in prompts:
         prompt_loss, prompt_metrics = compute_prompt_graph_loss(
             prompt=prompt,
@@ -277,14 +278,18 @@ def backward_batch_graph_loss(
             config=config,
         )
         detached_losses.append(prompt_loss.detach())
-        ((loss_scale / denom) * prompt_loss).backward()
+        scaled_prompt_loss = (loss_scale / denom) * prompt_loss
+        if scaled_prompt_loss.requires_grad:
+            scaled_prompt_loss.backward()
+            graph_backward_prompts += 1
         for key, value in prompt_metrics.items():
             metric_sums[key] = metric_sums.get(key, 0.0) + float(value)
-        del prompt_loss
+        del prompt_loss, scaled_prompt_loss
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
     loss = torch.stack(detached_losses).mean()
     metrics = {key: value / denom for key, value in metric_sums.items()}
     metrics["graph_prompts"] = float(len(prompts))
+    metrics["graph_backward_prompts"] = float(graph_backward_prompts)
     return loss, metrics
