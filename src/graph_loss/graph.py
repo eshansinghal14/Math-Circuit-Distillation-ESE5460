@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import NamedTuple
 
 import torch
@@ -239,14 +240,22 @@ def normalize_matrix(matrix: torch.Tensor) -> torch.Tensor:
     return normalized / normalized.sum(dim=1, keepdim=True).clamp(min=1e-10)
 
 
-def compute_influence(A: torch.Tensor, logit_weights: torch.Tensor, max_iter: int = 1000):
+def compute_influence(
+    A: torch.Tensor,
+    logit_weights: torch.Tensor,
+    max_iter: int = 1000,
+    atol: float | None = None,
+):
+    if atol is None:
+        atol = 1e-6 if A.dtype in (torch.float16, torch.bfloat16) else 0.0
     current_influence = logit_weights @ A
     influence = current_influence
     iterations = 0
-    while current_influence.any():
+    while current_influence.abs().amax().item() > atol:
         if iterations >= max_iter:
             raise RuntimeError(
-                f"Influence computation failed to converge after {iterations} iterations"
+                f"Influence computation failed to converge after {iterations} iterations "
+                f"(max residual={current_influence.abs().amax().item():.6g}, atol={atol:.6g})"
             )
         current_influence = current_influence @ A
         influence += current_influence
@@ -353,6 +362,7 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
     n_neurons = graph.n_neurons
     token_start = n_neurons
     logit_start = token_start + n_tokens
+    logger = logging.getLogger(__name__)
 
     adjacency_matrix = graph.adjacency_dense()
     logit_basis = torch.zeros(
@@ -366,6 +376,7 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
         logit_start + torch.arange(n_logits, device=adjacency_matrix.device)
     ] = 1
 
+    logger.info("  Computing logit influence for supergraph")
     logit_influence = compute_node_influence(adjacency_matrix, logit_basis)
     logit_probabilities = graph.logit_probabilities.to(
         device=adjacency_matrix.device,
@@ -423,6 +434,7 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
         
         return assignments, k
     
+    logger.info("  Clustering supernodes")
     node_clusters, num_supernodes = build_supernodes_svd(node_influence_vectors, min_cum_logit_influence, epsilon)
 
     # num_supernodes = 0
@@ -455,6 +467,7 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
     #         if node_influence_vectors[new_neighbors].sum(dim=0).norm(dim=-1) >= min_cum_logit_influence:
     #             neighbors = list(set(neighbors) | set(new_neighbors))
 
+    logger.info("  Aggregating supernode adjacency")
     adj_matrix_norm = normalize_matrix(adjacency_matrix)
     supernode_adj_matrix = torch.zeros(
         num_supernodes,
