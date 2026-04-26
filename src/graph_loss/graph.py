@@ -246,21 +246,32 @@ def compute_influence(
     max_iter: int = 1000,
     atol: float | None = None,
 ):
-    if atol is None:
-        atol = 1e-6 if A.dtype in (torch.float16, torch.bfloat16) else 0.0
-    current_influence = logit_weights @ A
-    influence = current_influence
-    iterations = 0
-    while current_influence.abs().amax().item() > atol:
-        if iterations >= max_iter:
-            raise RuntimeError(
-                f"Influence computation failed to converge after {iterations} iterations "
-                f"(max residual={current_influence.abs().amax().item():.6g}, atol={atol:.6g})"
-            )
-        current_influence = current_influence @ A
-        influence += current_influence
-        iterations += 1
-    return influence
+    """Sum all upstream path influences through the attribution DAG.
+
+    Rows are target nodes and columns are source nodes. The graph builder orders
+    neuron nodes by layer and appends token roots and logit targets, so a
+    reverse node-order pass accumulates the same finite path sum as
+    ``logit_weights @ A + logit_weights @ A^2 + ...`` without repeated dense
+    matrix powers.
+    """
+    del max_iter, atol  # Kept for call-site compatibility.
+
+    weights_were_1d = logit_weights.ndim == 1
+    base_weights = logit_weights.unsqueeze(0) if weights_were_1d else logit_weights
+    total_influence = base_weights.clone()
+
+    for target_idx in range(A.shape[0] - 1, -1, -1):
+        incoming = total_influence[:, target_idx]
+        if not incoming.any():
+            continue
+        row = A[target_idx]
+        source_cols = row.nonzero(as_tuple=False).flatten()
+        if source_cols.numel() == 0:
+            continue
+        total_influence[:, source_cols] += incoming[:, None] * row[source_cols][None, :]
+
+    influence = total_influence - base_weights
+    return influence.squeeze(0) if weights_were_1d else influence
 
 
 def compute_node_influence(adjacency_matrix: torch.Tensor, logit_weights: torch.Tensor):
