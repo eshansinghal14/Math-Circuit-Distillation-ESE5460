@@ -294,8 +294,15 @@ def prune_graph(graph: Graph, node_threshold: float = 0.8, edge_threshold: float
     token_start = n_neurons
 
     adjacency_matrix = graph.adjacency_dense()
-    logit_weights = torch.zeros(adjacency_matrix.shape[0], device=adjacency_matrix.device)
-    logit_weights[-n_logits:] = graph.logit_probabilities.to(adjacency_matrix.device)
+    logit_weights = torch.zeros(
+        adjacency_matrix.shape[0],
+        dtype=adjacency_matrix.dtype,
+        device=adjacency_matrix.device,
+    )
+    logit_weights[-n_logits:] = graph.logit_probabilities.to(
+        device=adjacency_matrix.device,
+        dtype=adjacency_matrix.dtype,
+    )
 
     node_influence = compute_node_influence(adjacency_matrix, logit_weights)
     node_mask = node_influence >= find_threshold(node_influence, node_threshold)
@@ -348,14 +355,22 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
     logit_start = token_start + n_tokens
 
     adjacency_matrix = graph.adjacency_dense()
-    logit_basis = torch.zeros(n_logits, adjacency_matrix.shape[0], device=adjacency_matrix.device)
+    logit_basis = torch.zeros(
+        n_logits,
+        adjacency_matrix.shape[0],
+        dtype=adjacency_matrix.dtype,
+        device=adjacency_matrix.device,
+    )
     logit_basis[
         torch.arange(n_logits, device=adjacency_matrix.device), 
         logit_start + torch.arange(n_logits, device=adjacency_matrix.device)
     ] = 1
 
     logit_influence = compute_node_influence(adjacency_matrix, logit_basis)
-    logit_probabilities = graph.logit_probabilities.to(adjacency_matrix.device)
+    logit_probabilities = graph.logit_probabilities.to(
+        device=adjacency_matrix.device,
+        dtype=adjacency_matrix.dtype,
+    )
     node_influence_vectors = (
         logit_influence.T[:n_neurons] * (1 - logit_probabilities) * logit_probabilities
     )
