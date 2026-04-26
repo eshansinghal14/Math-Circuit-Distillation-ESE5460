@@ -372,7 +372,7 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
         k = (cumulative < coverage_threshold).sum().item() + 1
 
         projections = U[:, :k] * S[:k]
-        assignments = projections.abs().argmax(dim=1)
+        assignments = projections.abs().argmax(dim=1) + 1
 
         max_projection = projections.abs().max(dim=1).values
         noise_mask = max_projection < noise_threshold
