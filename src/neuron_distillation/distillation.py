@@ -41,6 +41,8 @@ from torch.optim import AdamW
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from graph_loss.teacher_data_cache import TeacherDataCache
+
 try:
     from torch.utils.flop_counter import FlopCounterMode
     import torch.utils.flop_counter as _flop_counter_mod
@@ -160,6 +162,7 @@ class ClusterDistillationConfig:
     # Greedy-eval debug: print first N prompts + top-5 softmax at ``temperature`` (student & teacher).
     eval_print_samples: int = 0
     save_dir: str = "results/cluster-distillation"
+    teacher_data_cache: Optional[str] = None
     # Count FLOPs (FlopCounterMode) only on epochs where ``epoch_index % N == 0`` (0-based).
     # 1 = every epoch; 0 = never; N>1 = every Nth epoch (0, N, 2N, …). ~10% step overhead when active.
     count_flops_every: int = 1
@@ -701,7 +704,12 @@ class AddDataset(Dataset):
             )["input_ids"].squeeze(0)
             input_ids = torch.cat([prompt_ids, answer_ids])
             self.samples.append(
-                {"input_ids": input_ids, "prompt_len": len(prompt_ids)}
+                {
+                    "input_ids": input_ids,
+                    "prompt_len": len(prompt_ids),
+                    "prompt": prompt,
+                    "answer": int(answer),
+                }
             )
 
     def __len__(self):
@@ -739,6 +747,8 @@ def collate_fn(examples, pad_id: int):
         "input_ids": input_ids,
         "attention_mask": attention_mask,
         "kl_mask": kl_mask,
+        "prompts": [str(ex["prompt"]) for ex in examples],
+        "answers": [int(ex["answer"]) for ex in examples],
     }
 
 
@@ -955,6 +965,11 @@ class ClusterDistillationTrainer:
         self.config = config
         self._resume = resume
         self._standard = config.distillation_mode == "standard"
+        if config.teacher_data_cache and not self._standard:
+            raise ValueError(
+                "teacher_data_cache currently supports standard KL mode only. "
+                "Circuit mode still requires live teacher activations for CKA."
+            )
         self.cluster_pairs = cluster_pairs
         self.train_data = train_data
         self.test_data = test_data
@@ -980,6 +995,11 @@ class ClusterDistillationTrainer:
         student_dtype = torch.float32
         teacher_dtype = torch.float16 if self.device.type == "cuda" else torch.float32
         original_dtype = torch.float16 if self.device.type == "cuda" else torch.float32
+        self.teacher_data_cache = (
+            TeacherDataCache(config.teacher_data_cache)
+            if config.teacher_data_cache
+            else None
+        )
         if student is not None:
             self.student = student
         else:
@@ -988,16 +1008,20 @@ class ClusterDistillationTrainer:
                 config.student_model, dtype=student_dtype,
             ).to(self.device)
 
-        if teacher is not None:
+        if self.teacher_data_cache is not None:
+            print(f"Using cached teacher data: {config.teacher_data_cache}")
+            self.teacher = None
+        elif teacher is not None:
             self.teacher = teacher
         else:
             print(f"Loading teacher: {config.teacher_model}")
             self.teacher = AutoModelForCausalLM.from_pretrained(
                 config.teacher_model, dtype=teacher_dtype,
             ).to(self.device)
-        self.teacher.eval()
-        for p in self.teacher.parameters():
-            p.requires_grad = False
+        if self.teacher is not None:
+            self.teacher.eval()
+            for p in self.teacher.parameters():
+                p.requires_grad = False
 
         self.original_student: Optional[nn.Module] = None
         if config.lambda_original_kl > 0:
@@ -1079,10 +1103,12 @@ class ClusterDistillationTrainer:
         if config.kl_mask_range is not None:
             lo, hi = config.kl_mask_range
             raw = token_ids_for_integer_range(self.tokenizer, lo, hi)
-            vm = min(
-                int(self.student.config.vocab_size),
-                int(self.teacher.config.vocab_size),
+            teacher_vocab_size = (
+                self.teacher_data_cache.teacher_vocab_size
+                if self.teacher_data_cache is not None
+                else int(self.teacher.config.vocab_size)
             )
+            vm = min(int(self.student.config.vocab_size), teacher_vocab_size)
             raw = raw[raw < vm]
             if raw.numel() == 0:
                 raise ValueError(
@@ -1174,7 +1200,9 @@ class ClusterDistillationTrainer:
             print_samples=cfg.eval_print_samples,
             eval_label=label,
             teacher_for_topk_print=(
-                self.teacher if cfg.eval_print_samples > 0 else None
+                self.teacher
+                if cfg.eval_print_samples > 0 and self.teacher is not None
+                else None
             ),
             temperature=cfg.temperature,
         )
@@ -1255,6 +1283,27 @@ class ClusterDistillationTrainer:
                 )
         return kl_for_backward
 
+    def _teacher_logits_for_batch(
+        self,
+        batch: Dict[str, Any],
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.teacher_data_cache is not None:
+            return self.teacher_data_cache.get_batch_logits(
+                prompts=batch["prompts"],
+                answers=batch["answers"],
+                input_ids=input_ids,
+                device=self.device,
+            )
+        if self.teacher is None:
+            raise RuntimeError("Teacher model is not loaded and no teacher data cache is configured.")
+        with torch.no_grad():
+            return self.teacher(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            ).logits
+
     def _backward_with_cached_kl_cka_scale(
         self,
         kl_loss: torch.Tensor,
@@ -1296,13 +1345,19 @@ class ClusterDistillationTrainer:
 
         try:
             if self._standard:
-                with torch.no_grad():
-                    teacher_logits = self.teacher(
-                        input_ids=input_ids, attention_mask=attention_mask,
-                    ).logits
+                teacher_logits = self._teacher_logits_for_batch(
+                    batch,
+                    input_ids,
+                    attention_mask,
+                )
                 student_logits = self.student(
                     input_ids=input_ids, attention_mask=attention_mask,
                 ).logits
+                if teacher_logits.shape != student_logits.shape:
+                    raise ValueError(
+                        "Cached/live teacher logits must match student logits shape for KL: "
+                        f"teacher={tuple(teacher_logits.shape)} student={tuple(student_logits.shape)}"
+                    )
                 kl_loss = _masked_kl_loss_restricted(
                     student_logits,
                     teacher_logits,
@@ -1792,20 +1847,28 @@ class ClusterDistillationTrainer:
                 print_samples=cfg.eval_print_samples,
                 eval_label="student baseline",
                 teacher_for_topk_print=(
-                    self.teacher if cfg.eval_print_samples > 0 else None
+                    self.teacher
+                    if cfg.eval_print_samples > 0 and self.teacher is not None
+                    else None
                 ),
                 temperature=cfg.temperature,
             )
-            teacher_base = eval_accuracy(
-                self.teacher, self.tokenizer, self.test_data,
-                batch_size=cfg.eval_batch_size,
-                max_new_tokens=cfg.eval_max_new_tokens,
-                print_samples=0,
-                eval_label="teacher baseline",
-                temperature=cfg.temperature,
-            )
+            if self.teacher is not None:
+                teacher_base = eval_accuracy(
+                    self.teacher, self.tokenizer, self.test_data,
+                    batch_size=cfg.eval_batch_size,
+                    max_new_tokens=cfg.eval_max_new_tokens,
+                    print_samples=0,
+                    eval_label="teacher baseline",
+                    temperature=cfg.temperature,
+                )
+            else:
+                teacher_base = 0.0
             print(f"  Student baseline accuracy: {student_base:.4f}")
-            print(f"  Teacher baseline accuracy: {teacher_base:.4f}")
+            if self.teacher is not None:
+                print(f"  Teacher baseline accuracy: {teacher_base:.4f}")
+            else:
+                print("  Teacher baseline accuracy: skipped (using cached teacher logits)")
             self.history["student_baseline"] = student_base
             self.history["teacher_baseline"] = teacher_base
             for prefix, data in self.extra_eval_data.items():
@@ -1817,16 +1880,22 @@ class ClusterDistillationTrainer:
                     eval_label=f"{prefix} student baseline",
                     temperature=cfg.temperature,
                 )
-                extra_teacher_base = eval_accuracy(
-                    self.teacher, self.tokenizer, data,
-                    batch_size=cfg.eval_batch_size,
-                    max_new_tokens=cfg.eval_max_new_tokens,
-                    print_samples=0,
-                    eval_label=f"{prefix} teacher baseline",
-                    temperature=cfg.temperature,
-                )
+                if self.teacher is not None:
+                    extra_teacher_base = eval_accuracy(
+                        self.teacher, self.tokenizer, data,
+                        batch_size=cfg.eval_batch_size,
+                        max_new_tokens=cfg.eval_max_new_tokens,
+                        print_samples=0,
+                        eval_label=f"{prefix} teacher baseline",
+                        temperature=cfg.temperature,
+                    )
+                else:
+                    extra_teacher_base = 0.0
                 print(f"  Student baseline accuracy [{prefix}]: {extra_student_base:.4f}")
-                print(f"  Teacher baseline accuracy [{prefix}]: {extra_teacher_base:.4f}")
+                if self.teacher is not None:
+                    print(f"  Teacher baseline accuracy [{prefix}]: {extra_teacher_base:.4f}")
+                else:
+                    print(f"  Teacher baseline accuracy [{prefix}]: skipped (cached logits)")
                 self.history[f"student_baseline_{prefix}"] = extra_student_base
                 self.history[f"teacher_baseline_{prefix}"] = extra_teacher_base
 

@@ -475,6 +475,16 @@ def main():
         ),
     )
     parser.add_argument(
+        "--teacher-data-cache",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to graph_loss/generate_teacher_data cache. Standard mode can use "
+            "cached full teacher logits and skip loading the teacher model."
+        ),
+    )
+    parser.add_argument(
         "--count-flops-every",
         type=int,
         default=0,
@@ -523,6 +533,11 @@ def main():
         raise SystemExit("--weight-decay must be >= 0")
     if not (0.0 <= args.hard_ce_weight <= 1.0):
         raise SystemExit("--hard-ce-weight must be in [0, 1]")
+    if args.teacher_data_cache and args.mode != "standard":
+        raise SystemExit(
+            "--teacher-data-cache currently supports --mode standard only; "
+            "circuit mode still requires live teacher activations for CKA."
+        )
     replay_data = None
     replay_loss_weight = 0.0
     if args.add_replay_loss is not None:
@@ -787,6 +802,7 @@ def main():
         eval_print_samples=args.eval_print_samples,
         eval_batch_size=args.eval_batch_size,
         save_dir=run_dir,
+        teacher_data_cache=args.teacher_data_cache,
         count_flops_every=args.count_flops_every,
         log_kl_cka_grad_norms=args.log_kl_cka_grad_norms,
         track_stable_rank=args.track_stable_rank,

@@ -7,6 +7,12 @@ from huggingface_hub import login
 from graph_loss.attribution.attribute import attribute
 from graph_loss.graph import Graph, PruneResult, SuperGraph, build_super_graph, prune_graph
 from graph_loss.replacement_model import TransformerLensReplacementModel
+from graph_loss.utils import (
+    add_graph_build_args,
+    add_graph_prune_args,
+    add_supergraph_args,
+    resolve_torch_dtype,
+)
 from utils import HF_READ_TOKEN
 
 
@@ -264,64 +270,9 @@ def main():
         "--graph_output_path",
         help="Optional path to save the graph (.pt)",
     )
-    parser.add_argument(
-        "--dtype",
-        choices=["float32", "bfloat16", "float16", "fp32", "bf16", "fp16"],
-        default="float32",
-        help="Model dtype",
-    )
-    parser.add_argument(
-        "--top_k_logits",
-        type=int,
-        default=20,
-        help="If set, include exactly this many highest-probability logit nodes",
-    )
-    parser.add_argument(
-        "--prop_neurons_per_layer",
-        type=float,
-        default=0.1,
-        help="Fraction of neurons to keep per layer",
-    )
-    parser.add_argument(
-        "--batch_size",
-        type=int,
-        default=512,
-        help="Batch size for attribution backward passes",
-    )
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Show attribution progress",
-    )
-    parser.add_argument(
-        "--node_threshold",
-        type=float,
-        default=0.8,
-        help="Cumulative node influence threshold for pruning",
-    )
-    parser.add_argument(
-        "--edge_threshold",
-        type=float,
-        default=0.98,
-        help="Cumulative edge influence threshold for pruning",
-    )
-    parser.add_argument(
-        "--epsilon",
-        type=float,
-        default=1e-3,
-        help="Cosine distance threshold for supernode clustering",
-    )
-    parser.add_argument(
-        "--min_cum_logit_influence",
-        type=float,
-        default=0.9,
-        help="Minimum cumulative logit influence norm required to form a supernode",
-    )
-    parser.add_argument(
-        "--prune",
-        action="store_true",
-        help="Whether to apply pruning before building supergraph",
-    )
+    add_graph_build_args(parser)
+    add_graph_prune_args(parser)
+    add_supergraph_args(parser)
     parser.add_argument(
         "--prune_output_path",
         help="Optional path to save prune masks and cumulative scores (.pt)",
@@ -333,13 +284,7 @@ def main():
 
     args = parser.parse_args()
 
-    dtype_mapping = {
-        "fp32": "float32",
-        "bf16": "bfloat16",
-        "fp16": "float16",
-    }
-    dtype_name = dtype_mapping.get(args.dtype, args.dtype)
-    dtype = getattr(torch, dtype_name)
+    dtype = resolve_torch_dtype(args.dtype)
 
     if HF_READ_TOKEN:
         logger.info("Authenticating with Hugging Face token")
