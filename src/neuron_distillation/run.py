@@ -4,6 +4,7 @@
 
 - ``--mode circuit`` (default): neuron-cluster ablation, pairing, KL + cluster CKA (same as before).
 - ``--mode standard``: pure KL distillation (no circuit checkpoint, ablation, or CKA).
+- ``--mode graph``: KL + live teacher/student attribution supergraph loss.
 
 **Resume**: ``--resume`` loads weights from ``<save-dir>/student_model/``.
 Use ``--checkpoint-run <path>`` only for a legacy nested run folder;
@@ -32,6 +33,7 @@ from typing import Dict, Optional
 
 import torch
 
+from graph_loss.utils import DTYPE_CHOICES, resolve_torch_dtype
 from neuron_distillation.ablation import classify_problems, ablation
 from neuron_distillation.distillation import (
     ClusterDistillationConfig,
@@ -275,15 +277,18 @@ def _find_circuit_checkpoint_pt(save_dir: str) -> list[str]:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Neuron-distillation pipeline (circuit or standard KL)",
+        description="Neuron-distillation pipeline (circuit, standard KL, or graph)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
     parser.add_argument(
         "--mode",
-        choices=["circuit", "standard"],
+        choices=["circuit", "standard", "graph"],
         default="circuit",
-        help="circuit: ablation + CKA + KL; standard: KL only (same run layout under --save-dir)",
+        help=(
+            "circuit: ablation + CKA + KL; standard: KL only; "
+            "graph: live attribution supergraph loss + KL"
+        ),
     )
     parser.add_argument("--student-model", type=str, default=LLAMA_1B_MODEL_NAME)
     parser.add_argument("--teacher-model", type=str, default=LLAMA_8B_MODEL_NAME)
@@ -317,6 +322,13 @@ def main():
     parser.add_argument("--temperature", type=float, default=2.0)
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--lambda-cluster", type=float, default=0.01)
+    parser.add_argument(
+        "--lambda-graph",
+        type=float,
+        default=0.1,
+        metavar="W",
+        help="Graph mode: add W * graph loss as an auxiliary distillation term.",
+    )
     parser.add_argument(
         "--lambda-original-kl",
         type=float,
@@ -377,6 +389,85 @@ def main():
             "'activation' uses raw up_proj outputs; "
             "'residual_write' scales neurons by ||down_proj[:, i]||."
         ),
+    )
+    parser.add_argument(
+        "--dtype",
+        choices=DTYPE_CHOICES,
+        default="float32",
+        help="Graph mode only: dtype used inside live graph attribution/autocast.",
+    )
+    parser.add_argument(
+        "--graph-top-k-logits",
+        "--top_k_logits",
+        dest="graph_top_k_logits",
+        type=int,
+        default=20,
+        help="Graph mode: number of highest-probability logit targets for attribution.",
+    )
+    parser.add_argument(
+        "--graph-prop-neurons-per-layer",
+        "--prop_neurons_per_layer",
+        dest="graph_prop_neurons_per_layer",
+        type=float,
+        default=0.1,
+        help="Graph mode: fraction of neuron-position nodes to keep per layer.",
+    )
+    parser.add_argument(
+        "--graph-batch-size",
+        type=int,
+        default=512,
+        help="Graph mode: number of graph target rows processed per loop chunk.",
+    )
+    parser.add_argument(
+        "--graph-prune",
+        "--prune",
+        dest="graph_prune",
+        action="store_true",
+        help="Graph mode: prune graphs before supergraph construction.",
+    )
+    parser.add_argument(
+        "--graph-node-threshold",
+        "--node_threshold",
+        dest="graph_node_threshold",
+        type=float,
+        default=0.8,
+        help="Graph mode: cumulative node influence threshold for pruning.",
+    )
+    parser.add_argument(
+        "--graph-edge-threshold",
+        "--edge_threshold",
+        dest="graph_edge_threshold",
+        type=float,
+        default=0.98,
+        help="Graph mode: cumulative edge influence threshold for pruning.",
+    )
+    parser.add_argument(
+        "--graph-epsilon",
+        "--epsilon",
+        dest="graph_epsilon",
+        type=float,
+        default=1e-3,
+        help="Graph mode: cosine-distance threshold for supernode clustering.",
+    )
+    parser.add_argument(
+        "--graph-min-cum-logit-influence",
+        "--min_cum_logit_influence",
+        dest="graph_min_cum_logit_influence",
+        type=float,
+        default=0.9,
+        help="Graph mode: influence coverage threshold for supernode clustering.",
+    )
+    parser.add_argument(
+        "--graph-similarity-threshold",
+        type=float,
+        default=0.7,
+        help="Graph mode: DLA cosine threshold for teacher/student supernode alignment.",
+    )
+    parser.add_argument(
+        "--graph-max-fan-out",
+        type=int,
+        default=4,
+        help="Graph mode: max student supernodes aligned to one teacher supernode.",
     )
     parser.add_argument(
         "--no-poly-importance",
@@ -533,10 +624,31 @@ def main():
         raise SystemExit("--weight-decay must be >= 0")
     if not (0.0 <= args.hard_ce_weight <= 1.0):
         raise SystemExit("--hard-ce-weight must be in [0, 1]")
+    if args.lambda_graph < 0:
+        raise SystemExit("--lambda-graph must be >= 0")
+    if args.graph_top_k_logits is not None and args.graph_top_k_logits <= 0:
+        raise SystemExit("--graph-top-k-logits must be positive")
+    if not (0.0 < args.graph_prop_neurons_per_layer <= 1.0):
+        raise SystemExit("--graph-prop-neurons-per-layer must be in (0, 1]")
+    if args.graph_batch_size < 1:
+        raise SystemExit("--graph-batch-size must be >= 1")
+    if not (0.0 <= args.graph_node_threshold <= 1.0):
+        raise SystemExit("--graph-node-threshold must be in [0, 1]")
+    if not (0.0 <= args.graph_edge_threshold <= 1.0):
+        raise SystemExit("--graph-edge-threshold must be in [0, 1]")
+    if not (0.0 <= args.graph_epsilon <= 1.0):
+        raise SystemExit("--graph-epsilon must be in [0, 1]")
+    if args.graph_min_cum_logit_influence < 0:
+        raise SystemExit("--graph-min-cum-logit-influence must be >= 0")
+    if not (0.0 <= args.graph_similarity_threshold <= 1.0):
+        raise SystemExit("--graph-similarity-threshold must be in [0, 1]")
+    if args.graph_max_fan_out < 1:
+        raise SystemExit("--graph-max-fan-out must be >= 1")
+    graph_dtype = resolve_torch_dtype(args.dtype)
     if args.teacher_data_cache and args.mode != "standard":
         raise SystemExit(
             "--teacher-data-cache currently supports --mode standard only; "
-            "circuit mode still requires live teacher activations for CKA."
+            "circuit and graph modes require live teacher computation."
         )
     replay_data = None
     replay_loss_weight = 0.0
@@ -576,6 +688,7 @@ def main():
     is_resume = student_source is not None
 
     circuit = args.mode == "circuit"
+    graph_mode = args.mode == "graph"
     neuron_clustering_root = os.path.join(
         args.save_dir,
         NEURON_CLUSTERING_SUBDIR,
@@ -738,6 +851,22 @@ def main():
         if not cluster_pairs:
             print("No cluster pairs found. Check ablation results and cluster files.")
             sys.exit(1)
+    elif graph_mode:
+        print("=" * 60)
+        print("Configuration (graph)")
+        print("=" * 60)
+        print(f"  dataset (prefix):   {dataset_prefix}")
+        print(f"  train_path:         {train_path}")
+        print(f"  test_path:          {test_path}")
+        print(f"  lambda_graph:       {args.lambda_graph}")
+        print(f"  graph dtype:        {args.dtype}")
+        print(f"  top_k_logits:       {args.graph_top_k_logits}")
+        print(f"  prop_neurons/layer: {args.graph_prop_neurons_per_layer}")
+        print(f"  graph_batch_size:   {args.graph_batch_size}")
+        print(f"  prune:              {args.graph_prune}")
+        print(f"  epsilon:            {args.graph_epsilon}")
+        print(f"  min_logit_infl:     {args.graph_min_cum_logit_influence}")
+        print("=" * 60)
     else:
         print("=" * 60)
         print("Configuration (standard KL)")
@@ -780,7 +909,7 @@ def main():
     config = ClusterDistillationConfig(
         teacher_model=args.teacher_model,
         student_model=args.student_model,
-        distillation_mode="standard" if not circuit else "circuit",
+        distillation_mode=args.mode,
         epochs=args.epochs,
         batch_size=args.batch_size,
         step_log_interval=args.step_log_interval,
@@ -789,6 +918,7 @@ def main():
         temperature=args.temperature,
         grad_clip=args.grad_clip,
         lambda_cluster=args.lambda_cluster,
+        lambda_graph=args.lambda_graph,
         lambda_original_kl=args.lambda_original_kl,
         replay_loss_weight=replay_loss_weight,
         hard_ce_weight=args.hard_ce_weight,
@@ -797,6 +927,17 @@ def main():
         ),
         cluster_grad_weighting=args.cluster_grad_weighting,
         trajectory_space=args.trajectory_space,
+        graph_dtype=graph_dtype,
+        graph_top_k_logits=args.graph_top_k_logits,
+        graph_prop_neurons_per_layer=args.graph_prop_neurons_per_layer,
+        graph_batch_size=args.graph_batch_size,
+        graph_prune=args.graph_prune,
+        graph_node_threshold=args.graph_node_threshold,
+        graph_edge_threshold=args.graph_edge_threshold,
+        graph_epsilon=args.graph_epsilon,
+        graph_min_cum_logit_influence=args.graph_min_cum_logit_influence,
+        graph_similarity_threshold=args.graph_similarity_threshold,
+        graph_max_fan_out=args.graph_max_fan_out,
         save_best=args.save_best,
         eval_max_new_tokens=eval_max_new_tokens,
         eval_print_samples=args.eval_print_samples,

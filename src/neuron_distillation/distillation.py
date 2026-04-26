@@ -41,7 +41,9 @@ from torch.optim import AdamW
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from graph_loss.hf_adapter import HFLlamaGraphAdapter
 from graph_loss.teacher_data_cache import TeacherDataCache
+from graph_loss.training import GraphAuxConfig, compute_batch_graph_loss
 
 try:
     from torch.utils.flop_counter import FlopCounterMode
@@ -122,7 +124,7 @@ class ClusterPairInfo:
 class ClusterDistillationConfig:
     teacher_model: str = LLAMA_8B_MODEL_NAME
     student_model: str = LLAMA_1B_MODEL_NAME
-    # ``circuit``: KL + cluster CKA (hooks). ``standard``: KL only (no hooks / no ablation).
+    # ``circuit``: KL + cluster CKA. ``standard``: KL only. ``graph``: KL + graph auxiliary loss.
     distillation_mode: str = "circuit"
 
     epochs: int = 50
@@ -133,6 +135,7 @@ class ClusterDistillationConfig:
     grad_clip: float = 1.0
 
     lambda_cluster: float = 0.01
+    lambda_graph: float = 0.1
     # Optional anchor KL from the initial/frozen student to the current student.
     lambda_original_kl: float = 0.0
     # Optional CE replay loss on a second JSON dataset.
@@ -152,6 +155,17 @@ class ClusterDistillationConfig:
     # ``activation``: raw up_proj outputs.
     # ``residual_write``: activation scaled by ||down_proj[:, i]|| per neuron.
     trajectory_space: str = "activation"
+    graph_dtype: Optional[torch.dtype] = None
+    graph_top_k_logits: Optional[int] = 20
+    graph_prop_neurons_per_layer: float = 0.1
+    graph_batch_size: int = 512
+    graph_prune: bool = False
+    graph_node_threshold: float = 0.8
+    graph_edge_threshold: float = 0.98
+    graph_epsilon: float = 1e-3
+    graph_min_cum_logit_influence: float = 0.9
+    graph_similarity_threshold: float = 0.7
+    graph_max_fan_out: int = 4
 
     # Greedy test accuracy: prompts batched for ``generate`` (independent of training batch size).
     eval_batch_size: int = 50
@@ -964,11 +978,18 @@ class ClusterDistillationTrainer:
     ):
         self.config = config
         self._resume = resume
+        if config.distillation_mode not in {"standard", "circuit", "graph"}:
+            raise ValueError(
+                "distillation_mode must be one of 'standard', 'circuit', or 'graph', "
+                f"got {config.distillation_mode!r}",
+            )
         self._standard = config.distillation_mode == "standard"
+        self._circuit = config.distillation_mode == "circuit"
+        self._graph = config.distillation_mode == "graph"
         if config.teacher_data_cache and not self._standard:
             raise ValueError(
                 "teacher_data_cache currently supports standard KL mode only. "
-                "Circuit mode still requires live teacher activations for CKA."
+                "Circuit and graph modes require live teacher computation."
             )
         self.cluster_pairs = cluster_pairs
         self.train_data = train_data
@@ -1042,6 +1063,35 @@ class ClusterDistillationTrainer:
 
         # Losses
         self.cluster_loss_fn = ClusterAlignmentLoss()
+        self.graph_loss_config = GraphAuxConfig(
+            lambda_graph=config.lambda_graph,
+            graph_dtype=config.graph_dtype,
+            top_k_logits=config.graph_top_k_logits,
+            prop_neurons_per_layer=config.graph_prop_neurons_per_layer,
+            graph_batch_size=config.graph_batch_size,
+            graph_prune=config.graph_prune,
+            graph_node_threshold=config.graph_node_threshold,
+            graph_edge_threshold=config.graph_edge_threshold,
+            graph_epsilon=config.graph_epsilon,
+            graph_min_cum_logit_influence=config.graph_min_cum_logit_influence,
+            graph_similarity_threshold=config.graph_similarity_threshold,
+            graph_max_fan_out=config.graph_max_fan_out,
+        )
+        self.student_graph_adapter: Optional[HFLlamaGraphAdapter] = None
+        self.teacher_graph_adapter: Optional[HFLlamaGraphAdapter] = None
+        if self._graph:
+            if self.teacher is None:
+                raise ValueError("Graph mode requires a live teacher model.")
+            self.student_graph_adapter = HFLlamaGraphAdapter(
+                self.student,
+                self.tokenizer,
+                self.device,
+            )
+            self.teacher_graph_adapter = HFLlamaGraphAdapter(
+                self.teacher,
+                self.tokenizer,
+                self.device,
+            )
 
         # Optimizer
         self.optimizer = AdamW(
@@ -1079,7 +1129,7 @@ class ClusterDistillationTrainer:
             self._replay_iter = iter(self.replay_loader)
 
         if (
-            not self._standard
+            self._circuit
             and self.config.cluster_grad_weighting
             and self.cluster_pairs
         ):
@@ -1253,6 +1303,8 @@ class ClusterDistillationTrainer:
 
     def _should_log_kl_cka_detail(self, batch_step: int) -> bool:
         """If True, recompute split KL/CKA grad norms and refresh the cached scale."""
+        if not self._circuit:
+            return False
         cfg = self.config
         interval = int(cfg.log_kl_cka_grad_norms)
         if interval <= 0:
@@ -1261,7 +1313,7 @@ class ClusterDistillationTrainer:
 
     def _should_use_cached_kl_cka_scale(self) -> bool:
         """If True, reuse the most recent KL/CKA grad scale between recomputation steps."""
-        return (not self._standard) and int(self.config.log_kl_cka_grad_norms) > 0
+        return self._circuit and int(self.config.log_kl_cka_grad_norms) > 0
 
     def _kl_objective_for_backward(
         self,
@@ -1310,7 +1362,7 @@ class ClusterDistillationTrainer:
         cluster_loss: Optional[torch.Tensor],
     ) -> None:
         """Backward using the most recently recomputed KL/CKA scale."""
-        if self._standard or cluster_loss is None:
+        if not self._circuit or cluster_loss is None:
             kl_loss.backward()
             return
         scaled_total = (
@@ -1344,7 +1396,7 @@ class ClusterDistillationTrainer:
         T = self.config.temperature
 
         try:
-            if self._standard:
+            if self._standard or self._graph:
                 teacher_logits = self._teacher_logits_for_batch(
                     batch,
                     input_ids,
@@ -1400,11 +1452,38 @@ class ClusterDistillationTrainer:
                     if w_h > 0
                     else None
                 )
+                graph_loss = None
+                graph_metrics: Dict[str, Any] = {}
+                if self._graph:
+                    if self.student_graph_adapter is None or self.teacher_graph_adapter is None:
+                        raise RuntimeError("Graph mode adapters were not initialized.")
+                    graph_loss, graph_metrics = compute_batch_graph_loss(
+                        prompts=batch["prompts"],
+                        teacher_adapter=self.teacher_graph_adapter,
+                        student_adapter=self.student_graph_adapter,
+                        config=self.graph_loss_config,
+                        device=self.device,
+                    )
+
                 total = distill_kl
                 if replay_ce is not None:
                     total = total + self.config.replay_loss_weight * replay_ce
+                if graph_loss is not None:
+                    total = total + self.config.lambda_graph * graph_loss
                 if hard_ce is not None:
-                    total = total + w_h * hard_ce
+                    if graph_loss is not None:
+                        total = (
+                            (1.0 - w_h) * distill_kl
+                            + (
+                                self.config.replay_loss_weight * replay_ce
+                                if replay_ce is not None
+                                else 0.0
+                            )
+                            + self.config.lambda_graph * graph_loss
+                            + w_h * hard_ce
+                        )
+                    else:
+                        total = total + w_h * hard_ce
                 metrics = {
                     "kl_loss": kl_loss.item(),
                     "original_kl_loss": (
@@ -1416,7 +1495,15 @@ class ClusterDistillationTrainer:
                     "mean_cka": 0.0,
                     "kc_lam1": {},
                     "hard_ce_loss": hard_ce.item() if hard_ce is not None else 0.0,
+                    "graph_loss": graph_loss.item() if graph_loss is not None else 0.0,
+                    "graph_loss_weighted": (
+                        (self.config.lambda_graph * graph_loss).item()
+                        if graph_loss is not None
+                        else 0.0
+                    ),
                 }
+                for key, value in graph_metrics.items():
+                    metrics[f"graph_{key}"] = value
                 return total, metrics, distill_kl, None, hard_ce, replay_ce
 
             self.teacher_cache.register_hooks(self.teacher, detach=True)
@@ -1556,7 +1643,7 @@ class ClusterDistillationTrainer:
             ``(||g_KL||_2, ||g_{λ·CKA}||_2, r)``. Standard KL-only: third value is ``1.0``.
         """
         params = [p for p in self.student.parameters() if p.requires_grad]
-        if self._standard:
+        if not self._circuit:
             g_kl = torch.autograd.grad(
                 kl_loss, params, retain_graph=False, allow_unused=True,
             )
