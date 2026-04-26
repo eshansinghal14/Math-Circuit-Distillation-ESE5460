@@ -48,6 +48,7 @@ def compute_prompt_graph_loss(
         prop_neurons_per_layer=config.prop_neurons_per_layer,
         batch_size=config.graph_batch_size,
         dtype=config.graph_dtype,
+        verbose=config.verbose,
         create_graph=False,
     )
     if config.verbose:
@@ -58,6 +59,7 @@ def compute_prompt_graph_loss(
         prop_neurons_per_layer=config.prop_neurons_per_layer,
         batch_size=config.graph_batch_size,
         dtype=config.graph_dtype,
+        verbose=config.verbose,
         create_graph=True,
     )
 

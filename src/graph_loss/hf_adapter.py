@@ -156,6 +156,7 @@ class HFLlamaGraphAdapter:
         prop_neurons_per_layer: float = 0.1,
         batch_size: int = 512,
         dtype: torch.dtype | None = None,
+        verbose: bool = False,
         create_graph: bool = False,
     ) -> Graph:
         if not (0.0 < prop_neurons_per_layer <= 1.0):
@@ -272,7 +273,50 @@ class HFLlamaGraphAdapter:
 
         source_tensors = [mlp_outputs[idx] for idx in range(self.n_layers)] + [embed_out]
 
-        def source_scores(target: torch.Tensor) -> torch.Tensor:
+        def source_scores_batch(target_values: torch.Tensor) -> torch.Tensor:
+            grad_outputs = torch.eye(
+                target_values.numel(),
+                device=target_values.device,
+                dtype=target_values.dtype,
+            )
+            grads = torch.autograd.grad(
+                target_values,
+                source_tensors,
+                grad_outputs=grad_outputs,
+                retain_graph=True,
+                create_graph=create_graph,
+                allow_unused=True,
+                is_grads_batched=True,
+            )
+            rows = torch.zeros(
+                target_values.numel(),
+                source_count,
+                dtype=source_vectors_t.dtype,
+                device=self.device,
+            )
+            for layer_idx in range(self.n_layers):
+                layer_mask = source_layer_by_node_t == layer_idx
+                if not layer_mask.any():
+                    continue
+                grad = grads[layer_idx]
+                if grad is None:
+                    continue
+                layer_indices = torch.where(layer_mask)[0]
+                locs = neuron_locations_t[layer_mask]
+                grad_vecs = grad[:, 0, locs[:, 1], :].to(source_vectors_t.dtype)
+                rows[:, layer_indices] = (
+                    grad_vecs * source_vectors_t[layer_indices].unsqueeze(0)
+                ).sum(dim=-1)
+            token_grad = grads[-1]
+            if token_grad is not None:
+                token_vectors = embed_out.squeeze(0).to(source_vectors_t.dtype)
+                rows[:, n_neurons:source_count] = (
+                    token_grad.squeeze(1).to(source_vectors_t.dtype)
+                    * token_vectors.unsqueeze(0)
+                ).sum(dim=-1)
+            return rows
+
+        def source_scores_single(target: torch.Tensor) -> torch.Tensor:
             grads = torch.autograd.grad(
                 target,
                 source_tensors,
@@ -302,24 +346,48 @@ class HFLlamaGraphAdapter:
                 ).sum(dim=-1)
             return row
 
+        def source_scores_batch_with_fallback(target_values: torch.Tensor) -> torch.Tensor:
+            try:
+                return source_scores_batch(target_values)
+            except RuntimeError as exc:
+                if verbose:
+                    print(
+                        "    [graph] batched autograd failed; falling back to "
+                        f"row-wise attribution ({exc})",
+                    )
+                return torch.stack(
+                    [source_scores_single(target) for target in target_values],
+                    dim=0,
+                )
+
         for start in range(0, n_neurons, max(1, batch_size)):
             end = min(start + max(1, batch_size), n_neurons)
+            if verbose:
+                print(f"    [graph] neuron rows {start}:{end} / {n_neurons}")
+            target_values = []
             for row_idx in range(start, end):
                 layer_idx = int(neuron_locations_t[row_idx, 0].item())
                 pos_idx = int(neuron_locations_t[row_idx, 1].item())
-                target = (
+                target_values.append((
                     mlp_inputs[layer_idx][0, pos_idx].to(target_encoders_t.dtype)
                     * target_encoders_t[row_idx]
-                ).sum()
-                adjacency[row_idx, :source_count] = source_scores(target)
+                ).sum())
+            adjacency[start:end, :source_count] = source_scores_batch_with_fallback(
+                torch.stack(target_values),
+            )
 
         logit_start = n_neurons + n_tokens
-        for offset, logit_vec in enumerate(targets.logit_vectors):
-            target = (
-                final_hidden[0, -1].to(logit_vec.dtype)
-                * logit_vec.to(device=self.device, dtype=final_hidden.dtype)
-            ).sum()
-            adjacency[logit_start + offset, :source_count] = source_scores(target)
+        for start in range(0, n_logits, max(1, batch_size)):
+            end = min(start + max(1, batch_size), n_logits)
+            if verbose:
+                print(f"    [graph] logit rows {start}:{end} / {n_logits}")
+            logit_vecs = targets.logit_vectors[start:end].to(device=self.device)
+            target_values = (
+                final_hidden[0, -1].to(logit_vecs.dtype).unsqueeze(0) * logit_vecs
+            ).sum(dim=-1)
+            adjacency[logit_start + start:logit_start + end, :source_count] = (
+                source_scores_batch_with_fallback(target_values)
+            )
 
         graph = Graph(
             input_string=self.tokenizer.decode(input_ids.detach().cpu().tolist()),
