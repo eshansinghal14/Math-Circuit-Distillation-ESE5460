@@ -13,6 +13,12 @@ from transformers import AutoTokenizer
 
 from graph_loss.align import compute_supernode_dla
 from graph_loss.attribution.attribute import attribute
+from graph_loss.__main__ import (
+    _log_graph_summary,
+    _log_pipeline_comparison,
+    _log_prune_summary,
+    _log_supergraph_summary,
+)
 from graph_loss.graph import (
     Graph,
     PruneResult,
@@ -222,6 +228,7 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
         os.makedirs(sample_dir, exist_ok=True)
 
         logger.info("Generating teacher data for sample %d: %r", sample_idx, prompt)
+        logger.info("Running attribution graph build")
         graph = attribute(
             prompt=prompt,
             model=model,
@@ -230,32 +237,60 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
             batch_size=config.batch_size,
             verbose=config.verbose,
         )
+        _log_graph_summary(graph, logger=logger, stage="Built")
 
         graph_path = os.path.join(sample_dir, "graph.pt")
+        logger.info("Saving graph to %s", graph_path)
         graph.to_pt(graph_path)
 
         prune_result = None
         graph_for_supergraph = graph
         prune_path = None
         if config.prune:
+            logger.info("Running prune_graph")
             prune_result = prune_graph(
                 graph,
                 node_threshold=config.node_threshold,
                 edge_threshold=config.edge_threshold,
             )
+            _log_prune_summary(
+                graph,
+                prune_result,
+                node_threshold=config.node_threshold,
+                edge_threshold=config.edge_threshold,
+                logger=logger,
+            )
             prune_path = os.path.join(sample_dir, "prune_result.pt")
+            logger.info("Saving prune result to %s", prune_path)
             _save_prune_result(prune_path, prune_result)
+            logger.info("Applying prune masks to graph")
             graph_for_supergraph = graph.apply_prune_result(prune_result)
 
+        logger.info("Running build_super_graph")
         supergraph = build_super_graph(
             graph_for_supergraph,
             epsilon=config.epsilon,
             min_cum_logit_influence=config.min_cum_logit_influence,
         )
+        _log_supergraph_summary(
+            graph_for_supergraph,
+            supergraph,
+            epsilon=config.epsilon,
+            min_cum_logit_influence=config.min_cum_logit_influence,
+            logger=logger,
+        )
         supergraph_path = os.path.join(sample_dir, "supergraph.pt")
+        logger.info("Saving supergraph to %s", supergraph_path)
         _save_supergraph(supergraph_path, supergraph)
+        _log_pipeline_comparison(
+            graph_for_supergraph,
+            supergraph,
+            logger=logger,
+            prune_result=prune_result,
+        )
 
         dla_path = os.path.join(sample_dir, "teacher_supernode_dla.pt")
+        logger.info("Saving teacher supernode DLA to %s", dla_path)
         _save_teacher_supernode_dla(
             dla_path,
             supergraph=supergraph,
@@ -263,9 +298,11 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
             model=model,
         )
 
+        logger.info("Computing teacher logits for distillation cache")
         distill_tensors = _build_distillation_tensors(prompt, answer, tokenizer)
         logits = _compute_teacher_logits(model, distill_tensors["input_ids"])
         logits_path = os.path.join(sample_dir, "teacher_logits.pt")
+        logger.info("Saving teacher logits to %s", logits_path)
         torch.save(
             {
                 "prompt": prompt,
@@ -297,6 +334,7 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
             },
         }
         metadata_path = os.path.join(sample_dir, "metadata.json")
+        logger.info("Saving metadata to %s", metadata_path)
         _write_json(metadata_path, metadata)
 
         manifest["samples"].append(
@@ -313,7 +351,10 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
                 "prune_result": _relative(prune_path, store_path) if prune_path else None,
             }
         )
-        _write_json(os.path.join(store_path, MANIFEST_NAME), manifest)
+        manifest_path = os.path.join(store_path, MANIFEST_NAME)
+        logger.info("Updating manifest at %s", manifest_path)
+        _write_json(manifest_path, manifest)
+        logger.info("Completed teacher data for sample %d", sample_idx)
 
     return manifest
 
