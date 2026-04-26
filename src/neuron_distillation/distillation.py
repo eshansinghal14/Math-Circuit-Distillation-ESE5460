@@ -1301,6 +1301,14 @@ class ClusterDistillationTrainer:
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
 
+    def _cuda_clear_after_graph_step(self) -> None:
+        """Graph mode builds large temporary attribution tensors every batch."""
+        if not self._graph:
+            return
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     def _extra_eval_history_key(self, prefix: str) -> str:
         return f"accuracy_extra_{prefix}"
 
@@ -1711,7 +1719,7 @@ class ClusterDistillationTrainer:
                     if loss is None:
                         pass
                     elif torch.isfinite(loss).item():
-                        self.optimizer.zero_grad()
+                        self.optimizer.zero_grad(set_to_none=self._graph)
                         kl_for_backward = self._kl_objective_for_backward(
                             kl_loss, hard_ce, replay_ce,
                         )
@@ -1734,6 +1742,7 @@ class ClusterDistillationTrainer:
                         stepped = True
                 if stepped:
                     self.optimizer.step()
+                    self._cuda_clear_after_graph_step()
                 epoch_flops += int(fcm.get_total_flops())
                 if loss is None:
                     continue
@@ -1746,7 +1755,7 @@ class ClusterDistillationTrainer:
                 if not torch.isfinite(loss).item():
                     skipped_nonfinite += 1
                     continue
-                self.optimizer.zero_grad()
+                self.optimizer.zero_grad(set_to_none=self._graph)
                 kl_for_backward = self._kl_objective_for_backward(
                     kl_loss, hard_ce, replay_ce,
                 )
@@ -1767,6 +1776,7 @@ class ClusterDistillationTrainer:
                     self.student.parameters(), self.config.grad_clip,
                 )
                 self.optimizer.step()
+                self._cuda_clear_after_graph_step()
 
             if not torch.isfinite(loss).item():
                 skipped_nonfinite += 1
