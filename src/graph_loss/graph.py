@@ -407,7 +407,6 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
     
     node_clusters, num_supernodes = build_supernodes_svd(node_influence_vectors, min_cum_logit_influence, epsilon)
 
-
     # num_supernodes = 0
     # node_clusters = [0] * n_neurons
     # for n in range(n_neurons):
@@ -460,6 +459,36 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
 def range_query(node_influence_normalized: torch.Tensor, neuron_idx: int, epsilon: float) -> list[int]:
     """Find all nodes within epsilon of node_idx in the normalized node influence space."""
     return torch.where(1 - node_influence_normalized @ node_influence_normalized[neuron_idx] <= epsilon)[0].tolist()
+
+
+def kmeans(X, k, n_iter=100):
+    # X: [n × d]
+    # initialize centers with kmeans++
+    centers = [X[torch.randint(len(X), (1,)).item()]]
+    for _ in range(k - 1):
+        dists = torch.stack([
+            ((X - c) ** 2).sum(dim=1) for c in centers
+        ]).min(dim=0).values
+        probs = dists / dists.sum()
+        centers.append(X[torch.multinomial(probs, 1).item()])
+    centers = torch.stack(centers)  # [k × d]
+
+    for _ in range(n_iter):
+        # assign
+        dists = torch.cdist(X, centers)          # [n × k]
+        assignments = dists.argmin(dim=1)        # [n]
+        # update
+        new_centers = torch.stack([
+            X[assignments == i].mean(dim=0) 
+            if (assignments == i).any() 
+            else centers[i]
+            for i in range(k)
+        ])
+        if (new_centers - centers).norm() < 1e-6:
+            break
+        centers = new_centers
+
+    return assignments
 
 
 def extract_supernode_members(supergraph: SuperGraph, graph: Graph, model) -> list[dict]:
