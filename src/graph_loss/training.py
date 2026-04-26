@@ -114,12 +114,14 @@ def compute_prompt_graph_loss(
     alignment = align_supernodes(
         teacher_members,
         student_members,
-        teacher_graph_model.unembed.W_U.detach().to(dtype=config.graph_dtype)
-        if config.graph_dtype is not None
-        else teacher_graph_model.unembed.W_U.detach(),
-        student_adapter.W_U.to(dtype=config.graph_dtype)
-        if config.graph_dtype is not None
-        else student_adapter.W_U,
+        teacher_graph_model.unembed.W_U.detach().to(
+            device=student_graph.adjacency_device,
+            dtype=config.graph_dtype or student_graph.adjacency_matrix.dtype,
+        ),
+        student_adapter.W_U.to(
+            device=student_graph.adjacency_device,
+            dtype=config.graph_dtype or student_graph.adjacency_matrix.dtype,
+        ),
         similarity_threshold=config.graph_similarity_threshold,
         max_fan_out=config.graph_max_fan_out,
     )
@@ -127,7 +129,10 @@ def compute_prompt_graph_loss(
     teacher_ids = list(range(len(teacher_supergraph.supernodes)))
     student_ids = list(range(len(student_supergraph.supernodes)))
     graph_loss = compute_L_graph(
-        teacher_supergraph.supernode_adjacency_matrix.detach(),
+        teacher_supergraph.supernode_adjacency_matrix.detach().to(
+            device=student_supergraph.supernode_adjacency_matrix.device,
+            dtype=student_supergraph.supernode_adjacency_matrix.dtype,
+        ),
         student_supergraph.supernode_adjacency_matrix,
         alignment.mapping,
         teacher_ids,
