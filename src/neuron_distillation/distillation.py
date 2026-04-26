@@ -1872,6 +1872,14 @@ class ClusterDistillationTrainer:
                             for pk, pv in sorted(stable_rank.items())
                         )
                         print(f"             stable rank {stable_rank_s}")
+            if self._graph:
+                loss = None
+                metrics = None
+                kl_loss = None
+                cluster_loss = None
+                hard_ce = None
+                replay_ce = None
+                self._cuda_clear_after_graph_step()
 
         if n == 0:
             print(
