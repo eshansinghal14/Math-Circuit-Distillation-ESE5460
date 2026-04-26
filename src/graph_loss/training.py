@@ -2,32 +2,19 @@
 
 from __future__ import annotations
 
-import contextlib
 from dataclasses import dataclass
 from typing import Any
 
 import torch
 
 from graph_loss.align import align_supernodes
-from graph_loss.graph import build_super_graph, prune_graph
+from graph_loss.attribution.attribute import attribute
+from graph_loss.graph import build_super_graph, extract_supernode_members, prune_graph
 from graph_loss.hf_adapter import (
     HFLlamaGraphAdapter,
     extract_hf_supernode_members,
 )
 from graph_loss.loss import compute_L_graph
-
-
-@contextlib.contextmanager
-def _without_parameter_grads(model):
-    """Disable parameter gradients while keeping activation autograd available."""
-    changed = [param for param in model.parameters() if param.requires_grad]
-    try:
-        for param in changed:
-            param.requires_grad_(False)
-        yield
-    finally:
-        for param in changed:
-            param.requires_grad_(True)
 
 
 @dataclass
@@ -50,24 +37,20 @@ class GraphAuxConfig:
 def compute_prompt_graph_loss(
     *,
     prompt: str,
-    teacher_adapter: HFLlamaGraphAdapter,
+    teacher_graph_model: Any,
     student_adapter: HFLlamaGraphAdapter,
     config: GraphAuxConfig,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     if config.verbose:
         print(f"  [graph] building teacher graph for prompt: {prompt!r}")
-    # The teacher graph needs first-order activation gradients for attribution,
-    # but never parameter gradients or higher-order graph construction.
-    with _without_parameter_grads(teacher_adapter.model):
-        teacher_graph = teacher_adapter.build_graph(
-            prompt,
-            top_k_logits=config.top_k_logits,
-            prop_neurons_per_layer=config.prop_neurons_per_layer,
-            batch_size=config.graph_batch_size,
-            dtype=config.graph_dtype,
-            verbose=config.verbose,
-            create_graph=False,
-        )
+    teacher_graph = attribute(
+        prompt=prompt,
+        model=teacher_graph_model,
+        top_k_logits=config.top_k_logits,
+        prop_neurons_per_layer=config.prop_neurons_per_layer,
+        batch_size=config.graph_batch_size,
+        verbose=config.verbose,
+    )
     if config.verbose:
         print(f"  [graph] building student graph for prompt: {prompt!r}")
     student_graph = student_adapter.build_graph(
@@ -113,11 +96,10 @@ def compute_prompt_graph_loss(
 
     if config.verbose:
         print("  [graph] aligning supernodes and computing graph loss")
-    teacher_members = extract_hf_supernode_members(
+    teacher_members = extract_supernode_members(
         teacher_supergraph,
         teacher_graph,
-        teacher_adapter,
-        detach=True,
+        teacher_graph_model,
     )
     student_members = extract_hf_supernode_members(
         student_supergraph,
@@ -128,9 +110,9 @@ def compute_prompt_graph_loss(
     alignment = align_supernodes(
         teacher_members,
         student_members,
-        teacher_adapter.W_U.detach().to(dtype=config.graph_dtype)
+        teacher_graph_model.unembed.W_U.detach().to(dtype=config.graph_dtype)
         if config.graph_dtype is not None
-        else teacher_adapter.W_U.detach(),
+        else teacher_graph_model.unembed.W_U.detach(),
         student_adapter.W_U.to(dtype=config.graph_dtype)
         if config.graph_dtype is not None
         else student_adapter.W_U,
@@ -168,7 +150,7 @@ def compute_prompt_graph_loss(
 def compute_batch_graph_loss(
     *,
     prompts: list[str],
-    teacher_adapter: HFLlamaGraphAdapter,
+    teacher_graph_model: Any,
     student_adapter: HFLlamaGraphAdapter,
     config: GraphAuxConfig,
     device: torch.device,
@@ -178,7 +160,7 @@ def compute_batch_graph_loss(
     for prompt in prompts:
         prompt_loss, prompt_metrics = compute_prompt_graph_loss(
             prompt=prompt,
-            teacher_adapter=teacher_adapter,
+            teacher_graph_model=teacher_graph_model,
             student_adapter=student_adapter,
             config=config,
         )

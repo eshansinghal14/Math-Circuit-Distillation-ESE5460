@@ -42,6 +42,7 @@ from torch.optim import AdamW
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
+from graph_loss.replacement_model import TransformerLensReplacementModel
 from graph_loss.teacher_data_cache import TeacherDataCache
 from graph_loss.training import GraphAuxConfig, compute_batch_graph_loss
 
@@ -1080,7 +1081,7 @@ class ClusterDistillationTrainer:
             graph_max_fan_out=config.graph_max_fan_out,
         )
         self.student_graph_adapter: Optional[HFLlamaGraphAdapter] = None
-        self.teacher_graph_adapter: Optional[HFLlamaGraphAdapter] = None
+        self.teacher_graph_model = None
         if self._graph:
             if self.teacher is None:
                 raise ValueError("Graph mode requires a live teacher model.")
@@ -1089,11 +1090,13 @@ class ClusterDistillationTrainer:
                 self.tokenizer,
                 self.device,
             )
-            self.teacher_graph_adapter = HFLlamaGraphAdapter(
-                self.teacher,
-                self.tokenizer,
-                self.device,
+            print(f"Loading teacher graph model: {config.teacher_model}")
+            self.teacher_graph_model = TransformerLensReplacementModel.from_pretrained(
+                config.teacher_model,
+                device=self.device,
+                dtype=config.graph_dtype or teacher_dtype,
             )
+            self.teacher_graph_model.eval()
 
         # Optimizer
         self.optimizer = AdamW(
@@ -1457,11 +1460,11 @@ class ClusterDistillationTrainer:
                 graph_loss = None
                 graph_metrics: Dict[str, Any] = {}
                 if self._graph:
-                    if self.student_graph_adapter is None or self.teacher_graph_adapter is None:
-                        raise RuntimeError("Graph mode adapters were not initialized.")
+                    if self.student_graph_adapter is None or self.teacher_graph_model is None:
+                        raise RuntimeError("Graph mode models were not initialized.")
                     graph_loss, graph_metrics = compute_batch_graph_loss(
                         prompts=batch["prompts"],
-                        teacher_adapter=self.teacher_graph_adapter,
+                        teacher_graph_model=self.teacher_graph_model,
                         student_adapter=self.student_graph_adapter,
                         config=self.graph_loss_config,
                         device=self.device,
