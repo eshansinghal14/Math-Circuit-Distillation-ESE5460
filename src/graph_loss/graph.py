@@ -620,7 +620,7 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
         
         return assignments, k
     
-    node_clusters, num_supernodes = build_supernodes_svd(node_influence_vectors, min_cum_logit_influence, epsilon)
+    node_clusters, _ = build_supernodes_svd(node_influence_vectors, min_cum_logit_influence, epsilon)
 
     # num_supernodes = 0
     # node_clusters = [0] * n_neurons
@@ -653,7 +653,15 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
     #             neighbors = list(set(neighbors) | set(new_neighbors))
 
     adj_matrix_norm = normalize_matrix(adjacency_matrix)
-    supernodes = [[i for i in range(n_neurons) if node_clusters[i] == n] for n in range(1, num_supernodes + 1)]
+    used_cluster_ids = sorted(
+        int(cluster_id.item())
+        for cluster_id in node_clusters.unique()
+        if int(cluster_id.item()) > 0
+    )
+    supernodes = [
+        [i for i in range(n_neurons) if int(node_clusters[i].item()) == cluster_id]
+        for cluster_id in used_cluster_ids
+    ]
     supernode_adj_matrix = _supernode_adjacency_from_sparse(
         adj_matrix_norm,
         supernodes,
