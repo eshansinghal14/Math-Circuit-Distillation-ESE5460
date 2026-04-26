@@ -158,6 +158,7 @@ class HFLlamaGraphAdapter:
         dtype: torch.dtype | None = None,
         verbose: bool = False,
         create_graph: bool = False,
+        detach_result: bool | None = None,
     ) -> Graph:
         if not (0.0 < prop_neurons_per_layer <= 1.0):
             raise ValueError("prop_neurons_per_layer must be in (0, 1]")
@@ -408,7 +409,9 @@ class HFLlamaGraphAdapter:
             logit_probabilities=targets.logit_probabilities,
             vocab_size=targets.vocab_size,
         )
-        if not create_graph:
+        if detach_result is None:
+            detach_result = not create_graph
+        if detach_result:
             graph = detach_graph(graph)
         return graph
 
