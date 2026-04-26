@@ -1035,6 +1035,9 @@ class ClusterDistillationTrainer:
         if self.teacher_data_cache is not None:
             print(f"Using cached teacher data: {config.teacher_data_cache}")
             self.teacher = None
+        elif self._graph:
+            print("Graph mode: using TransformerLens teacher for graph attribution and KL logits")
+            self.teacher = None
         elif teacher is not None:
             self.teacher = teacher
         else:
@@ -1085,8 +1088,6 @@ class ClusterDistillationTrainer:
         self.student_graph_adapter: Optional[HFLlamaGraphAdapter] = None
         self.teacher_graph_model = None
         if self._graph:
-            if self.teacher is None:
-                raise ValueError("Graph mode requires a live teacher model.")
             self.student_graph_adapter = HFLlamaGraphAdapter(
                 self.student,
                 self.tokenizer,
@@ -1363,6 +1364,11 @@ class ClusterDistillationTrainer:
                 input_ids=input_ids,
                 device=self.device,
             )
+        if self._graph and self.teacher_graph_model is not None:
+            with torch.no_grad():
+                out = self.teacher_graph_model(input_ids)
+                logits = out.logits if hasattr(out, "logits") else out
+            return logits.to(device=self.device)
         if self.teacher is None:
             raise RuntimeError("Teacher model is not loaded and no teacher data cache is configured.")
         with torch.no_grad():
