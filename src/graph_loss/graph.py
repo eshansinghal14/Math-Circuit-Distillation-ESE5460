@@ -236,7 +236,12 @@ class Graph:
         )
 
 def normalize_matrix(matrix: torch.Tensor) -> torch.Tensor:
-    normalized = matrix.abs()
+    math_dtype = (
+        torch.float32
+        if matrix.dtype in (torch.float16, torch.bfloat16)
+        else matrix.dtype
+    )
+    normalized = matrix.to(dtype=math_dtype).abs()
     return normalized / normalized.sum(dim=1, keepdim=True).clamp(min=1e-10)
 
 
@@ -257,6 +262,7 @@ def compute_influence(
     del max_iter, atol  # Kept for call-site compatibility.
 
     weights_were_1d = logit_weights.ndim == 1
+    logit_weights = logit_weights.to(device=A.device, dtype=A.dtype)
     base_weights = logit_weights.unsqueeze(0) if weights_were_1d else logit_weights
     total_influence = base_weights.clone()
 
@@ -406,6 +412,18 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
         """
         # magnitudes — used for noise filtering and validity
         magnitudes = B_weighted.norm(dim=1)           # [n_neurons]
+        finite_magnitudes = magnitudes[torch.isfinite(magnitudes)]
+        if finite_magnitudes.numel():
+            logger.info(
+                "  Supernode influence magnitudes: finite=%d/%d min=%.6g median=%.6g max=%.6g",
+                int(finite_magnitudes.numel()),
+                int(magnitudes.numel()),
+                float(finite_magnitudes.min().item()),
+                float(finite_magnitudes.median().item()),
+                float(finite_magnitudes.max().item()),
+            )
+        else:
+            logger.info("  Supernode influence magnitudes: no finite values")
         
         # directions — used for clustering
         directions = B_weighted / magnitudes.unsqueeze(1).clamp(min=1e-12)
@@ -483,7 +501,7 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
     supernode_adj_matrix = torch.zeros(
         num_supernodes,
         num_supernodes,
-        dtype=adjacency_matrix.dtype,
+        dtype=adj_matrix_norm.dtype,
         device=adjacency_matrix.device,
     )
     supernodes = [[i for i in range(n_neurons) if node_clusters[i] == n] for n in range(1, num_supernodes + 1)]
