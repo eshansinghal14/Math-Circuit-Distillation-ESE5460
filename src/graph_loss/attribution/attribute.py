@@ -1,4 +1,4 @@
-"""Build sparse-backed neuron-level attribution graphs for small prompts/models."""
+"""Build dense-backed neuron-level attribution graphs for small prompts/models."""
 
 import logging
 import math
@@ -31,9 +31,9 @@ def attribute(
     verbose: bool = False,
     update_interval: int = 4,
 ) -> Graph:
-    """Compute a sparse-backed neuron graph for a prompt.
+    """Compute a dense-backed neuron graph for a prompt.
 
-    The sparse adjacency uses the node layout:
+    The dense adjacency layout is:
     ``[neurons, token_embeddings, logits]``.
     Token rows remain zero because tokens are source-only roots.
     """
@@ -79,7 +79,7 @@ def _check_dense_graph_size(total_nodes: int, dtype: torch.dtype):
     gib = total_bytes / (1024**3)
     if gib > 4:
         logging.getLogger("attribution").warning(
-            "A dense adjacency would require about %.2f GiB; using sparse COO adjacency.",
+            "Dense adjacency is estimated to require about %.2f GiB; continuing anyway.",
             gib,
         )
 
@@ -240,21 +240,21 @@ def _run_attribution(
     progress_bar.close()
     logger.info(f"Attribution rows completed in {time.time() - phase_start:.2f}s")
 
+    adjacency_matrix = torch.zeros(
+        (total_nodes, total_nodes),
+        dtype=ctx.source_vectors.dtype,
+    )
     if edge_value_chunks:
         adjacency_indices = torch.stack(
             [torch.cat(edge_row_chunks), torch.cat(edge_col_chunks)],
             dim=0,
         )
         adjacency_values = torch.cat(edge_value_chunks)
-    else:
-        adjacency_indices = torch.zeros((2, 0), dtype=torch.long)
-        adjacency_values = torch.zeros((0,), dtype=ctx.source_vectors.dtype)
-    adjacency_matrix = torch.sparse_coo_tensor(
-        adjacency_indices,
-        adjacency_values,
-        size=(total_nodes, total_nodes),
-        dtype=ctx.source_vectors.dtype,
-    ).coalesce()
+        adjacency_matrix.index_put_(
+            (adjacency_indices[0], adjacency_indices[1]),
+            adjacency_values,
+            accumulate=True,
+        )
 
     graph = Graph(
         input_string=model.tokenizer.decode(input_ids.detach().cpu().tolist()),
