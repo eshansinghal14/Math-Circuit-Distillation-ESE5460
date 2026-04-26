@@ -10,7 +10,13 @@ import torch
 
 from graph_loss.align import align_supernodes
 from graph_loss.attribution.attribute import attribute
-from graph_loss.graph import build_super_graph, extract_supernode_members, prune_graph
+from graph_loss.graph import (
+    SuperGraph,
+    build_super_graph,
+    extract_supernode_members,
+    normalize_matrix,
+    prune_graph,
+)
 from graph_loss.hf_adapter import (
     HFLlamaGraphAdapter,
     extract_hf_supernode_members,
@@ -34,6 +40,33 @@ class GraphAuxConfig:
     graph_min_cum_logit_influence: float = 0.9
     graph_similarity_threshold: float = 0.7
     graph_max_fan_out: int = 4
+
+
+def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
+    """Aggregate a differentiable graph adjacency using fixed supernode membership."""
+    adjacency_matrix = graph.adjacency_dense()
+    adj_matrix_norm = normalize_matrix(adjacency_matrix)
+    num_supernodes = len(supernodes)
+    supernode_adj_matrix = torch.zeros(
+        num_supernodes,
+        num_supernodes,
+        dtype=adj_matrix_norm.dtype,
+        device=adj_matrix_norm.device,
+    )
+    for t in range(num_supernodes):
+        total_input = torch.abs(adj_matrix_norm[:, supernodes[t]]).sum(dim=0)
+        internal_input = torch.abs(adj_matrix_norm[supernodes[t]][:, supernodes[t]]).sum(dim=0)
+        frac_external = (total_input - internal_input) / total_input.clamp(min=1e-10)
+        for s in range(num_supernodes):
+            sum_A = adj_matrix_norm[supernodes[t]][:, supernodes[s]].sum(dim=1)
+            supernode_adj_matrix[t, s] = (
+                (frac_external * sum_A).sum(dim=0)
+                / frac_external.sum(dim=0).clamp(min=1e-10)
+            )
+    return SuperGraph(
+        supernode_adjacency_matrix=supernode_adj_matrix,
+        supernodes=supernodes,
+    )
 
 
 def compute_prompt_graph_loss(
@@ -110,10 +143,15 @@ def compute_prompt_graph_loss(
             f"min_cum_logit_influence={config.graph_min_cum_logit_influence:g})",
         )
     supergraph_start = time.perf_counter()
-    student_supergraph = build_super_graph(
+    with torch.no_grad():
+        student_supergraph_structure = build_super_graph(
+            student_graph,
+            epsilon=config.graph_epsilon,
+            min_cum_logit_influence=config.graph_min_cum_logit_influence,
+        )
+    student_supergraph = _aggregate_supergraph_adjacency(
         student_graph,
-        epsilon=config.graph_epsilon,
-        min_cum_logit_influence=config.graph_min_cum_logit_influence,
+        student_supergraph_structure.supernodes,
     )
     if config.verbose:
         print(
