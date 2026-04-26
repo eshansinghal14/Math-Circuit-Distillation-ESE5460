@@ -364,35 +364,54 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
         dim=-1, keepdim=True
     ).clamp(min=1e-12)
 
-    num_supernodes = 0
-    node_clusters = [0] * n_neurons
-    for n in range(n_neurons):
-        if node_clusters[n] != 0:
-            continue
+    def build_supernodes_svd(coverage_threshold, noise_threshold):
+        U, S, Vt = torch.linalg.svd(node_influence_normalized, full_matrices=False)
+    
+        total_variance = (S ** 2).sum()
+        cumulative = torch.cumsum(S ** 2, dim=0) / total_variance
+        k = (cumulative < coverage_threshold).sum().item() + 1
 
-        neighbors = range_query(node_influence_normalized, n, epsilon)
-        if node_influence_vectors[neighbors].sum(dim=0).norm(dim=-1) < min_cum_logit_influence:
-            node_clusters[n] = -1
-            continue
+        projections = U[:, :k] @ S[:k]
+        assignments = projections.abs().argmax(dim=1)
+
+        max_projection = projections.abs().max(dim=1).values
+        noise_mask = max_projection < noise_threshold
+        assignments[noise_mask] = -1
+
+        return assignments, k, S
+    
+    node_clusters, num_supernodes, S = build_supernodes_svd(min_cum_logit_influence, epsilon)
+
+
+    # num_supernodes = 0
+    # node_clusters = [0] * n_neurons
+    # for n in range(n_neurons):
+    #     if node_clusters[n] != 0:
+    #         continue
+
+    #     neighbors = range_query(node_influence_normalized, n, epsilon)
+    #     if node_influence_vectors[neighbors].sum(dim=0).norm(dim=-1) < min_cum_logit_influence:
+    #         node_clusters[n] = -1
+    #         continue
         
-        num_supernodes += 1
-        node_clusters[n] = num_supernodes
-        neighbors = [neighbor for neighbor in neighbors if neighbor != n]
-        idx = 0
+    #     num_supernodes += 1
+    #     node_clusters[n] = num_supernodes
+    #     neighbors = [neighbor for neighbor in neighbors if neighbor != n]
+    #     idx = 0
 
-        while idx < len(neighbors):
-            s = neighbors[idx]
-            idx += 1
-            if node_clusters[s] == -1:
-                node_clusters[s] = num_supernodes
-            if node_clusters[s] != 0:
-                continue
+    #     while idx < len(neighbors):
+    #         s = neighbors[idx]
+    #         idx += 1
+    #         if node_clusters[s] == -1:
+    #             node_clusters[s] = num_supernodes
+    #         if node_clusters[s] != 0:
+    #             continue
 
-            node_clusters[s] = num_supernodes
-            new_neighbors = range_query(node_influence_normalized, s, epsilon)
+    #         node_clusters[s] = num_supernodes
+    #         new_neighbors = range_query(node_influence_normalized, s, epsilon)
 
-            if node_influence_vectors[new_neighbors].sum(dim=0).norm(dim=-1) >= min_cum_logit_influence:
-                neighbors = list(set(neighbors) | set(new_neighbors))
+    #         if node_influence_vectors[new_neighbors].sum(dim=0).norm(dim=-1) >= min_cum_logit_influence:
+    #             neighbors = list(set(neighbors) | set(new_neighbors))
 
     adj_matrix_norm = normalize_matrix(adjacency_matrix)
     supernode_adj_matrix = torch.zeros(
