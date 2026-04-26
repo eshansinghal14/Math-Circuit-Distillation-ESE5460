@@ -347,6 +347,14 @@ class HFLlamaGraphAdapter:
             return row
 
         def source_scores_batch_with_fallback(target_values: torch.Tensor) -> torch.Tensor:
+            if target_values.is_cuda:
+                # `is_grads_batched=True` materializes per-target gradients for every
+                # captured source tensor. On LLaMA-scale CUDA graphs that can exceed
+                # memory by a large factor, unlike the hook-injection path in main.py.
+                return torch.stack(
+                    [source_scores_single(target) for target in target_values],
+                    dim=0,
+                )
             try:
                 return source_scores_batch(target_values)
             except RuntimeError as exc:

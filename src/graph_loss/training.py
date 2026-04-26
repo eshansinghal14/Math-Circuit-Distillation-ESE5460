@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from typing import Any
 
@@ -14,6 +15,19 @@ from graph_loss.hf_adapter import (
     extract_hf_supernode_members,
 )
 from graph_loss.loss import compute_L_graph
+
+
+@contextlib.contextmanager
+def _without_parameter_grads(model):
+    """Disable parameter gradients while keeping activation autograd available."""
+    changed = [param for param in model.parameters() if param.requires_grad]
+    try:
+        for param in changed:
+            param.requires_grad_(False)
+        yield
+    finally:
+        for param in changed:
+            param.requires_grad_(True)
 
 
 @dataclass
@@ -42,15 +56,18 @@ def compute_prompt_graph_loss(
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     if config.verbose:
         print(f"  [graph] building teacher graph for prompt: {prompt!r}")
-    teacher_graph = teacher_adapter.build_graph(
-        prompt,
-        top_k_logits=config.top_k_logits,
-        prop_neurons_per_layer=config.prop_neurons_per_layer,
-        batch_size=config.graph_batch_size,
-        dtype=config.graph_dtype,
-        verbose=config.verbose,
-        create_graph=False,
-    )
+    # The teacher graph needs first-order activation gradients for attribution,
+    # but never parameter gradients or higher-order graph construction.
+    with _without_parameter_grads(teacher_adapter.model):
+        teacher_graph = teacher_adapter.build_graph(
+            prompt,
+            top_k_logits=config.top_k_logits,
+            prop_neurons_per_layer=config.prop_neurons_per_layer,
+            batch_size=config.graph_batch_size,
+            dtype=config.graph_dtype,
+            verbose=config.verbose,
+            create_graph=False,
+        )
     if config.verbose:
         print(f"  [graph] building student graph for prompt: {prompt!r}")
     student_graph = student_adapter.build_graph(
