@@ -247,3 +247,44 @@ def compute_batch_graph_loss(
     metrics = {key: value / denom for key, value in metric_sums.items()}
     metrics["graph_prompts"] = float(len(losses))
     return loss, metrics
+
+
+def backward_batch_graph_loss(
+    *,
+    prompts: list[str],
+    teacher_graph_model: Any,
+    student_adapter: HFLlamaGraphAdapter,
+    config: GraphAuxConfig,
+    device: torch.device,
+    loss_scale: float,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Compute and backprop graph loss one prompt at a time.
+
+    This keeps peak graph-loss memory bounded by a single problem instead of
+    retaining every prompt's attribution graph until the batch backward call.
+    """
+    if not prompts:
+        return torch.tensor(0.0, device=device), {}
+
+    metric_sums: dict[str, float] = {}
+    detached_losses = []
+    denom = float(len(prompts))
+    for prompt in prompts:
+        prompt_loss, prompt_metrics = compute_prompt_graph_loss(
+            prompt=prompt,
+            teacher_graph_model=teacher_graph_model,
+            student_adapter=student_adapter,
+            config=config,
+        )
+        detached_losses.append(prompt_loss.detach())
+        ((loss_scale / denom) * prompt_loss).backward()
+        for key, value in prompt_metrics.items():
+            metric_sums[key] = metric_sums.get(key, 0.0) + float(value)
+        del prompt_loss
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+    loss = torch.stack(detached_losses).mean()
+    metrics = {key: value / denom for key, value in metric_sums.items()}
+    metrics["graph_prompts"] = float(len(prompts))
+    return loss, metrics

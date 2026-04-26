@@ -44,7 +44,11 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
 from graph_loss.replacement_model import TransformerLensReplacementModel
 from graph_loss.teacher_data_cache import TeacherDataCache
-from graph_loss.training import GraphAuxConfig, compute_batch_graph_loss
+from graph_loss.training import (
+    GraphAuxConfig,
+    backward_batch_graph_loss,
+    compute_batch_graph_loss,
+)
 
 try:
     from torch.utils.flop_counter import FlopCounterMode
@@ -1393,7 +1397,7 @@ class ClusterDistillationTrainer:
         scaled_total.backward()
 
     def _forward_and_loss(
-        self, batch: Dict, batch_step: int = 0,
+        self, batch: Dict, batch_step: int = 0, compute_graph_loss: bool = True,
     ) -> Tuple[
         torch.Tensor,
         Dict,
@@ -1475,7 +1479,7 @@ class ClusterDistillationTrainer:
                 )
                 graph_loss = None
                 graph_metrics: Dict[str, Any] = {}
-                if self._graph:
+                if self._graph and compute_graph_loss:
                     if self.student_graph_adapter is None or self.teacher_graph_model is None:
                         raise RuntimeError("Graph mode models were not initialized.")
                     graph_loss, graph_metrics = compute_batch_graph_loss(
@@ -1694,6 +1698,34 @@ class ClusterDistillationTrainer:
             p.grad = gk + float(ratio) * gc
         return kl_gn, cka_gn, float(ratio)
 
+    def _backward_deferred_graph_loss(
+        self,
+        batch: Dict[str, Any],
+        metrics: Dict[str, Any],
+        non_graph_loss: torch.Tensor,
+    ) -> torch.Tensor:
+        if not self._graph:
+            return non_graph_loss
+        if self.student_graph_adapter is None or self.teacher_graph_model is None:
+            raise RuntimeError("Graph mode models were not initialized.")
+
+        graph_loss, graph_metrics = backward_batch_graph_loss(
+            prompts=batch["prompts"],
+            teacher_graph_model=self.teacher_graph_model,
+            student_adapter=self.student_graph_adapter,
+            config=self.graph_loss_config,
+            device=self.device,
+            loss_scale=self.config.lambda_graph,
+        )
+        graph_weighted = self.config.lambda_graph * graph_loss
+        total = non_graph_loss.detach() + graph_weighted
+        metrics["graph_loss"] = graph_loss.item()
+        metrics["graph_loss_weighted"] = graph_weighted.item()
+        metrics["total_loss"] = total.item()
+        for key, value in graph_metrics.items():
+            metrics[f"graph_{key}"] = value
+        return total
+
     # ------------------------------------------------------------------
 
     def train_epoch(self, epoch: int) -> Dict[str, Any]:
@@ -1720,7 +1752,11 @@ class ClusterDistillationTrainer:
                 stepped = False
                 with fcm:
                     loss, metrics, kl_loss, cluster_loss, hard_ce, replay_ce = (
-                        self._forward_and_loss(batch, step)
+                        self._forward_and_loss(
+                            batch,
+                            step,
+                            compute_graph_loss=not self._graph,
+                        )
                     )
                     if loss is None:
                         pass
@@ -1729,7 +1765,15 @@ class ClusterDistillationTrainer:
                         kl_for_backward = self._kl_objective_for_backward(
                             kl_loss, hard_ce, replay_ce,
                         )
-                        if self._should_log_kl_cka_detail(step):
+                        if self._graph:
+                            kl_for_backward.backward()
+                            del loss, kl_loss, hard_ce, replay_ce
+                            loss = self._backward_deferred_graph_loss(
+                                batch,
+                                metrics,
+                                kl_for_backward,
+                            )
+                        elif self._should_log_kl_cka_detail(step):
                             kl_gn, cka_gn, kl_over_cka = self._assign_grad_from_kl_cka(
                                 kl_for_backward, cluster_loss,
                             )
@@ -1754,7 +1798,11 @@ class ClusterDistillationTrainer:
                     continue
             else:
                 loss, metrics, kl_loss, cluster_loss, hard_ce, replay_ce = (
-                    self._forward_and_loss(batch, step)
+                    self._forward_and_loss(
+                        batch,
+                        step,
+                        compute_graph_loss=not self._graph,
+                    )
                 )
                 if loss is None:
                     continue
@@ -1765,7 +1813,15 @@ class ClusterDistillationTrainer:
                 kl_for_backward = self._kl_objective_for_backward(
                     kl_loss, hard_ce, replay_ce,
                 )
-                if self._should_log_kl_cka_detail(step):
+                if self._graph:
+                    kl_for_backward.backward()
+                    del loss, kl_loss, hard_ce, replay_ce
+                    loss = self._backward_deferred_graph_loss(
+                        batch,
+                        metrics,
+                        kl_for_backward,
+                    )
+                elif self._should_log_kl_cka_detail(step):
                     kl_gn, cka_gn, kl_over_cka = self._assign_grad_from_kl_cka(
                         kl_for_backward, cluster_loss,
                     )
