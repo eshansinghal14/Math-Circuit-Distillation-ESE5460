@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -86,17 +87,40 @@ def compute_prompt_graph_loss(
         )
 
     if config.verbose:
-        print("  [graph] building teacher/student supergraphs")
+        print(
+            "  [graph] building teacher supergraph "
+            f"(epsilon={config.graph_epsilon:g}, "
+            f"min_cum_logit_influence={config.graph_min_cum_logit_influence:g})",
+        )
+    supergraph_start = time.perf_counter()
     teacher_supergraph = build_super_graph(
         teacher_graph,
         epsilon=config.graph_epsilon,
         min_cum_logit_influence=config.graph_min_cum_logit_influence,
     )
+    if config.verbose:
+        print(
+            "  [graph] teacher supergraph complete: "
+            f"{len(teacher_supergraph.supernodes)} supernodes in "
+            f"{time.perf_counter() - supergraph_start:.2f}s",
+        )
+        print(
+            "  [graph] building student supergraph "
+            f"(epsilon={config.graph_epsilon:g}, "
+            f"min_cum_logit_influence={config.graph_min_cum_logit_influence:g})",
+        )
+    supergraph_start = time.perf_counter()
     student_supergraph = build_super_graph(
         student_graph,
         epsilon=config.graph_epsilon,
         min_cum_logit_influence=config.graph_min_cum_logit_influence,
     )
+    if config.verbose:
+        print(
+            "  [graph] student supergraph complete: "
+            f"{len(student_supergraph.supernodes)} supernodes in "
+            f"{time.perf_counter() - supergraph_start:.2f}s",
+        )
 
     if config.verbose:
         print("  [graph] aligning supernodes and computing graph loss")

@@ -1833,6 +1833,14 @@ class ClusterDistillationTrainer:
                         f"  step {step:04d} | KL {metrics['kl_loss']:.4f}"
                         f"{orig_s}{replay_s}{hard_s}{acc_s}{extra_eval_s}{grad_s}{flop_s}",
                     )
+                elif self._graph:
+                    print(
+                        f"  step {step:04d} | "
+                        f"KL {metrics['kl_loss']:.4f} | "
+                        f"Graph {metrics.get('graph_loss', 0.0):.4f} | "
+                        f"λGraph {metrics.get('graph_loss_weighted', 0.0):.4f}"
+                        f"{orig_s}{replay_s}{hard_s}{acc_s}{extra_eval_s}{flop_s}",
+                    )
                 else:
                     stable_rank = metrics.get("cluster_stable_rank") or {}
                     print(
@@ -1904,6 +1912,8 @@ class ClusterDistillationTrainer:
                 "accuracy",
                 "cluster_loss",
                 "mean_cka",
+                "graph_loss",
+                "graph_loss_weighted",
                 "kc_lam1",
                 "cluster_stable_rank",
                 "kl_grad_norm",
@@ -2000,6 +2010,8 @@ class ClusterDistillationTrainer:
         print("=" * 60)
         if self._standard:
             print("Standard KL Distillation (neuron-distillation entry)")
+        elif self._graph:
+            print("Graph KL Distillation")
         else:
             print("Neuron-Cluster KL + CKA Distillation")
         print(f"  Run dir:          {cfg.save_dir}")
@@ -2037,13 +2049,19 @@ class ClusterDistillationTrainer:
                 f"  eval print samples: {cfg.eval_print_samples} "
                 f"(prompt + top-5 softmax at T={cfg.temperature:g} for student & teacher)",
             )
-        if not self._standard:
+        if self._graph:
+            print(f"  lambda_graph:     {cfg.lambda_graph}")
+            print(f"  graph top_k_logits: {cfg.graph_top_k_logits}")
+            print(f"  graph prop neurons/layer: {cfg.graph_prop_neurons_per_layer}")
+            print(f"  teacher graph batch: {cfg.teacher_graph_batch_size}")
+            print(f"  student graph batch: {cfg.student_graph_batch_size}")
+        elif self._circuit:
             print(f"  lambda_cluster:   {cfg.lambda_cluster}")
             print(f"  Cluster pairs:    {len(self.cluster_pairs)}")
         print(
             f"  Step log / test eval every: {cfg.step_log_interval} training batches",
         )
-        if cfg.log_kl_cka_grad_norms:
+        if cfg.log_kl_cka_grad_norms and self._circuit:
             print(
                 "  KL/CKA grad norms: recompute every "
                 f"{int(cfg.log_kl_cka_grad_norms)} batches (split grads; ~2× work those steps); "
@@ -2054,7 +2072,7 @@ class ClusterDistillationTrainer:
                     "  K_c spectrum:     λ_max(H X X^T H) per cluster (student), "
                     "(B, T_valid×|C|) layout; same interval as grad-norm recomputes",
                 )
-        if cfg.track_stable_rank and not self._standard:
+        if cfg.track_stable_rank and self._circuit:
             print(
                 "  Stable rank:      per pair (student Gram), printed every "
                 f"{max(1, cfg.step_log_interval)} batches (same as step logs)",
@@ -2284,6 +2302,7 @@ class ClusterDistillationTrainer:
         loss_steps = history.get("train_step") or epochs
         kl_series = history.get("step_kl_loss") or history.get("kl_loss", [])
         cluster_series = history.get("step_cluster_loss") or history.get("cluster_loss", [])
+        graph_series = history.get("step_graph_loss") or history.get("graph_loss", [])
 
         if self._standard:
             fig, axes = plt.subplots(1, 2, figsize=(12, 4))
@@ -2294,6 +2313,21 @@ class ClusterDistillationTrainer:
             axes[0].grid(True, alpha=0.3)
             self._plot_accuracy_axes(axes[1], history, epochs)
             fig.suptitle("Standard KL Distillation", fontsize=13)
+        elif self._graph:
+            fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+            axes[0].plot(loss_steps, kl_series, marker="o", markersize=2, linewidth=1.0)
+            axes[0].set_title("KL Loss")
+            axes[0].set_xlabel("Train Step")
+            axes[0].set_ylabel("KL Loss")
+            axes[0].grid(True, alpha=0.3)
+            axes[1].plot(loss_steps, graph_series, marker="o", markersize=2,
+                         linewidth=1.0, color="tab:green")
+            axes[1].set_title("Graph Loss")
+            axes[1].set_xlabel("Train Step")
+            axes[1].set_ylabel("Graph Loss")
+            axes[1].grid(True, alpha=0.3)
+            self._plot_accuracy_axes(axes[2], history, epochs)
+            fig.suptitle("KL + Graph Distillation", fontsize=13)
         else:
             fig, axes = plt.subplots(1, 3, figsize=(15, 4))
             axes[0].plot(loss_steps, kl_series, marker="o", markersize=2, linewidth=1.0)
