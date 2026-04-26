@@ -364,23 +364,48 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
         dim=-1, keepdim=True
     ).clamp(min=1e-12)
 
-    def build_supernodes_svd(coverage_threshold, noise_threshold):
-        U, S, Vt = torch.linalg.svd(node_influence_normalized, full_matrices=False)
-    
-        total_variance = (S ** 2).sum()
-        cumulative = torch.cumsum(S ** 2, dim=0) / total_variance
+    def build_supernodes_svd(B_weighted, coverage_threshold, min_cluster_influence):
+        """
+        Cluster on directions, validate on magnitudes.
+        """
+        # magnitudes — used for noise filtering and validity
+        magnitudes = B_weighted.norm(dim=1)           # [n_neurons]
+        
+        # directions — used for clustering
+        directions = B_weighted / magnitudes.unsqueeze(1).clamp(min=1e-12)
+        
+        # filter noise before clustering
+        if min_cluster_influence is None:
+            min_cluster_influence = magnitudes.median() * 0.1
+        valid_mask = magnitudes >= min_cluster_influence
+        
+        valid_directions = directions[valid_mask]      # [n_valid × n_logits]
+        valid_magnitudes = magnitudes[valid_mask]      # [n_valid]
+        
+        # determine k: how many directions explain coverage_threshold 
+        # of total influence mass?
+        # use magnitude-weighted PCA instead of unweighted SVD
+        weighted_B = valid_directions * valid_magnitudes.unsqueeze(1)
+        U, S, Vt = torch.linalg.svd(weighted_B, full_matrices=False)
+        
+        total = (S ** 2).sum()
+        cumulative = torch.cumsum(S ** 2, dim=0) / total
         k = (cumulative < coverage_threshold).sum().item() + 1
-
-        projections = U[:, :k] * S[:k]
-        assignments = projections.abs().argmax(dim=1) + 1
-
-        max_projection = projections.abs().max(dim=1).values
-        noise_mask = max_projection < noise_threshold
-        assignments[noise_mask] = -1
-
-        return assignments, k, S
+        
+        # project directions (not raw B) into SVD subspace for clustering
+        # this gives balanced coordinates — no singular value dominance
+        direction_projections = valid_directions @ Vt[:k].T   # [n_valid × k]
+        
+        # k-means on unit-normalized direction projections
+        assignments_valid = kmeans(direction_projections, k)
+        
+        # map back
+        assignments = torch.full((n_neurons,), -1, dtype=torch.long)
+        assignments[valid_mask] = assignments_valid
+        
+        return assignments, k
     
-    node_clusters, num_supernodes, S = build_supernodes_svd(min_cum_logit_influence, epsilon)
+    node_clusters, num_supernodes = build_supernodes_svd(node_influence_vectors, min_cum_logit_influence, epsilon)
 
 
     # num_supernodes = 0
