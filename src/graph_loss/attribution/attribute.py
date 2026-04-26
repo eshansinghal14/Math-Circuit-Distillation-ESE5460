@@ -144,15 +144,13 @@ def _run_attribution(
 
     logger.info(f"Precomputation completed in {time.time() - phase_start:.2f}s")
     logger.info(f"Enumerated {len(ctx.neuron_locations)} neuron nodes")
-    for stats in ctx.layer_capture_stats:
+    if ctx.layer_capture_stats:
+        avg_captured_fraction = sum(
+            float(stats["captured_fraction"]) for stats in ctx.layer_capture_stats
+        ) / len(ctx.layer_capture_stats)
         logger.info(
-            "Layer %d selection captured %.2f%% of residual write norm (%d/%d neurons, %.4f/%.4f)",
-            stats["layer"],
-            100.0 * stats["captured_fraction"],
-            stats["selected_neurons"],
-            stats["total_neurons"],
-            stats["selected_residual_write_norm"],
-            stats["total_residual_write_norm"],
+            "Average layer selection captured %.2f%% of residual write norm across the model",
+            100.0 * avg_captured_fraction,
         )
 
     logger.info("Phase 1: Running hooked forward pass")
