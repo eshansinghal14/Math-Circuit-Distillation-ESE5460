@@ -23,7 +23,8 @@ class GraphAuxConfig:
     graph_dtype: torch.dtype | None = None
     top_k_logits: int | None = 20
     prop_neurons_per_layer: float = 0.1
-    graph_batch_size: int = 512
+    teacher_graph_batch_size: int = 512
+    student_graph_batch_size: int = 1
     verbose: bool = False
     graph_prune: bool = False
     graph_node_threshold: float = 0.8
@@ -48,7 +49,7 @@ def compute_prompt_graph_loss(
         model=teacher_graph_model,
         top_k_logits=config.top_k_logits,
         prop_neurons_per_layer=config.prop_neurons_per_layer,
-        batch_size=config.graph_batch_size,
+        batch_size=config.teacher_graph_batch_size,
         verbose=config.verbose,
     )
     if config.verbose:
@@ -57,7 +58,7 @@ def compute_prompt_graph_loss(
         prompt,
         top_k_logits=config.top_k_logits,
         prop_neurons_per_layer=config.prop_neurons_per_layer,
-        batch_size=config.graph_batch_size,
+        batch_size=config.student_graph_batch_size,
         dtype=config.graph_dtype,
         verbose=config.verbose,
         create_graph=True,

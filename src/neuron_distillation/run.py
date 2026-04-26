@@ -415,8 +415,23 @@ def main():
     parser.add_argument(
         "--graph-batch-size",
         type=int,
+        default=None,
+        help=(
+            "Graph mode legacy shortcut: set both teacher and student graph row batch sizes. "
+            "Prefer --teacher-graph-batch-size and --student-graph-batch-size."
+        ),
+    )
+    parser.add_argument(
+        "--teacher-graph-batch-size",
+        type=int,
         default=512,
-        help="Graph mode: number of graph target rows processed per loop chunk.",
+        help="Graph mode: teacher attribution row batch size, using the standalone graph pipeline.",
+    )
+    parser.add_argument(
+        "--student-graph-batch-size",
+        type=int,
+        default=1,
+        help="Graph mode: student attribution row chunk size. Keep small because it tracks graph-loss gradients.",
     )
     parser.add_argument(
         "--verbose",
@@ -635,8 +650,15 @@ def main():
         raise SystemExit("--graph-top-k-logits must be positive")
     if not (0.0 < args.graph_prop_neurons_per_layer <= 1.0):
         raise SystemExit("--graph-prop-neurons-per-layer must be in (0, 1]")
-    if args.graph_batch_size < 1:
-        raise SystemExit("--graph-batch-size must be >= 1")
+    if args.graph_batch_size is not None:
+        if args.graph_batch_size < 1:
+            raise SystemExit("--graph-batch-size must be >= 1")
+        args.teacher_graph_batch_size = args.graph_batch_size
+        args.student_graph_batch_size = args.graph_batch_size
+    if args.teacher_graph_batch_size < 1:
+        raise SystemExit("--teacher-graph-batch-size must be >= 1")
+    if args.student_graph_batch_size < 1:
+        raise SystemExit("--student-graph-batch-size must be >= 1")
     if not (0.0 <= args.graph_node_threshold <= 1.0):
         raise SystemExit("--graph-node-threshold must be in [0, 1]")
     if not (0.0 <= args.graph_edge_threshold <= 1.0):
@@ -867,7 +889,8 @@ def main():
         print(f"  graph dtype:        {args.dtype}")
         print(f"  top_k_logits:       {args.graph_top_k_logits}")
         print(f"  prop_neurons/layer: {args.graph_prop_neurons_per_layer}")
-        print(f"  graph_batch_size:   {args.graph_batch_size}")
+        print(f"  teacher_graph_bs:   {args.teacher_graph_batch_size}")
+        print(f"  student_graph_bs:   {args.student_graph_batch_size}")
         print(f"  verbose:            {args.verbose}")
         print(f"  prune:              {args.graph_prune}")
         print(f"  epsilon:            {args.graph_epsilon}")
@@ -936,7 +959,8 @@ def main():
         graph_dtype=graph_dtype,
         graph_top_k_logits=args.graph_top_k_logits,
         graph_prop_neurons_per_layer=args.graph_prop_neurons_per_layer,
-        graph_batch_size=args.graph_batch_size,
+        teacher_graph_batch_size=args.teacher_graph_batch_size,
+        student_graph_batch_size=args.student_graph_batch_size,
         graph_verbose=args.verbose,
         graph_prune=args.graph_prune,
         graph_node_threshold=args.graph_node_threshold,
