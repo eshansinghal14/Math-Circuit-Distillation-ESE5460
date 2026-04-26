@@ -45,10 +45,14 @@ class Graph:
         self.logit_probabilities = logit_probabilities
         self.vocab_size = vocab_size if vocab_size is not None else cfg.d_vocab
 
+        if not adjacency_matrix.is_sparse:
+            raise ValueError(
+                "Graph adjacency must be a sparse COO tensor. Dense adjacency matrices "
+                "are not supported because they can exceed available memory."
+            )
+
         self.input_string = input_string
-        self.adjacency_matrix = (
-            adjacency_matrix.coalesce() if adjacency_matrix.is_sparse else adjacency_matrix
-        )
+        self.adjacency_matrix = adjacency_matrix.coalesce()
         self.cfg = convert_nnsight_config_to_transformerlens(cfg)
         self.n_pos = len(input_tokens)
         self.neuron_locations = neuron_locations
@@ -88,7 +92,9 @@ class Graph:
         self.logit_probabilities = self.logit_probabilities.to(device)
 
     def adjacency_dense(self) -> torch.Tensor:
-        return self.adjacency_matrix.to_dense() if self.adjacency_matrix.is_sparse else self.adjacency_matrix
+        raise RuntimeError(
+            "Dense adjacency materialization is disabled. Use sparse graph utilities instead."
+        )
 
     def adjacency_nnz(self) -> int:
         if self.adjacency_matrix.is_sparse:
@@ -152,6 +158,7 @@ class Graph:
         )
 
     def to_pt(self, path: str):
+        adjacency = self.adjacency_matrix.coalesce()
         data = {
             "input_string": self.input_string,
             "cfg": self.cfg,
@@ -161,37 +168,26 @@ class Graph:
             "vocab_size": self.vocab_size,
             "input_tokens": self.input_tokens,
             "neuron_activations": self.neuron_activations,
+            "adjacency_layout": "sparse_coo",
+            "adjacency_indices": adjacency.indices(),
+            "adjacency_values": adjacency.values(),
+            "adjacency_size": tuple(adjacency.shape),
         }
-        if self.adjacency_matrix.is_sparse:
-            adjacency = self.adjacency_matrix.coalesce()
-            data.update(
-                {
-                    "adjacency_layout": "sparse_coo",
-                    "adjacency_indices": adjacency.indices(),
-                    "adjacency_values": adjacency.values(),
-                    "adjacency_size": tuple(adjacency.shape),
-                }
-            )
-        else:
-            data.update(
-                {
-                    "adjacency_layout": "dense",
-                    "adjacency_matrix": self.adjacency_matrix,
-                }
-            )
         torch.save(data, path)
 
     @staticmethod
     def from_pt(path: str, map_location="cpu") -> "Graph":
         data = torch.load(path, weights_only=False, map_location=map_location)
-        if data.get("adjacency_layout") == "sparse_coo":
-            adjacency_matrix = torch.sparse_coo_tensor(
-                data["adjacency_indices"],
-                data["adjacency_values"],
-                size=tuple(data["adjacency_size"]),
-            ).coalesce()
-        else:
-            adjacency_matrix = data["adjacency_matrix"]
+        if data.get("adjacency_layout") != "sparse_coo":
+            raise ValueError(
+                "Only sparse COO graph files are supported. Legacy dense graph files "
+                "must be regenerated with the sparse graph pipeline."
+            )
+        adjacency_matrix = torch.sparse_coo_tensor(
+            data["adjacency_indices"],
+            data["adjacency_values"],
+            size=tuple(data["adjacency_size"]),
+        ).coalesce()
         return Graph(
             input_string=data["input_string"],
             input_tokens=data["input_tokens"],
@@ -206,21 +202,26 @@ class Graph:
 
     def apply_prune_result(self, prune_result: "PruneResult") -> "Graph":
         """Returns a new Graph with edges and nodes zeroed out according to the PruneResult masks."""
-        adjacency_dense = self.adjacency_dense().clone()
-        
-        effective_edge_mask = (
-            prune_result.edge_mask 
-            & prune_result.node_mask[:, None] 
-            & prune_result.node_mask[None, :]
+        adjacency = self.adjacency_matrix.coalesce()
+        edge_mask = prune_result.edge_mask.coalesce()
+        indices = adjacency.indices()
+        values = adjacency.values()
+
+        node_mask = prune_result.node_mask.to(device=indices.device)
+        keep = node_mask[indices[0]] & node_mask[indices[1]]
+        keep &= _sparse_edge_membership(
+            indices,
+            edge_mask.indices().to(device=indices.device),
+            self.n_nodes,
         )
-        
-        adjacency_dense[~effective_edge_mask] = 0.0
-        
-        new_adjacency = (
-            adjacency_dense.to_sparse() 
-            if self.adjacency_matrix.is_sparse 
-            else adjacency_dense
-        )
+
+        new_adjacency = torch.sparse_coo_tensor(
+            indices[:, keep],
+            values[keep],
+            size=adjacency.shape,
+            dtype=values.dtype,
+            device=values.device,
+        ).coalesce()
 
         return Graph(
             input_string=self.input_string,
@@ -235,13 +236,43 @@ class Graph:
         )
 
 
+def _require_sparse_coo(matrix: torch.Tensor, *, name: str = "matrix") -> torch.Tensor:
+    if not matrix.is_sparse:
+        raise ValueError(f"{name} must be a sparse COO tensor")
+    return matrix.coalesce()
+
+
 def normalize_matrix(matrix: torch.Tensor) -> torch.Tensor:
-    normalized = matrix.abs()
-    return normalized / normalized.sum(dim=1, keepdim=True).clamp(min=1e-10)
+    matrix = _require_sparse_coo(matrix)
+    indices = matrix.indices()
+    values = matrix.values().abs()
+    row_sums = torch.zeros(
+        matrix.shape[0],
+        dtype=values.dtype,
+        device=values.device,
+    )
+    row_sums.scatter_add_(0, indices[0], values)
+    normalized_values = values / row_sums[indices[0]].clamp(min=1e-10)
+    return torch.sparse_coo_tensor(
+        indices,
+        normalized_values,
+        size=matrix.shape,
+        dtype=normalized_values.dtype,
+        device=normalized_values.device,
+    ).coalesce()
+
+
+def _dense_right_multiply_sparse(dense: torch.Tensor, sparse: torch.Tensor) -> torch.Tensor:
+    sparse = _require_sparse_coo(sparse)
+    dense_was_1d = dense.ndim == 1
+    dense_2d = dense.unsqueeze(0) if dense_was_1d else dense
+    result = torch.sparse.mm(sparse.transpose(0, 1), dense_2d.T).T
+    return result.squeeze(0) if dense_was_1d else result
 
 
 def compute_influence(A: torch.Tensor, logit_weights: torch.Tensor, max_iter: int = 1000):
-    current_influence = logit_weights @ A
+    A = _require_sparse_coo(A, name="A")
+    current_influence = _dense_right_multiply_sparse(logit_weights, A)
     influence = current_influence
     iterations = 0
     while current_influence.any():
@@ -249,7 +280,7 @@ def compute_influence(A: torch.Tensor, logit_weights: torch.Tensor, max_iter: in
             raise RuntimeError(
                 f"Influence computation failed to converge after {iterations} iterations"
             )
-        current_influence = current_influence @ A
+        current_influence = _dense_right_multiply_sparse(current_influence, A)
         influence += current_influence
         iterations += 1
     return influence
@@ -263,16 +294,119 @@ def compute_edge_influence(pruned_matrix: torch.Tensor, logit_weights: torch.Ten
     normalized_pruned = normalize_matrix(pruned_matrix)
     pruned_influence = compute_influence(normalized_pruned, logit_weights)
     pruned_influence += logit_weights
-    edge_scores = normalized_pruned * pruned_influence[:, None]
-    return edge_scores
+    normalized_pruned = normalized_pruned.coalesce()
+    indices = normalized_pruned.indices()
+    values = normalized_pruned.values() * pruned_influence[indices[0]]
+    return torch.sparse_coo_tensor(
+        indices,
+        values,
+        size=normalized_pruned.shape,
+        dtype=values.dtype,
+        device=values.device,
+    ).coalesce()
 
 
 def find_threshold(scores: torch.Tensor, threshold: float):
+    if scores.numel() == 0:
+        return torch.tensor(0.0, dtype=scores.dtype, device=scores.device)
     sorted_scores = torch.sort(scores, descending=True).values
-    cumulative_score = torch.cumsum(sorted_scores, dim=0) / torch.sum(sorted_scores)
+    score_sum = torch.sum(sorted_scores)
+    if score_sum <= 0:
+        return torch.tensor(0.0, dtype=scores.dtype, device=scores.device)
+    cumulative_score = torch.cumsum(sorted_scores, dim=0) / score_sum
     threshold_index = int(torch.searchsorted(cumulative_score, threshold).item())
     threshold_index = min(threshold_index, len(cumulative_score) - 1)
     return sorted_scores[threshold_index]
+
+
+def _sparse_edge_keys(indices: torch.Tensor, n_nodes: int) -> torch.Tensor:
+    return indices[0] * n_nodes + indices[1]
+
+
+def _sparse_edge_membership(
+    query_indices: torch.Tensor,
+    mask_indices: torch.Tensor,
+    n_nodes: int,
+) -> torch.Tensor:
+    if query_indices.shape[1] == 0 or mask_indices.shape[1] == 0:
+        return torch.zeros(query_indices.shape[1], dtype=torch.bool, device=query_indices.device)
+    query_keys = _sparse_edge_keys(query_indices, n_nodes)
+    mask_keys = _sparse_edge_keys(mask_indices, n_nodes).to(device=query_keys.device)
+    return torch.isin(query_keys, mask_keys)
+
+
+def _filter_sparse_by_node_mask(matrix: torch.Tensor, node_mask: torch.Tensor) -> torch.Tensor:
+    matrix = _require_sparse_coo(matrix)
+    indices = matrix.indices()
+    values = matrix.values()
+    node_mask = node_mask.to(device=indices.device)
+    keep = node_mask[indices[0]] & node_mask[indices[1]]
+    return torch.sparse_coo_tensor(
+        indices[:, keep],
+        values[keep],
+        size=matrix.shape,
+        dtype=values.dtype,
+        device=values.device,
+    ).coalesce()
+
+
+def _sparse_bool_from_indices(
+    indices: torch.Tensor,
+    size: tuple[int, int] | torch.Size,
+    *,
+    device: torch.device,
+) -> torch.Tensor:
+    values = torch.ones(indices.shape[1], dtype=torch.bool, device=device)
+    return torch.sparse_coo_tensor(indices, values, size=size, device=device).coalesce()
+
+
+def _edge_mask_from_scores(edge_scores: torch.Tensor, threshold: float) -> torch.Tensor:
+    edge_scores = _require_sparse_coo(edge_scores, name="edge_scores")
+    score_values = edge_scores.values()
+    if score_values.numel() == 0:
+        return _sparse_bool_from_indices(
+            torch.zeros((2, 0), dtype=torch.long, device=score_values.device),
+            edge_scores.shape,
+            device=score_values.device,
+        )
+    score_threshold = find_threshold(score_values, threshold)
+    keep = (score_values >= score_threshold) & (score_values != 0)
+    return _sparse_bool_from_indices(
+        edge_scores.indices()[:, keep],
+        edge_scores.shape,
+        device=score_values.device,
+    )
+
+
+def _filter_sparse_edge_mask_by_nodes(edge_mask: torch.Tensor, node_mask: torch.Tensor) -> torch.Tensor:
+    edge_mask = _require_sparse_coo(edge_mask, name="edge_mask")
+    indices = edge_mask.indices()
+    node_mask = node_mask.to(device=indices.device)
+    keep = node_mask[indices[0]] & node_mask[indices[1]]
+    return _sparse_bool_from_indices(indices[:, keep], edge_mask.shape, device=indices.device)
+
+
+def _neuron_connectivity_from_sparse_edges(
+    edge_mask: torch.Tensor,
+    node_mask: torch.Tensor,
+    n_neurons: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    edge_mask = _filter_sparse_edge_mask_by_nodes(edge_mask, node_mask)
+    indices = edge_mask.indices()
+    row_has_edge = torch.zeros(n_neurons, dtype=torch.bool, device=node_mask.device)
+    col_has_edge = torch.zeros(n_neurons, dtype=torch.bool, device=node_mask.device)
+    if indices.shape[1] == 0:
+        return row_has_edge, col_has_edge
+
+    rows = indices[0].to(device=node_mask.device)
+    cols = indices[1].to(device=node_mask.device)
+    row_neuron_edges = rows < n_neurons
+    col_neuron_edges = cols < n_neurons
+    if row_neuron_edges.any():
+        row_has_edge[rows[row_neuron_edges]] = True
+    if col_neuron_edges.any():
+        col_has_edge[cols[col_neuron_edges]] = True
+    return row_has_edge, col_has_edge
 
 
 class PruneResult(NamedTuple):
@@ -294,44 +428,116 @@ def prune_graph(graph: Graph, node_threshold: float = 0.8, edge_threshold: float
     n_neurons = graph.n_neurons
     token_start = n_neurons
 
-    adjacency_matrix = graph.adjacency_dense()
-    logit_weights = torch.zeros(adjacency_matrix.shape[0], device=adjacency_matrix.device)
+    adjacency_matrix = graph.adjacency_matrix.coalesce()
+    logit_weights = torch.zeros(
+        adjacency_matrix.shape[0],
+        dtype=adjacency_matrix.dtype,
+        device=adjacency_matrix.device,
+    )
     logit_weights[-n_logits:] = graph.logit_probabilities.to(adjacency_matrix.device)
 
     node_influence = compute_node_influence(adjacency_matrix, logit_weights)
     node_mask = node_influence >= find_threshold(node_influence, node_threshold)
     node_mask[token_start:] = True
 
-    pruned_matrix = adjacency_matrix.clone()
-    pruned_matrix[~node_mask] = 0
-    pruned_matrix[:, ~node_mask] = 0
+    pruned_matrix = _filter_sparse_by_node_mask(adjacency_matrix, node_mask)
 
     edge_scores = compute_edge_influence(pruned_matrix, logit_weights)
-    edge_mask = edge_scores >= find_threshold(edge_scores.flatten(), edge_threshold)
+    edge_mask = _edge_mask_from_scores(edge_scores, edge_threshold)
 
     old_node_mask = node_mask.clone()
-    node_mask[:n_neurons] &= edge_mask[:, :n_neurons].any(0)
-    node_mask[:n_neurons] &= edge_mask[:n_neurons].any(1)
+    row_has_edge, col_has_edge = _neuron_connectivity_from_sparse_edges(
+        edge_mask,
+        node_mask,
+        n_neurons,
+    )
+    node_mask[:n_neurons] &= col_has_edge
+    node_mask[:n_neurons] &= row_has_edge
 
     while not torch.all(node_mask == old_node_mask):
         old_node_mask[:] = node_mask
-        edge_mask[~node_mask] = False
-        edge_mask[:, ~node_mask] = False
-
-        node_mask[:n_neurons] &= edge_mask[:, :n_neurons].any(0)
-        node_mask[:n_neurons] &= edge_mask[:n_neurons].any(1)
+        row_has_edge, col_has_edge = _neuron_connectivity_from_sparse_edges(
+            edge_mask,
+            node_mask,
+            n_neurons,
+        )
+        node_mask[:n_neurons] &= col_has_edge
+        node_mask[:n_neurons] &= row_has_edge
 
     sorted_scores, sorted_indices = torch.sort(node_influence, descending=True)
     cumulative_scores = torch.cumsum(sorted_scores, dim=0) / torch.sum(sorted_scores)
     final_scores = torch.zeros_like(node_influence)
     final_scores[sorted_indices] = cumulative_scores
 
+    edge_mask = _filter_sparse_edge_mask_by_nodes(edge_mask, node_mask)
     return PruneResult(node_mask, edge_mask, final_scores)
 
 
 class SuperGraph(NamedTuple):
     supernode_adjacency_matrix: torch.Tensor
     supernodes: list[list[int]]       # old node ids inside each new node
+
+
+def _supernode_adjacency_from_sparse(
+    adjacency_matrix: torch.Tensor,
+    supernodes: list[list[int]],
+    *,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> torch.Tensor:
+    adjacency_matrix = _require_sparse_coo(adjacency_matrix, name="adjacency_matrix")
+    indices = adjacency_matrix.indices()
+    values = adjacency_matrix.values()
+    rows = indices[0]
+    cols = indices[1]
+    num_supernodes = len(supernodes)
+    supernode_adj_matrix = torch.zeros(
+        num_supernodes,
+        num_supernodes,
+        dtype=dtype,
+        device=device,
+    )
+
+    for t, target_members in enumerate(supernodes):
+        if not target_members:
+            continue
+        target_nodes = torch.tensor(target_members, dtype=torch.long, device=device)
+        target_col_mask = torch.isin(cols, target_nodes)
+        target_row_mask = torch.isin(rows, target_nodes)
+
+        total_input = torch.zeros(len(target_members), dtype=dtype, device=device)
+        if target_col_mask.any():
+            col_positions = torch.searchsorted(target_nodes, cols[target_col_mask])
+            total_input.scatter_add_(0, col_positions, values[target_col_mask].abs())
+
+        internal_input = torch.zeros(len(target_members), dtype=dtype, device=device)
+        internal_mask = target_col_mask & target_row_mask
+        if internal_mask.any():
+            internal_col_positions = torch.searchsorted(target_nodes, cols[internal_mask])
+            internal_input.scatter_add_(
+                0,
+                internal_col_positions,
+                values[internal_mask].abs(),
+            )
+
+        frac_external = (total_input - internal_input) / total_input.clamp(min=1e-10)
+        frac_external_sum = frac_external.sum(dim=0).clamp(min=1e-10)
+
+        for s, source_members in enumerate(supernodes):
+            if not source_members:
+                continue
+            source_nodes = torch.tensor(source_members, dtype=torch.long, device=device)
+            source_col_mask = torch.isin(cols, source_nodes)
+            block_mask = target_row_mask & source_col_mask
+            if not block_mask.any():
+                continue
+
+            sum_A = torch.zeros(len(target_members), dtype=dtype, device=device)
+            row_positions = torch.searchsorted(target_nodes, rows[block_mask])
+            sum_A.scatter_add_(0, row_positions, values[block_mask])
+            supernode_adj_matrix[t, s] = (frac_external * sum_A).sum(dim=0) / frac_external_sum
+
+    return supernode_adj_matrix
 
 
 def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influence: float = 0.9) -> SuperGraph:
@@ -348,8 +554,13 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
     token_start = n_neurons
     logit_start = token_start + n_tokens
 
-    adjacency_matrix = graph.adjacency_dense()
-    logit_basis = torch.zeros(n_logits, adjacency_matrix.shape[0], device=adjacency_matrix.device)
+    adjacency_matrix = graph.adjacency_matrix.coalesce()
+    logit_basis = torch.zeros(
+        n_logits,
+        adjacency_matrix.shape[0],
+        dtype=adjacency_matrix.dtype,
+        device=adjacency_matrix.device,
+    )
     logit_basis[
         torch.arange(n_logits, device=adjacency_matrix.device), 
         logit_start + torch.arange(n_logits, device=adjacency_matrix.device)
@@ -442,21 +653,13 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
     #             neighbors = list(set(neighbors) | set(new_neighbors))
 
     adj_matrix_norm = normalize_matrix(adjacency_matrix)
-    supernode_adj_matrix = torch.zeros(
-        num_supernodes,
-        num_supernodes,
+    supernodes = [[i for i in range(n_neurons) if node_clusters[i] == n] for n in range(1, num_supernodes + 1)]
+    supernode_adj_matrix = _supernode_adjacency_from_sparse(
+        adj_matrix_norm,
+        supernodes,
         dtype=adjacency_matrix.dtype,
         device=adjacency_matrix.device,
     )
-    supernodes = [[i for i in range(n_neurons) if node_clusters[i] == n] for n in range(1, num_supernodes + 1)]
-    for t in range(num_supernodes):
-        total_input = torch.abs(adj_matrix_norm[:, supernodes[t]]).sum(dim=0)
-        internal_input = torch.abs(adj_matrix_norm[supernodes[t]][:, supernodes[t]]).sum(dim=0)
-        frac_external = (total_input - internal_input) / total_input.clamp(min=1e-10)
-        
-        for s in range(num_supernodes):
-            sum_A = adj_matrix_norm[supernodes[t]][:, supernodes[s]].sum(dim=1)
-            supernode_adj_matrix[t, s] = (frac_external * sum_A).sum(dim=0) / frac_external.sum(dim=0).clamp(min=1e-10)
 
     return SuperGraph(supernode_adjacency_matrix=supernode_adj_matrix, supernodes=supernodes)
 

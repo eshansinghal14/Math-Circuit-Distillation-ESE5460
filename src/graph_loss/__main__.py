@@ -16,6 +16,26 @@ def _count_nonzero_edges(matrix: torch.Tensor) -> int:
     return int(matrix.count_nonzero().item())
 
 
+def _count_sparse_edges_in_block(
+    matrix: torch.Tensor,
+    row_start: int,
+    row_end: int,
+    col_start: int,
+    col_end: int,
+) -> int:
+    if not matrix.is_sparse:
+        return int(matrix[row_start:row_end, col_start:col_end].count_nonzero().item())
+    matrix = matrix.coalesce()
+    indices = matrix.indices()
+    mask = (
+        (indices[0] >= row_start)
+        & (indices[0] < row_end)
+        & (indices[1] >= col_start)
+        & (indices[1] < col_end)
+    )
+    return int(mask.sum().item())
+
+
 def _density(nonzero_edges: int, n_rows: int, n_cols: int) -> float:
     if n_rows == 0 or n_cols == 0:
         return 0.0
@@ -82,18 +102,19 @@ def _log_prune_summary(
     logger: logging.Logger,
 ) -> None:
     node_mask = prune_result.node_mask
-    edge_mask = prune_result.edge_mask
-    adjacency_matrix = graph.adjacency_dense()
-    adjacency_nonzero = adjacency_matrix != 0
-    effective_edge_mask = edge_mask & adjacency_nonzero & node_mask[:, None] & node_mask[None, :]
+    edge_mask = prune_result.edge_mask.coalesce()
 
     kept_neurons = int(node_mask[: graph.n_neurons].sum().item())
     kept_tokens = int(node_mask[graph.n_neurons : graph.n_neurons + graph.n_tokens].sum().item())
     kept_logits = int(node_mask[-graph.n_logits :].sum().item()) if graph.n_logits else 0
     kept_total = int(node_mask.sum().item())
-    kept_edges = int(effective_edge_mask.sum().item())
-    kept_neuron_edges = int(
-        effective_edge_mask[: graph.n_neurons, : graph.n_neurons].sum().item()
+    kept_edges = _count_nonzero_edges(edge_mask)
+    kept_neuron_edges = _count_sparse_edges_in_block(
+        edge_mask,
+        0,
+        graph.n_neurons,
+        0,
+        graph.n_neurons,
     )
     total_edges = _count_nonzero_edges(graph.adjacency_matrix)
 
@@ -205,14 +226,7 @@ def _log_pipeline_comparison(
 
     logger.info("Pipeline comparison")
     if prune_result is not None:
-        kept_edges = int(
-            (
-                prune_result.edge_mask
-                & (graph.adjacency_dense() != 0)
-                & prune_result.node_mask[:, None]
-                & prune_result.node_mask[None, :]
-            ).sum().item()
-        )
+        kept_edges = _count_nonzero_edges(prune_result.edge_mask)
         kept_neurons = int(prune_result.node_mask[: graph.n_neurons].sum().item())
         logger.info(
             "  build_to_prune: neurons %d -> %d, edges %d -> %d",

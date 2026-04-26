@@ -33,7 +33,7 @@ def attribute(
 ) -> Graph:
     """Compute a sparse-backed neuron graph for a prompt.
 
-    The dense adjacency layout is:
+    The sparse adjacency uses the node layout:
     ``[neurons, token_embeddings, logits]``.
     Token rows remain zero because tokens are source-only roots.
     """
@@ -79,7 +79,7 @@ def _check_dense_graph_size(total_nodes: int, dtype: torch.dtype):
     gib = total_bytes / (1024**3)
     if gib > 4:
         logging.getLogger("attribution").warning(
-            "Dense adjacency is estimated to require about %.2f GiB; continuing anyway.",
+            "A dense adjacency would require about %.2f GiB; using sparse COO adjacency.",
             gib,
         )
 
