@@ -159,6 +159,7 @@ class ClusterDistillationConfig:
     graph_top_k_logits: Optional[int] = 20
     graph_prop_neurons_per_layer: float = 0.1
     graph_batch_size: int = 512
+    graph_verbose: bool = False
     graph_prune: bool = False
     graph_node_threshold: float = 0.8
     graph_edge_threshold: float = 0.98
@@ -1069,6 +1070,7 @@ class ClusterDistillationTrainer:
             top_k_logits=config.graph_top_k_logits,
             prop_neurons_per_layer=config.graph_prop_neurons_per_layer,
             graph_batch_size=config.graph_batch_size,
+            verbose=config.graph_verbose,
             graph_prune=config.graph_prune,
             graph_node_threshold=config.graph_node_threshold,
             graph_edge_threshold=config.graph_edge_threshold,

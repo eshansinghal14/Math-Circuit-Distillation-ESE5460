@@ -419,6 +419,11 @@ def main():
         help="Graph mode: number of graph target rows processed per loop chunk.",
     )
     parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Graph mode: print live graph construction progress.",
+    )
+    parser.add_argument(
         "--graph-prune",
         "--prune",
         dest="graph_prune",
@@ -863,6 +868,7 @@ def main():
         print(f"  top_k_logits:       {args.graph_top_k_logits}")
         print(f"  prop_neurons/layer: {args.graph_prop_neurons_per_layer}")
         print(f"  graph_batch_size:   {args.graph_batch_size}")
+        print(f"  verbose:            {args.verbose}")
         print(f"  prune:              {args.graph_prune}")
         print(f"  epsilon:            {args.graph_epsilon}")
         print(f"  min_logit_infl:     {args.graph_min_cum_logit_influence}")
@@ -931,6 +937,7 @@ def main():
         graph_top_k_logits=args.graph_top_k_logits,
         graph_prop_neurons_per_layer=args.graph_prop_neurons_per_layer,
         graph_batch_size=args.graph_batch_size,
+        graph_verbose=args.verbose,
         graph_prune=args.graph_prune,
         graph_node_threshold=args.graph_node_threshold,
         graph_edge_threshold=args.graph_edge_threshold,

@@ -23,6 +23,7 @@ class GraphAuxConfig:
     top_k_logits: int | None = 20
     prop_neurons_per_layer: float = 0.1
     graph_batch_size: int = 512
+    verbose: bool = False
     graph_prune: bool = False
     graph_node_threshold: float = 0.8
     graph_edge_threshold: float = 0.98
@@ -39,6 +40,8 @@ def compute_prompt_graph_loss(
     student_adapter: HFLlamaGraphAdapter,
     config: GraphAuxConfig,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
+    if config.verbose:
+        print(f"  [graph] building teacher graph for prompt: {prompt!r}")
     teacher_graph = teacher_adapter.build_graph(
         prompt,
         top_k_logits=config.top_k_logits,
@@ -47,6 +50,8 @@ def compute_prompt_graph_loss(
         dtype=config.graph_dtype,
         create_graph=False,
     )
+    if config.verbose:
+        print(f"  [graph] building student graph for prompt: {prompt!r}")
     student_graph = student_adapter.build_graph(
         prompt,
         top_k_logits=config.top_k_logits,
@@ -57,6 +62,8 @@ def compute_prompt_graph_loss(
     )
 
     if config.graph_prune:
+        if config.verbose:
+            print("  [graph] pruning teacher/student graphs")
         teacher_graph = teacher_graph.apply_prune_result(
             prune_graph(
                 teacher_graph,
@@ -72,6 +79,8 @@ def compute_prompt_graph_loss(
             ),
         )
 
+    if config.verbose:
+        print("  [graph] building teacher/student supergraphs")
     teacher_supergraph = build_super_graph(
         teacher_graph,
         epsilon=config.graph_epsilon,
@@ -83,6 +92,8 @@ def compute_prompt_graph_loss(
         min_cum_logit_influence=config.graph_min_cum_logit_influence,
     )
 
+    if config.verbose:
+        print("  [graph] aligning supernodes and computing graph loss")
     teacher_members = extract_hf_supernode_members(
         teacher_supergraph,
         teacher_graph,
