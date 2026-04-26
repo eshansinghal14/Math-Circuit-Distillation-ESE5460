@@ -288,9 +288,12 @@ class HFLlamaGraphAdapter:
                 grad = grads[layer_idx]
                 if grad is None:
                     continue
+                layer_indices = torch.where(layer_mask)[0]
                 locs = neuron_locations_t[layer_mask]
                 grad_vecs = grad[0, locs[:, 1], :].to(source_vectors_t.dtype)
-                row[layer_mask] = (grad_vecs * source_vectors_t[layer_mask]).sum(dim=-1)
+                row[layer_indices] = (
+                    grad_vecs * source_vectors_t[layer_indices]
+                ).sum(dim=-1)
             token_grad = grads[-1]
             if token_grad is not None:
                 token_vectors = embed_out.squeeze(0).to(source_vectors_t.dtype)
