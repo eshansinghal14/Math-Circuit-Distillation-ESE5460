@@ -381,6 +381,8 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
         
         valid_directions = directions[valid_mask]      # [n_valid × n_logits]
         valid_magnitudes = magnitudes[valid_mask]      # [n_valid]
+        if len(valid_directions) == 0:
+            return torch.full((n_neurons,), -1, dtype=torch.long, device=B_weighted.device), 0
         
         # determine k: how many directions explain coverage_threshold 
         # of total influence mass?
@@ -389,8 +391,10 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
         U, S, Vt = torch.linalg.svd(weighted_B, full_matrices=False)
         
         total = (S ** 2).sum()
+        if total <= 0:
+            return torch.full((n_neurons,), -1, dtype=torch.long, device=B_weighted.device), 0
         cumulative = torch.cumsum(S ** 2, dim=0) / total
-        k = (cumulative < coverage_threshold).sum().item() + 1
+        k = min((cumulative < coverage_threshold).sum().item() + 1, len(valid_directions))
         
         # project directions (not raw B) into SVD subspace for clustering
         # this gives balanced coordinates — no singular value dominance
@@ -400,8 +404,8 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
         assignments_valid = kmeans(direction_projections, k)
         
         # map back
-        assignments = torch.full((n_neurons,), -1, dtype=torch.long)
-        assignments[valid_mask] = assignments_valid
+        assignments = torch.full((n_neurons,), -1, dtype=torch.long, device=B_weighted.device)
+        assignments[valid_mask] = assignments_valid + 1
         
         return assignments, k
     
@@ -463,14 +467,23 @@ def range_query(node_influence_normalized: torch.Tensor, neuron_idx: int, epsilo
 
 def kmeans(X, k, n_iter=100):
     # X: [n × d]
+    if len(X) == 0:
+        raise ValueError("kmeans requires at least one point")
+    if k <= 0:
+        raise ValueError("kmeans requires k > 0")
+    k = min(k, len(X))
+
     # initialize centers with kmeans++
     centers = [X[torch.randint(len(X), (1,)).item()]]
     for _ in range(k - 1):
         dists = torch.stack([
             ((X - c) ** 2).sum(dim=1) for c in centers
         ]).min(dim=0).values
-        probs = dists / dists.sum()
-        centers.append(X[torch.multinomial(probs, 1).item()])
+        if dists.sum() <= 0:
+            centers.append(X[torch.randint(len(X), (1,)).item()])
+        else:
+            probs = dists / dists.sum()
+            centers.append(X[torch.multinomial(probs, 1).item()])
     centers = torch.stack(centers)  # [k × d]
 
     for _ in range(n_iter):
