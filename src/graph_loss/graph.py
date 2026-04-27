@@ -366,37 +366,37 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
         return assignments, k
     
     logger.info("  Clustering supernodes")
-    node_clusters, num_supernodes = build_supernodes_svd(node_influence_vectors, min_cum_logit_influence, epsilon)
+    # node_clusters, num_supernodes = build_supernodes_svd(node_influence_vectors, min_cum_logit_influence, epsilon)
 
-    # num_supernodes = 0
-    # node_clusters = [0] * n_neurons
-    # for n in range(n_neurons):
-    #     if node_clusters[n] != 0:
-    #         continue
+    num_supernodes = 0
+    node_clusters = [0] * n_neurons
+    for n in range(n_neurons):
+        if node_clusters[n] != 0:
+            continue
 
-    #     neighbors = range_query(node_influence_normalized, n, epsilon)
-    #     if node_influence_vectors[neighbors].sum(dim=0).norm(dim=-1) < min_cum_logit_influence:
-    #         node_clusters[n] = -1
-    #         continue
+        neighbors = range_query(node_influence_normalized, n, epsilon)
+        if node_influence_vectors[neighbors].sum(dim=0).norm(dim=-1) < min_cum_logit_influence:
+            node_clusters[n] = -1
+            continue
         
-    #     num_supernodes += 1
-    #     node_clusters[n] = num_supernodes
-    #     neighbors = [neighbor for neighbor in neighbors if neighbor != n]
-    #     idx = 0
+        num_supernodes += 1
+        node_clusters[n] = num_supernodes
+        neighbors = [neighbor for neighbor in neighbors if neighbor != n]
+        idx = 0
 
-    #     while idx < len(neighbors):
-    #         s = neighbors[idx]
-    #         idx += 1
-    #         if node_clusters[s] == -1:
-    #             node_clusters[s] = num_supernodes
-    #         if node_clusters[s] != 0:
-    #             continue
+        while idx < len(neighbors):
+            s = neighbors[idx]
+            idx += 1
+            if node_clusters[s] == -1:
+                node_clusters[s] = num_supernodes
+            if node_clusters[s] != 0:
+                continue
 
-    #         node_clusters[s] = num_supernodes
-    #         new_neighbors = range_query(node_influence_normalized, s, epsilon)
+            node_clusters[s] = num_supernodes
+            new_neighbors = range_query(node_influence_normalized, s, epsilon)
 
-    #         if node_influence_vectors[new_neighbors].sum(dim=0).norm(dim=-1) >= min_cum_logit_influence:
-    #             neighbors = list(set(neighbors) | set(new_neighbors))
+            if node_influence_vectors[new_neighbors].sum(dim=0).norm(dim=-1) >= min_cum_logit_influence:
+                neighbors = list(set(neighbors) | set(new_neighbors))
 
     logger.info("  Aggregating supernode adjacency")
     adj_matrix_norm = normalize_matrix(adjacency_matrix)
