@@ -312,6 +312,32 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
         """
         Cluster on directions, validate on magnitudes.
         """
+        def silhouette_score(X, assignments, dist_type="cossim"):
+            unique_assignments = torch.unique(assignments)
+            if len(unique_assignments) <= 1 or len(unique_assignments) >= len(X):
+                return torch.tensor(float("nan"), device=X.device)
+
+            if dist_type == "cossim":
+                X_norm = X / X.norm(dim=1, keepdim=True).clamp(min=1e-12)
+                dists = 1 - X_norm @ X_norm.T
+            else:
+                dists = torch.cdist(X, X)
+
+            scores = []
+            for i in range(len(X)):
+                same_cluster = assignments == assignments[i]
+                other_clusters = unique_assignments[unique_assignments != assignments[i]]
+
+                same_cluster[i] = False
+                a = dists[i, same_cluster].mean() if same_cluster.any() else torch.tensor(0.0, device=X.device)
+                b = torch.stack([
+                    dists[i, assignments == cluster].mean()
+                    for cluster in other_clusters
+                ]).min()
+                scores.append((b - a) / torch.maximum(a, b).clamp(min=1e-12))
+
+            return torch.stack(scores).mean()
+
         # magnitudes — used for noise filtering and validity
         magnitudes = B_weighted.norm(dim=1)           # [n_neurons]
         finite_magnitudes = magnitudes[torch.isfinite(magnitudes)]
@@ -336,28 +362,23 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
         valid_mask = magnitudes >= min_cluster_influence
         
         valid_directions = directions[valid_mask]      # [n_valid × n_logits]
-        valid_magnitudes = magnitudes[valid_mask]      # [n_valid]
         if len(valid_directions) == 0:
             return torch.full((n_neurons,), -1, dtype=torch.long, device=B_weighted.device), 0
-        
-        # determine k: how many directions explain coverage_threshold 
-        # of total influence mass?
-        # use magnitude-weighted PCA instead of unweighted SVD
-        weighted_B = valid_directions * valid_magnitudes.unsqueeze(1)
-        U, S, Vt = torch.linalg.svd(weighted_B, full_matrices=False)
-        
-        total = (S ** 2).sum()
-        if total <= 0:
-            return torch.full((n_neurons,), -1, dtype=torch.long, device=B_weighted.device), 0
-        cumulative = torch.cumsum(S ** 2, dim=0) / total
-        k = min((cumulative < coverage_threshold).sum().item() + 1, len(valid_directions))
-        
-        # project directions (not raw B) into SVD subspace for clustering
-        # this gives balanced coordinates — no singular value dominance
-        direction_projections = valid_directions @ Vt[:k].T   # [n_valid × k]
-        
-        # k-means on unit-normalized direction projections
-        assignments_valid = kmeans(weighted_B, k, dist_type="cossim")
+
+        best_k = 1
+        best_score = torch.tensor(float("-inf"), device=B_weighted.device)
+        best_assignments_valid = torch.zeros(len(valid_directions), dtype=torch.long, device=B_weighted.device)
+        for candidate_k in range(1, min(10, len(valid_directions)) + 1):
+            candidate_assignments = kmeans(valid_directions, candidate_k, dist_type="cossim")
+            score = silhouette_score(valid_directions, candidate_assignments, dist_type="cossim")
+            print(f"k={candidate_k} silhouette_score={float(score.item()):.6g}")
+            if torch.isfinite(score) and score > best_score:
+                best_k = candidate_k
+                best_score = score
+                best_assignments_valid = candidate_assignments
+
+        assignments_valid = best_assignments_valid
+        k = best_k
         
         # map back
         assignments = torch.full((n_neurons,), -1, dtype=torch.long, device=B_weighted.device)
@@ -366,37 +387,37 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
         return assignments, k
     
     logger.info("  Clustering supernodes")
-    # node_clusters, num_supernodes = build_supernodes_svd(node_influence_vectors, min_cum_logit_influence, epsilon)
+    node_clusters, num_supernodes = build_supernodes_svd(node_influence_vectors, min_cum_logit_influence, epsilon)
 
-    num_supernodes = 0
-    node_clusters = [0] * n_neurons
-    for n in range(n_neurons):
-        if node_clusters[n] != 0:
-            continue
+    # num_supernodes = 0
+    # node_clusters = [0] * n_neurons
+    # for n in range(n_neurons):
+    #     if node_clusters[n] != 0:
+    #         continue
 
-        neighbors = range_query(node_influence_normalized, n, epsilon)
-        if node_influence_vectors[neighbors].sum(dim=0).norm(dim=-1) < min_cum_logit_influence:
-            node_clusters[n] = -1
-            continue
+    #     neighbors = range_query(node_influence_normalized, n, epsilon)
+    #     if node_influence_vectors[neighbors].sum(dim=0).norm(dim=-1) < min_cum_logit_influence:
+    #         node_clusters[n] = -1
+    #         continue
         
-        num_supernodes += 1
-        node_clusters[n] = num_supernodes
-        neighbors = [neighbor for neighbor in neighbors if neighbor != n]
-        idx = 0
+    #     num_supernodes += 1
+    #     node_clusters[n] = num_supernodes
+    #     neighbors = [neighbor for neighbor in neighbors if neighbor != n]
+    #     idx = 0
 
-        while idx < len(neighbors):
-            s = neighbors[idx]
-            idx += 1
-            if node_clusters[s] == -1:
-                node_clusters[s] = num_supernodes
-            if node_clusters[s] != 0:
-                continue
+    #     while idx < len(neighbors):
+    #         s = neighbors[idx]
+    #         idx += 1
+    #         if node_clusters[s] == -1:
+    #             node_clusters[s] = num_supernodes
+    #         if node_clusters[s] != 0:
+    #             continue
 
-            node_clusters[s] = num_supernodes
-            new_neighbors = range_query(node_influence_normalized, s, epsilon)
+    #         node_clusters[s] = num_supernodes
+    #         new_neighbors = range_query(node_influence_normalized, s, epsilon)
 
-            if node_influence_vectors[new_neighbors].sum(dim=0).norm(dim=-1) >= min_cum_logit_influence:
-                neighbors = list(set(neighbors) | set(new_neighbors))
+    #         if node_influence_vectors[new_neighbors].sum(dim=0).norm(dim=-1) >= min_cum_logit_influence:
+    #             neighbors = list(set(neighbors) | set(new_neighbors))
 
     logger.info("  Aggregating supernode adjacency")
     adj_matrix_norm = normalize_matrix(adjacency_matrix)
