@@ -151,7 +151,8 @@ def _log_remaining_neuron_top_dla_logits(
         device=W_U.device,
         dtype=W_U.dtype,
     )
-    neuron_records = []
+    neuron_metadata = []
+    write_vectors = []
     for neuron_idx in kept_neurons:
         location = graph.neuron_locations[neuron_idx]
         layer = int(location[0].item())
@@ -166,17 +167,34 @@ def _log_remaining_neuron_top_dla_logits(
 
         activation = graph.neuron_activations[neuron_idx].to(device=W_U.device, dtype=W_U.dtype)
         w_out_row = w_out_cache[layer][neuron_number].to(device=W_U.device, dtype=W_U.dtype)
-        dla = (activation * w_out_row) @ W_U
-        if len(target_vocab_indices):
-            normalized_dla = dla / dla.norm().clamp(min=1e-12)
-            rank_score = (normalized_dla[target_vocab_indices] * target_probs).mean()
-        else:
-            rank_score = torch.tensor(0.0, device=W_U.device, dtype=W_U.dtype)
-        neuron_records.append((float(rank_score.item()), neuron_idx, layer, token_pos, neuron_number, dla))
+        write_vectors.append(activation * w_out_row)
+        neuron_metadata.append((neuron_idx, layer, token_pos, neuron_number))
 
-    neuron_records.sort(key=lambda record: record[0], reverse=True)
+    dla_matrix = torch.stack(write_vectors) @ W_U
+    if len(target_vocab_indices):
+        normalized_dla_matrix = dla_matrix / dla_matrix.norm(dim=1, keepdim=True).clamp(min=1e-12)
+        rank_scores = (normalized_dla_matrix[:, target_vocab_indices] * target_probs).mean(dim=1)
+    else:
+        rank_scores = torch.zeros(len(neuron_metadata), device=W_U.device, dtype=W_U.dtype)
 
-    for rank_score, neuron_idx, layer, token_pos, neuron_number, dla in neuron_records:
+    neuron_records = sorted(
+        [
+            (
+                float(rank_scores[row_idx].item()),
+                row_idx,
+                neuron_idx,
+                layer,
+                token_pos,
+                neuron_number,
+            )
+            for row_idx, (neuron_idx, layer, token_pos, neuron_number) in enumerate(neuron_metadata)
+        ],
+        key=lambda record: record[0],
+        reverse=True,
+    )
+
+    for rank_score, row_idx, neuron_idx, layer, token_pos, neuron_number in neuron_records:
+        dla = dla_matrix[row_idx]
         k = min(top_k, int(dla.numel()))
         values, indices = torch.topk(dla.detach().float().cpu(), k=k)
         formatted = ", ".join(
