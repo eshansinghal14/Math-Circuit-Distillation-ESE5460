@@ -11,6 +11,7 @@ from graph_loss.graph import (
     PruneResult,
     SuperGraph,
     build_super_graph,
+    compute_node_influence,
     extract_supernode_members,
     prune_graph,
 )
@@ -109,12 +110,28 @@ def _log_remaining_neuron_top_dla_logits(
         logger.info("  no remaining neurons")
         return
 
+    logit_weights = torch.zeros(
+        graph.n_nodes,
+        dtype=graph.adjacency_matrix.dtype,
+        device=graph.adjacency_device,
+    )
+    if graph.n_logits:
+        logit_weights[-graph.n_logits :] = graph.logit_probabilities.to(
+            device=graph.adjacency_device,
+            dtype=graph.adjacency_matrix.dtype,
+        )
+    influence_scores = compute_node_influence(graph.adjacency_matrix, logit_weights)
+    kept_neurons = sorted(
+        kept_neurons,
+        key=lambda neuron_idx: float(influence_scores[neuron_idx].item()),
+        reverse=True,
+    )
+
     for neuron_idx in kept_neurons:
         location = graph.neuron_locations[neuron_idx]
         layer = int(location[0].item())
         token_pos = int(location[1].item())
         neuron_number = int(location[2].item())
-        token = _decode_vocab_token(model, int(graph.input_tokens[token_pos].item()))
 
         if layer not in w_out_cache:
             old_mlp = model.blocks[layer].mlp.old_mlp
@@ -132,10 +149,11 @@ def _log_remaining_neuron_top_dla_logits(
             for value, idx in zip(values, indices, strict=True)
         )
         logger.info(
-            "  neuron %d layer=%d token=%r: %s",
+            "  neuron %d layer=%d token=%d influence=%.6g: %s",
             neuron_number,
             layer,
-            token,
+            token_pos,
+            float(influence_scores[neuron_idx].item()),
             formatted,
         )
 
