@@ -445,10 +445,12 @@ def kmeans(X, k, n_iter=100, dist_type="p_norm", p=2):
     centers = [X[torch.randint(len(X), (1,)).item()]]
     for _ in range(k - 1):
         dists = pairwise_dists(X, torch.stack(centers)).min(dim=1).values
-        if dists.sum() <= 0:
+        init_weights = dists - dists.min()
+        total_weight = init_weights.sum()
+        if not torch.isfinite(total_weight) or total_weight <= 0:
             centers.append(X[torch.randint(len(X), (1,)).item()])
         else:
-            probs = dists / dists.sum()
+            probs = init_weights / total_weight
             centers.append(X[torch.multinomial(probs, 1).item()])
     centers = torch.stack(centers)  # [k × d]
 
