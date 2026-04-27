@@ -4,8 +4,16 @@ import logging
 import torch
 from huggingface_hub import login
 
+from graph_loss.align import compute_supernode_dla
 from graph_loss.attribution.attribute import attribute
-from graph_loss.graph import Graph, PruneResult, SuperGraph, build_super_graph, prune_graph
+from graph_loss.graph import (
+    Graph,
+    PruneResult,
+    SuperGraph,
+    build_super_graph,
+    extract_supernode_members,
+    prune_graph,
+)
 from graph_loss.replacement_model import TransformerLensReplacementModel
 from graph_loss.utils import (
     add_graph_build_args,
@@ -39,6 +47,45 @@ def _format_top_logit_targets(graph: Graph, limit: int = 5) -> str:
     return ", ".join(
         f"{target.token_str!r}:{prob:.4g}" for target, prob in top_targets
     )
+
+
+def _decode_vocab_token(model: TransformerLensReplacementModel, vocab_idx: int) -> str:
+    token = model.tokenizer.decode([vocab_idx])
+    return token.replace("\n", "\\n").replace("\r", "\\r")
+
+
+@torch.no_grad()
+def _log_supernode_top_dla_logits(
+    supergraph: SuperGraph,
+    graph: Graph,
+    model: TransformerLensReplacementModel,
+    *,
+    logger: logging.Logger,
+    top_k: int = 10,
+) -> None:
+    members = extract_supernode_members(supergraph, graph, model)
+    W_U = model.unembed.W_U.to(device=graph.adjacency_device)
+
+    logger.info("Supernode top DLA logits")
+    if not members:
+        logger.info("  no supernodes")
+        return
+
+    for member in members:
+        cluster_id = int(member["cluster_id"])
+        dla = compute_supernode_dla(member, W_U).detach().float().cpu()
+        k = min(top_k, int(dla.numel()))
+        values, indices = torch.topk(dla, k=k)
+        formatted = ", ".join(
+            f"{_decode_vocab_token(model, int(idx.item()))!r}:{float(value.item()):.6g}"
+            for value, idx in zip(values, indices, strict=True)
+        )
+        logger.info(
+            "  supernode %d (size=%d): %s",
+            cluster_id,
+            int(member["size"]),
+            formatted,
+        )
 
 
 def _log_graph_summary(graph: Graph, *, logger: logging.Logger, stage: str) -> None:
@@ -346,6 +393,7 @@ def main():
         min_cum_logit_influence=args.min_cum_logit_influence,
         logger=logger,
     )
+    _log_supernode_top_dla_logits(supergraph, graph, model, logger=logger)
     if args.supergraph_output_path:
         logger.info("Saving supergraph to %s", args.supergraph_output_path)
         _save_supergraph(args.supergraph_output_path, supergraph)

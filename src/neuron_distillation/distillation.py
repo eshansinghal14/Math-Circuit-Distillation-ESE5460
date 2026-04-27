@@ -2051,8 +2051,15 @@ class ClusterDistillationTrainer:
             print(f"  Student baseline accuracy: {student_base:.4f}")
             if self.teacher is not None:
                 print(f"  Teacher baseline accuracy: {teacher_base:.4f}")
-            else:
+            elif self.teacher_data_cache is not None:
                 print("  Teacher baseline accuracy: skipped (using cached teacher logits)")
+            elif self._graph:
+                print(
+                    "  Teacher baseline accuracy: skipped "
+                    "(graph mode uses TransformerLens teacher for KL/graph loss)",
+                )
+            else:
+                print("  Teacher baseline accuracy: skipped (teacher model unavailable)")
             self.history["student_baseline"] = student_base
             self.history["teacher_baseline"] = teacher_base
             for prefix, data in self.extra_eval_data.items():
@@ -2078,8 +2085,18 @@ class ClusterDistillationTrainer:
                 print(f"  Student baseline accuracy [{prefix}]: {extra_student_base:.4f}")
                 if self.teacher is not None:
                     print(f"  Teacher baseline accuracy [{prefix}]: {extra_teacher_base:.4f}")
-                else:
+                elif self.teacher_data_cache is not None:
                     print(f"  Teacher baseline accuracy [{prefix}]: skipped (cached logits)")
+                elif self._graph:
+                    print(
+                        f"  Teacher baseline accuracy [{prefix}]: skipped "
+                        "(graph mode uses TransformerLens teacher for KL/graph loss)",
+                    )
+                else:
+                    print(
+                        f"  Teacher baseline accuracy [{prefix}]: skipped "
+                        "(teacher model unavailable)",
+                    )
                 self.history[f"student_baseline_{prefix}"] = extra_student_base
                 self.history[f"teacher_baseline_{prefix}"] = extra_teacher_base
 
