@@ -207,17 +207,58 @@ def _log_remaining_neuron_top_dla_logits(
     )
 
     stage_start = time.perf_counter()
-    dla_matrix = torch.stack(write_vectors) @ W_U
-    logger.info(
-        "  timing: batched DLA matmul %.3fs shape=%s",
-        elapsed_since(stage_start),
-        tuple(dla_matrix.shape),
+    write_matrix = torch.stack(write_vectors)
+    dla_chunk_size = 8192
+    top_count = min(top_k, W_U.shape[1])
+    top_values = torch.full(
+        (len(neuron_metadata), top_count),
+        float("-inf"),
+        device=W_U.device,
+        dtype=W_U.dtype,
     )
+    top_indices = torch.full(
+        (len(neuron_metadata), top_count),
+        -1,
+        device=W_U.device,
+        dtype=torch.long,
+    )
+    dla_norm_sq = torch.zeros(len(neuron_metadata), device=W_U.device, dtype=torch.float32)
+    n_chunks = (W_U.shape[1] + dla_chunk_size - 1) // dla_chunk_size
+    logger.info(
+        "  chunked DLA scan: write_shape=%s vocab=%d chunk_size=%d chunks=%d",
+        tuple(write_matrix.shape),
+        W_U.shape[1],
+        dla_chunk_size,
+        n_chunks,
+    )
+    for chunk_idx, start in enumerate(range(0, W_U.shape[1], dla_chunk_size), start=1):
+        end = min(start + dla_chunk_size, W_U.shape[1])
+        chunk_scores = write_matrix @ W_U[:, start:end]
+        dla_norm_sq += chunk_scores.float().pow(2).sum(dim=1)
+
+        chunk_top_count = min(top_count, end - start)
+        chunk_values, chunk_local_indices = torch.topk(chunk_scores, k=chunk_top_count, dim=1)
+        chunk_indices = chunk_local_indices + start
+        combined_values = torch.cat([top_values, chunk_values], dim=1)
+        combined_indices = torch.cat([top_indices, chunk_indices], dim=1)
+        top_values, combined_top_positions = torch.topk(combined_values, k=top_count, dim=1)
+        top_indices = combined_indices.gather(1, combined_top_positions)
+
+        if chunk_idx == 1 or chunk_idx == n_chunks or chunk_idx % 10 == 0:
+            logger.info(
+                "  timing: DLA chunk %d/%d elapsed=%.3fs",
+                chunk_idx,
+                n_chunks,
+                elapsed_since(stage_start),
+            )
+
+    dla_norms = dla_norm_sq.sqrt().to(dtype=W_U.dtype).clamp(min=1e-12)
+    logger.info("  timing: chunked DLA scan %.3fs", elapsed_since(stage_start))
 
     stage_start = time.perf_counter()
     if len(target_vocab_indices):
-        normalized_dla_matrix = dla_matrix / dla_matrix.norm(dim=1, keepdim=True).clamp(min=1e-12)
-        rank_scores = (normalized_dla_matrix[:, target_vocab_indices] * target_probs).mean(dim=1)
+        target_dla = write_matrix @ W_U[:, target_vocab_indices]
+        rank_scores = ((target_dla / dla_norms[:, None]) * target_probs).mean(dim=1)
     else:
         rank_scores = torch.zeros(len(neuron_metadata), device=W_U.device, dtype=W_U.dtype)
 
@@ -240,9 +281,8 @@ def _log_remaining_neuron_top_dla_logits(
 
     stage_start = time.perf_counter()
     for rank_score, row_idx, neuron_idx, layer, token_pos, neuron_number in neuron_records:
-        dla = dla_matrix[row_idx]
-        k = min(top_k, int(dla.numel()))
-        values, indices = torch.topk(dla.detach().float().cpu(), k=k)
+        values = top_values[row_idx].detach().float().cpu()
+        indices = top_indices[row_idx].detach().cpu()
         formatted = ", ".join(
             f"{_decode_vocab_token(model, int(idx.item()))!r}:{float(value.item()):.6g}"
             for value, idx in zip(values, indices, strict=True)
