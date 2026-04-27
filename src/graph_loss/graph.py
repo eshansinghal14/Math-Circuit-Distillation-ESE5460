@@ -282,26 +282,28 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
     logger = logging.getLogger(__name__)
 
     adjacency_matrix = graph.adjacency_matrix
-    logit_basis = torch.zeros(
-        n_logits,
+    all_nodes_basis = torch.zeros(
+        adjacency_matrix.shape[0],
         adjacency_matrix.shape[0],
         dtype=adjacency_matrix.dtype,
         device=adjacency_matrix.device,
     )
-    logit_basis[
-        torch.arange(n_logits, device=adjacency_matrix.device), 
-        logit_start + torch.arange(n_logits, device=adjacency_matrix.device)
+    all_nodes_basis[
+        torch.arange(adjacency_matrix.shape[0], device=adjacency_matrix.device), 
+        torch.arange(adjacency_matrix.shape[0], device=adjacency_matrix.device)
     ] = 1
 
     logger.info("  Computing logit influence for supergraph")
-    logit_influence = compute_node_influence(adjacency_matrix, logit_basis)
+    logit_influence = compute_node_influence(adjacency_matrix, all_nodes_basis)
     logit_probabilities = graph.logit_probabilities.to(
         device=adjacency_matrix.device,
         dtype=adjacency_matrix.dtype,
     )
-    node_influence_vectors = (
-        logit_influence.T[:n_neurons] * (1 - logit_probabilities) * logit_probabilities
-    )
+    # node_influence_vectors = (
+    #     logit_influence.T[:n_neurons][:, :logit_start] * (1 - logit_probabilities) * logit_probabilities
+    # )
+    node_influence_vectors = logit_influence.T[:n_neurons]
+
     node_influence_normalized = node_influence_vectors / node_influence_vectors.norm(
         dim=-1, keepdim=True
     ).clamp(min=1e-12)
@@ -355,7 +357,7 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
         direction_projections = valid_directions @ Vt[:k].T   # [n_valid × k]
         
         # k-means on unit-normalized direction projections
-        assignments_valid = kmeans(direction_projections, k)
+        assignments_valid = kmeans(weighted_B, k, dist_type="cossim")
         
         # map back
         assignments = torch.full((n_neurons,), -1, dtype=torch.long, device=B_weighted.device)
@@ -421,20 +423,28 @@ def range_query(node_influence_normalized: torch.Tensor, neuron_idx: int, epsilo
     return torch.where(1 - node_influence_normalized @ node_influence_normalized[neuron_idx] <= epsilon)[0].tolist()
 
 
-def kmeans(X, k, n_iter=100):
+def kmeans(X, k, n_iter=100, dist_type="p_norm", p=2):
     # X: [n × d]
     if len(X) == 0:
         raise ValueError("kmeans requires at least one point")
     if k <= 0:
         raise ValueError("kmeans requires k > 0")
+    if dist_type not in ("p_norm", "cossim"):
+        raise ValueError("dist_type must be either 'p_norm' or 'cossim'")
     k = min(k, len(X))
+
+    def pairwise_dists(points, centers):
+        if dist_type == "p_norm":
+            return torch.cdist(points, centers, p=p)
+
+        points_norm = points / points.norm(dim=1, keepdim=True).clamp(min=1e-12)
+        centers_norm = centers / centers.norm(dim=1, keepdim=True).clamp(min=1e-12)
+        return 1 - points_norm @ centers_norm.T
 
     # initialize centers with kmeans++
     centers = [X[torch.randint(len(X), (1,)).item()]]
     for _ in range(k - 1):
-        dists = torch.stack([
-            ((X - c) ** 2).sum(dim=1) for c in centers
-        ]).min(dim=0).values
+        dists = pairwise_dists(X, torch.stack(centers)).min(dim=1).values
         if dists.sum() <= 0:
             centers.append(X[torch.randint(len(X), (1,)).item()])
         else:
@@ -444,7 +454,7 @@ def kmeans(X, k, n_iter=100):
 
     for _ in range(n_iter):
         # assign
-        dists = torch.cdist(X, centers)          # [n × k]
+        dists = pairwise_dists(X, centers)       # [n × k]
         assignments = dists.argmin(dim=1)        # [n]
         # update
         new_centers = torch.stack([
