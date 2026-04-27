@@ -86,6 +86,60 @@ def _log_supernode_top_dla_logits(
         )
 
 
+@torch.no_grad()
+def _log_remaining_neuron_top_dla_logits(
+    graph: Graph,
+    model: TransformerLensReplacementModel,
+    *,
+    logger: logging.Logger,
+    prune_result: PruneResult = None,
+    top_k: int = 10,
+) -> None:
+    W_U = model.unembed.W_U.to(device=graph.adjacency_device)
+    kept_mask = (
+        prune_result.node_mask[: graph.n_neurons].to(device=graph.adjacency_device, dtype=torch.bool)
+        if prune_result is not None
+        else torch.ones(graph.n_neurons, device=graph.adjacency_device, dtype=torch.bool)
+    )
+    kept_neurons = torch.where(kept_mask)[0].tolist()
+    w_out_cache = {}
+
+    logger.info("Remaining neuron top DLA logits")
+    if not kept_neurons:
+        logger.info("  no remaining neurons")
+        return
+
+    for neuron_idx in kept_neurons:
+        location = graph.neuron_locations[neuron_idx]
+        layer = int(location[0].item())
+        token_pos = int(location[1].item())
+        neuron_number = int(location[2].item())
+        token = _decode_vocab_token(model, int(graph.input_tokens[token_pos].item()))
+
+        if layer not in w_out_cache:
+            old_mlp = model.blocks[layer].mlp.old_mlp
+            w_out_cache[layer] = model._row_oriented_weight(
+                old_mlp.W_out.to(device=graph.adjacency_device)
+            )
+
+        activation = graph.neuron_activations[neuron_idx].to(device=W_U.device, dtype=W_U.dtype)
+        w_out_row = w_out_cache[layer][neuron_number].to(device=W_U.device, dtype=W_U.dtype)
+        dla = (activation * w_out_row) @ W_U
+        k = min(top_k, int(dla.numel()))
+        values, indices = torch.topk(dla.detach().float().cpu(), k=k)
+        formatted = ", ".join(
+            f"{_decode_vocab_token(model, int(idx.item()))!r}:{float(value.item()):.6g}"
+            for value, idx in zip(values, indices, strict=True)
+        )
+        logger.info(
+            "  neuron %d layer=%d token=%r: %s",
+            neuron_number,
+            layer,
+            token,
+            formatted,
+        )
+
+
 def _log_graph_summary(graph: Graph, *, logger: logging.Logger, stage: str) -> None:
     total_nodes = graph.n_nodes
     total_edges = int(graph.adjacency_matrix.count_nonzero().item())
@@ -380,6 +434,7 @@ def main():
         logger.info("Applying prune masks to graph")
         graph = graph.apply_prune_result(prune_result)
 
+    _log_remaining_neuron_top_dla_logits(graph, model, logger=logger, prune_result=prune_result)
     logger.info("Running build_super_graph")
     supergraph = build_super_graph(
         graph,

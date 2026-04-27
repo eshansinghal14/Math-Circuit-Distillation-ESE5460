@@ -351,7 +351,7 @@ def build_super_graph(
 
             return torch.stack(scores).mean()
 
-        # magnitudes — used for noise filtering and validity
+        # magnitudes are used for direction normalization and logging.
         magnitudes = B_weighted.norm(dim=1)           # [n_neurons]
         finite_magnitudes = magnitudes[torch.isfinite(magnitudes)]
         if finite_magnitudes.numel():
@@ -369,12 +369,9 @@ def build_super_graph(
         # directions — used for clustering
         directions = B_weighted / magnitudes.unsqueeze(1).clamp(min=1e-12)
         
-        # filter noise before clustering
-        if min_cluster_influence is None:
-            min_cluster_influence = magnitudes.median() * 0.1
-        valid_mask = kept_neuron_mask & torch.isfinite(magnitudes) & (magnitudes >= min_cluster_influence)
+        valid_mask = kept_neuron_mask & torch.isfinite(magnitudes)
         logger.info(
-            "  Supernode clustering candidates: kept_by_prune=%d/%d valid_after_influence_filter=%d/%d",
+            "  Supernode clustering candidates: kept_by_prune=%d/%d valid=%d/%d",
             int(kept_neuron_mask.sum().item()),
             int(n_neurons),
             int(valid_mask.sum().item()),
