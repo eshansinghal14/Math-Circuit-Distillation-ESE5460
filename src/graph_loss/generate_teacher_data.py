@@ -271,6 +271,7 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
             graph_for_supergraph,
             epsilon=config.epsilon,
             min_cum_logit_influence=config.min_cum_logit_influence,
+            prune_result=prune_result,
         )
         _log_supergraph_summary(
             graph_for_supergraph,

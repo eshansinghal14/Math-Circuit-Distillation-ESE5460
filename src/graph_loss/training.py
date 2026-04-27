@@ -100,23 +100,23 @@ def compute_prompt_graph_loss(
         detach_result=False,
     )
 
+    teacher_prune_result = None
+    student_prune_result = None
     if config.graph_prune:
         if config.verbose:
             print("  [graph] pruning teacher/student graphs")
-        teacher_graph = teacher_graph.apply_prune_result(
-            prune_graph(
-                teacher_graph,
-                node_threshold=config.graph_node_threshold,
-                edge_threshold=config.graph_edge_threshold,
-            ),
+        teacher_prune_result = prune_graph(
+            teacher_graph,
+            node_threshold=config.graph_node_threshold,
+            edge_threshold=config.graph_edge_threshold,
         )
-        student_graph = student_graph.apply_prune_result(
-            prune_graph(
-                student_graph,
-                node_threshold=config.graph_node_threshold,
-                edge_threshold=config.graph_edge_threshold,
-            ),
+        student_prune_result = prune_graph(
+            student_graph,
+            node_threshold=config.graph_node_threshold,
+            edge_threshold=config.graph_edge_threshold,
         )
+        teacher_graph = teacher_graph.apply_prune_result(teacher_prune_result)
+        student_graph = student_graph.apply_prune_result(student_prune_result)
 
     if config.verbose:
         print(
@@ -129,6 +129,7 @@ def compute_prompt_graph_loss(
         teacher_graph,
         epsilon=config.graph_epsilon,
         min_cum_logit_influence=config.graph_min_cum_logit_influence,
+        prune_result=teacher_prune_result,
     )
     if config.verbose:
         print(
@@ -147,6 +148,7 @@ def compute_prompt_graph_loss(
             student_graph,
             epsilon=config.graph_epsilon,
             min_cum_logit_influence=config.graph_min_cum_logit_influence,
+            prune_result=student_prune_result,
         )
     student_supergraph = _aggregate_supergraph_adjacency(
         student_graph,

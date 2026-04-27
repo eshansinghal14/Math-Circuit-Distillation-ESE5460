@@ -266,13 +266,20 @@ class SuperGraph(NamedTuple):
     supernodes: list[list[int]]       # old node ids inside each new node
 
 
-def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influence: float = 0.9) -> SuperGraph:
+def build_super_graph(
+    graph: Graph,
+    epsilon: float = 1e-3,
+    min_cum_logit_influence: float = 0.9,
+    prune_result: PruneResult | None = None,
+) -> SuperGraph:
     """Create supernodes as clusters of nodes that have distance < epsilon and cumulative logit influence > min_cum_logit_influence."""
 
     if epsilon > 1.0 or epsilon < 0.0:
         raise ValueError("epsilon must be between 0.0 and 1.0")
     if min_cum_logit_influence < 0.0:
         raise ValueError("min_cum_logit_influence must be non-negative")
+    if prune_result is not None:
+        graph = graph.apply_prune_result(prune_result)
 
     n_logits = graph.n_logits
     n_tokens = graph.n_tokens

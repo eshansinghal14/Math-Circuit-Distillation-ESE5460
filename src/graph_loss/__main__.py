@@ -385,6 +385,7 @@ def main():
         graph,
         epsilon=args.epsilon,
         min_cum_logit_influence=args.min_cum_logit_influence,
+        prune_result=prune_result,
     )
     _log_supergraph_summary(
         graph,
