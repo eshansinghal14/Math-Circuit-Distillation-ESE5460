@@ -287,6 +287,12 @@ def build_super_graph(
     token_start = n_neurons
     logit_start = token_start + n_tokens
     logger = logging.getLogger(__name__)
+    kept_neuron_mask = torch.ones(n_neurons, dtype=torch.bool, device=graph.adjacency_device)
+    if prune_result is not None:
+        kept_neuron_mask = prune_result.node_mask[:n_neurons].to(
+            device=graph.adjacency_device,
+            dtype=torch.bool,
+        )
 
     adjacency_matrix = graph.adjacency_matrix
     all_nodes_basis = torch.zeros(
@@ -366,7 +372,14 @@ def build_super_graph(
         # filter noise before clustering
         if min_cluster_influence is None:
             min_cluster_influence = magnitudes.median() * 0.1
-        valid_mask = magnitudes >= min_cluster_influence
+        valid_mask = kept_neuron_mask & torch.isfinite(magnitudes) & (magnitudes >= min_cluster_influence)
+        logger.info(
+            "  Supernode clustering candidates: kept_by_prune=%d/%d valid_after_influence_filter=%d/%d",
+            int(kept_neuron_mask.sum().item()),
+            int(n_neurons),
+            int(valid_mask.sum().item()),
+            int(n_neurons),
+        )
         
         valid_directions = directions[valid_mask]      # [n_valid × n_logits]
         if len(valid_directions) == 0:
