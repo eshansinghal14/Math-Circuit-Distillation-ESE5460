@@ -3,6 +3,7 @@ import logging
 import time
 
 import torch
+import torch.nn.functional as F
 from huggingface_hub import login
 
 from graph_loss.align import compute_supernode_dla
@@ -100,11 +101,16 @@ def _log_remaining_neuron_top_dla_logits(
     def elapsed_since(start: float) -> float:
         if graph.adjacency_device.type == "cuda":
             torch.cuda.synchronize(graph.adjacency_device)
+        if compute_device.type == "cuda" and compute_device != graph.adjacency_device:
+            torch.cuda.synchronize(compute_device)
         return time.perf_counter() - start
 
     total_start = time.perf_counter()
     stage_start = total_start
-    W_U = model.unembed.W_U.to(device=graph.adjacency_device)
+    source_w_u_device = model.unembed.W_U.device
+    compute_device = torch.device("cuda") if torch.cuda.is_available() else source_w_u_device
+    W_U = model.unembed.W_U.to(device=compute_device)
+    W_U_T = W_U.T.contiguous()
     kept_mask = (
         prune_result.node_mask[: graph.n_neurons].to(device=graph.adjacency_device, dtype=torch.bool)
         if prune_result is not None
@@ -115,12 +121,17 @@ def _log_remaining_neuron_top_dla_logits(
 
     logger.info("Remaining neuron top DLA logits")
     logger.info(
-        "  setup: kept_neurons=%d/%d n_logits=%d vocab=%d device=%s",
+        "  setup: kept_neurons=%d/%d n_logits=%d vocab=%d graph_device=%s source_W_U_device=%s compute_device=%s W_U_device=%s W_U_T_device=%s W_U_dtype=%s",
         len(kept_neurons),
         graph.n_neurons,
         graph.n_logits,
         W_U.shape[1],
         graph.adjacency_device,
+        source_w_u_device,
+        compute_device,
+        W_U.device,
+        W_U_T.device,
+        W_U.dtype,
     )
     logger.info("  timing: setup %.3fs", elapsed_since(stage_start))
     if not kept_neurons:
@@ -193,7 +204,7 @@ def _log_remaining_neuron_top_dla_logits(
         if layer not in w_out_cache:
             old_mlp = model.blocks[layer].mlp.old_mlp
             w_out_cache[layer] = model._row_oriented_weight(
-                old_mlp.W_out.to(device=graph.adjacency_device)
+                old_mlp.W_out.to(device=compute_device)
             )
 
         activation = graph.neuron_activations[neuron_idx].to(device=W_U.device, dtype=W_U.dtype)
@@ -208,7 +219,7 @@ def _log_remaining_neuron_top_dla_logits(
 
     stage_start = time.perf_counter()
     write_matrix = torch.stack(write_vectors)
-    dla_chunk_size = 8192
+    dla_chunk_size = 65536 if compute_device.type == "cuda" else 8192
     top_count = min(top_k, W_U.shape[1])
     top_values = torch.full(
         (len(neuron_metadata), top_count),
@@ -225,15 +236,18 @@ def _log_remaining_neuron_top_dla_logits(
     dla_norm_sq = torch.zeros(len(neuron_metadata), device=W_U.device, dtype=torch.float32)
     n_chunks = (W_U.shape[1] + dla_chunk_size - 1) // dla_chunk_size
     logger.info(
-        "  chunked DLA scan: write_shape=%s vocab=%d chunk_size=%d chunks=%d",
+        "  chunked DLA scan: write_shape=%s write_device=%s W_U_T_shape=%s W_U_T_device=%s vocab=%d chunk_size=%d chunks=%d",
         tuple(write_matrix.shape),
+        write_matrix.device,
+        tuple(W_U_T.shape),
+        W_U_T.device,
         W_U.shape[1],
         dla_chunk_size,
         n_chunks,
     )
     for chunk_idx, start in enumerate(range(0, W_U.shape[1], dla_chunk_size), start=1):
         end = min(start + dla_chunk_size, W_U.shape[1])
-        chunk_scores = write_matrix @ W_U[:, start:end]
+        chunk_scores = F.linear(write_matrix, W_U_T[start:end])
         dla_norm_sq += chunk_scores.float().pow(2).sum(dim=1)
 
         chunk_top_count = min(top_count, end - start)
@@ -257,7 +271,7 @@ def _log_remaining_neuron_top_dla_logits(
 
     stage_start = time.perf_counter()
     if len(target_vocab_indices):
-        target_dla = write_matrix @ W_U[:, target_vocab_indices]
+        target_dla = F.linear(write_matrix, W_U_T[target_vocab_indices])
         rank_scores = ((target_dla / dla_norms[:, None]) * target_probs).mean(dim=1)
     else:
         rank_scores = torch.zeros(len(neuron_metadata), device=W_U.device, dtype=W_U.dtype)
