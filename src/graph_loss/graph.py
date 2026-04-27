@@ -47,9 +47,7 @@ class Graph:
         self.vocab_size = vocab_size if vocab_size is not None else cfg.d_vocab
 
         self.input_string = input_string
-        self.adjacency_matrix = (
-            adjacency_matrix.coalesce() if adjacency_matrix.is_sparse else adjacency_matrix
-        )
+        self.adjacency_matrix = adjacency_matrix
         self.cfg = convert_nnsight_config_to_transformerlens(cfg)
         self.n_pos = len(input_tokens)
         self.neuron_locations = neuron_locations
@@ -82,67 +80,9 @@ class Graph:
 
     def to(self, device):
         self.adjacency_matrix = self.adjacency_matrix.to(device)
-        if self.adjacency_matrix.is_sparse:
-            self.adjacency_matrix = self.adjacency_matrix.coalesce()
         self.neuron_locations = self.neuron_locations.to(device)
         self.neuron_activations = self.neuron_activations.to(device)
         self.logit_probabilities = self.logit_probabilities.to(device)
-
-    def adjacency_dense(self) -> torch.Tensor:
-        return self.adjacency_matrix.to_dense() if self.adjacency_matrix.is_sparse else self.adjacency_matrix
-
-    def adjacency_nnz(self) -> int:
-        if self.adjacency_matrix.is_sparse:
-            return int(self.adjacency_matrix._nnz())
-        return int(self.adjacency_matrix.count_nonzero().item())
-
-    def adjacency_abs_sum(self) -> float:
-        if self.adjacency_matrix.is_sparse:
-            return float(self.adjacency_matrix.values().abs().sum().item())
-        return float(self.adjacency_matrix.abs().sum().item())
-
-    def block_nonzero_count(
-        self,
-        row_start: int,
-        row_end: int,
-        col_start: int,
-        col_end: int,
-    ) -> int:
-        if self.adjacency_matrix.is_sparse:
-            adjacency = self.adjacency_matrix.coalesce()
-            indices = adjacency.indices()
-            mask = (
-                (indices[0] >= row_start)
-                & (indices[0] < row_end)
-                & (indices[1] >= col_start)
-                & (indices[1] < col_end)
-            )
-            return int(mask.sum().item())
-        return int(
-            self.adjacency_matrix[row_start:row_end, col_start:col_end].count_nonzero().item()
-        )
-
-    def block_abs_sum(
-        self,
-        row_start: int,
-        row_end: int,
-        col_start: int,
-        col_end: int,
-    ) -> float:
-        if self.adjacency_matrix.is_sparse:
-            adjacency = self.adjacency_matrix.coalesce()
-            indices = adjacency.indices()
-            values = adjacency.values()
-            mask = (
-                (indices[0] >= row_start)
-                & (indices[0] < row_end)
-                & (indices[1] >= col_start)
-                & (indices[1] < col_end)
-            )
-            return float(values[mask].abs().sum().item())
-        return float(
-            self.adjacency_matrix[row_start:row_end, col_start:col_end].abs().sum().item()
-        )
 
     @property
     def logit_token_ids(self) -> torch.Tensor:
@@ -162,42 +102,19 @@ class Graph:
             "vocab_size": self.vocab_size,
             "input_tokens": self.input_tokens,
             "neuron_activations": self.neuron_activations,
+            "adjacency_layout": "dense",
+            "adjacency_matrix": self.adjacency_matrix,
         }
-        if self.adjacency_matrix.is_sparse:
-            adjacency = self.adjacency_matrix.coalesce()
-            data.update(
-                {
-                    "adjacency_layout": "sparse_coo",
-                    "adjacency_indices": adjacency.indices(),
-                    "adjacency_values": adjacency.values(),
-                    "adjacency_size": tuple(adjacency.shape),
-                }
-            )
-        else:
-            data.update(
-                {
-                    "adjacency_layout": "dense",
-                    "adjacency_matrix": self.adjacency_matrix,
-                }
-            )
         torch.save(data, path)
 
     @staticmethod
     def from_pt(path: str, map_location="cpu") -> "Graph":
         data = torch.load(path, weights_only=False, map_location=map_location)
-        if data.get("adjacency_layout") == "sparse_coo":
-            adjacency_matrix = torch.sparse_coo_tensor(
-                data["adjacency_indices"],
-                data["adjacency_values"],
-                size=tuple(data["adjacency_size"]),
-            ).coalesce()
-        else:
-            adjacency_matrix = data["adjacency_matrix"]
         return Graph(
             input_string=data["input_string"],
             input_tokens=data["input_tokens"],
             neuron_locations=data["neuron_locations"],
-            adjacency_matrix=adjacency_matrix,
+            adjacency_matrix=data["adjacency_matrix"],
             cfg=data["cfg"],
             neuron_activations=data["neuron_activations"],
             logit_targets=data["logit_targets"],
@@ -207,7 +124,7 @@ class Graph:
 
     def apply_prune_result(self, prune_result: "PruneResult") -> "Graph":
         """Returns a new Graph with edges and nodes zeroed out according to the PruneResult masks."""
-        adjacency_dense = self.adjacency_dense().clone()
+        adjacency_matrix = self.adjacency_matrix.clone()
         
         effective_edge_mask = (
             prune_result.edge_mask 
@@ -215,19 +132,13 @@ class Graph:
             & prune_result.node_mask[None, :]
         )
         
-        adjacency_dense[~effective_edge_mask] = 0.0
+        adjacency_matrix[~effective_edge_mask] = 0.0
         
-        new_adjacency = (
-            adjacency_dense.to_sparse() 
-            if self.adjacency_matrix.is_sparse 
-            else adjacency_dense
-        )
-
         return Graph(
             input_string=self.input_string,
             input_tokens=self.input_tokens,
             neuron_locations=self.neuron_locations,
-            adjacency_matrix=new_adjacency,
+            adjacency_matrix=adjacency_matrix,
             cfg=self.cfg, # type: ignore
             neuron_activations=self.neuron_activations,
             logit_targets=self.logit_targets,
@@ -308,7 +219,7 @@ def prune_graph(graph: Graph, node_threshold: float = 0.8, edge_threshold: float
     n_neurons = graph.n_neurons
     token_start = n_neurons
 
-    adjacency_matrix = graph.adjacency_dense()
+    adjacency_matrix = graph.adjacency_matrix
     logit_weights = torch.zeros(
         adjacency_matrix.shape[0],
         dtype=adjacency_matrix.dtype,
@@ -370,7 +281,7 @@ def build_super_graph(graph: Graph, epsilon: float = 1e-3, min_cum_logit_influen
     logit_start = token_start + n_tokens
     logger = logging.getLogger(__name__)
 
-    adjacency_matrix = graph.adjacency_dense()
+    adjacency_matrix = graph.adjacency_matrix
     logit_basis = torch.zeros(
         n_logits,
         adjacency_matrix.shape[0],

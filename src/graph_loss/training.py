@@ -44,8 +44,7 @@ class GraphAuxConfig:
 
 def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
     """Aggregate a differentiable graph adjacency using fixed supernode membership."""
-    adjacency_matrix = graph.adjacency_dense()
-    adj_matrix_norm = normalize_matrix(adjacency_matrix)
+    adj_matrix_norm = normalize_matrix(graph.adjacency_matrix)
     num_supernodes = len(supernodes)
     supernode_adj_matrix = torch.zeros(
         num_supernodes,

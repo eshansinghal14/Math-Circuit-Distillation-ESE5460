@@ -25,8 +25,6 @@ from utils import HF_READ_TOKEN
 
 
 def _count_nonzero_edges(matrix: torch.Tensor) -> int:
-    if matrix.is_sparse:
-        return int(matrix._nnz())
     return int(matrix.count_nonzero().item())
 
 
@@ -90,8 +88,10 @@ def _log_supernode_top_dla_logits(
 
 def _log_graph_summary(graph: Graph, *, logger: logging.Logger, stage: str) -> None:
     total_nodes = graph.n_nodes
-    total_edges = graph.adjacency_nnz()
-    neuron_edges = graph.block_nonzero_count(0, graph.n_neurons, 0, graph.n_neurons)
+    total_edges = int(graph.adjacency_matrix.count_nonzero().item())
+    neuron_edges = int(
+        graph.adjacency_matrix[: graph.n_neurons, : graph.n_neurons].count_nonzero().item()
+    )
 
     logger.info("%s graph summary", stage)
     logger.info(
@@ -116,8 +116,8 @@ def _log_graph_summary(graph: Graph, *, logger: logging.Logger, stage: str) -> N
     )
     logger.info(
         "  edge_weight_mass: abs_total=%.6f abs_neuron_to_neuron=%.6f",
-        graph.adjacency_abs_sum(),
-        graph.block_abs_sum(0, graph.n_neurons, 0, graph.n_neurons),
+        float(graph.adjacency_matrix.abs().sum().item()),
+        float(graph.adjacency_matrix[: graph.n_neurons, : graph.n_neurons].abs().sum().item()),
     )
     logger.info(
         "  logits: vocab_size=%d top_targets=%s",
@@ -136,7 +136,7 @@ def _log_prune_summary(
 ) -> None:
     node_mask = prune_result.node_mask
     edge_mask = prune_result.edge_mask
-    adjacency_matrix = graph.adjacency_dense()
+    adjacency_matrix = graph.adjacency_matrix
     adjacency_nonzero = adjacency_matrix != 0
     effective_edge_mask = edge_mask & adjacency_nonzero & node_mask[:, None] & node_mask[None, :]
 
@@ -253,7 +253,7 @@ def _log_pipeline_comparison(
     logger: logging.Logger,
     prune_result: PruneResult = None,
 ) -> None:
-    total_edges = graph.adjacency_nnz()
+    total_edges = int(graph.adjacency_matrix.count_nonzero().item())
     super_edges = _count_nonzero_edges(supergraph.supernode_adjacency_matrix)
 
     logger.info("Pipeline comparison")
@@ -261,7 +261,7 @@ def _log_pipeline_comparison(
         kept_edges = int(
             (
                 prune_result.edge_mask
-                & (graph.adjacency_dense() != 0)
+                & (graph.adjacency_matrix != 0)
                 & prune_result.node_mask[:, None]
                 & prune_result.node_mask[None, :]
             ).sum().item()
