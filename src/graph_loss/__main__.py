@@ -121,6 +121,23 @@ def _log_remaining_neuron_top_dla_logits(
             dtype=graph.adjacency_matrix.dtype,
         )
     influence_scores = compute_node_influence(graph.adjacency_matrix, logit_weights)
+    logit_influence_by_neuron = None
+    if graph.n_logits:
+        logit_start = graph.n_neurons + graph.n_tokens
+        logit_basis = torch.zeros(
+            graph.n_logits,
+            graph.n_nodes,
+            dtype=graph.adjacency_matrix.dtype,
+            device=graph.adjacency_device,
+        )
+        logit_basis[
+            torch.arange(graph.n_logits, device=graph.adjacency_device),
+            logit_start + torch.arange(graph.n_logits, device=graph.adjacency_device),
+        ] = 1
+        logit_influence_by_neuron = compute_node_influence(
+            graph.adjacency_matrix,
+            logit_basis,
+        ).T[: graph.n_neurons]
     kept_neurons = sorted(
         kept_neurons,
         key=lambda neuron_idx: float(influence_scores[neuron_idx].item()),
@@ -156,6 +173,15 @@ def _log_remaining_neuron_top_dla_logits(
             float(influence_scores[neuron_idx].item()),
             formatted,
         )
+        if logit_influence_by_neuron is not None:
+            logit_influences = logit_influence_by_neuron[neuron_idx].detach().float().cpu()
+            influence_k = min(top_k, int(logit_influences.numel()))
+            influence_values, influence_indices = torch.topk(logit_influences, k=influence_k)
+            influence_formatted = ", ".join(
+                f"{graph.logit_targets[int(idx.item())].token_str!r}:{float(value.item()):.6g}"
+                for value, idx in zip(influence_values, influence_indices, strict=True)
+            )
+            logger.info("    top influence logits: %s", influence_formatted)
 
 
 def _log_graph_summary(graph: Graph, *, logger: logging.Logger, stage: str) -> None:
