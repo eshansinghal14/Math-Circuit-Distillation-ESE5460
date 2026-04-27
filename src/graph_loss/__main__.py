@@ -1,5 +1,6 @@
 import argparse
 import logging
+import time
 
 import torch
 from huggingface_hub import login
@@ -96,6 +97,13 @@ def _log_remaining_neuron_top_dla_logits(
     prune_result: PruneResult = None,
     top_k: int = 10,
 ) -> None:
+    def elapsed_since(start: float) -> float:
+        if graph.adjacency_device.type == "cuda":
+            torch.cuda.synchronize(graph.adjacency_device)
+        return time.perf_counter() - start
+
+    total_start = time.perf_counter()
+    stage_start = total_start
     W_U = model.unembed.W_U.to(device=graph.adjacency_device)
     kept_mask = (
         prune_result.node_mask[: graph.n_neurons].to(device=graph.adjacency_device, dtype=torch.bool)
@@ -106,10 +114,20 @@ def _log_remaining_neuron_top_dla_logits(
     w_out_cache = {}
 
     logger.info("Remaining neuron top DLA logits")
+    logger.info(
+        "  setup: kept_neurons=%d/%d n_logits=%d vocab=%d device=%s",
+        len(kept_neurons),
+        graph.n_neurons,
+        graph.n_logits,
+        W_U.shape[1],
+        graph.adjacency_device,
+    )
+    logger.info("  timing: setup %.3fs", elapsed_since(stage_start))
     if not kept_neurons:
         logger.info("  no remaining neurons")
         return
 
+    stage_start = time.perf_counter()
     logit_weights = torch.zeros(
         graph.n_nodes,
         dtype=graph.adjacency_matrix.dtype,
@@ -121,8 +139,11 @@ def _log_remaining_neuron_top_dla_logits(
             dtype=graph.adjacency_matrix.dtype,
         )
     influence_scores = compute_node_influence(graph.adjacency_matrix, logit_weights)
+    logger.info("  timing: probability-weighted node influence %.3fs", elapsed_since(stage_start))
+
     logit_influence_by_neuron = None
     if graph.n_logits:
+        stage_start = time.perf_counter()
         logit_start = graph.n_neurons + graph.n_tokens
         logit_basis = torch.zeros(
             graph.n_logits,
@@ -138,6 +159,13 @@ def _log_remaining_neuron_top_dla_logits(
             graph.adjacency_matrix,
             logit_basis,
         ).T[: graph.n_neurons]
+        logger.info(
+            "  timing: per-logit node influence %.3fs shape=%s",
+            elapsed_since(stage_start),
+            tuple(logit_influence_by_neuron.shape),
+        )
+
+    stage_start = time.perf_counter()
     valid_target_positions = [
         i for i, target in enumerate(graph.logit_targets)
         if 0 <= target.vocab_idx < W_U.shape[1]
@@ -153,6 +181,9 @@ def _log_remaining_neuron_top_dla_logits(
     )
     neuron_metadata = []
     write_vectors = []
+    logger.info("  timing: target setup %.3fs valid_targets=%d", elapsed_since(stage_start), len(valid_target_positions))
+
+    stage_start = time.perf_counter()
     for neuron_idx in kept_neurons:
         location = graph.neuron_locations[neuron_idx]
         layer = int(location[0].item())
@@ -169,8 +200,21 @@ def _log_remaining_neuron_top_dla_logits(
         w_out_row = w_out_cache[layer][neuron_number].to(device=W_U.device, dtype=W_U.dtype)
         write_vectors.append(activation * w_out_row)
         neuron_metadata.append((neuron_idx, layer, token_pos, neuron_number))
+    logger.info(
+        "  timing: collect write vectors %.3fs layers_cached=%d",
+        elapsed_since(stage_start),
+        len(w_out_cache),
+    )
 
+    stage_start = time.perf_counter()
     dla_matrix = torch.stack(write_vectors) @ W_U
+    logger.info(
+        "  timing: batched DLA matmul %.3fs shape=%s",
+        elapsed_since(stage_start),
+        tuple(dla_matrix.shape),
+    )
+
+    stage_start = time.perf_counter()
     if len(target_vocab_indices):
         normalized_dla_matrix = dla_matrix / dla_matrix.norm(dim=1, keepdim=True).clamp(min=1e-12)
         rank_scores = (normalized_dla_matrix[:, target_vocab_indices] * target_probs).mean(dim=1)
@@ -192,7 +236,9 @@ def _log_remaining_neuron_top_dla_logits(
         key=lambda record: record[0],
         reverse=True,
     )
+    logger.info("  timing: rank score + sort %.3fs", elapsed_since(stage_start))
 
+    stage_start = time.perf_counter()
     for rank_score, row_idx, neuron_idx, layer, token_pos, neuron_number in neuron_records:
         dla = dla_matrix[row_idx]
         k = min(top_k, int(dla.numel()))
@@ -219,6 +265,8 @@ def _log_remaining_neuron_top_dla_logits(
                 for value, idx in zip(influence_values, influence_indices, strict=True)
             )
             logger.info("    top influence logits: %s", influence_formatted)
+    logger.info("  timing: format + emit logs %.3fs", elapsed_since(stage_start))
+    logger.info("  timing: remaining-neuron DLA total %.3fs", elapsed_since(total_start))
 
 
 def _log_graph_summary(graph: Graph, *, logger: logging.Logger, stage: str) -> None:
