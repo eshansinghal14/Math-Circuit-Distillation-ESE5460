@@ -388,7 +388,7 @@ def build_super_graph(
         best_k = 1
         best_score = torch.tensor(float("-inf"), device=B_weighted.device)
         best_assignments_valid = torch.zeros(len(valid_directions), dtype=torch.long, device=B_weighted.device)
-        for candidate_k in range(1, min(10, len(valid_directions)) + 1):
+        for candidate_k in range(1, min(50, len(valid_directions)) + 1):
             candidate_assignments = kmeans(valid_directions, candidate_k, dist_type="cossim")
             score = silhouette_score(valid_directions, candidate_assignments, dist_type="cossim")
             print(f"k={candidate_k} silhouette_score={float(score.item()):.6g}")
