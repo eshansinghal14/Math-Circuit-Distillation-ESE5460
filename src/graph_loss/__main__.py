@@ -138,12 +138,20 @@ def _log_remaining_neuron_top_dla_logits(
             graph.adjacency_matrix,
             logit_basis,
         ).T[: graph.n_neurons]
-    kept_neurons = sorted(
-        kept_neurons,
-        key=lambda neuron_idx: float(influence_scores[neuron_idx].item()),
-        reverse=True,
+    valid_target_positions = [
+        i for i, target in enumerate(graph.logit_targets)
+        if 0 <= target.vocab_idx < W_U.shape[1]
+    ]
+    target_vocab_indices = torch.tensor(
+        [graph.logit_targets[i].vocab_idx for i in valid_target_positions],
+        device=W_U.device,
+        dtype=torch.long,
     )
-
+    target_probs = graph.logit_probabilities[valid_target_positions].to(
+        device=W_U.device,
+        dtype=W_U.dtype,
+    )
+    neuron_records = []
     for neuron_idx in kept_neurons:
         location = graph.neuron_locations[neuron_idx]
         layer = int(location[0].item())
@@ -159,6 +167,16 @@ def _log_remaining_neuron_top_dla_logits(
         activation = graph.neuron_activations[neuron_idx].to(device=W_U.device, dtype=W_U.dtype)
         w_out_row = w_out_cache[layer][neuron_number].to(device=W_U.device, dtype=W_U.dtype)
         dla = (activation * w_out_row) @ W_U
+        if len(target_vocab_indices):
+            normalized_dla = dla / dla.norm().clamp(min=1e-12)
+            rank_score = (normalized_dla[target_vocab_indices] * target_probs).mean()
+        else:
+            rank_score = torch.tensor(0.0, device=W_U.device, dtype=W_U.dtype)
+        neuron_records.append((float(rank_score.item()), neuron_idx, layer, token_pos, neuron_number, dla))
+
+    neuron_records.sort(key=lambda record: record[0], reverse=True)
+
+    for rank_score, neuron_idx, layer, token_pos, neuron_number, dla in neuron_records:
         k = min(top_k, int(dla.numel()))
         values, indices = torch.topk(dla.detach().float().cpu(), k=k)
         formatted = ", ".join(
@@ -166,10 +184,11 @@ def _log_remaining_neuron_top_dla_logits(
             for value, idx in zip(values, indices, strict=True)
         )
         logger.info(
-            "  neuron %d layer=%d token=%d influence=%.6g: %s",
+            "  neuron %d layer=%d token=%d rank_score=%.6g influence=%.6g: %s",
             neuron_number,
             layer,
             token_pos,
+            rank_score,
             float(influence_scores[neuron_idx].item()),
             formatted,
         )
