@@ -363,7 +363,7 @@ def build_super_graph(
             plt.ylabel("Neuron score")
             plt.title("Output-node neuron scores, sorted high to low")
             plt.tight_layout()
-            plt.show()
+            plt.savefig("output_node_scores.png")
         return kept_neurons[output_node_positions], neuron_scores[output_node_positions.to(device=neuron_scores.device)].to(
             device=kept_neurons.device,
         )
