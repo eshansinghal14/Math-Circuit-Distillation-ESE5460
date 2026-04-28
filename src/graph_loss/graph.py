@@ -432,7 +432,6 @@ def build_super_graph(
         )
 
         dla_normalized = dla_matrix / dla_matrix.norm(dim=1, keepdim=True).clamp(min=1e-12)
-        log_output_dla_silhouette_scores(dla_normalized)
         target_probabilities = logit_probabilities.to(device=device, dtype=dla_matrix.dtype)
         neuron_scores = (
             dla_normalized[:, target_vocab_indices] * target_probabilities
@@ -441,6 +440,8 @@ def build_super_graph(
         elbow_count = find_output_elbow_count(sorted_scores)
         output_node_positions = sorted_positions[:elbow_count].to(device=kept_neurons.device)
         output_dla = dla_normalized[sorted_positions[:elbow_count]]
+
+        log_output_dla_silhouette_scores(output_dla)
 
         return (
             kept_neurons[output_node_positions],
