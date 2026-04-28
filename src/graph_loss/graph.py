@@ -329,6 +329,75 @@ def build_super_graph(
         distance_from_diagonal = (1 - x) - y
         return int(distance_from_diagonal.argmax().item()) + 1
 
+    def kmeans_cossim(X: torch.Tensor, k: int, n_iter: int = 100) -> torch.Tensor:
+        if len(X) == 0:
+            raise ValueError("kmeans_cossim requires at least one point")
+        if k <= 0:
+            raise ValueError("kmeans_cossim requires k > 0")
+        k = min(k, len(X))
+
+        def pairwise_dists(points: torch.Tensor, centers: torch.Tensor) -> torch.Tensor:
+            points_norm = points / points.norm(dim=1, keepdim=True).clamp(min=1e-12)
+            centers_norm = centers / centers.norm(dim=1, keepdim=True).clamp(min=1e-12)
+            return 1 - points_norm @ centers_norm.T
+
+        centers = [X[torch.randint(len(X), (1,), device=X.device).item()]]
+        for _ in range(k - 1):
+            dists = pairwise_dists(X, torch.stack(centers)).min(dim=1).values
+            init_weights = dists - dists.min()
+            total_weight = init_weights.sum()
+            if not torch.isfinite(total_weight) or total_weight <= 0:
+                centers.append(X[torch.randint(len(X), (1,), device=X.device).item()])
+            else:
+                centers.append(X[torch.multinomial(init_weights / total_weight, 1).item()])
+        centers_t = torch.stack(centers)
+
+        for _ in range(n_iter):
+            assignments = pairwise_dists(X, centers_t).argmin(dim=1)
+            new_centers = torch.stack([
+                X[assignments == i].mean(dim=0)
+                if (assignments == i).any()
+                else centers_t[i]
+                for i in range(k)
+            ])
+            if (new_centers - centers_t).norm() < 1e-6:
+                break
+            centers_t = new_centers
+
+        return assignments
+
+    def silhouette_score_cossim(X: torch.Tensor, assignments: torch.Tensor) -> torch.Tensor:
+        unique_assignments = torch.unique(assignments)
+        if len(unique_assignments) <= 1 or len(unique_assignments) >= len(X):
+            return torch.tensor(float("nan"), device=X.device)
+
+        X_norm = X / X.norm(dim=1, keepdim=True).clamp(min=1e-12)
+        dists = 1 - X_norm @ X_norm.T
+        scores = []
+        for i in range(len(X)):
+            same_cluster = assignments == assignments[i]
+            other_clusters = unique_assignments[unique_assignments != assignments[i]]
+            same_cluster[i] = False
+            a = dists[i, same_cluster].mean() if same_cluster.any() else torch.tensor(0.0, device=X.device)
+            b = torch.stack([
+                dists[i, assignments == cluster].mean()
+                for cluster in other_clusters
+            ]).min()
+            scores.append((b - a) / torch.maximum(a, b).clamp(min=1e-12))
+
+        return torch.stack(scores).mean()
+
+    def log_output_dla_silhouette_scores(dla_normalized: torch.Tensor) -> None:
+        if len(dla_normalized) == 0:
+            logger.info("  Output-node normalized DLA kmeans silhouette: no vectors")
+            return
+
+        logger.info("  Output-node normalized DLA kmeans silhouette scores")
+        for candidate_k in range(1, min(10, len(dla_normalized)) + 1):
+            assignments = kmeans_cossim(dla_normalized, candidate_k)
+            score = silhouette_score_cossim(dla_normalized, assignments)
+            logger.info("    k=%d silhouette_score=%.6g", candidate_k, float(score.item()))
+
     def build_output_node():
         kept_neurons = torch.where(kept_neuron_mask)[0]
         device = model.unembed.W_U.device
@@ -363,6 +432,7 @@ def build_super_graph(
         )
 
         dla_normalized = dla_matrix / dla_matrix.norm(dim=1, keepdim=True).clamp(min=1e-12)
+        log_output_dla_silhouette_scores(dla_normalized)
         target_probabilities = logit_probabilities.to(device=device, dtype=dla_matrix.dtype)
         neuron_scores = (
             dla_normalized[:, target_vocab_indices] * target_probabilities
