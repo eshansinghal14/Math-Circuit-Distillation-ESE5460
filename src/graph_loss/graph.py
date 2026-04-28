@@ -333,18 +333,9 @@ def build_super_graph(
         if score_range.abs() <= 1e-12:
             return n_scores
 
-        window = min(11, n_scores)
-        if window % 2 == 0:
-            window -= 1
-        half_window = window // 2
-        smoothed_scores = torch.stack([
-            sorted_scores[max(0, i - half_window): min(n_scores, i + half_window + 1)].mean()
-            for i in range(n_scores)
-        ])
-
         x = torch.linspace(0, 1, n_scores, device=sorted_scores.device, dtype=sorted_scores.dtype)
-        y = (smoothed_scores - smoothed_scores[-1]) / (
-            smoothed_scores[0] - smoothed_scores[-1]
+        y = (sorted_scores - sorted_scores[-1]) / (
+            sorted_scores[0] - sorted_scores[-1]
         ).clamp(min=1e-12)
         distance_from_diagonal = y - (1 - x)
         return int(distance_from_diagonal.argmax().item()) + 1
@@ -367,7 +358,7 @@ def build_super_graph(
             write_vectors.append(activation * w_out_cache[layer][neuron_id].to(dtype=W_U.dtype))
 
         if not write_vectors:
-            return kept_neurons[:0], torch.empty(0, device=kept_neurons.device), 0
+            return kept_neurons[:0], torch.empty(0, device=kept_neurons.device), 0, torch.empty(0)
 
         dla_matrix = torch.stack(write_vectors) @ W_U
         target_vocab_indices = torch.tensor(
@@ -382,25 +373,27 @@ def build_super_graph(
         elbow_count = find_output_elbow_count(sorted_scores)
         output_node_positions = sorted_positions[:elbow_count].to(device=kept_neurons.device)
 
-        if neuron_scores.numel():
-            sorted_scores = torch.sort(neuron_scores.detach().float().cpu(), descending=True).values
-            plt.figure(figsize=(8, 4))
-            plt.plot(sorted_scores.tolist(), marker="o")
-            plt.xlabel("Output-node neuron rank")
-            plt.ylabel("Neuron score")
-            plt.title("Output-node neuron scores, sorted high to low")
-            plt.tight_layout()
-            plt.savefig("output_node_scores.png")
-
         return kept_neurons[output_node_positions], neuron_scores[output_node_positions.to(device=neuron_scores.device)].to(
             device=kept_neurons.device,
-        ), elbow_count
+        ), elbow_count, sorted_scores.detach().float().cpu()
 
-    def log_output_node(output_node_indices, output_node_scores, elbow_count):
+    def log_output_node(output_node_indices, output_node_scores, elbow_count, all_sorted_scores):
         logger.info("  Output node members: %d", int(output_node_indices.numel()))
         sorted_positions = torch.argsort(output_node_scores, descending=True)
         output_node_indices = output_node_indices[sorted_positions]
         output_node_scores = output_node_scores[sorted_positions]
+        if all_sorted_scores.numel():
+            plt.figure(figsize=(8, 4))
+            plt.plot(all_sorted_scores.tolist(), marker="o")
+            if 0 < elbow_count <= int(all_sorted_scores.numel()):
+                plt.axvline(elbow_count - 1, color="red", linestyle="--")
+            plt.xlabel("Neuron rank")
+            plt.ylabel("Neuron score")
+            plt.title("Output-node neuron scores, sorted high to low")
+            plt.tight_layout()
+            plt.savefig("output_node_scores.png")
+            plt.close()
+
         if output_node_scores.numel():
             logger.info(
                 "  Output node elbow: selected=%d elbow_score=%.6g max_score=%.6g",
@@ -519,8 +512,8 @@ def build_super_graph(
         return assignments, k
 
     logger.info("  Building output node")
-    output_node_indices, output_node_scores, output_node_count = build_output_node()
-    log_output_node(output_node_indices, output_node_scores, output_node_count)
+    output_node_indices, output_node_scores, output_node_count, all_output_scores = build_output_node()
+    log_output_node(output_node_indices, output_node_scores, output_node_count, all_output_scores)
     
     
     logger.info("  Clustering supernodes")
