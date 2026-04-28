@@ -337,7 +337,7 @@ def build_super_graph(
         y = (sorted_scores - sorted_scores[-1]) / (
             sorted_scores[0] - sorted_scores[-1]
         ).clamp(min=1e-12)
-        distance_from_diagonal = y - (1 - x)
+        distance_from_diagonal = (1 - x) - y
         return int(distance_from_diagonal.argmax().item()) + 1
 
     def build_output_node():
