@@ -424,6 +424,8 @@ def build_super_graph(
                 torch.empty((0, W_U.shape[1]), device=device, dtype=W_U.dtype),
                 0,
                 torch.empty(0),
+                0,
+                torch.empty(0),
             )
 
         dla_matrix = torch.stack(write_vectors) @ W_U
@@ -433,37 +435,56 @@ def build_super_graph(
             dtype=torch.long,
         )
 
-        dla_normalized = (dla_matrix / dla_matrix.norm(dim=1, keepdim=True).clamp(min=1e-12))[:, target_vocab_indices]
-        dla_probs_sim = dla_normalized @ logit_probabilities.to(device=dla_normalized.device, dtype=dla_normalized.dtype).T
-        sorted_dla_probs_sim, sorted_dla_probs_sim_indices = torch.sort(dla_probs_sim, descending=True)
-        plt.figure(figsize=(8, 4))
-        plt.plot(sorted_dla_probs_sim.tolist(), marker="o")
-        plt.xlabel("Logit rank")
-        plt.ylabel("DLA-logit similarity")
-        plt.title("Output-node DLA-logit similarity, sorted high to low")
-        plt.tight_layout()
-        plt.savefig("output_node_dla_logit_similarity.png")
-        plt.close()
+        target_dla_matrix = dla_matrix[:, target_vocab_indices]
+        target_dla_directions = target_dla_matrix / target_dla_matrix.norm(
+            dim=1,
+            keepdim=True,
+        ).clamp(min=1e-12)
+        target_probability_direction = logit_probabilities.to(
+            device=target_dla_directions.device,
+            dtype=target_dla_directions.dtype,
+        )
+        target_probability_direction = target_probability_direction / (
+            target_probability_direction.norm().clamp(min=1e-12)
+        )
+        dla_probability_similarities = target_dla_directions @ target_probability_direction.T
+        sorted_dla_probability_similarities, cossim_candidate_positions = torch.sort(
+            dla_probability_similarities,
+            descending=True,
+        )
 
+        cossim_candidate_count = find_output_elbow_count(sorted_dla_probability_similarities)
+        cossim_candidate_positions = cossim_candidate_positions[:cossim_candidate_count]
+        candidate_dla_matrix = dla_matrix[cossim_candidate_positions]
+        candidate_activation_magnitudes = torch.stack(activation_magnitudes)[
+            cossim_candidate_positions
+        ].clamp(min=1e-12)
         
-        target_probabilities = logit_probabilities.to(device=device, dtype=dla_matrix.dtype)
+        target_probabilities = logit_probabilities.to(device=device, dtype=candidate_dla_matrix.dtype)
         neuron_scores = (
-            dla_matrix[:, target_vocab_indices] * target_probabilities
-        ).sum(dim=-1) / torch.stack(activation_magnitudes).clamp(min=1e-12)
+            candidate_dla_matrix[:, target_vocab_indices] * target_probabilities
+        ).sum(dim=-1) / candidate_activation_magnitudes
         sorted_scores, sorted_positions = torch.sort(neuron_scores, descending=True)
         elbow_count = find_output_elbow_count(sorted_scores)
-        output_node_positions = sorted_positions[:elbow_count].to(device=kept_neurons.device)
-        output_dla_normalized = dla_normalized[output_node_positions]
+        selected_candidate_positions = sorted_positions[:elbow_count]
+        selected_kept_positions = cossim_candidate_positions[selected_candidate_positions].to(
+            device=kept_neurons.device,
+        )
+        output_dla_normalized = target_dla_directions[
+            cossim_candidate_positions[selected_candidate_positions]
+        ]
         log_output_dla_silhouette_scores(output_dla_normalized)
 
         return (
-            kept_neurons[output_node_positions],
-            neuron_scores[output_node_positions.to(device=neuron_scores.device)].to(
+            kept_neurons[selected_kept_positions],
+            neuron_scores[selected_candidate_positions.to(device=neuron_scores.device)].to(
                 device=kept_neurons.device,
             ),
-            dla_matrix[output_node_positions],
+            candidate_dla_matrix[selected_candidate_positions],
             elbow_count,
             sorted_scores.detach().float().cpu(),
+            cossim_candidate_count,
+            sorted_dla_probability_similarities.detach().float().cpu(),
         )
 
     def decode_vocab_token(vocab_idx: int) -> str:
@@ -521,7 +542,15 @@ def build_super_graph(
             for value, idx in zip(values, indices, strict=True)
         )
 
-    def log_output_node(output_node_indices, output_node_scores, output_node_dla, elbow_count, all_sorted_scores):
+    def log_output_node(
+        output_node_indices,
+        output_node_scores,
+        output_node_dla,
+        elbow_count,
+        all_sorted_scores,
+        cossim_candidate_count,
+        all_sorted_dla_probability_similarities,
+    ):
         logger.info("  Output node members: %d", int(output_node_indices.numel()))
         sorted_positions = torch.argsort(output_node_scores, descending=True)
         output_node_indices = output_node_indices[sorted_positions]
@@ -541,6 +570,18 @@ def build_super_graph(
             plt.title("Output-node normalized DLA scores, sorted high to low")
             plt.tight_layout()
             plt.savefig("output_node_scores.png")
+            plt.close()
+
+        if all_sorted_dla_probability_similarities.numel():
+            plt.figure(figsize=(8, 4))
+            plt.plot(all_sorted_dla_probability_similarities.tolist(), marker="o")
+            if 0 < cossim_candidate_count <= int(all_sorted_dla_probability_similarities.numel()):
+                plt.axvline(cossim_candidate_count - 1, color="red", linestyle="--")
+            plt.xlabel("Neuron rank")
+            plt.ylabel("DLA-probability cosine similarity")
+            plt.title("Output-node DLA-probability similarity, sorted high to low")
+            plt.tight_layout()
+            plt.savefig("output_node_dla_probability_similarity.png")
             plt.close()
 
         if output_node_scores.numel():
@@ -586,7 +627,11 @@ def build_super_graph(
             logger.info("  Output node normalized DLA cossim matrix: []")
             return
 
-        cossim_matrix = output_node_dla @ output_node_dla.T
+        output_node_dla_normalized = output_node_dla / output_node_dla.norm(
+            dim=1,
+            keepdim=True,
+        ).clamp(min=1e-12)
+        cossim_matrix = output_node_dla_normalized @ output_node_dla_normalized.T
         logger.info("  Output node normalized DLA cossim matrix:")
         for row in cossim_matrix.detach().float().cpu().tolist():
             logger.info("    [%s]", ", ".join(f"{value:.6g}" for value in row))
@@ -598,6 +643,8 @@ def build_super_graph(
         output_node_dla,
         output_node_count,
         all_output_scores,
+        cossim_candidate_count,
+        all_output_dla_probability_similarities,
     ) = build_output_node()
     log_output_node(
         output_node_indices,
@@ -605,6 +652,8 @@ def build_super_graph(
         output_node_dla,
         output_node_count,
         all_output_scores,
+        cossim_candidate_count,
+        all_output_dla_probability_similarities,
     )
 
     logger.info("  Aggregating output-node supergraph")
