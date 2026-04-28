@@ -341,7 +341,7 @@ def build_super_graph(
             write_vectors.append(activation * w_out_cache[layer][neuron_id].to(dtype=W_U.dtype))
 
         if not write_vectors:
-            return kept_neurons[:0]
+            return kept_neurons[:0], torch.empty(0, device=kept_neurons.device)
 
         dla_matrix = torch.stack(write_vectors) @ W_U
         target_vocab_indices = torch.tensor(
@@ -356,20 +356,26 @@ def build_super_graph(
         dla_kl = (expanded_logit_probabilities * (torch.log(expanded_logit_probabilities.clamp(min=1e-12)) - log_softmax_dla_matrix_scaled)).sum(dim=-1)
         
         output_node_positions = torch.where(dla_kl <= kl_threshold)[0].to(device=kept_neurons.device)
-        return kept_neurons[output_node_positions]
+        return kept_neurons[output_node_positions], dla_kl[output_node_positions.to(device=dla_kl.device)].to(
+            device=kept_neurons.device,
+        )
 
-    def log_output_node(output_node_indices):
+    def log_output_node(output_node_indices, output_node_kl):
         logger.info("  Output node members: %d", int(output_node_indices.numel()))
-        for neuron_idx in output_node_indices.tolist():
+        sorted_positions = torch.argsort(output_node_kl)
+        output_node_indices = output_node_indices[sorted_positions]
+        output_node_kl = output_node_kl[sorted_positions]
+        for neuron_idx, kl_value in zip(output_node_indices.tolist(), output_node_kl.tolist(), strict=True):
             layer = int(graph.neuron_locations[neuron_idx, 0].item())
             token_pos = int(graph.neuron_locations[neuron_idx, 1].item())
             neuron_id = int(graph.neuron_locations[neuron_idx, 2].item())
             logger.info(
-                "    graph_neuron_idx=%d layer=%d token=%d neuron=%d",
+                "    graph_neuron_idx=%d layer=%d token=%d neuron=%d kl=%.6g",
                 neuron_idx,
                 layer,
                 token_pos,
                 neuron_id,
+                float(kl_value),
             )
 
         if output_node_indices.numel() == 0:
@@ -382,10 +388,9 @@ def build_super_graph(
             keepdim=True,
         ).clamp(min=1e-12)
         cossim_matrix = output_influence_normalized @ output_influence_normalized.T
-        logger.info(
-            "  Output node influence cossim matrix:\n%s",
-            cossim_matrix.detach().float().cpu(),
-        )
+        logger.info("  Output node influence cossim matrix:")
+        for row in cossim_matrix.detach().float().cpu().tolist():
+            logger.info("    [%s]", ", ".join(f"{value:.6g}" for value in row))
 
     def build_supernodes_svd(B_weighted, coverage_threshold, min_cluster_influence):
         """
@@ -470,8 +475,8 @@ def build_super_graph(
         return assignments, k
 
     logger.info("  Building output node")
-    output_node_indices = build_output_node(epsilon)
-    log_output_node(output_node_indices)
+    output_node_indices, output_node_kl = build_output_node(epsilon)
+    log_output_node(output_node_indices, output_node_kl)
     
     
     logger.info("  Clustering supernodes")
