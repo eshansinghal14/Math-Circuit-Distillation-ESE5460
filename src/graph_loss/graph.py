@@ -349,10 +349,11 @@ def build_super_graph(
             device=device,
             dtype=torch.long,
         )
-        log_softmax_dla_matrix = F.log_softmax(dla_matrix, dim=-1)[:, target_vocab_indices]
-        expanded_logit_probabilities = logit_probabilities.unsqueeze(0).expand_as(log_softmax_dla_matrix)
+        log_softmax_dla_matrix_scaled = F.log_softmax(dla_matrix[:, target_vocab_indices], dim=-1)
+        logit_probs_scaled = logit_probabilities / logit_probabilities.sum()
+        expanded_logit_probabilities = logit_probs_scaled.unsqueeze(0).expand_as(log_softmax_dla_matrix_scaled)
 
-        dla_kl = (expanded_logit_probabilities * (torch.log(expanded_logit_probabilities) - log_softmax_dla_matrix)).sum(dim=-1)
+        dla_kl = (expanded_logit_probabilities * (torch.log(expanded_logit_probabilities.clamp(min=1e-12)) - log_softmax_dla_matrix_scaled)).sum(dim=-1)
         
         output_node_positions = torch.where(dla_kl <= kl_threshold)[0]
         return kept_neurons[output_node_positions]
