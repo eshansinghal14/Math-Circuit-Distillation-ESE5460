@@ -7,7 +7,6 @@ from typing import NamedTuple
 
 import matplotlib.pyplot as plt
 import torch
-import torch.nn.functional as F
 
 from graph_loss.attribution.targets import LogitTarget
 from graph_loss.utils import UnifiedConfig, convert_nnsight_config_to_transformerlens
@@ -358,7 +357,13 @@ def build_super_graph(
             write_vectors.append(activation * w_out_cache[layer][neuron_id].to(dtype=W_U.dtype))
 
         if not write_vectors:
-            return kept_neurons[:0], torch.empty(0, device=kept_neurons.device), 0, torch.empty(0)
+            return (
+                kept_neurons[:0],
+                torch.empty(0, device=kept_neurons.device),
+                torch.empty((0, W_U.shape[1]), device=device, dtype=W_U.dtype),
+                0,
+                torch.empty(0),
+            )
 
         dla_matrix = torch.stack(write_vectors) @ W_U
         target_vocab_indices = torch.tensor(
@@ -372,16 +377,55 @@ def build_super_graph(
         sorted_scores, sorted_positions = torch.sort(neuron_scores, descending=True)
         elbow_count = find_output_elbow_count(sorted_scores)
         output_node_positions = sorted_positions[:elbow_count].to(device=kept_neurons.device)
+        output_dla = dla_matrix[sorted_positions[:elbow_count]]
 
-        return kept_neurons[output_node_positions], neuron_scores[output_node_positions.to(device=neuron_scores.device)].to(
-            device=kept_neurons.device,
-        ), elbow_count, sorted_scores.detach().float().cpu()
+        return (
+            kept_neurons[output_node_positions],
+            neuron_scores[output_node_positions.to(device=neuron_scores.device)].to(
+                device=kept_neurons.device,
+            ),
+            output_dla,
+            elbow_count,
+            sorted_scores.detach().float().cpu(),
+        )
 
-    def log_output_node(output_node_indices, output_node_scores, elbow_count, all_sorted_scores):
+    def decode_vocab_token(vocab_idx: int) -> str:
+        token = model.tokenizer.decode([vocab_idx])
+        return token.replace("\n", "\\n").replace("\r", "\\r")
+
+    def format_top_dla_logits(dla_vector: torch.Tensor, top_k: int = 10) -> str:
+        if dla_vector.numel() == 0:
+            return "none"
+        k = min(top_k, int(dla_vector.numel()))
+        values, indices = torch.topk(dla_vector.detach().float().cpu(), k=k)
+        return ", ".join(
+            f"{decode_vocab_token(int(idx.item()))!r}:{float(value.item()):.6g}"
+            for value, idx in zip(values, indices, strict=True)
+        )
+
+    def format_top_logit_influence_logits(
+        influence_vector: torch.Tensor,
+        top_k: int = 10,
+    ) -> str:
+        if influence_vector.numel() == 0:
+            return "none"
+        k = min(top_k, int(influence_vector.numel()))
+        values, indices = torch.topk(influence_vector.detach().float().cpu(), k=k)
+        return ", ".join(
+            f"{graph.logit_targets[int(idx.item())].token_str!r}:{float(value.item()):.6g}"
+            for value, idx in zip(values, indices, strict=True)
+        )
+
+    def log_output_node(output_node_indices, output_node_scores, output_node_dla, elbow_count, all_sorted_scores):
         logger.info("  Output node members: %d", int(output_node_indices.numel()))
         sorted_positions = torch.argsort(output_node_scores, descending=True)
         output_node_indices = output_node_indices[sorted_positions]
         output_node_scores = output_node_scores[sorted_positions]
+        output_node_dla = output_node_dla[sorted_positions.to(device=output_node_dla.device)]
+        output_logit_influence_vectors = node_influence_vectors[
+            output_node_indices,
+            logit_start: logit_start + n_logits,
+        ]
         if all_sorted_scores.numel():
             plt.figure(figsize=(8, 4))
             plt.plot(all_sorted_scores.tolist(), marker="o")
@@ -402,7 +446,9 @@ def build_super_graph(
                 float(output_node_scores[0].item()),
             )
 
-        for neuron_idx, score in zip(output_node_indices.tolist(), output_node_scores.tolist(), strict=True):
+        for row_idx, (neuron_idx, score) in enumerate(
+            zip(output_node_indices.tolist(), output_node_scores.tolist(), strict=True)
+        ):
             layer = int(graph.neuron_locations[neuron_idx, 0].item())
             token_pos = int(graph.neuron_locations[neuron_idx, 1].item())
             neuron_id = int(graph.neuron_locations[neuron_idx, 2].item())
@@ -413,6 +459,14 @@ def build_super_graph(
                 token_pos,
                 neuron_id,
                 float(score),
+            )
+            logger.info(
+                "      top DLA logits: %s",
+                format_top_dla_logits(output_node_dla[row_idx]),
+            )
+            logger.info(
+                "      top logit influence logits: %s",
+                format_top_logit_influence_logits(output_logit_influence_vectors[row_idx]),
             )
 
         if output_node_indices.numel() == 0:
@@ -552,8 +606,20 @@ def build_super_graph(
         return assignments, k
 
     logger.info("  Building output node")
-    output_node_indices, output_node_scores, output_node_count, all_output_scores = build_output_node()
-    log_output_node(output_node_indices, output_node_scores, output_node_count, all_output_scores)
+    (
+        output_node_indices,
+        output_node_scores,
+        output_node_dla,
+        output_node_count,
+        all_output_scores,
+    ) = build_output_node()
+    log_output_node(
+        output_node_indices,
+        output_node_scores,
+        output_node_dla,
+        output_node_count,
+        all_output_scores,
+    )
     log_all_node_influence_silhouette_scores()
     
     

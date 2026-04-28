@@ -1,9 +1,7 @@
 import argparse
 import logging
-import time
 
 import torch
-import torch.nn.functional as F
 from huggingface_hub import login
 
 from graph_loss.align import compute_supernode_dla
@@ -13,7 +11,6 @@ from graph_loss.graph import (
     PruneResult,
     SuperGraph,
     build_super_graph,
-    compute_node_influence,
     extract_supernode_members,
     prune_graph,
 )
@@ -87,208 +84,6 @@ def _log_supernode_top_dla_logits(
             int(member["size"]),
             formatted,
         )
-
-
-@torch.no_grad()
-def _log_remaining_neuron_top_dla_logits(
-    graph: Graph,
-    model: TransformerLensReplacementModel,
-    *,
-    logger: logging.Logger,
-    prune_result: PruneResult = None,
-    top_k: int = 10,
-) -> None:
-    def elapsed_since(start: float) -> float:
-        if graph.adjacency_device.type == "cuda":
-            torch.cuda.synchronize(graph.adjacency_device)
-        if compute_device.type == "cuda" and compute_device != graph.adjacency_device:
-            torch.cuda.synchronize(compute_device)
-        return time.perf_counter() - start
-
-    total_start = time.perf_counter()
-    stage_start = total_start
-    source_w_u_device = model.unembed.W_U.device
-    compute_device = torch.device("cuda") if torch.cuda.is_available() else source_w_u_device
-    W_U = model.unembed.W_U.to(device=compute_device)
-    W_U_T = W_U.T.contiguous()
-    kept_mask = (
-        prune_result.node_mask[: graph.n_neurons].to(device=graph.adjacency_device, dtype=torch.bool)
-        if prune_result is not None
-        else torch.ones(graph.n_neurons, device=graph.adjacency_device, dtype=torch.bool)
-    )
-    kept_neurons = torch.where(kept_mask)[0].tolist()
-    w_out_cache = {}
-
-    logger.info("Remaining neuron top DLA logits")
-    logger.info(
-        "  setup: kept_neurons=%d/%d n_logits=%d vocab=%d graph_device=%s source_W_U_device=%s compute_device=%s W_U_device=%s W_U_T_device=%s W_U_dtype=%s",
-        len(kept_neurons),
-        graph.n_neurons,
-        graph.n_logits,
-        W_U.shape[1],
-        graph.adjacency_device,
-        source_w_u_device,
-        compute_device,
-        W_U.device,
-        W_U_T.device,
-        W_U.dtype,
-    )
-    logger.info("  timing: setup %.3fs", elapsed_since(stage_start))
-    if not kept_neurons:
-        logger.info("  no remaining neurons")
-        return
-
-    stage_start = time.perf_counter()
-    logit_weights = torch.zeros(
-        graph.n_nodes,
-        dtype=graph.adjacency_matrix.dtype,
-        device=graph.adjacency_device,
-    )
-    if graph.n_logits:
-        logit_weights[-graph.n_logits :] = graph.logit_probabilities.to(
-            device=graph.adjacency_device,
-            dtype=graph.adjacency_matrix.dtype,
-        )
-    influence_scores = compute_node_influence(graph.adjacency_matrix, logit_weights)
-    logger.info("  timing: probability-weighted node influence %.3fs", elapsed_since(stage_start))
-
-    logit_influence_by_neuron = None
-    if graph.n_logits:
-        stage_start = time.perf_counter()
-        logit_start = graph.n_neurons + graph.n_tokens
-        logit_basis = torch.zeros(
-            graph.n_logits,
-            graph.n_nodes,
-            dtype=graph.adjacency_matrix.dtype,
-            device=graph.adjacency_device,
-        )
-        logit_basis[
-            torch.arange(graph.n_logits, device=graph.adjacency_device),
-            logit_start + torch.arange(graph.n_logits, device=graph.adjacency_device),
-        ] = 1
-        logit_influence_by_neuron = compute_node_influence(
-            graph.adjacency_matrix,
-            logit_basis,
-        ).T[: graph.n_neurons]
-        logger.info(
-            "  timing: per-logit node influence %.3fs shape=%s",
-            elapsed_since(stage_start),
-            tuple(logit_influence_by_neuron.shape),
-        )
-
-    stage_start = time.perf_counter()
-    valid_target_positions = [
-        i for i, target in enumerate(graph.logit_targets)
-        if 0 <= target.vocab_idx < W_U.shape[1]
-    ]
-    target_vocab_indices = torch.tensor(
-        [graph.logit_targets[i].vocab_idx for i in valid_target_positions],
-        device=W_U.device,
-        dtype=torch.long,
-    )
-    target_probs = graph.logit_probabilities[valid_target_positions].to(
-        device=W_U.device,
-        dtype=W_U.dtype,
-    )
-    neuron_metadata = []
-    write_vectors = []
-    logger.info("  timing: target setup %.3fs valid_targets=%d", elapsed_since(stage_start), len(valid_target_positions))
-
-    stage_start = time.perf_counter()
-    for neuron_idx in kept_neurons:
-        location = graph.neuron_locations[neuron_idx]
-        layer = int(location[0].item())
-        token_pos = int(location[1].item())
-        neuron_number = int(location[2].item())
-
-        if layer not in w_out_cache:
-            old_mlp = model.blocks[layer].mlp.old_mlp
-            w_out_cache[layer] = model._row_oriented_weight(
-                old_mlp.W_out.to(device=compute_device)
-            )
-
-        activation = graph.neuron_activations[neuron_idx].to(device=W_U.device, dtype=W_U.dtype)
-        w_out_row = w_out_cache[layer][neuron_number].to(device=W_U.device, dtype=W_U.dtype)
-        write_vectors.append(activation * w_out_row)
-        neuron_metadata.append((neuron_idx, layer, token_pos, neuron_number))
-    logger.info(
-        "  timing: collect write vectors %.3fs layers_cached=%d",
-        elapsed_since(stage_start),
-        len(w_out_cache),
-    )
-
-    stage_start = time.perf_counter()
-    write_matrix = torch.stack(write_vectors)
-    logger.info(
-        "  batched DLA: write_shape=%s write_device=%s W_U_T_shape=%s W_U_T_device=%s vocab=%d",
-        tuple(write_matrix.shape),
-        write_matrix.device,
-        tuple(W_U_T.shape),
-        W_U_T.device,
-        W_U.shape[1],
-    )
-    dla_matrix = F.linear(write_matrix, W_U_T)
-    top_count = min(top_k, int(dla_matrix.shape[1]))
-    top_values, top_indices = torch.topk(dla_matrix, k=top_count, dim=1)
-    dla_norms = dla_matrix.norm(dim=1).clamp(min=1e-12)
-    logger.info(
-        "  timing: batched DLA %.3fs shape=%s",
-        elapsed_since(stage_start),
-        tuple(dla_matrix.shape),
-    )
-
-    stage_start = time.perf_counter()
-    if len(target_vocab_indices):
-        target_dla = dla_matrix[:, target_vocab_indices]
-        rank_scores = ((target_dla / dla_norms[:, None]) * target_probs).mean(dim=1)
-    else:
-        rank_scores = torch.zeros(len(neuron_metadata), device=W_U.device, dtype=W_U.dtype)
-
-    neuron_records = sorted(
-        [
-            (
-                float(rank_scores[row_idx].item()),
-                row_idx,
-                neuron_idx,
-                layer,
-                token_pos,
-                neuron_number,
-            )
-            for row_idx, (neuron_idx, layer, token_pos, neuron_number) in enumerate(neuron_metadata)
-        ],
-        key=lambda record: record[0],
-        reverse=True,
-    )
-    logger.info("  timing: rank score + sort %.3fs", elapsed_since(stage_start))
-
-    stage_start = time.perf_counter()
-    for rank_score, row_idx, neuron_idx, layer, token_pos, neuron_number in neuron_records:
-        values = top_values[row_idx].detach().float().cpu()
-        indices = top_indices[row_idx].detach().cpu()
-        formatted = ", ".join(
-            f"{_decode_vocab_token(model, int(idx.item()))!r}:{float(value.item()):.6g}"
-            for value, idx in zip(values, indices, strict=True)
-        )
-        logger.info(
-            "  neuron %d layer=%d token=%d rank_score=%.6g influence=%.6g: %s",
-            neuron_number,
-            layer,
-            token_pos,
-            rank_score,
-            float(influence_scores[neuron_idx].item()),
-            formatted,
-        )
-        if logit_influence_by_neuron is not None:
-            logit_influences = logit_influence_by_neuron[neuron_idx].detach().float().cpu()
-            influence_k = min(top_k, int(logit_influences.numel()))
-            influence_values, influence_indices = torch.topk(logit_influences, k=influence_k)
-            influence_formatted = ", ".join(
-                f"{graph.logit_targets[int(idx.item())].token_str!r}:{float(value.item()):.6g}"
-                for value, idx in zip(influence_values, influence_indices, strict=True)
-            )
-            logger.info("    top influence logits: %s", influence_formatted)
-    logger.info("  timing: format + emit logs %.3fs", elapsed_since(stage_start))
-    logger.info("  timing: remaining-neuron DLA total %.3fs", elapsed_since(total_start))
 
 
 def _log_graph_summary(graph: Graph, *, logger: logging.Logger, stage: str) -> None:
@@ -585,7 +380,6 @@ def main():
         logger.info("Applying prune masks to graph")
         graph = graph.apply_prune_result(prune_result)
 
-    _log_remaining_neuron_top_dla_logits(graph, model, logger=logger, prune_result=prune_result)
     logger.info("Running build_super_graph")
     supergraph = build_super_graph(
         graph,
