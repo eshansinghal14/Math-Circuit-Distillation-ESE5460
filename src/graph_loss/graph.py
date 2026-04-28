@@ -537,7 +537,7 @@ def build_super_graph(
             device=output_node_dla.device,
             dtype=torch.long,
         )
-        output_dla_normalized = output_node_dla / output_node_dla.norm(dim=1, keepdim=True).clamp(min=1e-12)[:, target_vocab_indices]
+        output_dla_normalized = (output_node_dla / output_node_dla.norm(dim=1, keepdim=True).clamp(min=1e-12)).to(device=output_node_dla.device)[:, target_vocab_indices]
         dla_probs_sim = output_dla_normalized @ logit_probabilities.to(device=output_dla_normalized.device, dtype=output_dla_normalized.dtype).T
         sorted_dla_probs_sim, sorted_dla_probs_sim_indices = torch.sort(dla_probs_sim, descending=True)
         plt.figure(figsize=(8, 4))
