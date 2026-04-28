@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import NamedTuple
 
+import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
 
@@ -349,14 +350,21 @@ def build_super_graph(
             device=device,
             dtype=torch.long,
         )
-        log_softmax_dla_matrix_scaled = F.log_softmax(dla_matrix[:, target_vocab_indices], dim=-1)
-        logit_probs_scaled = (logit_probabilities / logit_probabilities.sum()).to(device=device, dtype=log_softmax_dla_matrix_scaled.dtype)
-        expanded_logit_probabilities = logit_probs_scaled.unsqueeze(0).expand_as(log_softmax_dla_matrix_scaled)
 
-        dla_kl = (expanded_logit_probabilities * (torch.log(expanded_logit_probabilities.clamp(min=1e-12)) - log_softmax_dla_matrix_scaled)).sum(dim=-1)
-        
-        output_node_positions = torch.where(dla_kl <= kl_threshold)[0].to(device=kept_neurons.device)
-        return kept_neurons[output_node_positions], dla_kl[output_node_positions.to(device=dla_kl.device)].to(
+        target_probabilities = logit_probabilities.to(device=device, dtype=dla_matrix.dtype)
+        neuron_scores = (dla_matrix[:, target_vocab_indices] * target_probabilities).sum(dim=-1)
+        output_node_positions = torch.where(neuron_scores <= kl_threshold)[0].to(device=kept_neurons.device)
+        output_node_scores = neuron_scores[output_node_positions.to(device=neuron_scores.device)]
+        if output_node_scores.numel():
+            sorted_scores = torch.sort(output_node_scores.detach().float().cpu(), descending=True).values
+            plt.figure(figsize=(8, 4))
+            plt.plot(sorted_scores.tolist(), marker="o")
+            plt.xlabel("Output-node neuron rank")
+            plt.ylabel("Neuron score")
+            plt.title("Output-node neuron scores, sorted high to low")
+            plt.tight_layout()
+            plt.show()
+        return kept_neurons[output_node_positions], neuron_scores[output_node_positions.to(device=neuron_scores.device)].to(
             device=kept_neurons.device,
         )
 
