@@ -382,6 +382,16 @@ def build_super_graph(
         elbow_count = find_output_elbow_count(sorted_scores)
         output_node_positions = sorted_positions[:elbow_count].to(device=kept_neurons.device)
 
+        if output_node_scores.numel():
+            sorted_scores = torch.sort(output_node_scores.detach().float().cpu(), descending=True).values
+            plt.figure(figsize=(8, 4))
+            plt.plot(sorted_scores.tolist(), marker="o")
+            plt.xlabel("Output-node neuron rank")
+            plt.ylabel("Neuron score")
+            plt.title("Output-node neuron scores, sorted high to low")
+            plt.tight_layout()
+            plt.savefig("output_node_scores.png")
+
         return kept_neurons[output_node_positions], neuron_scores[output_node_positions.to(device=neuron_scores.device)].to(
             device=kept_neurons.device,
         ), elbow_count
@@ -411,16 +421,6 @@ def build_super_graph(
                 neuron_id,
                 float(score),
             )
-        
-        if output_node_scores.numel():
-            sorted_scores = torch.sort(output_node_scores.detach().float().cpu(), descending=True).values
-            plt.figure(figsize=(8, 4))
-            plt.plot(sorted_scores.tolist(), marker="o")
-            plt.xlabel("Output-node neuron rank")
-            plt.ylabel("Neuron score")
-            plt.title("Output-node neuron scores, sorted high to low")
-            plt.tight_layout()
-            plt.savefig("output_node_scores.png")
 
         if output_node_indices.numel() == 0:
             logger.info("  Output node influence cossim matrix: []")
