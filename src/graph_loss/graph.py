@@ -355,7 +355,7 @@ def build_super_graph(
 
         dla_kl = (expanded_logit_probabilities * (torch.log(expanded_logit_probabilities.clamp(min=1e-12)) - log_softmax_dla_matrix_scaled)).sum(dim=-1)
         
-        output_node_positions = torch.where(dla_kl <= kl_threshold)[0]
+        output_node_positions = torch.where(dla_kl <= kl_threshold)[0].to(device=kept_neurons.device)
         return kept_neurons[output_node_positions]
 
     def log_output_node(output_node_indices):
