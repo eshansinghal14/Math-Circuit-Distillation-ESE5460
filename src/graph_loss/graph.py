@@ -433,7 +433,18 @@ def build_super_graph(
             dtype=torch.long,
         )
 
-        dla_normalized = dla_matrix / dla_matrix.norm(dim=1, keepdim=True).clamp(min=1e-12)
+        dla_normalized = (dla_matrix / dla_matrix.norm(dim=1, keepdim=True).clamp(min=1e-12))[:, target_vocab_indices]
+        dla_probs_sim = dla_normalized @ logit_probabilities.to(device=dla_normalized.device, dtype=dla_normalized.dtype).T
+        sorted_dla_probs_sim, sorted_dla_probs_sim_indices = torch.sort(dla_probs_sim, descending=True)
+        plt.figure(figsize=(8, 4))
+        plt.plot(sorted_dla_probs_sim.tolist(), marker="o")
+        plt.xlabel("Logit rank")
+        plt.ylabel("DLA-logit similarity")
+        plt.title("Output-node DLA-logit similarity, sorted high to low")
+        plt.tight_layout()
+        plt.savefig("output_node_dla_logit_similarity.png")
+        plt.close()
+
         
         target_probabilities = logit_probabilities.to(device=device, dtype=dla_matrix.dtype)
         neuron_scores = (
@@ -531,23 +542,6 @@ def build_super_graph(
             plt.tight_layout()
             plt.savefig("output_node_scores.png")
             plt.close()
-
-        target_vocab_indices = torch.tensor(
-            [target.vocab_idx for target in graph.logit_targets],
-            device=output_node_dla.device,
-            dtype=torch.long,
-        )
-        output_dla_normalized = (output_node_dla / output_node_dla.norm(dim=1, keepdim=True).clamp(min=1e-12)).to(device=output_node_dla.device)[:, target_vocab_indices]
-        dla_probs_sim = output_dla_normalized @ logit_probabilities.to(device=output_dla_normalized.device, dtype=output_dla_normalized.dtype).T
-        sorted_dla_probs_sim, sorted_dla_probs_sim_indices = torch.sort(dla_probs_sim, descending=True)
-        plt.figure(figsize=(8, 4))
-        plt.plot(sorted_dla_probs_sim.tolist(), marker="o")
-        plt.xlabel("Logit rank")
-        plt.ylabel("DLA-logit similarity")
-        plt.title("Output-node DLA-logit similarity, sorted high to low")
-        plt.tight_layout()
-        plt.savefig("output_node_dla_logit_similarity.png")
-        plt.close()
 
         if output_node_scores.numel():
             logger.info(
