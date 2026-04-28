@@ -57,45 +57,35 @@ def compute_L_graph(
 
 
 
-def compute_L_error(
-    student_errors: torch.Tensor,
-    mlp_output_norms: torch.Tensor,
-    relative_threshold: float = 0.05,
-) -> torch.Tensor:
-    # normalize errors by MLP output magnitude so threshold is scale-invariant
-    normalized = student_errors / mlp_output_norms.clamp(min=1e-10)
-    return F.relu(normalized - relative_threshold).pow(2).mean()
-
 def compute_L_total(
     L_task: torch.Tensor,
     L_graph: torch.Tensor,
-    L_error: torch.Tensor | None = None,
+    L_repr: torch.Tensor | None = None,
     beta_graph: float = 0.1,
-    alpha_error: float = 0.01,
+    alpha_repr: float = 0.01,
     error_contamination: float = 0.0,
     contamination_threshold: float = 0.3,
 ) -> tuple[torch.Tensor, dict]:
-    # L_total = L_task + \beta·L_graph + \alpha·L_error
-    # soft-scales L_graph above contamination threshold (linear decay to 0 at 1.0)
+    # L_total = L_task + \beta·L_graph + \alpha·L_repr
     if error_contamination > contamination_threshold:
         graph_scale = max(0.0, 1.0 - error_contamination)
     else:
         graph_scale = 1.0
 
     weighted_graph = beta_graph * graph_scale * L_graph
-    weighted_error = (
-        alpha_error * L_error
-        if L_error is not None
+    weighted_repr = (
+        alpha_repr * L_repr
+        if L_repr is not None
         else torch.tensor(0.0, device=L_task.device)
     )
 
-    total = L_task + weighted_graph + weighted_error
+    total = L_task + weighted_graph + weighted_repr
 
     return total, {
         "L_task": L_task.item(),
         "L_graph_raw": L_graph.item(),
         "L_graph_weighted": weighted_graph.item(),
-        "L_error_weighted": weighted_error.item(),
+        "L_repr_weighted": weighted_repr.item(),
         "graph_scale": graph_scale,
         "error_contamination": error_contamination,
         "L_total": total.item(),
