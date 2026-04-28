@@ -429,6 +429,46 @@ def build_super_graph(
         for row in cossim_matrix.detach().float().cpu().tolist():
             logger.info("    [%s]", ", ".join(f"{value:.6g}" for value in row))
 
+    def silhouette_score(X, assignments, dist_type="cossim"):
+        unique_assignments = torch.unique(assignments)
+        if len(unique_assignments) <= 1 or len(unique_assignments) >= len(X):
+            return torch.tensor(float("nan"), device=X.device)
+
+        if dist_type == "cossim":
+            X_norm = X / X.norm(dim=1, keepdim=True).clamp(min=1e-12)
+            dists = 1 - X_norm @ X_norm.T
+        else:
+            dists = torch.cdist(X, X)
+
+        scores = []
+        for i in range(len(X)):
+            same_cluster = assignments == assignments[i]
+            other_clusters = unique_assignments[unique_assignments != assignments[i]]
+
+            same_cluster[i] = False
+            a = dists[i, same_cluster].mean() if same_cluster.any() else torch.tensor(0.0, device=X.device)
+            b = torch.stack([
+                dists[i, assignments == cluster].mean()
+                for cluster in other_clusters
+            ]).min()
+            scores.append((b - a) / torch.maximum(a, b).clamp(min=1e-12))
+
+        return torch.stack(scores).mean()
+
+    def log_all_node_influence_silhouette_scores():
+        magnitudes = node_influence_vectors.norm(dim=1)
+        valid_mask = kept_neuron_mask & torch.isfinite(magnitudes)
+        valid_vectors = node_influence_vectors[valid_mask]
+        if len(valid_vectors) == 0:
+            logger.info("  All-node influence kmeans silhouette: no valid vectors")
+            return
+
+        logger.info("  All-node influence kmeans silhouette scores")
+        for candidate_k in range(1, min(10, len(valid_vectors)) + 1):
+            assignments = kmeans(valid_vectors, candidate_k, dist_type="cossim")
+            score = silhouette_score(valid_vectors, assignments, dist_type="cossim")
+            logger.info("    k=%d silhouette_score=%.6g", candidate_k, float(score.item()))
+
     def build_supernodes_svd(B_weighted, coverage_threshold, min_cluster_influence):
         """
         Cluster on directions, validate on magnitudes.
@@ -514,6 +554,7 @@ def build_super_graph(
     logger.info("  Building output node")
     output_node_indices, output_node_scores, output_node_count, all_output_scores = build_output_node()
     log_output_node(output_node_indices, output_node_scores, output_node_count, all_output_scores)
+    log_all_node_influence_silhouette_scores()
     
     
     logger.info("  Clustering supernodes")
