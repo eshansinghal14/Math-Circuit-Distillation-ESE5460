@@ -404,6 +404,7 @@ def build_super_graph(
         W_U = model.unembed.W_U.to(device=device)
         w_out_cache = {}
         write_vectors = []
+        activation_magnitudes = []
 
         for neuron_idx in kept_neurons.tolist():
             layer = int(graph.neuron_locations[neuron_idx, 0].item())
@@ -414,6 +415,7 @@ def build_super_graph(
 
             activation = graph.neuron_activations[neuron_idx].to(device=device, dtype=W_U.dtype)
             write_vectors.append(activation * w_out_cache[layer][neuron_id].to(dtype=W_U.dtype))
+            activation_magnitudes.append(activation.abs())
 
         if not write_vectors:
             return (
@@ -432,22 +434,23 @@ def build_super_graph(
         )
 
         dla_normalized = dla_matrix / dla_matrix.norm(dim=1, keepdim=True).clamp(min=1e-12)
-        log_output_dla_silhouette_scores(dla_normalized)
+        
         target_probabilities = logit_probabilities.to(device=device, dtype=dla_matrix.dtype)
         neuron_scores = (
-            dla_normalized[:, target_vocab_indices] * target_probabilities
-        ).sum(dim=-1)
+            dla_matrix[:, target_vocab_indices] * target_probabilities
+        ).sum(dim=-1) / torch.stack(activation_magnitudes).clamp(min=1e-12)
         sorted_scores, sorted_positions = torch.sort(neuron_scores, descending=True)
         elbow_count = find_output_elbow_count(sorted_scores)
         output_node_positions = sorted_positions[:elbow_count].to(device=kept_neurons.device)
-        output_dla = dla_normalized[sorted_positions[:elbow_count]]
+        output_dla_normalized = dla_normalized[output_node_positions]
+        log_output_dla_silhouette_scores(output_dla_normalized)
 
         return (
             kept_neurons[output_node_positions],
             neuron_scores[output_node_positions.to(device=neuron_scores.device)].to(
                 device=kept_neurons.device,
             ),
-            output_dla,
+            dla_matrix[output_node_positions],
             elbow_count,
             sorted_scores.detach().float().cpu(),
         )
@@ -528,6 +531,18 @@ def build_super_graph(
             plt.tight_layout()
             plt.savefig("output_node_scores.png")
             plt.close()
+
+        output_dla_normalized = output_node_dla / output_node_dla.norm(dim=1, keepdim=True).clamp(min=1e-12)
+        dla_probs_sim = output_dla_normalized @ logit_probabilities.to(device=output_dla_normalized.device, dtype=output_dla_normalized.dtype).T
+        sorted_dla_probs_sim, sorted_dla_probs_sim_indices = torch.sort(dla_probs_sim, descending=True)
+        plt.figure(figsize=(8, 4))
+        plt.plot(sorted_dla_probs_sim.tolist(), marker="o")
+        plt.xlabel("Logit rank")
+        plt.ylabel("DLA-logit similarity")
+        plt.title("Output-node DLA-logit similarity, sorted high to low")
+        plt.tight_layout()
+        plt.savefig("output_node_dla_logit_similarity.png")
+        plt.close()
 
         if output_node_scores.numel():
             logger.info(
