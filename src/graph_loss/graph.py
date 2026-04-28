@@ -456,14 +456,32 @@ def build_super_graph(
         token = model.tokenizer.decode([vocab_idx])
         return token.replace("\n", "\\n").replace("\r", "\\r")
 
+    target_logit_prob_by_vocab_idx = {
+        int(target.vocab_idx): float(prob)
+        for target, prob in zip(graph.logit_targets, logit_probabilities.detach().float().cpu().tolist(), strict=True)
+    }
+
     def format_top_dla_logits(dla_vector: torch.Tensor, top_k: int = 10) -> str:
         if dla_vector.numel() == 0:
             return "none"
         k = min(top_k, int(dla_vector.numel()))
         values, indices = torch.topk(dla_vector.detach().float().cpu(), k=k)
         return ", ".join(
-            f"{decode_vocab_token(int(idx.item()))!r}:{float(value.item()):.6g}"
+            f"{decode_vocab_token(int(idx.item()))!r}: {float(value.item()):.6g}"
             for value, idx in zip(values, indices, strict=True)
+        )
+
+    def format_top_dla_logit_probs(dla_vector: torch.Tensor, top_k: int = 10) -> str:
+        if dla_vector.numel() == 0:
+            return "none"
+        k = min(top_k, int(dla_vector.numel()))
+        _, indices = torch.topk(dla_vector.detach().float().cpu(), k=k)
+        return ", ".join(
+            (
+                f"{decode_vocab_token(int(idx.item()))!r}: "
+                f"{target_logit_prob_by_vocab_idx.get(int(idx.item()), 0.0):.6g}"
+            )
+            for idx in indices
         )
 
     def format_top_logit_influence_logits(
@@ -518,6 +536,10 @@ def build_super_graph(
                 float(output_node_scores[-1].item()),
                 float(output_node_scores[0].item()),
             )
+            logger.info(
+                "  top 20 logits: %s",
+                format_top_output_logits(top_k=20),
+            )
 
         for row_idx, (neuron_idx, score) in enumerate(
             zip(output_node_indices.tolist(), output_node_scores.tolist(), strict=True)
@@ -534,8 +556,8 @@ def build_super_graph(
                 float(score),
             )
             logger.info(
-                "      top 20 logits: %s",
-                format_top_output_logits(top_k=20),
+                "      top DLA logits probs: %s",
+                format_top_dla_logit_probs(output_node_dla[row_idx]),
             )
             logger.info(
                 "      top DLA logits: %s",
