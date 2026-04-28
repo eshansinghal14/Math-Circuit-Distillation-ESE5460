@@ -512,7 +512,7 @@ def build_super_graph(
         )
 
     def positive_dla_concentration(dla_vector: torch.Tensor) -> float:
-        positive_dla = dla_vector.clamp(min=0)
+        positive_dla = dla_vector.detach().float().clamp(min=0)
         l1_norm = positive_dla.norm(p=1)
         if l1_norm <= 1e-12:
             return 0.0
