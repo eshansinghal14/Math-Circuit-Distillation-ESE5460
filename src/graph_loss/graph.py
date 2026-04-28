@@ -335,7 +335,6 @@ def build_super_graph(
         W_U = model.unembed.W_U.to(device=device)
         w_out_cache = {}
         write_vectors = []
-        activation_magnitudes = []
 
         for neuron_idx in kept_neurons.tolist():
             layer = int(graph.neuron_locations[neuron_idx, 0].item())
@@ -346,7 +345,6 @@ def build_super_graph(
 
             activation = graph.neuron_activations[neuron_idx].to(device=device, dtype=W_U.dtype)
             write_vectors.append(activation * w_out_cache[layer][neuron_id].to(dtype=W_U.dtype))
-            activation_magnitudes.append(activation.abs())
 
         if not write_vectors:
             return (
@@ -364,15 +362,15 @@ def build_super_graph(
             dtype=torch.long,
         )
 
+        dla_normalized = dla_matrix / dla_matrix.norm(dim=1, keepdim=True).clamp(min=1e-12)
         target_probabilities = logit_probabilities.to(device=device, dtype=dla_matrix.dtype)
-        activation_magnitudes_t = torch.stack(activation_magnitudes).clamp(min=1e-12)
         neuron_scores = (
-            dla_matrix[:, target_vocab_indices] * target_probabilities
-        ).sum(dim=-1) / activation_magnitudes_t
+            dla_normalized[:, target_vocab_indices] * target_probabilities
+        ).sum(dim=-1)
         sorted_scores, sorted_positions = torch.sort(neuron_scores, descending=True)
         elbow_count = find_output_elbow_count(sorted_scores)
         output_node_positions = sorted_positions[:elbow_count].to(device=kept_neurons.device)
-        output_dla = dla_matrix[sorted_positions[:elbow_count]]
+        output_dla = dla_normalized[sorted_positions[:elbow_count]]
 
         return (
             kept_neurons[output_node_positions],
@@ -427,8 +425,8 @@ def build_super_graph(
             if 0 < elbow_count <= int(all_sorted_scores.numel()):
                 plt.axvline(elbow_count - 1, color="red", linestyle="--")
             plt.xlabel("Neuron rank")
-            plt.ylabel("Neuron score")
-            plt.title("Output-node neuron scores, sorted high to low")
+            plt.ylabel("Normalized DLA score")
+            plt.title("Output-node normalized DLA scores, sorted high to low")
             plt.tight_layout()
             plt.savefig("output_node_scores.png")
             plt.close()
@@ -465,16 +463,11 @@ def build_super_graph(
             )
 
         if output_node_indices.numel() == 0:
-            logger.info("  Output node influence cossim matrix: []")
+            logger.info("  Output node normalized DLA cossim matrix: []")
             return
 
-        output_influence_vectors = node_influence_vectors[output_node_indices]
-        output_influence_normalized = output_influence_vectors / output_influence_vectors.norm(
-            dim=1,
-            keepdim=True,
-        ).clamp(min=1e-12)
-        cossim_matrix = output_influence_normalized @ output_influence_normalized.T
-        logger.info("  Output node influence cossim matrix:")
+        cossim_matrix = output_node_dla @ output_node_dla.T
+        logger.info("  Output node normalized DLA cossim matrix:")
         for row in cossim_matrix.detach().float().cpu().tolist():
             logger.info("    [%s]", ", ".join(f"{value:.6g}" for value in row))
 
