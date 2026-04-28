@@ -438,7 +438,7 @@ def build_super_graph(
         activation_magnitudes_t = torch.stack(activation_magnitudes).clamp(min=1e-12)
         neuron_scores = (
             dla_matrix[:, target_vocab_indices] * target_probabilities
-        ).sum(dim=-1) / activation_magnitudes_t
+        ).sum(dim=-1)
         sorted_scores, sorted_positions = torch.sort(neuron_scores, descending=True)
         elbow_count = find_output_elbow_count(sorted_scores)
         output_node_positions = sorted_positions[:elbow_count].to(device=kept_neurons.device)
