@@ -36,8 +36,6 @@ class GraphAuxConfig:
     graph_prune: bool = False
     graph_node_threshold: float = 0.8
     graph_edge_threshold: float = 0.98
-    graph_epsilon: float = 1e-3
-    graph_min_cum_logit_influence: float = 0.9
     graph_similarity_threshold: float = 0.7
     graph_max_fan_out: int = 4
 
@@ -119,17 +117,11 @@ def compute_prompt_graph_loss(
         student_graph = student_graph.apply_prune_result(student_prune_result)
 
     if config.verbose:
-        print(
-            "  [graph] building teacher supergraph "
-            f"(epsilon={config.graph_epsilon:g}, "
-            f"min_cum_logit_influence={config.graph_min_cum_logit_influence:g})",
-        )
+        print("  [graph] building teacher supergraph")
     supergraph_start = time.perf_counter()
     teacher_supergraph = build_super_graph(
         teacher_graph,
         teacher_graph_model,
-        epsilon=config.graph_epsilon,
-        min_cum_logit_influence=config.graph_min_cum_logit_influence,
         prune_result=teacher_prune_result,
     )
     if config.verbose:
@@ -139,17 +131,13 @@ def compute_prompt_graph_loss(
             f"{time.perf_counter() - supergraph_start:.2f}s",
         )
         print(
-            "  [graph] building student supergraph "
-            f"(epsilon={config.graph_epsilon:g}, "
-            f"min_cum_logit_influence={config.graph_min_cum_logit_influence:g})",
+            "  [graph] building student supergraph",
         )
     supergraph_start = time.perf_counter()
     with torch.no_grad():
         student_supergraph_structure = build_super_graph(
             student_graph,
             student_adapter,
-            epsilon=config.graph_epsilon,
-            min_cum_logit_influence=config.graph_min_cum_logit_influence,
             prune_result=student_prune_result,
         )
     student_supergraph = _aggregate_supergraph_adjacency(

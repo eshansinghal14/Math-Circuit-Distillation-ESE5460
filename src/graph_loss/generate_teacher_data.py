@@ -31,7 +31,6 @@ from graph_loss.replacement_model import TransformerLensReplacementModel
 from graph_loss.utils import (
     add_graph_build_args,
     add_graph_prune_args,
-    add_supergraph_args,
     resolve_torch_dtype,
 )
 from utils import HF_READ_TOKEN, default_datasets_dir, load_prompt_answer_json, patch_tokenizer_no_special_tokens
@@ -54,8 +53,6 @@ class TeacherDataConfig:
     prune: bool = False
     node_threshold: float = 0.8
     edge_threshold: float = 0.98
-    epsilon: float = 1e-3
-    min_cum_logit_influence: float = 0.9
     limit: int | None = None
     start_index: int = 0
     overwrite: bool = False
@@ -270,15 +267,11 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
         supergraph = build_super_graph(
             graph_for_supergraph,
             model,
-            epsilon=config.epsilon,
-            min_cum_logit_influence=config.min_cum_logit_influence,
             prune_result=prune_result,
         )
         _log_supergraph_summary(
             graph_for_supergraph,
             supergraph,
-            epsilon=config.epsilon,
-            min_cum_logit_influence=config.min_cum_logit_influence,
             logger=logger,
         )
         supergraph_path = os.path.join(sample_dir, "supergraph.pt")
@@ -382,7 +375,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing sample folders")
     add_graph_build_args(parser)
     add_graph_prune_args(parser)
-    add_supergraph_args(parser)
     return parser
 
 
@@ -402,8 +394,6 @@ def main() -> None:
         prune=args.prune,
         node_threshold=args.node_threshold,
         edge_threshold=args.edge_threshold,
-        epsilon=args.epsilon,
-        min_cum_logit_influence=args.min_cum_logit_influence,
         limit=args.limit,
         start_index=args.start_index,
         overwrite=args.overwrite,

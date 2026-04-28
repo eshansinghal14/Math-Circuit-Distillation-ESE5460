@@ -132,21 +132,6 @@ def add_graph_prune_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def add_supergraph_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--epsilon",
-        type=float,
-        default=1e-3,
-        help="Cosine distance threshold for supernode clustering",
-    )
-    parser.add_argument(
-        "--min_cum_logit_influence",
-        type=float,
-        default=0.9,
-        help="Minimum cumulative logit influence norm required to form a supernode",
-    )
-
-
 def resolve_torch_dtype(dtype: str) -> torch.dtype:
     dtype_mapping = {
         "fp32": "float32",

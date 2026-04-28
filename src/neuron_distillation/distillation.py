@@ -169,8 +169,6 @@ class ClusterDistillationConfig:
     graph_prune: bool = False
     graph_node_threshold: float = 0.8
     graph_edge_threshold: float = 0.98
-    graph_epsilon: float = 1e-3
-    graph_min_cum_logit_influence: float = 0.9
     graph_similarity_threshold: float = 0.7
     graph_max_fan_out: int = 4
 
@@ -1084,8 +1082,6 @@ class ClusterDistillationTrainer:
             graph_prune=config.graph_prune,
             graph_node_threshold=config.graph_node_threshold,
             graph_edge_threshold=config.graph_edge_threshold,
-            graph_epsilon=config.graph_epsilon,
-            graph_min_cum_logit_influence=config.graph_min_cum_logit_influence,
             graph_similarity_threshold=config.graph_similarity_threshold,
             graph_max_fan_out=config.graph_max_fan_out,
         )

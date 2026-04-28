@@ -462,22 +462,6 @@ def main():
         help="Graph mode: cumulative edge influence threshold for pruning.",
     )
     parser.add_argument(
-        "--graph-epsilon",
-        "--epsilon",
-        dest="graph_epsilon",
-        type=float,
-        default=1e-3,
-        help="Graph mode: cosine-distance threshold for supernode clustering.",
-    )
-    parser.add_argument(
-        "--graph-min-cum-logit-influence",
-        "--min_cum_logit_influence",
-        dest="graph_min_cum_logit_influence",
-        type=float,
-        default=0.9,
-        help="Graph mode: influence coverage threshold for supernode clustering.",
-    )
-    parser.add_argument(
         "--graph-similarity-threshold",
         type=float,
         default=0.7,
@@ -663,10 +647,6 @@ def main():
         raise SystemExit("--graph-node-threshold must be in [0, 1]")
     if not (0.0 <= args.graph_edge_threshold <= 1.0):
         raise SystemExit("--graph-edge-threshold must be in [0, 1]")
-    if not (0.0 <= args.graph_epsilon <= 1.0):
-        raise SystemExit("--graph-epsilon must be in [0, 1]")
-    if args.graph_min_cum_logit_influence < 0:
-        raise SystemExit("--graph-min-cum-logit-influence must be >= 0")
     if not (0.0 <= args.graph_similarity_threshold <= 1.0):
         raise SystemExit("--graph-similarity-threshold must be in [0, 1]")
     if args.graph_max_fan_out < 1:
@@ -893,8 +873,6 @@ def main():
         print(f"  student_graph_bs:   {args.student_graph_batch_size}")
         print(f"  verbose:            {args.verbose}")
         print(f"  prune:              {args.graph_prune}")
-        print(f"  epsilon:            {args.graph_epsilon}")
-        print(f"  min_logit_infl:     {args.graph_min_cum_logit_influence}")
         print("=" * 60)
     else:
         print("=" * 60)
@@ -965,8 +943,6 @@ def main():
         graph_prune=args.graph_prune,
         graph_node_threshold=args.graph_node_threshold,
         graph_edge_threshold=args.graph_edge_threshold,
-        graph_epsilon=args.graph_epsilon,
-        graph_min_cum_logit_influence=args.graph_min_cum_logit_influence,
         graph_similarity_threshold=args.graph_similarity_threshold,
         graph_max_fan_out=args.graph_max_fan_out,
         save_best=args.save_best,

@@ -270,16 +270,10 @@ class SuperGraph(NamedTuple):
 def build_super_graph(
     graph: Graph,
     model,
-    epsilon: float = 1e-3,
-    min_cum_logit_influence: float = 0.9,
     prune_result: PruneResult | None = None,
 ) -> SuperGraph:
-    """Create supernodes as clusters of nodes that have distance < epsilon and cumulative logit influence > min_cum_logit_influence."""
+    """Create a single supernode from the selected output-node neurons."""
 
-    # if epsilon > 1.0 or epsilon < 0.0:
-    #     raise ValueError("epsilon must be between 0.0 and 1.0")
-    if min_cum_logit_influence < 0.0:
-        raise ValueError("min_cum_logit_influence must be non-negative")
     if prune_result is not None:
         graph = graph.apply_prune_result(prune_result)
 
@@ -318,10 +312,6 @@ def build_super_graph(
     #     logit_influence.T[:n_neurons][:, :logit_start] * (1 - logit_probabilities) * logit_probabilities
     # )
     node_influence_vectors = logit_influence.T[:n_neurons]
-
-    node_influence_normalized = node_influence_vectors / node_influence_vectors.norm(
-        dim=-1, keepdim=True
-    ).clamp(min=1e-12)
 
     def find_output_elbow_count(sorted_scores: torch.Tensor) -> int:
         n_scores = int(sorted_scores.numel())
@@ -488,128 +478,6 @@ def build_super_graph(
         for row in cossim_matrix.detach().float().cpu().tolist():
             logger.info("    [%s]", ", ".join(f"{value:.6g}" for value in row))
 
-    def silhouette_score(X, assignments, dist_type="cossim"):
-        unique_assignments = torch.unique(assignments)
-        if len(unique_assignments) <= 1 or len(unique_assignments) >= len(X):
-            return torch.tensor(float("nan"), device=X.device)
-
-        if dist_type == "cossim":
-            X_norm = X / X.norm(dim=1, keepdim=True).clamp(min=1e-12)
-            dists = 1 - X_norm @ X_norm.T
-        else:
-            dists = torch.cdist(X, X)
-
-        scores = []
-        for i in range(len(X)):
-            same_cluster = assignments == assignments[i]
-            other_clusters = unique_assignments[unique_assignments != assignments[i]]
-
-            same_cluster[i] = False
-            a = dists[i, same_cluster].mean() if same_cluster.any() else torch.tensor(0.0, device=X.device)
-            b = torch.stack([
-                dists[i, assignments == cluster].mean()
-                for cluster in other_clusters
-            ]).min()
-            scores.append((b - a) / torch.maximum(a, b).clamp(min=1e-12))
-
-        return torch.stack(scores).mean()
-
-    def log_all_node_influence_silhouette_scores():
-        magnitudes = node_influence_vectors.norm(dim=1)
-        valid_mask = kept_neuron_mask & torch.isfinite(magnitudes)
-        valid_vectors = node_influence_vectors[valid_mask]
-        if len(valid_vectors) == 0:
-            logger.info("  All-node influence kmeans silhouette: no valid vectors")
-            return
-
-        logger.info("  All-node influence kmeans silhouette scores")
-        for candidate_k in range(1, min(10, len(valid_vectors)) + 1):
-            assignments = kmeans(valid_vectors, candidate_k, dist_type="cossim")
-            score = silhouette_score(valid_vectors, assignments, dist_type="cossim")
-            logger.info("    k=%d silhouette_score=%.6g", candidate_k, float(score.item()))
-
-    def build_supernodes_svd(B_weighted, coverage_threshold, min_cluster_influence):
-        """
-        Cluster on directions, validate on magnitudes.
-        """
-        def silhouette_score(X, assignments, dist_type="cossim"):
-            unique_assignments = torch.unique(assignments)
-            if len(unique_assignments) <= 1 or len(unique_assignments) >= len(X):
-                return torch.tensor(float("nan"), device=X.device)
-
-            if dist_type == "cossim":
-                X_norm = X / X.norm(dim=1, keepdim=True).clamp(min=1e-12)
-                dists = 1 - X_norm @ X_norm.T
-            else:
-                dists = torch.cdist(X, X)
-
-            scores = []
-            for i in range(len(X)):
-                same_cluster = assignments == assignments[i]
-                other_clusters = unique_assignments[unique_assignments != assignments[i]]
-
-                same_cluster[i] = False
-                a = dists[i, same_cluster].mean() if same_cluster.any() else torch.tensor(0.0, device=X.device)
-                b = torch.stack([
-                    dists[i, assignments == cluster].mean()
-                    for cluster in other_clusters
-                ]).min()
-                scores.append((b - a) / torch.maximum(a, b).clamp(min=1e-12))
-
-            return torch.stack(scores).mean()
-
-        # magnitudes are used for direction normalization and logging.
-        magnitudes = B_weighted.norm(dim=1)           # [n_neurons]
-        finite_magnitudes = magnitudes[torch.isfinite(magnitudes)]
-        if finite_magnitudes.numel():
-            logger.info(
-                "  Supernode influence magnitudes: finite=%d/%d min=%.6g median=%.6g max=%.6g",
-                int(finite_magnitudes.numel()),
-                int(magnitudes.numel()),
-                float(finite_magnitudes.min().item()),
-                float(finite_magnitudes.median().item()),
-                float(finite_magnitudes.max().item()),
-            )
-        else:
-            logger.info("  Supernode influence magnitudes: no finite values")
-        
-        # directions — used for clustering
-        directions = B_weighted / magnitudes.unsqueeze(1).clamp(min=1e-12)
-        
-        valid_mask = kept_neuron_mask & torch.isfinite(magnitudes)
-        logger.info(
-            "  Supernode clustering candidates: kept_by_prune=%d/%d valid=%d/%d",
-            int(kept_neuron_mask.sum().item()),
-            int(n_neurons),
-            int(valid_mask.sum().item()),
-            int(n_neurons),
-        )
-        
-        valid_directions = directions[valid_mask]      # [n_valid × n_logits]
-        if len(valid_directions) == 0:
-            return torch.full((n_neurons,), -1, dtype=torch.long, device=B_weighted.device), 0
-
-        best_k = 1
-        best_score = torch.tensor(float("-inf"), device=B_weighted.device)
-        best_assignments_valid = torch.zeros(len(valid_directions), dtype=torch.long, device=B_weighted.device)
-        for candidate_k in range(1, min(50, len(valid_directions)) + 1):
-            candidate_assignments = kmeans(valid_directions, candidate_k, dist_type="cossim")
-            score = silhouette_score(valid_directions, candidate_assignments, dist_type="cossim")
-            print(f"k={candidate_k} silhouette_score={float(score.item()):.6g}")
-            if torch.isfinite(score) and score > best_score:
-                best_k = candidate_k
-                best_score = score
-                best_assignments_valid = candidate_assignments
-
-        assignments_valid = best_assignments_valid
-        k = best_k
-        
-        # map back
-        assignments = torch.full((n_neurons,), -1, dtype=torch.long, device=B_weighted.device)
-        assignments[valid_mask] = assignments_valid + 1
-        
-        return assignments, k
-
     logger.info("  Building output node")
     (
         output_node_indices,
@@ -625,21 +493,17 @@ def build_super_graph(
         output_node_count,
         all_output_scores,
     )
-    log_all_node_influence_silhouette_scores()
-    
-    
-    logger.info("  Clustering supernodes")
-    node_clusters, num_supernodes = build_supernodes_svd(node_influence_vectors, min_cum_logit_influence, epsilon)
 
-    logger.info("  Aggregating supernode adjacency")
+    logger.info("  Aggregating output-node supergraph")
     adj_matrix_norm = normalize_matrix(adjacency_matrix)
+    supernodes = [output_node_indices.tolist()]
+    num_supernodes = len(supernodes)
     supernode_adj_matrix = torch.zeros(
         num_supernodes,
         num_supernodes,
         dtype=adj_matrix_norm.dtype,
         device=adjacency_matrix.device,
     )
-    supernodes = [[i for i in range(n_neurons) if node_clusters[i] == n] for n in range(1, num_supernodes + 1)]
     for t in range(num_supernodes):
         total_input = torch.abs(adj_matrix_norm[:, supernodes[t]]).sum(dim=0)
         internal_input = torch.abs(adj_matrix_norm[supernodes[t]][:, supernodes[t]]).sum(dim=0)
@@ -650,59 +514,6 @@ def build_super_graph(
             supernode_adj_matrix[t, s] = (frac_external * sum_A).sum(dim=0) / frac_external.sum(dim=0).clamp(min=1e-10)
 
     return SuperGraph(supernode_adjacency_matrix=supernode_adj_matrix, supernodes=supernodes)
-
-def range_query(node_influence_normalized: torch.Tensor, neuron_idx: int, epsilon: float) -> list[int]:
-    """Find all nodes within epsilon of node_idx in the normalized node influence space."""
-    return torch.where(1 - node_influence_normalized @ node_influence_normalized[neuron_idx] <= epsilon)[0].tolist()
-
-
-def kmeans(X, k, n_iter=100, dist_type="p_norm", p=2):
-    # X: [n × d]
-    if len(X) == 0:
-        raise ValueError("kmeans requires at least one point")
-    if k <= 0:
-        raise ValueError("kmeans requires k > 0")
-    if dist_type not in ("p_norm", "cossim"):
-        raise ValueError("dist_type must be either 'p_norm' or 'cossim'")
-    k = min(k, len(X))
-
-    def pairwise_dists(points, centers):
-        if dist_type == "p_norm":
-            return torch.cdist(points, centers, p=p)
-
-        points_norm = points / points.norm(dim=1, keepdim=True).clamp(min=1e-12)
-        centers_norm = centers / centers.norm(dim=1, keepdim=True).clamp(min=1e-12)
-        return 1 - points_norm @ centers_norm.T
-
-    # initialize centers with kmeans++
-    centers = [X[torch.randint(len(X), (1,)).item()]]
-    for _ in range(k - 1):
-        dists = pairwise_dists(X, torch.stack(centers)).min(dim=1).values
-        init_weights = dists - dists.min()
-        total_weight = init_weights.sum()
-        if not torch.isfinite(total_weight) or total_weight <= 0:
-            centers.append(X[torch.randint(len(X), (1,)).item()])
-        else:
-            probs = init_weights / total_weight
-            centers.append(X[torch.multinomial(probs, 1).item()])
-    centers = torch.stack(centers)  # [k × d]
-
-    for _ in range(n_iter):
-        # assign
-        dists = pairwise_dists(X, centers)       # [n × k]
-        assignments = dists.argmin(dim=1)        # [n]
-        # update
-        new_centers = torch.stack([
-            X[assignments == i].mean(dim=0) 
-            if (assignments == i).any() 
-            else centers[i]
-            for i in range(k)
-        ])
-        if (new_centers - centers).norm() < 1e-6:
-            break
-        centers = new_centers
-
-    return assignments
 
 
 def extract_supernode_members(supergraph: SuperGraph, graph: Graph, model) -> list[dict]:

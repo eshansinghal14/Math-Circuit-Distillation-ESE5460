@@ -18,7 +18,6 @@ from graph_loss.replacement_model import TransformerLensReplacementModel
 from graph_loss.utils import (
     add_graph_build_args,
     add_graph_prune_args,
-    add_supergraph_args,
     resolve_torch_dtype,
 )
 from utils import HF_READ_TOKEN
@@ -194,8 +193,6 @@ def _log_supergraph_summary(
     graph: Graph,
     supergraph: SuperGraph,
     *,
-    epsilon: float,
-    min_cum_logit_influence: float,
     logger: logging.Logger,
 ) -> None:
     cluster_sizes = [len(cluster) for cluster in supergraph.supernodes]
@@ -205,11 +202,6 @@ def _log_supergraph_summary(
     super_edges = _count_nonzero_edges(supergraph.supernode_adjacency_matrix)
 
     logger.info("Supergraph summary")
-    logger.info(
-        "  thresholds: epsilon=%.6f min_cum_logit_influence=%.6f",
-        epsilon,
-        min_cum_logit_influence,
-    )
     logger.info(
         "  structure: supernodes=%d super_adjacency_shape=%s edges=%d density=%.6f",
         supernode_count,
@@ -319,7 +311,6 @@ def main():
     )
     add_graph_build_args(parser)
     add_graph_prune_args(parser)
-    add_supergraph_args(parser)
     parser.add_argument(
         "--prune_output_path",
         help="Optional path to save prune masks and cumulative scores (.pt)",
@@ -384,15 +375,11 @@ def main():
     supergraph = build_super_graph(
         graph,
         model,
-        epsilon=args.epsilon,
-        min_cum_logit_influence=args.min_cum_logit_influence,
         prune_result=prune_result,
     )
     _log_supergraph_summary(
         graph,
         supergraph,
-        epsilon=args.epsilon,
-        min_cum_logit_influence=args.min_cum_logit_influence,
         logger=logger,
     )
     _log_supernode_top_dla_logits(supergraph, graph, model, logger=logger)
