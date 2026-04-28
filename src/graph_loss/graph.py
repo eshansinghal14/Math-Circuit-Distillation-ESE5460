@@ -511,23 +511,12 @@ def build_super_graph(
             for value, idx in zip(values, indices, strict=True)
         )
 
-    def softmax_dla_target_prob_cossim(dla_vector: torch.Tensor) -> float:
-        if dla_vector.numel() == 0 or not graph.logit_targets:
-            return float("nan")
-        target_vocab_indices = torch.tensor(
-            [target.vocab_idx for target in graph.logit_targets],
-            device=dla_vector.device,
-            dtype=torch.long,
-        )
-        target_softmax_dla = torch.softmax(dla_vector, dim=0)[target_vocab_indices]
-        target_probabilities = logit_probabilities.to(
-            device=dla_vector.device,
-            dtype=target_softmax_dla.dtype,
-        )
-        denominator = (
-            target_softmax_dla.norm() * target_probabilities.norm()
-        ).clamp(min=1e-12)
-        return float((target_softmax_dla @ target_probabilities / denominator).item())
+    def positive_dla_concentration(dla_vector: torch.Tensor) -> float:
+        positive_dla = dla_vector.clamp(min=0)
+        l1_norm = positive_dla.norm(p=1)
+        if l1_norm <= 1e-12:
+            return 0.0
+        return float(((positive_dla.norm(p=2) ** 2) / (l1_norm ** 2)).item())
 
     def log_output_node(output_node_indices, output_node_scores, output_node_dla, elbow_count, all_sorted_scores):
         logger.info("  Output node members: %d", int(output_node_indices.numel()))
@@ -570,13 +559,13 @@ def build_super_graph(
             token_pos = int(graph.neuron_locations[neuron_idx, 1].item())
             neuron_id = int(graph.neuron_locations[neuron_idx, 2].item())
             logger.info(
-                "    graph_neuron_idx=%d layer=%d token=%d neuron=%d score=%.6g softmax_dla_prob_cossim=%.6g",
+                "    graph_neuron_idx=%d layer=%d token=%d neuron=%d score=%.6g concentration=%.6g",
                 neuron_idx,
                 layer,
                 token_pos,
                 neuron_id,
                 float(score),
-                softmax_dla_target_prob_cossim(output_node_dla[row_idx]),
+                positive_dla_concentration(output_node_dla[row_idx]),
             )
             logger.info(
                 "      top DLA logits probs: %s",
