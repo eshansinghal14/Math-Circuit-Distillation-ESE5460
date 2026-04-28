@@ -350,7 +350,7 @@ def build_super_graph(
             dtype=torch.long,
         )
         log_softmax_dla_matrix_scaled = F.log_softmax(dla_matrix[:, target_vocab_indices], dim=-1)
-        logit_probs_scaled = logit_probabilities / logit_probabilities.sum()
+        logit_probs_scaled = (logit_probabilities / logit_probabilities.sum()).to(device=device, dtype=log_softmax_dla_matrix_scaled.dtype)
         expanded_logit_probabilities = logit_probs_scaled.unsqueeze(0).expand_as(log_softmax_dla_matrix_scaled)
 
         dla_kl = (expanded_logit_probabilities * (torch.log(expanded_logit_probabilities.clamp(min=1e-12)) - log_softmax_dla_matrix_scaled)).sum(dim=-1)
