@@ -382,8 +382,8 @@ def build_super_graph(
         elbow_count = find_output_elbow_count(sorted_scores)
         output_node_positions = sorted_positions[:elbow_count].to(device=kept_neurons.device)
 
-        if output_node_scores.numel():
-            sorted_scores = torch.sort(output_node_scores.detach().float().cpu(), descending=True).values
+        if neuron_scores.numel():
+            sorted_scores = torch.sort(neuron_scores.detach().float().cpu(), descending=True).values
             plt.figure(figsize=(8, 4))
             plt.plot(sorted_scores.tolist(), marker="o")
             plt.xlabel("Output-node neuron rank")
