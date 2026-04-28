@@ -534,7 +534,7 @@ def build_super_graph(
 
         target_vocab_indices = torch.tensor(
             [target.vocab_idx for target in graph.logit_targets],
-            device=device,
+            device=output_node_dla.device,
             dtype=torch.long,
         )
         output_dla_normalized = output_node_dla / output_node_dla.norm(dim=1, keepdim=True).clamp(min=1e-12)[:, target_vocab_indices]
