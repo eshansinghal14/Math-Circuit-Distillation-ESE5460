@@ -1,5 +1,11 @@
+import argparse
 from dataclasses import dataclass
 from typing import Any
+
+import torch
+
+
+DTYPE_CHOICES = ["float32", "bfloat16", "float16", "fp32", "bf16", "fp16"]
 
 
 @dataclass
@@ -72,3 +78,80 @@ def convert_nnsight_config_to_transformerlens(config):
         n_key_value_heads=config_dict.get("n_key_value_heads"),
         dtype=config_dict.get("dtype"),
     )
+
+
+def add_graph_build_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--dtype",
+        choices=DTYPE_CHOICES,
+        default="float32",
+        help="Model dtype",
+    )
+    parser.add_argument(
+        "--top_k_logits",
+        type=int,
+        default=20,
+        help="If set, include exactly this many highest-probability logit nodes",
+    )
+    parser.add_argument(
+        "--prop_neurons_per_layer",
+        type=float,
+        default=0.1,
+        help="Fraction of neurons to keep per layer",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=512,
+        help="Batch size for attribution backward passes",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show attribution progress",
+    )
+
+
+def add_graph_prune_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--node_threshold",
+        type=float,
+        default=0.8,
+        help="Cumulative node influence threshold for pruning",
+    )
+    parser.add_argument(
+        "--edge_threshold",
+        type=float,
+        default=0.98,
+        help="Cumulative edge influence threshold for pruning",
+    )
+    parser.add_argument(
+        "--prune",
+        action="store_true",
+        help="Whether to apply pruning before building supergraph",
+    )
+
+
+def add_supergraph_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--epsilon",
+        type=float,
+        default=1e-3,
+        help="Cosine distance threshold for supernode clustering",
+    )
+    parser.add_argument(
+        "--min_cum_logit_influence",
+        type=float,
+        default=0.9,
+        help="Minimum cumulative logit influence norm required to form a supernode",
+    )
+
+
+def resolve_torch_dtype(dtype: str) -> torch.dtype:
+    dtype_mapping = {
+        "fp32": "float32",
+        "bf16": "bfloat16",
+        "fp16": "float16",
+    }
+    dtype_name = dtype_mapping.get(dtype, dtype)
+    return getattr(torch, dtype_name)

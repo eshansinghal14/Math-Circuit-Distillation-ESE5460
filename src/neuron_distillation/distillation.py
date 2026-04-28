@@ -41,6 +41,15 @@ from torch.optim import AdamW
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from graph_loss.hf_adapter import HFLlamaGraphAdapter
+from graph_loss.replacement_model import TransformerLensReplacementModel
+from graph_loss.teacher_data_cache import TeacherDataCache
+from graph_loss.training import (
+    GraphAuxConfig,
+    backward_batch_graph_loss,
+    compute_batch_graph_loss,
+)
+
 try:
     from torch.utils.flop_counter import FlopCounterMode
     import torch.utils.flop_counter as _flop_counter_mod
@@ -120,7 +129,7 @@ class ClusterPairInfo:
 class ClusterDistillationConfig:
     teacher_model: str = LLAMA_8B_MODEL_NAME
     student_model: str = LLAMA_1B_MODEL_NAME
-    # ``circuit``: KL + cluster CKA (hooks). ``standard``: KL only (no hooks / no ablation).
+    # ``circuit``: KL + cluster CKA. ``standard``: KL only. ``graph``: KL + graph auxiliary loss.
     distillation_mode: str = "circuit"
 
     epochs: int = 50
@@ -131,6 +140,7 @@ class ClusterDistillationConfig:
     grad_clip: float = 1.0
 
     lambda_cluster: float = 0.01
+    lambda_graph: float = 0.1
     # Optional anchor KL from the initial/frozen student to the current student.
     lambda_original_kl: float = 0.0
     # Optional CE replay loss on a second JSON dataset.
@@ -150,6 +160,19 @@ class ClusterDistillationConfig:
     # ``activation``: raw up_proj outputs.
     # ``residual_write``: activation scaled by ||down_proj[:, i]|| per neuron.
     trajectory_space: str = "activation"
+    graph_dtype: Optional[torch.dtype] = None
+    graph_top_k_logits: Optional[int] = 20
+    graph_prop_neurons_per_layer: float = 0.1
+    teacher_graph_batch_size: int = 512
+    student_graph_batch_size: int = 1
+    graph_verbose: bool = False
+    graph_prune: bool = False
+    graph_node_threshold: float = 0.8
+    graph_edge_threshold: float = 0.98
+    graph_epsilon: float = 1e-3
+    graph_min_cum_logit_influence: float = 0.9
+    graph_similarity_threshold: float = 0.7
+    graph_max_fan_out: int = 4
 
     # Greedy test accuracy: prompts batched for ``generate`` (independent of training batch size).
     eval_batch_size: int = 50
@@ -160,6 +183,7 @@ class ClusterDistillationConfig:
     # Greedy-eval debug: print first N prompts + top-5 softmax at ``temperature`` (student & teacher).
     eval_print_samples: int = 0
     save_dir: str = "results/cluster-distillation"
+    teacher_data_cache: Optional[str] = None
     # Count FLOPs (FlopCounterMode) only on epochs where ``epoch_index % N == 0`` (0-based).
     # 1 = every epoch; 0 = never; N>1 = every Nth epoch (0, N, 2N, …). ~10% step overhead when active.
     count_flops_every: int = 1
@@ -701,7 +725,12 @@ class AddDataset(Dataset):
             )["input_ids"].squeeze(0)
             input_ids = torch.cat([prompt_ids, answer_ids])
             self.samples.append(
-                {"input_ids": input_ids, "prompt_len": len(prompt_ids)}
+                {
+                    "input_ids": input_ids,
+                    "prompt_len": len(prompt_ids),
+                    "prompt": prompt,
+                    "answer": int(answer),
+                }
             )
 
     def __len__(self):
@@ -739,6 +768,8 @@ def collate_fn(examples, pad_id: int):
         "input_ids": input_ids,
         "attention_mask": attention_mask,
         "kl_mask": kl_mask,
+        "prompts": [str(ex["prompt"]) for ex in examples],
+        "answers": [int(ex["answer"]) for ex in examples],
     }
 
 
@@ -954,7 +985,19 @@ class ClusterDistillationTrainer:
     ):
         self.config = config
         self._resume = resume
+        if config.distillation_mode not in {"standard", "circuit", "graph"}:
+            raise ValueError(
+                "distillation_mode must be one of 'standard', 'circuit', or 'graph', "
+                f"got {config.distillation_mode!r}",
+            )
         self._standard = config.distillation_mode == "standard"
+        self._circuit = config.distillation_mode == "circuit"
+        self._graph = config.distillation_mode == "graph"
+        if config.teacher_data_cache and not self._standard:
+            raise ValueError(
+                "teacher_data_cache currently supports standard KL mode only. "
+                "Circuit and graph modes require live teacher computation."
+            )
         self.cluster_pairs = cluster_pairs
         self.train_data = train_data
         self.test_data = test_data
@@ -980,6 +1023,11 @@ class ClusterDistillationTrainer:
         student_dtype = torch.float32
         teacher_dtype = torch.float16 if self.device.type == "cuda" else torch.float32
         original_dtype = torch.float16 if self.device.type == "cuda" else torch.float32
+        self.teacher_data_cache = (
+            TeacherDataCache(config.teacher_data_cache)
+            if config.teacher_data_cache
+            else None
+        )
         if student is not None:
             self.student = student
         else:
@@ -988,16 +1036,23 @@ class ClusterDistillationTrainer:
                 config.student_model, dtype=student_dtype,
             ).to(self.device)
 
-        if teacher is not None:
+        if self.teacher_data_cache is not None:
+            print(f"Using cached teacher data: {config.teacher_data_cache}")
+            self.teacher = None
+        elif self._graph:
+            print("Graph mode: using TransformerLens teacher for graph attribution and KL logits")
+            self.teacher = None
+        elif teacher is not None:
             self.teacher = teacher
         else:
             print(f"Loading teacher: {config.teacher_model}")
             self.teacher = AutoModelForCausalLM.from_pretrained(
                 config.teacher_model, dtype=teacher_dtype,
             ).to(self.device)
-        self.teacher.eval()
-        for p in self.teacher.parameters():
-            p.requires_grad = False
+        if self.teacher is not None:
+            self.teacher.eval()
+            for p in self.teacher.parameters():
+                p.requires_grad = False
 
         self.original_student: Optional[nn.Module] = None
         if config.lambda_original_kl > 0:
@@ -1018,6 +1073,37 @@ class ClusterDistillationTrainer:
 
         # Losses
         self.cluster_loss_fn = ClusterAlignmentLoss()
+        self.graph_loss_config = GraphAuxConfig(
+            lambda_graph=config.lambda_graph,
+            graph_dtype=config.graph_dtype,
+            top_k_logits=config.graph_top_k_logits,
+            prop_neurons_per_layer=config.graph_prop_neurons_per_layer,
+            teacher_graph_batch_size=config.teacher_graph_batch_size,
+            student_graph_batch_size=config.student_graph_batch_size,
+            verbose=config.graph_verbose,
+            graph_prune=config.graph_prune,
+            graph_node_threshold=config.graph_node_threshold,
+            graph_edge_threshold=config.graph_edge_threshold,
+            graph_epsilon=config.graph_epsilon,
+            graph_min_cum_logit_influence=config.graph_min_cum_logit_influence,
+            graph_similarity_threshold=config.graph_similarity_threshold,
+            graph_max_fan_out=config.graph_max_fan_out,
+        )
+        self.student_graph_adapter: Optional[HFLlamaGraphAdapter] = None
+        self.teacher_graph_model = None
+        if self._graph:
+            self.student_graph_adapter = HFLlamaGraphAdapter(
+                self.student,
+                self.tokenizer,
+                self.device,
+            )
+            print(f"Loading teacher graph model: {config.teacher_model}")
+            self.teacher_graph_model = TransformerLensReplacementModel.from_pretrained(
+                config.teacher_model,
+                device=self.device,
+                dtype=config.graph_dtype or teacher_dtype,
+            )
+            self.teacher_graph_model.eval()
 
         # Optimizer
         self.optimizer = AdamW(
@@ -1055,7 +1141,7 @@ class ClusterDistillationTrainer:
             self._replay_iter = iter(self.replay_loader)
 
         if (
-            not self._standard
+            self._circuit
             and self.config.cluster_grad_weighting
             and self.cluster_pairs
         ):
@@ -1079,10 +1165,12 @@ class ClusterDistillationTrainer:
         if config.kl_mask_range is not None:
             lo, hi = config.kl_mask_range
             raw = token_ids_for_integer_range(self.tokenizer, lo, hi)
-            vm = min(
-                int(self.student.config.vocab_size),
-                int(self.teacher.config.vocab_size),
+            teacher_vocab_size = (
+                self.teacher_data_cache.teacher_vocab_size
+                if self.teacher_data_cache is not None
+                else int(self.teacher.config.vocab_size)
             )
+            vm = min(int(self.student.config.vocab_size), teacher_vocab_size)
             raw = raw[raw < vm]
             if raw.numel() == 0:
                 raise ValueError(
@@ -1174,7 +1262,9 @@ class ClusterDistillationTrainer:
             print_samples=cfg.eval_print_samples,
             eval_label=label,
             teacher_for_topk_print=(
-                self.teacher if cfg.eval_print_samples > 0 else None
+                self.teacher
+                if cfg.eval_print_samples > 0 and self.teacher is not None
+                else None
             ),
             temperature=cfg.temperature,
         )
@@ -1216,6 +1306,14 @@ class ClusterDistillationTrainer:
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
 
+    def _cuda_clear_after_graph_step(self) -> None:
+        """Graph mode builds large temporary attribution tensors every batch."""
+        if not self._graph:
+            return
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     def _extra_eval_history_key(self, prefix: str) -> str:
         return f"accuracy_extra_{prefix}"
 
@@ -1225,6 +1323,8 @@ class ClusterDistillationTrainer:
 
     def _should_log_kl_cka_detail(self, batch_step: int) -> bool:
         """If True, recompute split KL/CKA grad norms and refresh the cached scale."""
+        if not self._circuit:
+            return False
         cfg = self.config
         interval = int(cfg.log_kl_cka_grad_norms)
         if interval <= 0:
@@ -1233,7 +1333,7 @@ class ClusterDistillationTrainer:
 
     def _should_use_cached_kl_cka_scale(self) -> bool:
         """If True, reuse the most recent KL/CKA grad scale between recomputation steps."""
-        return (not self._standard) and int(self.config.log_kl_cka_grad_norms) > 0
+        return self._circuit and int(self.config.log_kl_cka_grad_norms) > 0
 
     def _kl_objective_for_backward(
         self,
@@ -1255,13 +1355,39 @@ class ClusterDistillationTrainer:
                 )
         return kl_for_backward
 
+    def _teacher_logits_for_batch(
+        self,
+        batch: Dict[str, Any],
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.teacher_data_cache is not None:
+            return self.teacher_data_cache.get_batch_logits(
+                prompts=batch["prompts"],
+                answers=batch["answers"],
+                input_ids=input_ids,
+                device=self.device,
+            )
+        if self._graph and self.teacher_graph_model is not None:
+            with torch.no_grad():
+                out = self.teacher_graph_model(input_ids)
+                logits = out.logits if hasattr(out, "logits") else out
+            return logits.to(device=self.device)
+        if self.teacher is None:
+            raise RuntimeError("Teacher model is not loaded and no teacher data cache is configured.")
+        with torch.no_grad():
+            return self.teacher(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            ).logits
+
     def _backward_with_cached_kl_cka_scale(
         self,
         kl_loss: torch.Tensor,
         cluster_loss: Optional[torch.Tensor],
     ) -> None:
         """Backward using the most recently recomputed KL/CKA scale."""
-        if self._standard or cluster_loss is None:
+        if not self._circuit or cluster_loss is None:
             kl_loss.backward()
             return
         scaled_total = (
@@ -1271,7 +1397,7 @@ class ClusterDistillationTrainer:
         scaled_total.backward()
 
     def _forward_and_loss(
-        self, batch: Dict, batch_step: int = 0,
+        self, batch: Dict, batch_step: int = 0, compute_graph_loss: bool = True,
     ) -> Tuple[
         torch.Tensor,
         Dict,
@@ -1295,14 +1421,20 @@ class ClusterDistillationTrainer:
         T = self.config.temperature
 
         try:
-            if self._standard:
-                with torch.no_grad():
-                    teacher_logits = self.teacher(
-                        input_ids=input_ids, attention_mask=attention_mask,
-                    ).logits
+            if self._standard or self._graph:
+                teacher_logits = self._teacher_logits_for_batch(
+                    batch,
+                    input_ids,
+                    attention_mask,
+                )
                 student_logits = self.student(
                     input_ids=input_ids, attention_mask=attention_mask,
                 ).logits
+                if teacher_logits.shape != student_logits.shape:
+                    raise ValueError(
+                        "Cached/live teacher logits must match student logits shape for KL: "
+                        f"teacher={tuple(teacher_logits.shape)} student={tuple(student_logits.shape)}"
+                    )
                 kl_loss = _masked_kl_loss_restricted(
                     student_logits,
                     teacher_logits,
@@ -1345,11 +1477,38 @@ class ClusterDistillationTrainer:
                     if w_h > 0
                     else None
                 )
+                graph_loss = None
+                graph_metrics: Dict[str, Any] = {}
+                if self._graph and compute_graph_loss:
+                    if self.student_graph_adapter is None or self.teacher_graph_model is None:
+                        raise RuntimeError("Graph mode models were not initialized.")
+                    graph_loss, graph_metrics = compute_batch_graph_loss(
+                        prompts=batch["prompts"],
+                        teacher_graph_model=self.teacher_graph_model,
+                        student_adapter=self.student_graph_adapter,
+                        config=self.graph_loss_config,
+                        device=self.device,
+                    )
+
                 total = distill_kl
                 if replay_ce is not None:
                     total = total + self.config.replay_loss_weight * replay_ce
+                if graph_loss is not None:
+                    total = total + self.config.lambda_graph * graph_loss
                 if hard_ce is not None:
-                    total = total + w_h * hard_ce
+                    if graph_loss is not None:
+                        total = (
+                            (1.0 - w_h) * distill_kl
+                            + (
+                                self.config.replay_loss_weight * replay_ce
+                                if replay_ce is not None
+                                else 0.0
+                            )
+                            + self.config.lambda_graph * graph_loss
+                            + w_h * hard_ce
+                        )
+                    else:
+                        total = total + w_h * hard_ce
                 metrics = {
                     "kl_loss": kl_loss.item(),
                     "original_kl_loss": (
@@ -1361,7 +1520,15 @@ class ClusterDistillationTrainer:
                     "mean_cka": 0.0,
                     "kc_lam1": {},
                     "hard_ce_loss": hard_ce.item() if hard_ce is not None else 0.0,
+                    "graph_loss": graph_loss.item() if graph_loss is not None else 0.0,
+                    "graph_loss_weighted": (
+                        (self.config.lambda_graph * graph_loss).item()
+                        if graph_loss is not None
+                        else 0.0
+                    ),
                 }
+                for key, value in graph_metrics.items():
+                    metrics[f"graph_{key}"] = value
                 return total, metrics, distill_kl, None, hard_ce, replay_ce
 
             self.teacher_cache.register_hooks(self.teacher, detach=True)
@@ -1501,7 +1668,7 @@ class ClusterDistillationTrainer:
             ``(||g_KL||_2, ||g_{λ·CKA}||_2, r)``. Standard KL-only: third value is ``1.0``.
         """
         params = [p for p in self.student.parameters() if p.requires_grad]
-        if self._standard:
+        if not self._circuit:
             g_kl = torch.autograd.grad(
                 kl_loss, params, retain_graph=False, allow_unused=True,
             )
@@ -1531,6 +1698,34 @@ class ClusterDistillationTrainer:
             p.grad = gk + float(ratio) * gc
         return kl_gn, cka_gn, float(ratio)
 
+    def _backward_deferred_graph_loss(
+        self,
+        batch: Dict[str, Any],
+        metrics: Dict[str, Any],
+        non_graph_loss: torch.Tensor,
+    ) -> torch.Tensor:
+        if not self._graph:
+            return non_graph_loss
+        if self.student_graph_adapter is None or self.teacher_graph_model is None:
+            raise RuntimeError("Graph mode models were not initialized.")
+
+        graph_loss, graph_metrics = backward_batch_graph_loss(
+            prompts=batch["prompts"],
+            teacher_graph_model=self.teacher_graph_model,
+            student_adapter=self.student_graph_adapter,
+            config=self.graph_loss_config,
+            device=self.device,
+            loss_scale=self.config.lambda_graph,
+        )
+        graph_weighted = self.config.lambda_graph * graph_loss
+        total = non_graph_loss.detach() + graph_weighted
+        metrics["graph_loss"] = graph_loss.item()
+        metrics["graph_loss_weighted"] = graph_weighted.item()
+        metrics["total_loss"] = total.item()
+        for key, value in graph_metrics.items():
+            metrics[f"graph_{key}"] = value
+        return total
+
     # ------------------------------------------------------------------
 
     def train_epoch(self, epoch: int) -> Dict[str, Any]:
@@ -1557,16 +1752,28 @@ class ClusterDistillationTrainer:
                 stepped = False
                 with fcm:
                     loss, metrics, kl_loss, cluster_loss, hard_ce, replay_ce = (
-                        self._forward_and_loss(batch, step)
+                        self._forward_and_loss(
+                            batch,
+                            step,
+                            compute_graph_loss=not self._graph,
+                        )
                     )
                     if loss is None:
                         pass
                     elif torch.isfinite(loss).item():
-                        self.optimizer.zero_grad()
+                        self.optimizer.zero_grad(set_to_none=self._graph)
                         kl_for_backward = self._kl_objective_for_backward(
                             kl_loss, hard_ce, replay_ce,
                         )
-                        if self._should_log_kl_cka_detail(step):
+                        if self._graph:
+                            kl_for_backward.backward()
+                            del loss, kl_loss, hard_ce, replay_ce
+                            loss = self._backward_deferred_graph_loss(
+                                batch,
+                                metrics,
+                                kl_for_backward,
+                            )
+                        elif self._should_log_kl_cka_detail(step):
                             kl_gn, cka_gn, kl_over_cka = self._assign_grad_from_kl_cka(
                                 kl_for_backward, cluster_loss,
                             )
@@ -1585,23 +1792,36 @@ class ClusterDistillationTrainer:
                         stepped = True
                 if stepped:
                     self.optimizer.step()
+                    self._cuda_clear_after_graph_step()
                 epoch_flops += int(fcm.get_total_flops())
                 if loss is None:
                     continue
             else:
                 loss, metrics, kl_loss, cluster_loss, hard_ce, replay_ce = (
-                    self._forward_and_loss(batch, step)
+                    self._forward_and_loss(
+                        batch,
+                        step,
+                        compute_graph_loss=not self._graph,
+                    )
                 )
                 if loss is None:
                     continue
                 if not torch.isfinite(loss).item():
                     skipped_nonfinite += 1
                     continue
-                self.optimizer.zero_grad()
+                self.optimizer.zero_grad(set_to_none=self._graph)
                 kl_for_backward = self._kl_objective_for_backward(
                     kl_loss, hard_ce, replay_ce,
                 )
-                if self._should_log_kl_cka_detail(step):
+                if self._graph:
+                    kl_for_backward.backward()
+                    del loss, kl_loss, hard_ce, replay_ce
+                    loss = self._backward_deferred_graph_loss(
+                        batch,
+                        metrics,
+                        kl_for_backward,
+                    )
+                elif self._should_log_kl_cka_detail(step):
                     kl_gn, cka_gn, kl_over_cka = self._assign_grad_from_kl_cka(
                         kl_for_backward, cluster_loss,
                     )
@@ -1618,6 +1838,7 @@ class ClusterDistillationTrainer:
                     self.student.parameters(), self.config.grad_clip,
                 )
                 self.optimizer.step()
+                self._cuda_clear_after_graph_step()
 
             if not torch.isfinite(loss).item():
                 skipped_nonfinite += 1
@@ -1684,6 +1905,14 @@ class ClusterDistillationTrainer:
                         f"  step {step:04d} | KL {metrics['kl_loss']:.4f}"
                         f"{orig_s}{replay_s}{hard_s}{acc_s}{extra_eval_s}{grad_s}{flop_s}",
                     )
+                elif self._graph:
+                    print(
+                        f"  step {step:04d} | "
+                        f"KL {metrics['kl_loss']:.4f} | "
+                        f"Graph {metrics.get('graph_loss', 0.0):.4f} | "
+                        f"λGraph {metrics.get('graph_loss_weighted', 0.0):.4f}"
+                        f"{orig_s}{replay_s}{hard_s}{acc_s}{extra_eval_s}{flop_s}",
+                    )
                 else:
                     stable_rank = metrics.get("cluster_stable_rank") or {}
                     print(
@@ -1699,6 +1928,14 @@ class ClusterDistillationTrainer:
                             for pk, pv in sorted(stable_rank.items())
                         )
                         print(f"             stable rank {stable_rank_s}")
+            if self._graph:
+                loss = None
+                metrics = None
+                kl_loss = None
+                cluster_loss = None
+                hard_ce = None
+                replay_ce = None
+                self._cuda_clear_after_graph_step()
 
         if n == 0:
             print(
@@ -1755,6 +1992,8 @@ class ClusterDistillationTrainer:
                 "accuracy",
                 "cluster_loss",
                 "mean_cka",
+                "graph_loss",
+                "graph_loss_weighted",
                 "kc_lam1",
                 "cluster_stable_rank",
                 "kl_grad_norm",
@@ -1792,20 +2031,35 @@ class ClusterDistillationTrainer:
                 print_samples=cfg.eval_print_samples,
                 eval_label="student baseline",
                 teacher_for_topk_print=(
-                    self.teacher if cfg.eval_print_samples > 0 else None
+                    self.teacher
+                    if cfg.eval_print_samples > 0 and self.teacher is not None
+                    else None
                 ),
                 temperature=cfg.temperature,
             )
-            teacher_base = eval_accuracy(
-                self.teacher, self.tokenizer, self.test_data,
-                batch_size=cfg.eval_batch_size,
-                max_new_tokens=cfg.eval_max_new_tokens,
-                print_samples=0,
-                eval_label="teacher baseline",
-                temperature=cfg.temperature,
-            )
+            if self.teacher is not None:
+                teacher_base = eval_accuracy(
+                    self.teacher, self.tokenizer, self.test_data,
+                    batch_size=cfg.eval_batch_size,
+                    max_new_tokens=cfg.eval_max_new_tokens,
+                    print_samples=0,
+                    eval_label="teacher baseline",
+                    temperature=cfg.temperature,
+                )
+            else:
+                teacher_base = 0.0
             print(f"  Student baseline accuracy: {student_base:.4f}")
-            print(f"  Teacher baseline accuracy: {teacher_base:.4f}")
+            if self.teacher is not None:
+                print(f"  Teacher baseline accuracy: {teacher_base:.4f}")
+            elif self.teacher_data_cache is not None:
+                print("  Teacher baseline accuracy: skipped (using cached teacher logits)")
+            elif self._graph:
+                print(
+                    "  Teacher baseline accuracy: skipped "
+                    "(graph mode uses TransformerLens teacher for KL/graph loss)",
+                )
+            else:
+                print("  Teacher baseline accuracy: skipped (teacher model unavailable)")
             self.history["student_baseline"] = student_base
             self.history["teacher_baseline"] = teacher_base
             for prefix, data in self.extra_eval_data.items():
@@ -1817,16 +2071,32 @@ class ClusterDistillationTrainer:
                     eval_label=f"{prefix} student baseline",
                     temperature=cfg.temperature,
                 )
-                extra_teacher_base = eval_accuracy(
-                    self.teacher, self.tokenizer, data,
-                    batch_size=cfg.eval_batch_size,
-                    max_new_tokens=cfg.eval_max_new_tokens,
-                    print_samples=0,
-                    eval_label=f"{prefix} teacher baseline",
-                    temperature=cfg.temperature,
-                )
+                if self.teacher is not None:
+                    extra_teacher_base = eval_accuracy(
+                        self.teacher, self.tokenizer, data,
+                        batch_size=cfg.eval_batch_size,
+                        max_new_tokens=cfg.eval_max_new_tokens,
+                        print_samples=0,
+                        eval_label=f"{prefix} teacher baseline",
+                        temperature=cfg.temperature,
+                    )
+                else:
+                    extra_teacher_base = 0.0
                 print(f"  Student baseline accuracy [{prefix}]: {extra_student_base:.4f}")
-                print(f"  Teacher baseline accuracy [{prefix}]: {extra_teacher_base:.4f}")
+                if self.teacher is not None:
+                    print(f"  Teacher baseline accuracy [{prefix}]: {extra_teacher_base:.4f}")
+                elif self.teacher_data_cache is not None:
+                    print(f"  Teacher baseline accuracy [{prefix}]: skipped (cached logits)")
+                elif self._graph:
+                    print(
+                        f"  Teacher baseline accuracy [{prefix}]: skipped "
+                        "(graph mode uses TransformerLens teacher for KL/graph loss)",
+                    )
+                else:
+                    print(
+                        f"  Teacher baseline accuracy [{prefix}]: skipped "
+                        "(teacher model unavailable)",
+                    )
                 self.history[f"student_baseline_{prefix}"] = extra_student_base
                 self.history[f"teacher_baseline_{prefix}"] = extra_teacher_base
 
@@ -1837,6 +2107,8 @@ class ClusterDistillationTrainer:
         print("=" * 60)
         if self._standard:
             print("Standard KL Distillation (neuron-distillation entry)")
+        elif self._graph:
+            print("Graph KL Distillation")
         else:
             print("Neuron-Cluster KL + CKA Distillation")
         print(f"  Run dir:          {cfg.save_dir}")
@@ -1874,13 +2146,19 @@ class ClusterDistillationTrainer:
                 f"  eval print samples: {cfg.eval_print_samples} "
                 f"(prompt + top-5 softmax at T={cfg.temperature:g} for student & teacher)",
             )
-        if not self._standard:
+        if self._graph:
+            print(f"  lambda_graph:     {cfg.lambda_graph}")
+            print(f"  graph top_k_logits: {cfg.graph_top_k_logits}")
+            print(f"  graph prop neurons/layer: {cfg.graph_prop_neurons_per_layer}")
+            print(f"  teacher graph batch: {cfg.teacher_graph_batch_size}")
+            print(f"  student graph batch: {cfg.student_graph_batch_size}")
+        elif self._circuit:
             print(f"  lambda_cluster:   {cfg.lambda_cluster}")
             print(f"  Cluster pairs:    {len(self.cluster_pairs)}")
         print(
             f"  Step log / test eval every: {cfg.step_log_interval} training batches",
         )
-        if cfg.log_kl_cka_grad_norms:
+        if cfg.log_kl_cka_grad_norms and self._circuit:
             print(
                 "  KL/CKA grad norms: recompute every "
                 f"{int(cfg.log_kl_cka_grad_norms)} batches (split grads; ~2× work those steps); "
@@ -1891,7 +2169,7 @@ class ClusterDistillationTrainer:
                     "  K_c spectrum:     λ_max(H X X^T H) per cluster (student), "
                     "(B, T_valid×|C|) layout; same interval as grad-norm recomputes",
                 )
-        if cfg.track_stable_rank and not self._standard:
+        if cfg.track_stable_rank and self._circuit:
             print(
                 "  Stable rank:      per pair (student Gram), printed every "
                 f"{max(1, cfg.step_log_interval)} batches (same as step logs)",
@@ -2121,6 +2399,7 @@ class ClusterDistillationTrainer:
         loss_steps = history.get("train_step") or epochs
         kl_series = history.get("step_kl_loss") or history.get("kl_loss", [])
         cluster_series = history.get("step_cluster_loss") or history.get("cluster_loss", [])
+        graph_series = history.get("step_graph_loss") or history.get("graph_loss", [])
 
         if self._standard:
             fig, axes = plt.subplots(1, 2, figsize=(12, 4))
@@ -2131,6 +2410,21 @@ class ClusterDistillationTrainer:
             axes[0].grid(True, alpha=0.3)
             self._plot_accuracy_axes(axes[1], history, epochs)
             fig.suptitle("Standard KL Distillation", fontsize=13)
+        elif self._graph:
+            fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+            axes[0].plot(loss_steps, kl_series, marker="o", markersize=2, linewidth=1.0)
+            axes[0].set_title("KL Loss")
+            axes[0].set_xlabel("Train Step")
+            axes[0].set_ylabel("KL Loss")
+            axes[0].grid(True, alpha=0.3)
+            axes[1].plot(loss_steps, graph_series, marker="o", markersize=2,
+                         linewidth=1.0, color="tab:green")
+            axes[1].set_title("Graph Loss")
+            axes[1].set_xlabel("Train Step")
+            axes[1].set_ylabel("Graph Loss")
+            axes[1].grid(True, alpha=0.3)
+            self._plot_accuracy_axes(axes[2], history, epochs)
+            fig.suptitle("KL + Graph Distillation", fontsize=13)
         else:
             fig, axes = plt.subplots(1, 3, figsize=(15, 4))
             axes[0].plot(loss_steps, kl_series, marker="o", markersize=2, linewidth=1.0)

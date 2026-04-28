@@ -1,4 +1,4 @@
-"""Build sparse-backed neuron-level attribution graphs for small prompts/models."""
+"""Build dense-backed neuron-level attribution graphs for small prompts/models."""
 
 import logging
 import math
@@ -23,7 +23,7 @@ def attribute(
     model: TransformerLensReplacementModel,
     *,
     attribution_targets: Sequence[str] | Sequence[TargetSpec] | torch.Tensor | None = None,
-    logit_min_prob: float = 1e-5,
+    top_k_logits: int | None = None,
     prop_neurons_per_layer: float = 0.1,
     batch_size: int = 512,
     max_feature_nodes: int | None = None,
@@ -31,7 +31,7 @@ def attribute(
     verbose: bool = False,
     update_interval: int = 4,
 ) -> Graph:
-    """Compute a sparse-backed neuron graph for a prompt.
+    """Compute a dense-backed neuron graph for a prompt.
 
     The dense adjacency layout is:
     ``[neurons, token_embeddings, logits]``.
@@ -62,7 +62,7 @@ def attribute(
             model=model,
             prompt=prompt,
             attribution_targets=attribution_targets,
-            logit_min_prob=logit_min_prob,
+            top_k_logits=top_k_logits,
             prop_neurons_per_layer=prop_neurons_per_layer,
             batch_size=batch_size,
             logger=logger,
@@ -129,7 +129,7 @@ def _run_attribution(
     model: TransformerLensReplacementModel,
     prompt,
     attribution_targets,
-    logit_min_prob,
+    top_k_logits,
     prop_neurons_per_layer,
     batch_size,
     logger,
@@ -144,15 +144,13 @@ def _run_attribution(
 
     logger.info(f"Precomputation completed in {time.time() - phase_start:.2f}s")
     logger.info(f"Enumerated {len(ctx.neuron_locations)} neuron nodes")
-    for stats in ctx.layer_capture_stats:
+    if ctx.layer_capture_stats:
+        avg_captured_fraction = sum(
+            float(stats["captured_fraction"]) for stats in ctx.layer_capture_stats
+        ) / len(ctx.layer_capture_stats)
         logger.info(
-            "Layer %d selection captured %.2f%% of residual write norm (%d/%d neurons, %.4f/%.4f)",
-            stats["layer"],
-            100.0 * stats["captured_fraction"],
-            stats["selected_neurons"],
-            stats["total_neurons"],
-            stats["selected_residual_write_norm"],
-            stats["total_residual_write_norm"],
+            "Average layer selection captured %.2f%% of residual write norm across the model",
+            100.0 * avg_captured_fraction,
         )
 
     logger.info("Phase 1: Running hooked forward pass")
@@ -169,7 +167,7 @@ def _run_attribution(
         logits=ctx.logits[0, -1],
         unembed_proj=model.unembed.W_U,
         tokenizer=model.tokenizer,
-        logit_min_prob=logit_min_prob,
+        top_k_logits=top_k_logits,
     )
     log_attribution_target_info(targets, attribution_targets, logger)
 
@@ -240,21 +238,21 @@ def _run_attribution(
     progress_bar.close()
     logger.info(f"Attribution rows completed in {time.time() - phase_start:.2f}s")
 
+    adjacency_matrix = torch.zeros(
+        (total_nodes, total_nodes),
+        dtype=ctx.source_vectors.dtype,
+    )
     if edge_value_chunks:
         adjacency_indices = torch.stack(
             [torch.cat(edge_row_chunks), torch.cat(edge_col_chunks)],
             dim=0,
         )
         adjacency_values = torch.cat(edge_value_chunks)
-    else:
-        adjacency_indices = torch.zeros((2, 0), dtype=torch.long)
-        adjacency_values = torch.zeros((0,), dtype=ctx.source_vectors.dtype)
-    adjacency_matrix = torch.sparse_coo_tensor(
-        adjacency_indices,
-        adjacency_values,
-        size=(total_nodes, total_nodes),
-        dtype=ctx.source_vectors.dtype,
-    ).coalesce()
+        adjacency_matrix.index_put_(
+            (adjacency_indices[0], adjacency_indices[1]),
+            adjacency_values,
+            accumulate=True,
+        )
 
     graph = Graph(
         input_string=model.tokenizer.decode(input_ids.detach().cpu().tolist()),

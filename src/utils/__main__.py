@@ -16,14 +16,14 @@ def main() -> None:
     )
 
     generate_math_dataset(
-        dataset_all_json_path("23_add"),
+        dataset_all_json_path("222_add_tight"),
         tokenizer,
-        digits=[2, 3],
-        operations=[["+"]],
-        spaces=True,
+        digits=[2, 2, 2],
+        operations=[["+", "+"]],
+        spaces=False,
         shuffle=True,
-        samples=10000,
-        split_test_frac=0.5,
+        samples=30000,
+        split_test_frac=0.167,
     )
 
     # mix_datasets(
