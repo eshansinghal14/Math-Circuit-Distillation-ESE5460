@@ -479,6 +479,16 @@ def build_super_graph(
             for value, idx in zip(values, indices, strict=True)
         )
 
+    def format_top_output_logits(top_k: int = 20) -> str:
+        if logit_probabilities.numel() == 0:
+            return "none"
+        k = min(top_k, int(logit_probabilities.numel()))
+        values, indices = torch.topk(logit_probabilities.detach().float().cpu(), k=k)
+        return ", ".join(
+            f"{graph.logit_targets[int(idx.item())].token_str!r}:{float(value.item()):.6g}"
+            for value, idx in zip(values, indices, strict=True)
+        )
+
     def log_output_node(output_node_indices, output_node_scores, output_node_dla, elbow_count, all_sorted_scores):
         logger.info("  Output node members: %d", int(output_node_indices.numel()))
         sorted_positions = torch.argsort(output_node_scores, descending=True)
@@ -522,6 +532,10 @@ def build_super_graph(
                 token_pos,
                 neuron_id,
                 float(score),
+            )
+            logger.info(
+                "      top 20 logits: %s",
+                format_top_output_logits(top_k=20),
             )
             logger.info(
                 "      top DLA logits: %s",
