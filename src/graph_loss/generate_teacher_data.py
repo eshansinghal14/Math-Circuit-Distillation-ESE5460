@@ -269,6 +269,7 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
         logger.info("Running build_super_graph")
         supergraph = build_super_graph(
             graph_for_supergraph,
+            model,
             epsilon=config.epsilon,
             min_cum_logit_influence=config.min_cum_logit_influence,
             prune_result=prune_result,

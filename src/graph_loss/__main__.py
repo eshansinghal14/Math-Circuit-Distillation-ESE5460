@@ -589,6 +589,7 @@ def main():
     logger.info("Running build_super_graph")
     supergraph = build_super_graph(
         graph,
+        model,
         epsilon=args.epsilon,
         min_cum_logit_influence=args.min_cum_logit_influence,
         prune_result=prune_result,

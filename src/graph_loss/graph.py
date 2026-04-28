@@ -6,6 +6,7 @@ import logging
 from typing import NamedTuple
 
 import torch
+import torch.nn.functional as F
 
 from graph_loss.attribution.targets import LogitTarget
 from graph_loss.utils import UnifiedConfig, convert_nnsight_config_to_transformerlens
@@ -268,6 +269,7 @@ class SuperGraph(NamedTuple):
 
 def build_super_graph(
     graph: Graph,
+    model,
     epsilon: float = 1e-3,
     min_cum_logit_influence: float = 0.9,
     prune_result: PruneResult | None = None,
@@ -320,6 +322,69 @@ def build_super_graph(
     node_influence_normalized = node_influence_vectors / node_influence_vectors.norm(
         dim=-1, keepdim=True
     ).clamp(min=1e-12)
+
+    def build_output_node(kl_threshold):
+        kept_neurons = torch.where(kept_neuron_mask)[0]
+        device = model.unembed.W_U.device
+        W_U = model.unembed.W_U.to(device=device)
+        w_out_cache = {}
+        write_vectors = []
+
+        for neuron_idx in kept_neurons.tolist():
+            layer = int(graph.neuron_locations[neuron_idx, 0].item())
+            neuron_id = int(graph.neuron_locations[neuron_idx, 2].item())
+            if layer not in w_out_cache:
+                old_mlp = model.blocks[layer].mlp.old_mlp
+                w_out_cache[layer] = model._row_oriented_weight(old_mlp.W_out.to(device=device))
+
+            activation = graph.neuron_activations[neuron_idx].to(device=device, dtype=W_U.dtype)
+            write_vectors.append(activation * w_out_cache[layer][neuron_id].to(dtype=W_U.dtype))
+
+        if not write_vectors:
+            return kept_neurons[:0]
+
+        dla_matrix = torch.stack(write_vectors) @ W_U
+        target_vocab_indices = torch.tensor(
+            [target.vocab_idx for target in graph.logit_targets],
+            device=device,
+            dtype=torch.long,
+        )
+        log_softmax_dla_matrix = F.log_softmax(dla_matrix, dim=-1)[:, target_vocab_indices]
+        expanded_logit_probabilities = logit_probabilities.unsqueeze(0).expand_as(log_softmax_dla_matrix)
+
+        dla_kl = (expanded_logit_probabilities * (torch.log(expanded_logit_probabilities) - log_softmax_dla_matrix)).sum(dim=-1)
+        
+        output_node_positions = torch.where(dla_kl <= kl_threshold)[0]
+        return kept_neurons[output_node_positions]
+
+    def log_output_node(output_node_indices):
+        logger.info("  Output node members: %d", int(output_node_indices.numel()))
+        for neuron_idx in output_node_indices.tolist():
+            layer = int(graph.neuron_locations[neuron_idx, 0].item())
+            token_pos = int(graph.neuron_locations[neuron_idx, 1].item())
+            neuron_id = int(graph.neuron_locations[neuron_idx, 2].item())
+            logger.info(
+                "    graph_neuron_idx=%d layer=%d token=%d neuron=%d",
+                neuron_idx,
+                layer,
+                token_pos,
+                neuron_id,
+            )
+
+        if output_node_indices.numel() == 0:
+            logger.info("  Output node influence cossim matrix: []")
+            return
+
+        output_influence_vectors = node_influence_vectors[output_node_indices]
+        output_influence_normalized = output_influence_vectors / output_influence_vectors.norm(
+            dim=1,
+            keepdim=True,
+        ).clamp(min=1e-12)
+        cossim_matrix = output_influence_normalized @ output_influence_normalized.T
+        logger.info(
+            "  Output node influence cossim matrix:\n%s",
+            cossim_matrix.detach().float().cpu(),
+        )
 
     def build_supernodes_svd(B_weighted, coverage_threshold, min_cluster_influence):
         """
@@ -402,39 +467,14 @@ def build_super_graph(
         assignments[valid_mask] = assignments_valid + 1
         
         return assignments, k
+
+    logger.info("  Building output node")
+    output_node_indices = build_output_node(epsilon)
+    log_output_node(output_node_indices)
+    
     
     logger.info("  Clustering supernodes")
     node_clusters, num_supernodes = build_supernodes_svd(node_influence_vectors, min_cum_logit_influence, epsilon)
-
-    # num_supernodes = 0
-    # node_clusters = [0] * n_neurons
-    # for n in range(n_neurons):
-    #     if node_clusters[n] != 0:
-    #         continue
-
-    #     neighbors = range_query(node_influence_normalized, n, epsilon)
-    #     if node_influence_vectors[neighbors].sum(dim=0).norm(dim=-1) < min_cum_logit_influence:
-    #         node_clusters[n] = -1
-    #         continue
-        
-    #     num_supernodes += 1
-    #     node_clusters[n] = num_supernodes
-    #     neighbors = [neighbor for neighbor in neighbors if neighbor != n]
-    #     idx = 0
-
-    #     while idx < len(neighbors):
-    #         s = neighbors[idx]
-    #         idx += 1
-    #         if node_clusters[s] == -1:
-    #             node_clusters[s] = num_supernodes
-    #         if node_clusters[s] != 0:
-    #             continue
-
-    #         node_clusters[s] = num_supernodes
-    #         new_neighbors = range_query(node_influence_normalized, s, epsilon)
-
-    #         if node_influence_vectors[new_neighbors].sum(dim=0).norm(dim=-1) >= min_cum_logit_influence:
-    #             neighbors = list(set(neighbors) | set(new_neighbors))
 
     logger.info("  Aggregating supernode adjacency")
     adj_matrix_norm = normalize_matrix(adjacency_matrix)

@@ -127,6 +127,7 @@ def compute_prompt_graph_loss(
     supergraph_start = time.perf_counter()
     teacher_supergraph = build_super_graph(
         teacher_graph,
+        teacher_graph_model,
         epsilon=config.graph_epsilon,
         min_cum_logit_influence=config.graph_min_cum_logit_influence,
         prune_result=teacher_prune_result,
@@ -146,6 +147,7 @@ def compute_prompt_graph_loss(
     with torch.no_grad():
         student_supergraph_structure = build_super_graph(
             student_graph,
+            student_adapter,
             epsilon=config.graph_epsilon,
             min_cum_logit_influence=config.graph_min_cum_logit_influence,
             prune_result=student_prune_result,
