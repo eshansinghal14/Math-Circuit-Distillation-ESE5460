@@ -314,6 +314,39 @@ def build_super_graph(
     # )
     node_influence_vectors = logit_influence.T[:n_neurons]
 
+    def get_vocab_embedding_matrix(
+        vocab_size: int,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        if hasattr(model, "W_E"):
+            embedding_matrix = model.W_E
+        elif hasattr(model, "embed") and hasattr(model.embed, "W_E"):
+            embedding_matrix = model.embed.W_E
+        elif hasattr(model, "embed_tokens"):
+            embedding_matrix = model.embed_tokens.weight
+        else:
+            raise AttributeError("Model does not expose W_E, embed.W_E, or embed_tokens.weight")
+
+        embedding_matrix = embedding_matrix.to(device=device, dtype=dtype)
+        if embedding_matrix.shape[0] == vocab_size:
+            return embedding_matrix
+        if embedding_matrix.shape[1] == vocab_size:
+            return embedding_matrix.T
+        raise ValueError(
+            f"Could not orient embedding matrix of shape {tuple(embedding_matrix.shape)} "
+            f"for vocab size {vocab_size}"
+        )
+
+    def project_dla_to_embedding_space(dla_matrix: torch.Tensor) -> torch.Tensor:
+        embedding_matrix = get_vocab_embedding_matrix(
+            int(dla_matrix.shape[1]),
+            device=dla_matrix.device,
+            dtype=dla_matrix.dtype,
+        )
+        return dla_matrix @ embedding_matrix
+
     def find_output_elbow_count(sorted_scores: torch.Tensor) -> int:
         n_scores = int(sorted_scores.numel())
         if n_scores <= 2:
@@ -381,11 +414,12 @@ def build_super_graph(
             logger.info("  Output-node DLA cossim clustering: no vectors")
             return torch.empty(0, dtype=torch.long, device=output_dla.device)
 
-        assignments = cossim_connected_components(output_dla)
+        projected_dla = project_dla_to_embedding_space(output_dla)
+        assignments = cossim_connected_components(projected_dla)
         unique_assignments, cluster_sizes = torch.unique(assignments, return_counts=True)
-        score = silhouette_score_cossim(output_dla, assignments)
+        score = silhouette_score_cossim(projected_dla, assignments)
         logger.info(
-            "  Output-node DLA cossim clustering: eps=%.6g clusters=%d min_size=%d max_size=%d silhouette_score=%.6g",
+            "  Output-node embedding-projected DLA cossim clustering: eps=%.6g clusters=%d min_size=%d max_size=%d silhouette_score=%.6g",
             float(cossim_eps),
             int(unique_assignments.numel()),
             int(cluster_sizes.min().item()),
@@ -566,14 +600,15 @@ def build_super_graph(
                     logger.info("      top DLA logits %d: %s", line_idx, line)
 
         if output_node_dla.numel():
-            output_dla_normalized = output_node_dla.detach().float() / output_node_dla.detach().float().norm(
+            projected_output_dla = project_dla_to_embedding_space(output_node_dla).detach().float()
+            projected_output_dla_normalized = projected_output_dla / projected_output_dla.norm(
                 dim=1,
                 keepdim=True,
             ).clamp(min=1e-12)
-            cossim_matrix = output_dla_normalized @ output_dla_normalized.T
+            cossim_matrix = projected_output_dla_normalized @ projected_output_dla_normalized.T
             cossim_threshold = 1.0 - float(cossim_eps)
             logger.info(
-                "  Output node DLA cossim matrix values > %.6g:",
+                "  Output node embedding-projected DLA cossim matrix values > %.6g:",
                 cossim_threshold,
             )
             for row in cossim_matrix.detach().cpu().tolist():
