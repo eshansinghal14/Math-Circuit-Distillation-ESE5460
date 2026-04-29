@@ -208,7 +208,7 @@ def _activations_for_location_batch(
     target_hook_name = f"blocks.{layer}.{model.feature_input_hook}"
     mlp_input_at_pos = None
 
-    def cache_target_position(acts: torch.Tensor, _hook) -> torch.Tensor:
+    def cache_target_position(acts: torch.Tensor, hook) -> torch.Tensor:
         nonlocal mlp_input_at_pos
         mlp_input_at_pos = acts[:, token_pos, :].detach()
         return acts
