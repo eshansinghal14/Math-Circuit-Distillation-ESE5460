@@ -272,8 +272,8 @@ def build_super_graph(
     graph: Graph,
     model,
     prune_result: PruneResult | None = None,
-    hdbscan_min_cluster_size: int = 3,
-    hdbscan_min_samples: int = 2,
+    dbscan_eps: float = 0.1,
+    dbscan_min_samples: int = 2,
 ) -> SuperGraph:
     """Create a single supernode from the selected output-node neurons."""
 
@@ -332,20 +332,19 @@ def build_super_graph(
         distance_from_diagonal = (1 - x) - y
         return int(distance_from_diagonal.argmax().item()) + 1
 
-    def hdbscan_cossim(X: torch.Tensor) -> torch.Tensor:
+    def dbscan_cossim(X: torch.Tensor) -> torch.Tensor:
         if len(X) == 0:
-            raise ValueError("hdbscan_cossim requires at least one point")
+            raise ValueError("dbscan_cossim requires at least one point")
         if len(X) == 1:
             return torch.zeros(1, dtype=torch.long, device=X.device)
 
         X_norm = X / X.norm(dim=1, keepdim=True).clamp(min=1e-12)
         distances = (1 - X_norm @ X_norm.T).clamp(min=0).detach().float().cpu().numpy()
-        HDBSCAN = importlib.import_module("sklearn.cluster").HDBSCAN
-        clusterer = HDBSCAN(
+        DBSCAN = importlib.import_module("sklearn.cluster").DBSCAN
+        clusterer = DBSCAN(
+            eps=max(0.0, float(dbscan_eps)),
             metric="precomputed",
-            min_cluster_size=max(2, int(hdbscan_min_cluster_size)),
-            min_samples=max(1, int(hdbscan_min_samples)),
-            allow_single_cluster=True,
+            min_samples=max(1, int(dbscan_min_samples)),
         )
         raw_labels = clusterer.fit_predict(distances).tolist()
         next_cluster = max(raw_labels, default=-1) + 1
@@ -379,16 +378,18 @@ def build_super_graph(
 
         return torch.stack(scores).mean()
 
-    def output_dla_hdbscan_assignments(output_dla: torch.Tensor) -> torch.Tensor:
+    def output_dla_dbscan_assignments(output_dla: torch.Tensor) -> torch.Tensor:
         if len(output_dla) == 0:
-            logger.info("  Output-node normalized DLA HDBSCAN: no vectors")
+            logger.info("  Output-node normalized DLA DBSCAN: no vectors")
             return torch.empty(0, dtype=torch.long, device=output_dla.device)
 
-        assignments = hdbscan_cossim(output_dla)
+        assignments = dbscan_cossim(output_dla)
         unique_assignments, cluster_sizes = torch.unique(assignments, return_counts=True)
         score = silhouette_score_cossim(output_dla, assignments)
         logger.info(
-            "  Output-node normalized DLA HDBSCAN: clusters=%d min_size=%d max_size=%d silhouette_score=%.6g",
+            "  Output-node normalized DLA DBSCAN: eps=%.6g min_samples=%d clusters=%d min_size=%d max_size=%d silhouette_score=%.6g",
+            float(dbscan_eps),
+            int(dbscan_min_samples),
             int(unique_assignments.numel()),
             int(cluster_sizes.min().item()),
             int(cluster_sizes.max().item()),
@@ -530,7 +531,7 @@ def build_super_graph(
                 format_top_output_logits(top_k=20),
             )
 
-        cluster_assignments = output_dla_hdbscan_assignments(output_node_dla)
+        cluster_assignments = output_dla_dbscan_assignments(output_node_dla)
         unique_cluster_ids = torch.unique(cluster_assignments).tolist()
         for cluster_id in unique_cluster_ids:
             cluster_mask = cluster_assignments == int(cluster_id)
