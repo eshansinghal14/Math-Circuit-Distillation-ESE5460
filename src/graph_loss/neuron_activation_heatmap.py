@@ -245,6 +245,9 @@ def _plot_3d(
 
 def plot_neuron_activation_heatmap(args: argparse.Namespace) -> str:
     logger = logging.getLogger(__name__)
+    if args.forward_batch_size <= 0:
+        raise ValueError("--forward-batch-size must be positive")
+
     dataset_path = _resolve_dataset_path(args.dataset_name)
     data = load_prompt_answer_json(dataset_path)
     samples = list(data.items())
@@ -316,7 +319,11 @@ def plot_neuron_activation_heatmap(args: argparse.Namespace) -> str:
             else:
                 skipped += 1
         if args.log_interval and (start + len(batch)) % args.log_interval == 0:
-            logger.info("Processed %d/%d valid samples", start + len(batch), len(valid_samples))
+            logger.info(
+                "Processed %d/%d valid samples",
+                start + len(batch),
+                len(valid_samples),
+            )
 
     if not values_by_arg:
         raise ValueError("No valid activations collected.")
@@ -347,7 +354,12 @@ def build_parser() -> argparse.ArgumentParser:
         description="Plot a graph-indexed neuron's activations over a numeric dataset.",
     )
     parser.add_argument("--model", required=True, help="HuggingFace model name")
-    parser.add_argument("--neuron-idx", type=int, required=True, help="Graph neuron index")
+    parser.add_argument(
+        "--neuron-idx",
+        type=int,
+        required=True,
+        help="Graph neuron index from graph_neuron_idx logs, not the per-layer neuron id",
+    )
     parser.add_argument("--dataset-name", required=True, help="Dataset prefix, filename, or path")
     parser.add_argument("--output-path", help="Path for the output heatmap PNG")
     parser.add_argument("--limit", type=int, default=None, help="Optional sample limit")
