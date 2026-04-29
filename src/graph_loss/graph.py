@@ -472,46 +472,23 @@ def build_super_graph(
         token = model.tokenizer.decode([vocab_idx])
         return token.replace("\n", "\\n").replace("\r", "\\r")
 
-    target_logit_prob_by_vocab_idx = {
-        int(target.vocab_idx): float(prob)
-        for target, prob in zip(graph.logit_targets, logit_probabilities.detach().float().cpu().tolist(), strict=True)
-    }
-
-    def format_top_dla_logits(dla_vector: torch.Tensor, top_k: int = 10) -> str:
+    def format_top_dla_logit_lines(
+        dla_vector: torch.Tensor,
+        top_k: int = 30,
+        line_size: int = 10,
+    ) -> list[str]:
         if dla_vector.numel() == 0:
-            return "none"
+            return ["none"]
         k = min(top_k, int(dla_vector.numel()))
         values, indices = torch.topk(dla_vector.detach().float().cpu(), k=k)
-        return ", ".join(
+        formatted = [
             f"{decode_vocab_token(int(idx.item()))!r}: {float(value.item()):.6g}"
             for value, idx in zip(values, indices, strict=True)
-        )
-
-    def format_top_dla_logit_probs(dla_vector: torch.Tensor, top_k: int = 10) -> str:
-        if dla_vector.numel() == 0:
-            return "none"
-        k = min(top_k, int(dla_vector.numel()))
-        _, indices = torch.topk(dla_vector.detach().float().cpu(), k=k)
-        return ", ".join(
-            (
-                f"{decode_vocab_token(int(idx.item()))!r}: "
-                f"{target_logit_prob_by_vocab_idx.get(int(idx.item()), 0.0):.6g}"
-            )
-            for idx in indices
-        )
-
-    def format_top_logit_influence_logits(
-        influence_vector: torch.Tensor,
-        top_k: int = 10,
-    ) -> str:
-        if influence_vector.numel() == 0:
-            return "none"
-        k = min(top_k, int(influence_vector.numel()))
-        values, indices = torch.topk(influence_vector.detach().float().cpu(), k=k)
-        return ", ".join(
-            f"{graph.logit_targets[int(idx.item())].token_str!r}:{float(value.item()):.6g}"
-            for value, idx in zip(values, indices, strict=True)
-        )
+        ]
+        return [
+            ", ".join(formatted[start:start + line_size])
+            for start in range(0, len(formatted), line_size)
+        ]
 
     def format_top_output_logits(top_k: int = 20) -> str:
         if logit_probabilities.numel() == 0:
@@ -533,10 +510,6 @@ def build_super_graph(
         output_node_indices = output_node_indices[sorted_positions]
         output_node_scores = output_node_scores[sorted_positions]
         output_node_dla = output_node_dla[sorted_positions.to(device=output_node_dla.device)]
-        output_logit_influence_vectors = node_influence_vectors[
-            output_node_indices,
-            logit_start: logit_start + n_logits,
-        ]
         if all_sorted_scores.numel():
             plt.figure(figsize=(8, 4))
             plt.plot(all_sorted_scores.tolist(), marker="o")
@@ -576,18 +549,11 @@ def build_super_graph(
                 float(score),
                 softmax_dla_entropy(output_node_dla[row_idx]),
             )
-            logger.info(
-                "      top DLA logits probs: %s",
-                format_top_dla_logit_probs(output_node_dla[row_idx]),
-            )
-            logger.info(
-                "      top DLA logits: %s",
-                format_top_dla_logits(output_node_dla[row_idx]),
-            )
-            logger.info(
-                "      top logit influence logits: %s",
-                format_top_logit_influence_logits(output_logit_influence_vectors[row_idx]),
-            )
+            for line_idx, line in enumerate(
+                format_top_dla_logit_lines(output_node_dla[row_idx], top_k=30, line_size=10),
+                start=1,
+            ):
+                logger.info("      top DLA logits %d: %s", line_idx, line)
 
         if output_node_indices.numel() == 0:
             logger.info("  Output node normalized DLA cossim matrix: []")
