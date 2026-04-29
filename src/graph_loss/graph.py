@@ -271,6 +271,7 @@ def build_super_graph(
     graph: Graph,
     model,
     prune_result: PruneResult | None = None,
+    cossim_eps: float = 0.1,
 ) -> SuperGraph:
     """Create a single supernode from the selected output-node neurons."""
 
@@ -329,42 +330,30 @@ def build_super_graph(
         distance_from_diagonal = (1 - x) - y
         return int(distance_from_diagonal.argmax().item()) + 1
 
-    def kmeans_cossim(X: torch.Tensor, k: int, n_iter: int = 100) -> torch.Tensor:
+    def cossim_connected_components(X: torch.Tensor) -> torch.Tensor:
         if len(X) == 0:
-            raise ValueError("kmeans_cossim requires at least one point")
-        if k <= 0:
-            raise ValueError("kmeans_cossim requires k > 0")
-        k = min(k, len(X))
+            raise ValueError("cossim_connected_components requires at least one point")
+        if len(X) == 1:
+            return torch.zeros(1, dtype=torch.long, device=X.device)
 
-        def pairwise_dists(points: torch.Tensor, centers: torch.Tensor) -> torch.Tensor:
-            points_norm = points / points.norm(dim=1, keepdim=True).clamp(min=1e-12)
-            centers_norm = centers / centers.norm(dim=1, keepdim=True).clamp(min=1e-12)
-            return 1 - points_norm @ centers_norm.T
-
-        centers = [X[torch.randint(len(X), (1,), device=X.device).item()]]
-        for _ in range(k - 1):
-            dists = pairwise_dists(X, torch.stack(centers)).min(dim=1).values
-            init_weights = dists - dists.min()
-            total_weight = init_weights.sum()
-            if not torch.isfinite(total_weight) or total_weight <= 0:
-                centers.append(X[torch.randint(len(X), (1,), device=X.device).item()])
-            else:
-                centers.append(X[torch.multinomial(init_weights / total_weight, 1).item()])
-        centers_t = torch.stack(centers)
-
-        for _ in range(n_iter):
-            assignments = pairwise_dists(X, centers_t).argmin(dim=1)
-            new_centers = torch.stack([
-                X[assignments == i].mean(dim=0)
-                if (assignments == i).any()
-                else centers_t[i]
-                for i in range(k)
-            ])
-            if (new_centers - centers_t).norm() < 1e-6:
-                break
-            centers_t = new_centers
-
-        return assignments
+        X_norm = X / X.norm(dim=1, keepdim=True).clamp(min=1e-12)
+        cossim_matrix = X_norm @ X_norm.T
+        connected = cossim_matrix >= 1.0 - float(cossim_eps)
+        labels = torch.full((len(X),), -1, dtype=torch.long, device=X.device)
+        cluster_id = 0
+        for start_idx in range(len(X)):
+            if labels[start_idx] >= 0:
+                continue
+            stack = [start_idx]
+            labels[start_idx] = cluster_id
+            while stack:
+                current_idx = stack.pop()
+                neighbors = torch.where(connected[current_idx] & (labels < 0))[0].tolist()
+                for neighbor_idx in neighbors:
+                    labels[neighbor_idx] = cluster_id
+                    stack.append(int(neighbor_idx))
+            cluster_id += 1
+        return labels
 
     def silhouette_score_cossim(X: torch.Tensor, assignments: torch.Tensor) -> torch.Tensor:
         unique_assignments = torch.unique(assignments)
@@ -387,16 +376,23 @@ def build_super_graph(
 
         return torch.stack(scores).mean()
 
-    def log_output_dla_silhouette_scores(dla_normalized: torch.Tensor) -> None:
-        if len(dla_normalized) == 0:
-            logger.info("  Output-node normalized DLA kmeans silhouette: no vectors")
-            return
+    def output_dla_cossim_assignments(output_dla: torch.Tensor) -> torch.Tensor:
+        if len(output_dla) == 0:
+            logger.info("  Output-node DLA cossim clustering: no vectors")
+            return torch.empty(0, dtype=torch.long, device=output_dla.device)
 
-        logger.info("  Output-node normalized DLA kmeans silhouette scores")
-        for candidate_k in range(1, min(10, len(dla_normalized)) + 1):
-            assignments = kmeans_cossim(dla_normalized, candidate_k)
-            score = silhouette_score_cossim(dla_normalized, assignments)
-            logger.info("    k=%d silhouette_score=%.6g", candidate_k, float(score.item()))
+        assignments = cossim_connected_components(output_dla)
+        unique_assignments, cluster_sizes = torch.unique(assignments, return_counts=True)
+        score = silhouette_score_cossim(output_dla, assignments)
+        logger.info(
+            "  Output-node DLA cossim clustering: eps=%.6g clusters=%d min_size=%d max_size=%d silhouette_score=%.6g",
+            float(cossim_eps),
+            int(unique_assignments.numel()),
+            int(cluster_sizes.min().item()),
+            int(cluster_sizes.max().item()),
+            float(score.item()),
+        )
+        return assignments
 
     def build_output_node():
         kept_neurons = torch.where(kept_neuron_mask)[0]
@@ -424,8 +420,6 @@ def build_super_graph(
                 torch.empty((0, W_U.shape[1]), device=device, dtype=W_U.dtype),
                 0,
                 torch.empty(0),
-                0,
-                torch.empty(0),
             )
 
         dla_matrix = torch.stack(write_vectors) @ W_U
@@ -435,102 +429,60 @@ def build_super_graph(
             dtype=torch.long,
         )
 
-        target_dla_matrix = dla_matrix[:, target_vocab_indices]
-        target_dla_directions = target_dla_matrix / target_dla_matrix.norm(
-            dim=1,
-            keepdim=True,
-        ).clamp(min=1e-12)
-        target_probability_direction = logit_probabilities.to(
-            device=target_dla_directions.device,
-            dtype=target_dla_directions.dtype,
-        )
-        target_probability_direction = target_probability_direction / (
-            target_probability_direction.norm().clamp(min=1e-12)
-        )
-        dla_probability_similarities = target_dla_directions @ target_probability_direction.T
-        sorted_dla_probability_similarities, cossim_candidate_positions = torch.sort(
-            dla_probability_similarities,
-            descending=True,
-        )
-
-        cossim_candidate_count = find_output_elbow_count(sorted_dla_probability_similarities)
-        cossim_candidate_positions = cossim_candidate_positions[:cossim_candidate_count]
-        candidate_dla_matrix = dla_matrix[cossim_candidate_positions]
-        candidate_activation_magnitudes = torch.stack(activation_magnitudes)[
-            cossim_candidate_positions
-        ].clamp(min=1e-12)
-        
-        target_probabilities = logit_probabilities.to(device=device, dtype=candidate_dla_matrix.dtype)
+        dla_normalized = dla_matrix / dla_matrix.norm(dim=1, keepdim=True).clamp(min=1e-12)
+        target_probabilities = logit_probabilities.to(device=device, dtype=dla_matrix.dtype)
+        activation_magnitudes_t = torch.stack(activation_magnitudes).clamp(min=1e-12)
         neuron_scores = (
-            candidate_dla_matrix[:, target_vocab_indices] * target_probabilities
-        ).sum(dim=-1) / candidate_activation_magnitudes
+            dla_matrix[:, target_vocab_indices] * target_probabilities
+        ).sum(dim=-1)
         sorted_scores, sorted_positions = torch.sort(neuron_scores, descending=True)
         elbow_count = find_output_elbow_count(sorted_scores)
-        selected_candidate_positions = sorted_positions[:elbow_count]
-        selected_kept_positions = cossim_candidate_positions[selected_candidate_positions].to(
-            device=kept_neurons.device,
-        )
-        output_dla_normalized = target_dla_directions[
-            cossim_candidate_positions[selected_candidate_positions]
-        ]
-        log_output_dla_silhouette_scores(output_dla_normalized)
+        output_node_positions = sorted_positions[:elbow_count].to(device=kept_neurons.device)
+        output_dla = dla_matrix[sorted_positions[:elbow_count]]
+        if output_dla.numel():
+            log_softmax_output_dla = torch.log_softmax(output_dla.detach().float(), dim=1)
+            output_entropies = -(log_softmax_output_dla.exp() * log_softmax_output_dla).sum(dim=1)
+            sorted_negative_output_entropies = torch.sort(-output_entropies, descending=True).values
+            plt.figure(figsize=(8, 4))
+            plt.plot(sorted_negative_output_entropies.cpu().tolist(), marker="o")
+            plt.xlabel("Output-node neuron rank")
+            plt.ylabel("Negative softmax DLA entropy")
+            plt.title("Output-node negative softmax DLA entropies, sorted high to low")
+            plt.tight_layout()
+            plt.savefig("output_node_entropies.png")
+            plt.close()
 
         return (
-            kept_neurons[selected_kept_positions],
-            neuron_scores[selected_candidate_positions.to(device=neuron_scores.device)].to(
+            kept_neurons[output_node_positions],
+            neuron_scores[output_node_positions.to(device=neuron_scores.device)].to(
                 device=kept_neurons.device,
             ),
-            candidate_dla_matrix[selected_candidate_positions],
+            output_dla,
             elbow_count,
             sorted_scores.detach().float().cpu(),
-            cossim_candidate_count,
-            sorted_dla_probability_similarities.detach().float().cpu(),
         )
 
     def decode_vocab_token(vocab_idx: int) -> str:
         token = model.tokenizer.decode([vocab_idx])
         return token.replace("\n", "\\n").replace("\r", "\\r")
 
-    target_logit_prob_by_vocab_idx = {
-        int(target.vocab_idx): float(prob)
-        for target, prob in zip(graph.logit_targets, logit_probabilities.detach().float().cpu().tolist(), strict=True)
-    }
-
-    def format_top_dla_logits(dla_vector: torch.Tensor, top_k: int = 10) -> str:
+    def format_top_dla_logit_lines(
+        dla_vector: torch.Tensor,
+        top_k: int = 30,
+        line_size: int = 10,
+    ) -> list[str]:
         if dla_vector.numel() == 0:
-            return "none"
+            return ["none"]
         k = min(top_k, int(dla_vector.numel()))
         values, indices = torch.topk(dla_vector.detach().float().cpu(), k=k)
-        return ", ".join(
+        formatted = [
             f"{decode_vocab_token(int(idx.item()))!r}: {float(value.item()):.6g}"
             for value, idx in zip(values, indices, strict=True)
-        )
-
-    def format_top_dla_logit_probs(dla_vector: torch.Tensor, top_k: int = 10) -> str:
-        if dla_vector.numel() == 0:
-            return "none"
-        k = min(top_k, int(dla_vector.numel()))
-        _, indices = torch.topk(dla_vector.detach().float().cpu(), k=k)
-        return ", ".join(
-            (
-                f"{decode_vocab_token(int(idx.item()))!r}: "
-                f"{target_logit_prob_by_vocab_idx.get(int(idx.item()), 0.0):.6g}"
-            )
-            for idx in indices
-        )
-
-    def format_top_logit_influence_logits(
-        influence_vector: torch.Tensor,
-        top_k: int = 10,
-    ) -> str:
-        if influence_vector.numel() == 0:
-            return "none"
-        k = min(top_k, int(influence_vector.numel()))
-        values, indices = torch.topk(influence_vector.detach().float().cpu(), k=k)
-        return ", ".join(
-            f"{graph.logit_targets[int(idx.item())].token_str!r}:{float(value.item()):.6g}"
-            for value, idx in zip(values, indices, strict=True)
-        )
+        ]
+        return [
+            ", ".join(formatted[start:start + line_size])
+            for start in range(0, len(formatted), line_size)
+        ]
 
     def format_top_output_logits(top_k: int = 20) -> str:
         if logit_probabilities.numel() == 0:
@@ -542,24 +494,16 @@ def build_super_graph(
             for value, idx in zip(values, indices, strict=True)
         )
 
-    def log_output_node(
-        output_node_indices,
-        output_node_scores,
-        output_node_dla,
-        elbow_count,
-        all_sorted_scores,
-        cossim_candidate_count,
-        all_sorted_dla_probability_similarities,
-    ):
+    def softmax_dla_entropy(dla_vector: torch.Tensor) -> float:
+        log_probs = torch.log_softmax(dla_vector.detach().float(), dim=0)
+        return float((-(log_probs.exp() * log_probs).sum()).item())
+
+    def log_output_node(output_node_indices, output_node_scores, output_node_dla, elbow_count, all_sorted_scores):
         logger.info("  Output node members: %d", int(output_node_indices.numel()))
         sorted_positions = torch.argsort(output_node_scores, descending=True)
         output_node_indices = output_node_indices[sorted_positions]
         output_node_scores = output_node_scores[sorted_positions]
         output_node_dla = output_node_dla[sorted_positions.to(device=output_node_dla.device)]
-        output_logit_influence_vectors = node_influence_vectors[
-            output_node_indices,
-            logit_start: logit_start + n_logits,
-        ]
         if all_sorted_scores.numel():
             plt.figure(figsize=(8, 4))
             plt.plot(all_sorted_scores.tolist(), marker="o")
@@ -570,18 +514,6 @@ def build_super_graph(
             plt.title("Output-node normalized DLA scores, sorted high to low")
             plt.tight_layout()
             plt.savefig("output_node_scores.png")
-            plt.close()
-
-        if all_sorted_dla_probability_similarities.numel():
-            plt.figure(figsize=(8, 4))
-            plt.plot(all_sorted_dla_probability_similarities.tolist(), marker="o")
-            if 0 < cossim_candidate_count <= int(all_sorted_dla_probability_similarities.numel()):
-                plt.axvline(cossim_candidate_count - 1, color="red", linestyle="--")
-            plt.xlabel("Neuron rank")
-            plt.ylabel("DLA-probability cosine similarity")
-            plt.title("Output-node DLA-probability similarity, sorted high to low")
-            plt.tight_layout()
-            plt.savefig("output_node_dla_probability_similarity.png")
             plt.close()
 
         if output_node_scores.numel():
@@ -596,45 +528,62 @@ def build_super_graph(
                 format_top_output_logits(top_k=20),
             )
 
-        for row_idx, (neuron_idx, score) in enumerate(
-            zip(output_node_indices.tolist(), output_node_scores.tolist(), strict=True)
-        ):
-            layer = int(graph.neuron_locations[neuron_idx, 0].item())
-            token_pos = int(graph.neuron_locations[neuron_idx, 1].item())
-            neuron_id = int(graph.neuron_locations[neuron_idx, 2].item())
-            logger.info(
-                "    graph_neuron_idx=%d layer=%d token=%d neuron=%d score=%.6g",
-                neuron_idx,
-                layer,
-                token_pos,
-                neuron_id,
-                float(score),
-            )
-            logger.info(
-                "      top DLA logits probs: %s",
-                format_top_dla_logit_probs(output_node_dla[row_idx]),
-            )
-            logger.info(
-                "      top DLA logits: %s",
-                format_top_dla_logits(output_node_dla[row_idx]),
-            )
-            logger.info(
-                "      top logit influence logits: %s",
-                format_top_logit_influence_logits(output_logit_influence_vectors[row_idx]),
-            )
+        cluster_assignments = output_dla_cossim_assignments(output_node_dla)
+        cluster_groups = []
+        for cluster_id in torch.unique(cluster_assignments).tolist():
+            cluster_mask = cluster_assignments == int(cluster_id)
+            cluster_rows = torch.where(cluster_mask)[0].tolist()
+            cluster_groups.append((int(cluster_id), cluster_mask, cluster_rows))
+        cluster_groups.sort(key=lambda group: len(group[2]), reverse=True)
 
-        if output_node_indices.numel() == 0:
-            logger.info("  Output node normalized DLA cossim matrix: []")
-            return
+        for cluster_id, cluster_mask, cluster_rows in cluster_groups:
+            mean_dla_norm = output_node_dla[cluster_mask].detach().float().mean(dim=0).norm()
+            logger.info(
+                "  cluster %d size=%d mean_dla_norm=%.6g",
+                cluster_id,
+                len(cluster_rows),
+                float(mean_dla_norm.item()),
+            )
+            for row_idx in cluster_rows:
+                neuron_idx = int(output_node_indices[row_idx].item())
+                score = float(output_node_scores[row_idx].item())
+                layer = int(graph.neuron_locations[neuron_idx, 0].item())
+                token_pos = int(graph.neuron_locations[neuron_idx, 1].item())
+                neuron_id = int(graph.neuron_locations[neuron_idx, 2].item())
+                logger.info(
+                    "    graph_neuron_idx=%d layer=%d token=%d neuron=%d score=%.6g entropy=%.6g",
+                    neuron_idx,
+                    layer,
+                    token_pos,
+                    neuron_id,
+                    score,
+                    softmax_dla_entropy(output_node_dla[row_idx]),
+                )
+                for line_idx, line in enumerate(
+                    format_top_dla_logit_lines(output_node_dla[row_idx], top_k=30, line_size=10),
+                    start=1,
+                ):
+                    logger.info("      top DLA logits %d: %s", line_idx, line)
 
-        output_node_dla_normalized = output_node_dla / output_node_dla.norm(
-            dim=1,
-            keepdim=True,
-        ).clamp(min=1e-12)
-        cossim_matrix = output_node_dla_normalized @ output_node_dla_normalized.T
-        logger.info("  Output node normalized DLA cossim matrix:")
-        for row in cossim_matrix.detach().float().cpu().tolist():
-            logger.info("    [%s]", ", ".join(f"{value:.6g}" for value in row))
+        if output_node_dla.numel():
+            output_dla_normalized = output_node_dla.detach().float() / output_node_dla.detach().float().norm(
+                dim=1,
+                keepdim=True,
+            ).clamp(min=1e-12)
+            cossim_matrix = output_dla_normalized @ output_dla_normalized.T
+            cossim_threshold = 1.0 - float(cossim_eps)
+            logger.info(
+                "  Output node DLA cossim matrix values > %.6g:",
+                cossim_threshold,
+            )
+            for row in cossim_matrix.detach().cpu().tolist():
+                logger.info(
+                    "    [%s]",
+                    ", ".join(
+                        f"{value:.6g}" if value > cossim_threshold else ""
+                        for value in row
+                    ),
+                )
 
     logger.info("  Building output node")
     (
@@ -643,8 +592,6 @@ def build_super_graph(
         output_node_dla,
         output_node_count,
         all_output_scores,
-        cossim_candidate_count,
-        all_output_dla_probability_similarities,
     ) = build_output_node()
     log_output_node(
         output_node_indices,
@@ -652,8 +599,6 @@ def build_super_graph(
         output_node_dla,
         output_node_count,
         all_output_scores,
-        cossim_candidate_count,
-        all_output_dla_probability_similarities,
     )
 
     logger.info("  Aggregating output-node supergraph")

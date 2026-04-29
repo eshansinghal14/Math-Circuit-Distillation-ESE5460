@@ -319,6 +319,12 @@ def main():
         "--supergraph_output_path",
         help="Optional path to save the supergraph (.pt)",
     )
+    parser.add_argument(
+        "--cossim_eps",
+        type=float,
+        default=0.1,
+        help="Cosine-distance epsilon for output-node DLA connected-component clustering",
+    )
 
     args = parser.parse_args()
 
@@ -376,6 +382,7 @@ def main():
         graph,
         model,
         prune_result=prune_result,
+        cossim_eps=args.cossim_eps,
     )
     _log_supergraph_summary(
         graph,
