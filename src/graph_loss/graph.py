@@ -427,21 +427,6 @@ def build_super_graph(
             )
 
         dla_matrix = torch.stack(write_vectors) @ W_U
-        log_softmax_dla = torch.log_softmax(dla_matrix.detach().float(), dim=1)
-        prefilter_entropies = -(log_softmax_dla.exp() * log_softmax_dla).sum(dim=1)
-        sorted_prefilter_entropies = torch.sort(
-            prefilter_entropies,
-            descending=True,
-        ).values
-        plt.figure(figsize=(8, 4))
-        plt.plot(sorted_prefilter_entropies.cpu().tolist(), marker="o")
-        plt.xlabel("Kept neuron rank")
-        plt.ylabel("Softmax DLA entropy")
-        plt.title("Pre-filter softmax DLA entropies, sorted high to low")
-        plt.tight_layout()
-        plt.savefig("output_node_entropies.png")
-        plt.close()
-
         target_vocab_indices = torch.tensor(
             [target.vocab_idx for target in graph.logit_targets],
             device=device,
@@ -458,6 +443,18 @@ def build_super_graph(
         elbow_count = find_output_elbow_count(sorted_scores)
         output_node_positions = sorted_positions[:elbow_count].to(device=kept_neurons.device)
         output_dla = dla_matrix[sorted_positions[:elbow_count]]
+        if output_dla.numel():
+            log_softmax_output_dla = torch.log_softmax(output_dla.detach().float(), dim=1)
+            output_entropies = -(log_softmax_output_dla.exp() * log_softmax_output_dla).sum(dim=1)
+            sorted_output_entropies = torch.sort(output_entropies, descending=True).values
+            plt.figure(figsize=(8, 4))
+            plt.plot(sorted_output_entropies.cpu().tolist(), marker="o")
+            plt.xlabel("Output-node neuron rank")
+            plt.ylabel("Softmax DLA entropy")
+            plt.title("Output-node softmax DLA entropies, sorted high to low")
+            plt.tight_layout()
+            plt.savefig("output_node_entropies.png")
+            plt.close()
 
         log_output_dla_silhouette_scores(output_dla)
 
