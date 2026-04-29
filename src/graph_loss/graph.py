@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import importlib
 from typing import NamedTuple
 
 import matplotlib.pyplot as plt
@@ -272,8 +271,7 @@ def build_super_graph(
     graph: Graph,
     model,
     prune_result: PruneResult | None = None,
-    dbscan_eps: float = 0.1,
-    dbscan_min_samples: int = 2,
+    cossim_eps: float = 0.1,
 ) -> SuperGraph:
     """Create a single supernode from the selected output-node neurons."""
 
@@ -332,30 +330,30 @@ def build_super_graph(
         distance_from_diagonal = (1 - x) - y
         return int(distance_from_diagonal.argmax().item()) + 1
 
-    def dbscan_cossim(X: torch.Tensor) -> torch.Tensor:
+    def cossim_connected_components(X: torch.Tensor) -> torch.Tensor:
         if len(X) == 0:
-            raise ValueError("dbscan_cossim requires at least one point")
+            raise ValueError("cossim_connected_components requires at least one point")
         if len(X) == 1:
             return torch.zeros(1, dtype=torch.long, device=X.device)
 
         X_norm = X / X.norm(dim=1, keepdim=True).clamp(min=1e-12)
-        distances = (1 - X_norm @ X_norm.T).clamp(min=0).detach().float().cpu().numpy()
-        DBSCAN = importlib.import_module("sklearn.cluster").DBSCAN
-        clusterer = DBSCAN(
-            eps=max(0.0, float(dbscan_eps)),
-            metric="precomputed",
-            min_samples=max(1, int(dbscan_min_samples)),
-        )
-        raw_labels = clusterer.fit_predict(distances).tolist()
-        next_cluster = max(raw_labels, default=-1) + 1
-        labels = []
-        for label in raw_labels:
-            if label == -1:
-                labels.append(next_cluster)
-                next_cluster += 1
-            else:
-                labels.append(int(label))
-        return torch.tensor(labels, dtype=torch.long, device=X.device)
+        cossim_matrix = X_norm @ X_norm.T
+        connected = cossim_matrix >= 1.0 - float(cossim_eps)
+        labels = torch.full((len(X),), -1, dtype=torch.long, device=X.device)
+        cluster_id = 0
+        for start_idx in range(len(X)):
+            if labels[start_idx] >= 0:
+                continue
+            stack = [start_idx]
+            labels[start_idx] = cluster_id
+            while stack:
+                current_idx = stack.pop()
+                neighbors = torch.where(connected[current_idx] & (labels < 0))[0].tolist()
+                for neighbor_idx in neighbors:
+                    labels[neighbor_idx] = cluster_id
+                    stack.append(int(neighbor_idx))
+            cluster_id += 1
+        return labels
 
     def silhouette_score_cossim(X: torch.Tensor, assignments: torch.Tensor) -> torch.Tensor:
         unique_assignments = torch.unique(assignments)
@@ -378,18 +376,17 @@ def build_super_graph(
 
         return torch.stack(scores).mean()
 
-    def output_dla_dbscan_assignments(output_dla: torch.Tensor) -> torch.Tensor:
+    def output_dla_cossim_assignments(output_dla: torch.Tensor) -> torch.Tensor:
         if len(output_dla) == 0:
-            logger.info("  Output-node normalized DLA DBSCAN: no vectors")
+            logger.info("  Output-node DLA cossim clustering: no vectors")
             return torch.empty(0, dtype=torch.long, device=output_dla.device)
 
-        assignments = dbscan_cossim(output_dla)
+        assignments = cossim_connected_components(output_dla)
         unique_assignments, cluster_sizes = torch.unique(assignments, return_counts=True)
         score = silhouette_score_cossim(output_dla, assignments)
         logger.info(
-            "  Output-node normalized DLA DBSCAN: eps=%.6g min_samples=%d clusters=%d min_size=%d max_size=%d silhouette_score=%.6g",
-            float(dbscan_eps),
-            int(dbscan_min_samples),
+            "  Output-node DLA cossim clustering: eps=%.6g clusters=%d min_size=%d max_size=%d silhouette_score=%.6g",
+            float(cossim_eps),
             int(unique_assignments.numel()),
             int(cluster_sizes.min().item()),
             int(cluster_sizes.max().item()),
@@ -531,7 +528,7 @@ def build_super_graph(
                 format_top_output_logits(top_k=20),
             )
 
-        cluster_assignments = output_dla_dbscan_assignments(output_node_dla)
+        cluster_assignments = output_dla_cossim_assignments(output_node_dla)
         unique_cluster_ids = torch.unique(cluster_assignments).tolist()
         for cluster_id in unique_cluster_ids:
             cluster_mask = cluster_assignments == int(cluster_id)
@@ -563,6 +560,26 @@ def build_super_graph(
                     start=1,
                 ):
                     logger.info("      top DLA logits %d: %s", line_idx, line)
+
+        if output_node_dla.numel():
+            output_dla_normalized = output_node_dla.detach().float() / output_node_dla.detach().float().norm(
+                dim=1,
+                keepdim=True,
+            ).clamp(min=1e-12)
+            cossim_matrix = output_dla_normalized @ output_dla_normalized.T
+            cossim_threshold = 1.0 - float(cossim_eps)
+            logger.info(
+                "  Output node DLA cossim matrix values > %.6g:",
+                cossim_threshold,
+            )
+            for row in cossim_matrix.detach().cpu().tolist():
+                logger.info(
+                    "    [%s]",
+                    ", ".join(
+                        f"{value:.6g}" if value > cossim_threshold else ""
+                        for value in row
+                    ),
+                )
 
     logger.info("  Building output node")
     (

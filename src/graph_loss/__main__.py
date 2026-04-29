@@ -320,16 +320,10 @@ def main():
         help="Optional path to save the supergraph (.pt)",
     )
     parser.add_argument(
-        "--dbscan_eps",
+        "--cossim_eps",
         type=float,
         default=0.1,
-        help="DBSCAN eps for output-node DLA cosine-distance clustering",
-    )
-    parser.add_argument(
-        "--dbscan_min_samples",
-        type=int,
-        default=2,
-        help="DBSCAN min_samples for output-node DLA clustering",
+        help="Cosine-distance epsilon for output-node DLA connected-component clustering",
     )
 
     args = parser.parse_args()
@@ -388,8 +382,7 @@ def main():
         graph,
         model,
         prune_result=prune_result,
-        dbscan_eps=args.dbscan_eps,
-        dbscan_min_samples=args.dbscan_min_samples,
+        cossim_eps=args.cossim_eps,
     )
     _log_supergraph_summary(
         graph,
