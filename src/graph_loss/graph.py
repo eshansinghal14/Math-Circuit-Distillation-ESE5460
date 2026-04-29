@@ -552,6 +552,24 @@ def build_super_graph(
                 format_top_output_logits(top_k=20),
             )
 
+        if output_node_dla.numel():
+            concentrations = torch.tensor(
+                [
+                    positive_dla_concentration(output_node_dla[row_idx])
+                    for row_idx in range(output_node_dla.shape[0])
+                ],
+                dtype=torch.float32,
+            )
+            sorted_concentrations = torch.sort(concentrations, descending=True).values
+            plt.figure(figsize=(8, 4))
+            plt.plot(sorted_concentrations.tolist(), marker="o")
+            plt.xlabel("Output-node neuron rank")
+            plt.ylabel("Positive DLA concentration")
+            plt.title("Output-node positive DLA concentrations, sorted high to low")
+            plt.tight_layout()
+            plt.savefig("output_node_concentrations.png")
+            plt.close()
+
         for row_idx, (neuron_idx, score) in enumerate(
             zip(output_node_indices.tolist(), output_node_scores.tolist(), strict=True)
         ):
