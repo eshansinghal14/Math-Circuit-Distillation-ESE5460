@@ -341,8 +341,8 @@ def build_super_graph(
         HDBSCAN = importlib.import_module("sklearn.cluster").HDBSCAN
         clusterer = HDBSCAN(
             metric="precomputed",
-            min_cluster_size=2,
-            min_samples=1,
+            min_cluster_size=3,
+            min_samples=2,
             allow_single_cluster=True,
         )
         raw_labels = clusterer.fit_predict(distances).tolist()
