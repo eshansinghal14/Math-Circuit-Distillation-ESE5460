@@ -7,6 +7,7 @@ import logging
 import os
 import re
 from collections import defaultdict
+from dataclasses import dataclass
 
 import matplotlib.pyplot as plt
 import torch
@@ -15,6 +16,20 @@ from huggingface_hub import login
 
 from graph_loss.utils import add_graph_build_args, resolve_torch_dtype
 from utils import HF_READ_TOKEN, default_datasets_dir, load_prompt_answer_json
+
+
+@dataclass
+class ActivationAccumulator:
+    total: float = 0.0
+    count: int = 0
+
+    def add(self, value: float) -> None:
+        self.total += value
+        self.count += 1
+
+    @property
+    def mean(self) -> float:
+        return self.total / self.count
 
 
 def _resolve_dataset_path(dataset_name: str) -> str:
@@ -71,6 +86,43 @@ def _resolve_graph_neuron_location(
     return int(layer), int(token_pos), int(neuron_id)
 
 
+def _select_mlp_neuron_weight(
+    model,
+    weight: torch.Tensor,
+    neuron_id: int,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    d_model = model.cfg.d_model
+    d_mlp = model.cfg.d_mlp
+
+    if weight.shape == (d_mlp, d_model):
+        row = weight[neuron_id]
+    elif weight.shape == (d_model, d_mlp):
+        row = weight[:, neuron_id]
+    else:
+        raise ValueError(
+            f"Unsupported MLP weight shape {tuple(weight.shape)} for model dims "
+            f"(d_model={d_model}, d_mlp={d_mlp})",
+        )
+    return row.to(device=device, dtype=dtype)
+
+
+def _select_mlp_neuron_bias(
+    module,
+    name: str,
+    neuron_id: int,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    bias = getattr(module, name, None)
+    if bias is None:
+        return torch.zeros((), device=device, dtype=dtype)
+    return bias[neuron_id].to(device=device, dtype=dtype)
+
+
 @torch.no_grad()
 def _activations_for_location_batch(
     model,
@@ -122,41 +174,53 @@ def _activations_for_location_batch(
         input_ids[row_idx, : ids.numel()] = ids
         valid_at_pos.append(token_pos < int(ids.numel()))
 
+    target_hook_name = f"blocks.{layer}.{model.feature_input_hook}"
     mlp_in_cache, mlp_in_caching_hooks, _ = model.get_caching_hooks(
-        lambda name: name.endswith(model.feature_input_hook),
+        lambda name: name == target_hook_name,
     )
     model.run_with_hooks(input_ids, fwd_hooks=mlp_in_caching_hooks)
-    mlp_inputs = model._stack_layer_cache(mlp_in_cache, model.feature_input_hook)
+    try:
+        mlp_input = mlp_in_cache[target_hook_name]
+    except KeyError as exc:
+        raise RuntimeError(f"Did not cache target hook {target_hook_name!r}") from exc
 
     old_mlp = model.blocks[layer].mlp.old_mlp
-    gate_rows = model._row_oriented_weight(
-        old_mlp.W_gate.to(device=input_ids.device, dtype=mlp_inputs.dtype),
+    gate_weight = _select_mlp_neuron_weight(
+        model,
+        old_mlp.W_gate,
+        neuron_id,
+        device=input_ids.device,
+        dtype=mlp_input.dtype,
     )
-    up_rows = model._row_oriented_weight(
-        old_mlp.W_in.to(device=input_ids.device, dtype=mlp_inputs.dtype),
+    up_weight = _select_mlp_neuron_weight(
+        model,
+        old_mlp.W_in,
+        neuron_id,
+        device=input_ids.device,
+        dtype=mlp_input.dtype,
     )
-    gate_bias = model._get_bias(
+    gate_bias = _select_mlp_neuron_bias(
         old_mlp,
         "b_gate",
-        gate_rows.shape[0],
-        input_ids.device,
-        mlp_inputs.dtype,
+        neuron_id,
+        device=input_ids.device,
+        dtype=mlp_input.dtype,
     )
-    up_bias = model._get_bias(
+    up_bias = _select_mlp_neuron_bias(
         old_mlp,
         "b_in",
-        up_rows.shape[0],
-        input_ids.device,
-        mlp_inputs.dtype,
+        neuron_id,
+        device=input_ids.device,
+        dtype=mlp_input.dtype,
     )
-    layer_inputs_at_pos = mlp_inputs[layer, :, token_pos]
-    gate_pre = layer_inputs_at_pos @ gate_rows.T + gate_bias
-    up_pre = layer_inputs_at_pos @ up_rows.T + up_bias
+    layer_inputs_at_pos = mlp_input[:, token_pos]
+    gate_pre = layer_inputs_at_pos @ gate_weight + gate_bias
+    up_pre = layer_inputs_at_pos @ up_weight + up_bias
     activations = F.silu(gate_pre) * up_pre
     if token_pos == 0:
         activations.zero_()
 
-    out = activations[:, neuron_id].detach().float().cpu().tolist()
+    out = activations.detach().float().cpu().tolist()
     return [
         float(value) if is_valid else float("nan")
         for value, is_valid in zip(out, valid_at_pos, strict=True)
@@ -164,16 +228,13 @@ def _activations_for_location_batch(
 
 
 def _plot_1d(
-    values_by_arg: dict[tuple[int, ...], list[float]],
+    values_by_arg: dict[tuple[int, ...], ActivationAccumulator],
     *,
     output_path: str,
     title: str,
 ) -> None:
     xs = sorted(arg[0] for arg in values_by_arg)
-    ys = [
-        sum(values_by_arg[(x,)]) / max(len(values_by_arg[(x,)]), 1)
-        for x in xs
-    ]
+    ys = [values_by_arg[(x,)].mean for x in xs]
     plt.figure(figsize=(8, 4))
     plt.plot(xs, ys, marker="o")
     plt.xlabel("arg 1")
@@ -185,7 +246,7 @@ def _plot_1d(
 
 
 def _plot_2d(
-    values_by_arg: dict[tuple[int, ...], list[float]],
+    values_by_arg: dict[tuple[int, ...], ActivationAccumulator],
     *,
     output_path: str,
     title: str,
@@ -196,9 +257,9 @@ def _plot_2d(
     y_to_idx = {value: idx for idx, value in enumerate(ys)}
 
     heatmap = torch.full((len(ys), len(xs)), float("nan"), dtype=torch.float32)
-    for (x, y), vals in values_by_arg.items():
-        if vals:
-            heatmap[y_to_idx[y], x_to_idx[x]] = sum(vals) / len(vals)
+    for (x, y), stats in values_by_arg.items():
+        if stats.count:
+            heatmap[y_to_idx[y], x_to_idx[x]] = stats.mean
 
     plt.figure(figsize=(8, 6))
     plt.imshow(
@@ -217,15 +278,15 @@ def _plot_2d(
 
 
 def _plot_3d(
-    values_by_arg: dict[tuple[int, ...], list[float]],
+    values_by_arg: dict[tuple[int, ...], ActivationAccumulator],
     *,
     output_path: str,
     title: str,
 ) -> None:
     points = []
-    for (x, y, z), vals in values_by_arg.items():
-        if vals:
-            points.append((x, y, z, sum(vals) / len(vals)))
+    for (x, y, z), stats in values_by_arg.items():
+        if stats.count:
+            points.append((x, y, z, stats.mean))
     if not points:
         raise ValueError("No valid 3D points to plot.")
 
@@ -281,10 +342,34 @@ def plot_neuron_activation_heatmap(args: argparse.Namespace) -> str:
         neuron_id,
     )
 
-    values_by_arg: dict[tuple[int, ...], list[float]] = defaultdict(list)
+    values_by_arg: dict[tuple[int, ...], ActivationAccumulator] = defaultdict(ActivationAccumulator)
     skipped = 0
     expected_n_args = None
-    valid_samples = []
+    processed_valid = 0
+    batch: list[tuple[str, tuple[int, ...]]] = []
+
+    def flush_batch() -> None:
+        nonlocal processed_valid, skipped, batch
+        if not batch:
+            return
+        prompts = [prompt for prompt, _numeric_args in batch]
+        activations = _activations_for_location_batch(
+            model,
+            prompts,
+            layer=layer,
+            token_pos=token_pos,
+            neuron_id=neuron_id,
+        )
+        for (_prompt, numeric_args), activation in zip(batch, activations, strict=True):
+            if activation == activation:
+                values_by_arg[numeric_args].add(activation)
+            else:
+                skipped += 1
+        processed_valid += len(batch)
+        if args.log_interval and processed_valid % args.log_interval == 0:
+            logger.info("Processed %d valid samples", processed_valid)
+        batch = []
+
     for prompt, _answer in samples:
         try:
             numeric_args = _parse_numeric_args(prompt)
@@ -301,29 +386,10 @@ def plot_neuron_activation_heatmap(args: argparse.Namespace) -> str:
         if len(numeric_args) != expected_n_args:
             skipped += 1
             continue
-        valid_samples.append((prompt, numeric_args))
-
-    for start in range(0, len(valid_samples), args.forward_batch_size):
-        batch = valid_samples[start:start + args.forward_batch_size]
-        prompts = [prompt for prompt, _numeric_args in batch]
-        activations = _activations_for_location_batch(
-            model,
-            prompts,
-            layer=layer,
-            token_pos=token_pos,
-            neuron_id=neuron_id,
-        )
-        for (_prompt, numeric_args), activation in zip(batch, activations, strict=True):
-            if activation == activation:
-                values_by_arg[numeric_args].append(activation)
-            else:
-                skipped += 1
-        if args.log_interval and (start + len(batch)) % args.log_interval == 0:
-            logger.info(
-                "Processed %d/%d valid samples",
-                start + len(batch),
-                len(valid_samples),
-            )
+        batch.append((prompt, numeric_args))
+        if len(batch) == args.forward_batch_size:
+            flush_batch()
+    flush_batch()
 
     if not values_by_arg:
         raise ValueError("No valid activations collected.")
