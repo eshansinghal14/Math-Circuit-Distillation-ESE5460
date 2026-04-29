@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import importlib
 from typing import NamedTuple
 
 import matplotlib.pyplot as plt
@@ -329,42 +330,31 @@ def build_super_graph(
         distance_from_diagonal = (1 - x) - y
         return int(distance_from_diagonal.argmax().item()) + 1
 
-    def kmeans_cossim(X: torch.Tensor, k: int, n_iter: int = 100) -> torch.Tensor:
+    def hdbscan_cossim(X: torch.Tensor) -> torch.Tensor:
         if len(X) == 0:
-            raise ValueError("kmeans_cossim requires at least one point")
-        if k <= 0:
-            raise ValueError("kmeans_cossim requires k > 0")
-        k = min(k, len(X))
+            raise ValueError("hdbscan_cossim requires at least one point")
+        if len(X) == 1:
+            return torch.zeros(1, dtype=torch.long, device=X.device)
 
-        def pairwise_dists(points: torch.Tensor, centers: torch.Tensor) -> torch.Tensor:
-            points_norm = points / points.norm(dim=1, keepdim=True).clamp(min=1e-12)
-            centers_norm = centers / centers.norm(dim=1, keepdim=True).clamp(min=1e-12)
-            return 1 - points_norm @ centers_norm.T
-
-        centers = [X[torch.randint(len(X), (1,), device=X.device).item()]]
-        for _ in range(k - 1):
-            dists = pairwise_dists(X, torch.stack(centers)).min(dim=1).values
-            init_weights = dists - dists.min()
-            total_weight = init_weights.sum()
-            if not torch.isfinite(total_weight) or total_weight <= 0:
-                centers.append(X[torch.randint(len(X), (1,), device=X.device).item()])
+        X_norm = X / X.norm(dim=1, keepdim=True).clamp(min=1e-12)
+        distances = (1 - X_norm @ X_norm.T).clamp(min=0).detach().float().cpu().numpy()
+        HDBSCAN = importlib.import_module("sklearn.cluster").HDBSCAN
+        clusterer = HDBSCAN(
+            metric="precomputed",
+            min_cluster_size=2,
+            min_samples=1,
+            allow_single_cluster=True,
+        )
+        raw_labels = clusterer.fit_predict(distances).tolist()
+        next_cluster = max(raw_labels, default=-1) + 1
+        labels = []
+        for label in raw_labels:
+            if label == -1:
+                labels.append(next_cluster)
+                next_cluster += 1
             else:
-                centers.append(X[torch.multinomial(init_weights / total_weight, 1).item()])
-        centers_t = torch.stack(centers)
-
-        for _ in range(n_iter):
-            assignments = pairwise_dists(X, centers_t).argmin(dim=1)
-            new_centers = torch.stack([
-                X[assignments == i].mean(dim=0)
-                if (assignments == i).any()
-                else centers_t[i]
-                for i in range(k)
-            ])
-            if (new_centers - centers_t).norm() < 1e-6:
-                break
-            centers_t = new_centers
-
-        return assignments
+                labels.append(int(label))
+        return torch.tensor(labels, dtype=torch.long, device=X.device)
 
     def silhouette_score_cossim(X: torch.Tensor, assignments: torch.Tensor) -> torch.Tensor:
         unique_assignments = torch.unique(assignments)
@@ -389,14 +379,19 @@ def build_super_graph(
 
     def log_output_dla_silhouette_scores(dla_normalized: torch.Tensor) -> None:
         if len(dla_normalized) == 0:
-            logger.info("  Output-node normalized DLA kmeans silhouette: no vectors")
+            logger.info("  Output-node normalized DLA HDBSCAN: no vectors")
             return
 
-        logger.info("  Output-node normalized DLA kmeans silhouette scores")
-        for candidate_k in range(1, min(10, len(dla_normalized)) + 1):
-            assignments = kmeans_cossim(dla_normalized, candidate_k)
-            score = silhouette_score_cossim(dla_normalized, assignments)
-            logger.info("    k=%d silhouette_score=%.6g", candidate_k, float(score.item()))
+        assignments = hdbscan_cossim(dla_normalized)
+        unique_assignments, cluster_sizes = torch.unique(assignments, return_counts=True)
+        score = silhouette_score_cossim(dla_normalized, assignments)
+        logger.info(
+            "  Output-node normalized DLA HDBSCAN: clusters=%d min_size=%d max_size=%d silhouette_score=%.6g",
+            int(unique_assignments.numel()),
+            int(cluster_sizes.min().item()),
+            int(cluster_sizes.max().item()),
+            float(score.item()),
+        )
 
     def build_output_node():
         kept_neurons = torch.where(kept_neuron_mask)[0]
