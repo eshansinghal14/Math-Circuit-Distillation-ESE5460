@@ -10,7 +10,7 @@ import torch
 
 from graph_loss.attribution.targets import LogitTarget
 from graph_loss.neuron_activation_heatmap import (
-    build_neuron_activation_write_matrix,
+    build_neuron_activation_write_result,
     save_cluster_activation_heatmap_pdfs,
 )
 from graph_loss.utils import UnifiedConfig, convert_nnsight_config_to_transformerlens
@@ -629,12 +629,13 @@ def build_super_graph(
     if dataset and output_node_indices.numel():
         logger.info("  Building output-node activation-write matrices from dataset: %s", dataset)
         output_neuron_locations = graph.neuron_locations[output_node_indices].detach().cpu()
-        activation_write_matrices = build_neuron_activation_write_matrix(
+        activation_write_result = build_neuron_activation_write_result(
             model,
             dataset,
             output_neuron_locations,
             forward_batch_size=activation_forward_batch_size,
         )
+        activation_write_matrices = activation_write_result.write_matrices
         cossim_vectors = torch.nan_to_num(activation_write_matrices.detach().float()).flatten(start_dim=1)
         cluster_assignments = output_cossim_assignments(
             output_node_indices,
@@ -642,7 +643,8 @@ def build_super_graph(
             label="activation-write",
         )
         saved_paths = save_cluster_activation_heatmap_pdfs(
-            activation_write_matrices,
+            activation_write_result.activations,
+            activation_write_result.numeric_args,
             cluster_assignments,
             output_node_indices.detach().cpu(),
             graph.neuron_locations.detach().cpu(),
