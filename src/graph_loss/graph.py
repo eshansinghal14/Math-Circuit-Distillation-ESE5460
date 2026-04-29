@@ -561,15 +561,6 @@ def build_super_graph(
                 ):
                     logger.info("      top DLA logits %d: %s", line_idx, line)
 
-        if output_node_indices.numel() == 0:
-            logger.info("  Output node normalized DLA cossim matrix: []")
-            return
-
-        cossim_matrix = output_node_dla @ output_node_dla.T
-        logger.info("  Output node normalized DLA cossim matrix:")
-        for row in cossim_matrix.detach().float().cpu().tolist():
-            logger.info("    [%s]", ", ".join(f"{value:.6g}" for value in row))
-
     logger.info("  Building output node")
     (
         output_node_indices,
