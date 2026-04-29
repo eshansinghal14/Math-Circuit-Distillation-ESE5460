@@ -377,14 +377,14 @@ def build_super_graph(
 
         return torch.stack(scores).mean()
 
-    def log_output_dla_silhouette_scores(dla_normalized: torch.Tensor) -> None:
-        if len(dla_normalized) == 0:
+    def output_dla_hdbscan_assignments(output_dla: torch.Tensor) -> torch.Tensor:
+        if len(output_dla) == 0:
             logger.info("  Output-node normalized DLA HDBSCAN: no vectors")
-            return
+            return torch.empty(0, dtype=torch.long, device=output_dla.device)
 
-        assignments = hdbscan_cossim(dla_normalized)
+        assignments = hdbscan_cossim(output_dla)
         unique_assignments, cluster_sizes = torch.unique(assignments, return_counts=True)
-        score = silhouette_score_cossim(dla_normalized, assignments)
+        score = silhouette_score_cossim(output_dla, assignments)
         logger.info(
             "  Output-node normalized DLA HDBSCAN: clusters=%d min_size=%d max_size=%d silhouette_score=%.6g",
             int(unique_assignments.numel()),
@@ -392,6 +392,7 @@ def build_super_graph(
             int(cluster_sizes.max().item()),
             float(score.item()),
         )
+        return assignments
 
     def build_output_node():
         kept_neurons = torch.where(kept_neuron_mask)[0]
@@ -450,8 +451,6 @@ def build_super_graph(
             plt.tight_layout()
             plt.savefig("output_node_entropies.png")
             plt.close()
-
-        log_output_dla_silhouette_scores(output_dla)
 
         return (
             kept_neurons[output_node_positions],
@@ -529,26 +528,38 @@ def build_super_graph(
                 format_top_output_logits(top_k=20),
             )
 
-        for row_idx, (neuron_idx, score) in enumerate(
-            zip(output_node_indices.tolist(), output_node_scores.tolist(), strict=True)
-        ):
-            layer = int(graph.neuron_locations[neuron_idx, 0].item())
-            token_pos = int(graph.neuron_locations[neuron_idx, 1].item())
-            neuron_id = int(graph.neuron_locations[neuron_idx, 2].item())
+        cluster_assignments = output_dla_hdbscan_assignments(output_node_dla)
+        unique_cluster_ids = torch.unique(cluster_assignments).tolist()
+        for cluster_id in unique_cluster_ids:
+            cluster_mask = cluster_assignments == int(cluster_id)
+            cluster_rows = torch.where(cluster_mask)[0].tolist()
+            mean_dla_norm = output_node_dla[cluster_mask].detach().float().mean(dim=0).norm()
             logger.info(
-                "    graph_neuron_idx=%d layer=%d token=%d neuron=%d score=%.6g entropy=%.6g",
-                neuron_idx,
-                layer,
-                token_pos,
-                neuron_id,
-                float(score),
-                softmax_dla_entropy(output_node_dla[row_idx]),
+                "  cluster %d size=%d mean_dla_norm=%.6g",
+                int(cluster_id),
+                len(cluster_rows),
+                float(mean_dla_norm.item()),
             )
-            for line_idx, line in enumerate(
-                format_top_dla_logit_lines(output_node_dla[row_idx], top_k=30, line_size=10),
-                start=1,
-            ):
-                logger.info("      top DLA logits %d: %s", line_idx, line)
+            for row_idx in cluster_rows:
+                neuron_idx = int(output_node_indices[row_idx].item())
+                score = float(output_node_scores[row_idx].item())
+                layer = int(graph.neuron_locations[neuron_idx, 0].item())
+                token_pos = int(graph.neuron_locations[neuron_idx, 1].item())
+                neuron_id = int(graph.neuron_locations[neuron_idx, 2].item())
+                logger.info(
+                    "    graph_neuron_idx=%d layer=%d token=%d neuron=%d score=%.6g entropy=%.6g",
+                    neuron_idx,
+                    layer,
+                    token_pos,
+                    neuron_id,
+                    score,
+                    softmax_dla_entropy(output_node_dla[row_idx]),
+                )
+                for line_idx, line in enumerate(
+                    format_top_dla_logit_lines(output_node_dla[row_idx], top_k=30, line_size=10),
+                    start=1,
+                ):
+                    logger.info("      top DLA logits %d: %s", line_idx, line)
 
         if output_node_indices.numel() == 0:
             logger.info("  Output node normalized DLA cossim matrix: []")
