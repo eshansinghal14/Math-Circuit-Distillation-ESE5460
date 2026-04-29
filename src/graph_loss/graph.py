@@ -9,6 +9,10 @@ import matplotlib.pyplot as plt
 import torch
 
 from graph_loss.attribution.targets import LogitTarget
+from graph_loss.neuron_activation_heatmap import (
+    build_neuron_activation_write_matrix,
+    save_cluster_activation_heatmap_pdfs,
+)
 from graph_loss.utils import UnifiedConfig, convert_nnsight_config_to_transformerlens
 
 
@@ -272,6 +276,8 @@ def build_super_graph(
     model,
     prune_result: PruneResult | None = None,
     cossim_eps: float = 0.1,
+    dataset: str | None = None,
+    activation_forward_batch_size: int = 32,
 ) -> SuperGraph:
     """Create a single supernode from the selected output-node neurons."""
 
@@ -383,27 +389,30 @@ def build_super_graph(
 
         return torch.stack(scores).mean()
 
-    def output_connectivity_cossim_assignments(output_node_indices: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        if len(output_node_indices) == 0:
-            logger.info("  Output-node connectivity cossim clustering: no vectors")
-            return (
-                torch.empty(0, dtype=torch.long, device=output_node_indices.device),
-                torch.empty((0, 0), dtype=adjacency_matrix.dtype, device=adjacency_matrix.device),
-            )
+    def output_cossim_assignments(
+        output_node_indices: torch.Tensor,
+        cossim_vectors: torch.Tensor,
+        *,
+        label: str,
+    ) -> torch.Tensor:
+        if len(output_node_indices) == 0 or cossim_vectors.numel() == 0:
+            logger.info("  Output-node %s cossim clustering: no vectors", label)
+            return torch.empty(0, dtype=torch.long, device=output_node_indices.device)
 
-        connectivity_vectors = neuron_connectivity_vectors(output_node_indices)
-        assignments = cossim_connected_components(connectivity_vectors)
+        local_assignments = cossim_connected_components(cossim_vectors)
+        assignments = local_assignments.to(device=output_node_indices.device)
         unique_assignments, cluster_sizes = torch.unique(assignments, return_counts=True)
-        score = silhouette_score_cossim(connectivity_vectors, assignments)
+        score = silhouette_score_cossim(cossim_vectors, local_assignments)
         logger.info(
-            "  Output-node connectivity cossim clustering: eps=%.6g clusters=%d min_size=%d max_size=%d silhouette_score=%.6g",
+            "  Output-node %s cossim clustering: eps=%.6g clusters=%d min_size=%d max_size=%d silhouette_score=%.6g",
+            label,
             float(cossim_eps),
             int(unique_assignments.numel()),
             int(cluster_sizes.min().item()),
             int(cluster_sizes.max().item()),
             float(score.item()),
         )
-        return assignments, connectivity_vectors
+        return assignments
 
     def build_output_node():
         kept_neurons = torch.where(kept_neuron_mask)[0]
@@ -509,12 +518,24 @@ def build_super_graph(
         log_probs = torch.log_softmax(dla_vector.detach().float(), dim=0)
         return float((-(log_probs.exp() * log_probs).sum()).item())
 
-    def log_output_node(output_node_indices, output_node_scores, output_node_dla, elbow_count, all_sorted_scores):
+    def log_output_node(
+        output_node_indices,
+        output_node_scores,
+        output_node_dla,
+        elbow_count,
+        all_sorted_scores,
+        cluster_assignments,
+        cossim_vectors,
+        *,
+        cossim_label: str,
+    ):
         logger.info("  Output node members: %d", int(output_node_indices.numel()))
         sorted_positions = torch.argsort(output_node_scores, descending=True)
         output_node_indices = output_node_indices[sorted_positions]
         output_node_scores = output_node_scores[sorted_positions]
         output_node_dla = output_node_dla[sorted_positions.to(device=output_node_dla.device)]
+        cluster_assignments = cluster_assignments[sorted_positions.to(device=cluster_assignments.device)]
+        cossim_vectors = cossim_vectors[sorted_positions.to(device=cossim_vectors.device)]
         if all_sorted_scores.numel():
             plt.figure(figsize=(8, 4))
             plt.plot(all_sorted_scores.tolist(), marker="o")
@@ -539,9 +560,6 @@ def build_super_graph(
                 format_top_output_logits(top_k=20),
             )
 
-        cluster_assignments, connectivity_vectors = output_connectivity_cossim_assignments(
-            output_node_indices,
-        )
         cluster_groups = []
         for cluster_id in torch.unique(cluster_assignments).tolist():
             cluster_mask = cluster_assignments == int(cluster_id)
@@ -578,15 +596,16 @@ def build_super_graph(
                 ):
                     logger.info("      top DLA logits %d: %s", line_idx, line)
 
-        if connectivity_vectors.numel():
-            connectivity_vectors_normalized = connectivity_vectors.detach().float() / connectivity_vectors.detach().float().norm(
+        if cossim_vectors.numel():
+            cossim_vectors_normalized = cossim_vectors.detach().float() / cossim_vectors.detach().float().norm(
                 dim=1,
                 keepdim=True,
             ).clamp(min=1e-12)
-            cossim_matrix = connectivity_vectors_normalized @ connectivity_vectors_normalized.T
+            cossim_matrix = cossim_vectors_normalized @ cossim_vectors_normalized.T
             cossim_threshold = 1.0 - float(cossim_eps)
             logger.info(
-                "  Output node connectivity cossim matrix values > %.6g:",
+                "  Output node %s cossim matrix values > %.6g:",
+                cossim_label,
                 cossim_threshold,
             )
             for row in cossim_matrix.detach().cpu().tolist():
@@ -606,12 +625,50 @@ def build_super_graph(
         output_node_count,
         all_output_scores,
     ) = build_output_node()
+
+    if dataset and output_node_indices.numel():
+        logger.info("  Building output-node activation-write matrices from dataset: %s", dataset)
+        output_neuron_locations = graph.neuron_locations[output_node_indices].detach().cpu()
+        activation_write_matrices = build_neuron_activation_write_matrix(
+            model,
+            dataset,
+            output_neuron_locations,
+            forward_batch_size=activation_forward_batch_size,
+        )
+        cossim_vectors = torch.nan_to_num(activation_write_matrices.detach().float()).flatten(start_dim=1)
+        cluster_assignments = output_cossim_assignments(
+            output_node_indices,
+            cossim_vectors,
+            label="activation-write",
+        )
+        saved_paths = save_cluster_activation_heatmap_pdfs(
+            activation_write_matrices,
+            cluster_assignments,
+            output_node_indices.detach().cpu(),
+            graph.neuron_locations.detach().cpu(),
+            output_dir=".",
+        )
+        for saved_path in saved_paths:
+            logger.info("  Saved activation-write cluster heatmap PDF: %s", saved_path)
+        cossim_label = "activation-write"
+    else:
+        cossim_vectors = neuron_connectivity_vectors(output_node_indices)
+        cluster_assignments = output_cossim_assignments(
+            output_node_indices,
+            cossim_vectors,
+            label="connectivity",
+        )
+        cossim_label = "connectivity"
+
     log_output_node(
         output_node_indices,
         output_node_scores,
         output_node_dla,
         output_node_count,
         all_output_scores,
+        cluster_assignments,
+        cossim_vectors,
+        cossim_label=cossim_label,
     )
 
     logger.info("  Aggregating output-node supergraph")

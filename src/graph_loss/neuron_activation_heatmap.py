@@ -10,6 +10,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 
 import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
 import torch
 import torch.nn.functional as F
 from huggingface_hub import login
@@ -122,18 +123,7 @@ def _select_mlp_neuron_bias(
     return bias[neuron_id].to(device=device, dtype=dtype)
 
 
-@torch.no_grad()
-def _activations_for_location_batch(
-    model,
-    prompts: list[str],
-    *,
-    layer: int,
-    token_pos: int,
-    neuron_id: int,
-) -> list[float]:
-    if not prompts:
-        return []
-
+def _tokenize_prompt_batch(model, prompts: list[str]) -> tuple[torch.Tensor, list[int]]:
     tokenizer = model.tokenizer
     tokenized = [
         tokenizer(prompt, return_tensors="pt", add_special_tokens=False).input_ids.squeeze(0)
@@ -149,9 +139,8 @@ def _activations_for_location_batch(
         else torch.cat([torch.tensor([bos_token_id], dtype=ids.dtype), ids])
         for ids in tokenized
     ]
-    max_len = max(int(ids.numel()) for ids in tokenized)
-    if token_pos >= max_len:
-        return [float("nan")] * len(prompts)
+    lengths = [int(ids.numel()) for ids in tokenized]
+    max_len = max(lengths)
 
     pad_token_id = (
         tokenizer.pad_token_id
@@ -167,11 +156,28 @@ def _activations_for_location_batch(
         dtype=tokenized[0].dtype,
         device=model.cfg.device,
     )
-    valid_at_pos = []
     for row_idx, ids in enumerate(tokenized):
-        ids = ids.to(model.cfg.device)
-        input_ids[row_idx, : ids.numel()] = ids
-        valid_at_pos.append(token_pos < int(ids.numel()))
+        input_ids[row_idx, : ids.numel()] = ids.to(model.cfg.device)
+    return input_ids, lengths
+
+
+@torch.no_grad()
+def _activations_for_location_batch(
+    model,
+    prompts: list[str],
+    *,
+    layer: int,
+    token_pos: int,
+    neuron_id: int,
+) -> list[float]:
+    if not prompts:
+        return []
+
+    input_ids, lengths = _tokenize_prompt_batch(model, prompts)
+    max_len = input_ids.shape[1]
+    if token_pos >= max_len:
+        return [float("nan")] * len(prompts)
+    valid_at_pos = [token_pos < length for length in lengths]
 
     target_hook_name = f"blocks.{layer}.{model.feature_input_hook}"
     mlp_input_at_pos = None
@@ -225,6 +231,219 @@ def _activations_for_location_batch(
         float(value) if is_valid else float("nan")
         for value, is_valid in zip(out, valid_at_pos, strict=True)
     ]
+
+
+@torch.no_grad()
+def build_neuron_activation_write_matrix(
+    model,
+    dataset_name: str,
+    neuron_locations: list[tuple[int, int, int]] | torch.Tensor,
+    *,
+    forward_batch_size: int = 32,
+    limit: int | None = None,
+    log_interval: int = 100,
+) -> torch.Tensor:
+    """Return activation * W_out matrices with shape [neurons, problems, d_model]."""
+    logger = logging.getLogger(__name__)
+    if forward_batch_size <= 0:
+        raise ValueError("forward_batch_size must be positive")
+
+    if isinstance(neuron_locations, torch.Tensor):
+        locations = [
+            (int(row[0].item()), int(row[1].item()), int(row[2].item()))
+            for row in neuron_locations.detach().cpu()
+        ]
+    else:
+        locations = [
+            (int(layer), int(token_pos), int(neuron_id))
+            for layer, token_pos, neuron_id in neuron_locations
+        ]
+
+    for layer, token_pos, neuron_id in locations:
+        _validate_neuron_location(
+            model,
+            layer=layer,
+            token_pos=token_pos,
+            neuron_id=neuron_id,
+        )
+
+    dataset_path = _resolve_dataset_path(dataset_name)
+    samples = list(load_prompt_answer_json(dataset_path).items())
+    if limit is not None:
+        samples = samples[:limit]
+    prompts = [prompt for prompt, _answer in samples]
+    if not prompts:
+        raise ValueError(f"Dataset has no samples: {dataset_path}")
+
+    d_model = int(model.cfg.d_model)
+    result = torch.full(
+        (len(locations), len(prompts), d_model),
+        float("nan"),
+        dtype=torch.float32,
+        device="cpu",
+    )
+    if not locations:
+        return result
+
+    location_groups: dict[tuple[int, int], list[tuple[int, int]]] = defaultdict(list)
+    w_out_cache: dict[int, torch.Tensor] = {}
+    for location_idx, (layer, token_pos, neuron_id) in enumerate(locations):
+        location_groups[(layer, token_pos)].append((location_idx, neuron_id))
+        if layer not in w_out_cache:
+            old_mlp = model.blocks[layer].mlp.old_mlp
+            w_out_cache[layer] = model._row_oriented_weight(old_mlp.W_out.to(device=model.cfg.device))
+
+    for batch_start in range(0, len(prompts), forward_batch_size):
+        batch_prompts = prompts[batch_start:batch_start + forward_batch_size]
+        input_ids, lengths = _tokenize_prompt_batch(model, batch_prompts)
+        max_len = input_ids.shape[1]
+        active_groups = {
+            group_key: group_members
+            for group_key, group_members in location_groups.items()
+            if group_key[1] < max_len
+        }
+        if not active_groups:
+            continue
+
+        cached_inputs: dict[tuple[int, int], torch.Tensor] = {}
+        hooks = []
+        for layer, token_pos in active_groups:
+            hook_name = f"blocks.{layer}.{model.feature_input_hook}"
+
+            def cache_target_position(
+                acts: torch.Tensor,
+                hook,
+                *,
+                key: tuple[int, int] = (layer, token_pos),
+            ) -> torch.Tensor:
+                cached_inputs[key] = acts[:, key[1], :].detach()
+                return acts
+
+            hooks.append((hook_name, cache_target_position))
+
+        model.run_with_hooks(input_ids, fwd_hooks=hooks)
+        for (layer, token_pos), group_members in active_groups.items():
+            mlp_input_at_pos = cached_inputs.get((layer, token_pos))
+            if mlp_input_at_pos is None:
+                raise RuntimeError(
+                    f"Did not cache target hook for layer={layer}, token_pos={token_pos}"
+                )
+
+            old_mlp = model.blocks[layer].mlp.old_mlp
+            valid_at_pos = torch.tensor(
+                [token_pos < length for length in lengths],
+                dtype=torch.bool,
+                device=mlp_input_at_pos.device,
+            )
+            for location_idx, neuron_id in group_members:
+                gate_weight = _select_mlp_neuron_weight(
+                    model,
+                    old_mlp.W_gate,
+                    neuron_id,
+                    device=mlp_input_at_pos.device,
+                    dtype=mlp_input_at_pos.dtype,
+                )
+                up_weight = _select_mlp_neuron_weight(
+                    model,
+                    old_mlp.W_in,
+                    neuron_id,
+                    device=mlp_input_at_pos.device,
+                    dtype=mlp_input_at_pos.dtype,
+                )
+                gate_bias = _select_mlp_neuron_bias(
+                    old_mlp,
+                    "b_gate",
+                    neuron_id,
+                    device=mlp_input_at_pos.device,
+                    dtype=mlp_input_at_pos.dtype,
+                )
+                up_bias = _select_mlp_neuron_bias(
+                    old_mlp,
+                    "b_in",
+                    neuron_id,
+                    device=mlp_input_at_pos.device,
+                    dtype=mlp_input_at_pos.dtype,
+                )
+                gate_pre = mlp_input_at_pos @ gate_weight + gate_bias
+                up_pre = mlp_input_at_pos @ up_weight + up_bias
+                activations = F.silu(gate_pre) * up_pre
+                if token_pos == 0:
+                    activations.zero_()
+
+                write_matrix = activations[:, None] * w_out_cache[layer][neuron_id].to(
+                    device=mlp_input_at_pos.device,
+                    dtype=activations.dtype,
+                )[None, :]
+                write_matrix = write_matrix.detach().float().cpu()
+                invalid_rows = (~valid_at_pos).detach().cpu()
+                write_matrix[invalid_rows] = float("nan")
+                result[
+                    location_idx,
+                    batch_start:batch_start + len(batch_prompts),
+                ] = write_matrix
+
+        processed = batch_start + len(batch_prompts)
+        if log_interval and processed % log_interval == 0:
+            logger.info("Processed %d activation-write samples", processed)
+
+    logger.info(
+        "Built activation-write matrix for %d neurons x %d problems from %s",
+        len(locations),
+        len(prompts),
+        dataset_path,
+    )
+    return result
+
+
+def save_cluster_activation_heatmap_pdfs(
+    activation_write_matrices: torch.Tensor,
+    assignments: torch.Tensor,
+    neuron_indices: torch.Tensor,
+    neuron_locations: torch.Tensor,
+    *,
+    output_dir: str = ".",
+) -> list[str]:
+    """Save one PDF per cluster with one activation-write heatmap page per neuron."""
+    os.makedirs(output_dir, exist_ok=True)
+    saved_paths: list[str] = []
+    if activation_write_matrices.numel() == 0 or assignments.numel() == 0:
+        return saved_paths
+
+    matrices = activation_write_matrices.detach().float().cpu()
+    assignments_cpu = assignments.detach().cpu()
+    neuron_indices_cpu = neuron_indices.detach().cpu()
+    locations_cpu = neuron_locations.detach().cpu()
+
+    for cluster_id in torch.unique(assignments_cpu).tolist():
+        cluster_rows = torch.where(assignments_cpu == int(cluster_id))[0].tolist()
+        output_path = os.path.join(output_dir, f"cluster_{int(cluster_id)}.pdf")
+        with PdfPages(output_path) as pdf:
+            for row_idx in cluster_rows:
+                graph_neuron_idx = int(neuron_indices_cpu[row_idx].item())
+                layer = int(locations_cpu[graph_neuron_idx, 0].item())
+                token_pos = int(locations_cpu[graph_neuron_idx, 1].item())
+                neuron_id = int(locations_cpu[graph_neuron_idx, 2].item())
+
+                fig, ax = plt.subplots(figsize=(10, 6))
+                image = ax.imshow(
+                    matrices[row_idx].numpy(),
+                    aspect="auto",
+                    interpolation="nearest",
+                )
+                fig.colorbar(image, ax=ax, label="activation * W_out")
+                ax.set_xlabel("model dimension")
+                ax.set_ylabel("problem")
+                ax.set_title(
+                    "cluster "
+                    f"{int(cluster_id)} | graph_neuron_idx={graph_neuron_idx} "
+                    f"layer={layer} token={token_pos} neuron={neuron_id}"
+                )
+                fig.tight_layout()
+                pdf.savefig(fig)
+                plt.close(fig)
+        saved_paths.append(output_path)
+
+    return saved_paths
 
 
 def _plot_1d(

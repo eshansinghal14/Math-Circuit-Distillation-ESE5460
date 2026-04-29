@@ -325,6 +325,19 @@ def main():
         default=0.1,
         help="Cosine-distance epsilon for output-node DLA connected-component clustering",
     )
+    parser.add_argument(
+        "--dataset",
+        help=(
+            "Optional dataset prefix, filename, or path for activation-write "
+            "output-neuron clustering and per-cluster PDF heatmaps"
+        ),
+    )
+    parser.add_argument(
+        "--activation_forward_batch_size",
+        type=int,
+        default=32,
+        help="Batch size for dataset activation-write forward passes",
+    )
 
     args = parser.parse_args()
 
@@ -383,6 +396,8 @@ def main():
         model,
         prune_result=prune_result,
         cossim_eps=args.cossim_eps,
+        dataset=args.dataset,
+        activation_forward_batch_size=args.activation_forward_batch_size,
     )
     _log_supergraph_summary(
         graph,
