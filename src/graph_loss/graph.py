@@ -529,14 +529,18 @@ def build_super_graph(
             )
 
         cluster_assignments = output_dla_cossim_assignments(output_node_dla)
-        unique_cluster_ids = torch.unique(cluster_assignments).tolist()
-        for cluster_id in unique_cluster_ids:
+        cluster_groups = []
+        for cluster_id in torch.unique(cluster_assignments).tolist():
             cluster_mask = cluster_assignments == int(cluster_id)
             cluster_rows = torch.where(cluster_mask)[0].tolist()
+            cluster_groups.append((int(cluster_id), cluster_mask, cluster_rows))
+        cluster_groups.sort(key=lambda group: len(group[2]), reverse=True)
+
+        for cluster_id, cluster_mask, cluster_rows in cluster_groups:
             mean_dla_norm = output_node_dla[cluster_mask].detach().float().mean(dim=0).norm()
             logger.info(
                 "  cluster %d size=%d mean_dla_norm=%.6g",
-                int(cluster_id),
+                cluster_id,
                 len(cluster_rows),
                 float(mean_dla_norm.item()),
             )
