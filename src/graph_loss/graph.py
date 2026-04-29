@@ -314,38 +314,12 @@ def build_super_graph(
     # )
     node_influence_vectors = logit_influence.T[:n_neurons]
 
-    def get_vocab_embedding_matrix(
-        vocab_size: int,
-        *,
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> torch.Tensor:
-        if hasattr(model, "W_E"):
-            embedding_matrix = model.W_E
-        elif hasattr(model, "embed") and hasattr(model.embed, "W_E"):
-            embedding_matrix = model.embed.W_E
-        elif hasattr(model, "embed_tokens"):
-            embedding_matrix = model.embed_tokens.weight
-        else:
-            raise AttributeError("Model does not expose W_E, embed.W_E, or embed_tokens.weight")
-
-        embedding_matrix = embedding_matrix.to(device=device, dtype=dtype)
-        if embedding_matrix.shape[0] == vocab_size:
-            return embedding_matrix
-        if embedding_matrix.shape[1] == vocab_size:
-            return embedding_matrix.T
-        raise ValueError(
-            f"Could not orient embedding matrix of shape {tuple(embedding_matrix.shape)} "
-            f"for vocab size {vocab_size}"
-        )
-
-    def project_dla_to_embedding_space(dla_matrix: torch.Tensor) -> torch.Tensor:
-        embedding_matrix = get_vocab_embedding_matrix(
-            int(dla_matrix.shape[1]),
-            device=dla_matrix.device,
-            dtype=dla_matrix.dtype,
-        )
-        return dla_matrix @ embedding_matrix
+    def neuron_connectivity_vectors(neuron_indices: torch.Tensor) -> torch.Tensor:
+        neuron_adjacency = adjacency_matrix[:n_neurons, :n_neurons]
+        neuron_indices = neuron_indices.to(device=neuron_adjacency.device, dtype=torch.long)
+        incoming_from_upstream = neuron_adjacency[neuron_indices, :]
+        outgoing_to_downstream = neuron_adjacency[:, neuron_indices].T
+        return torch.cat([incoming_from_upstream, outgoing_to_downstream], dim=1)
 
     def find_output_elbow_count(sorted_scores: torch.Tensor) -> int:
         n_scores = int(sorted_scores.numel())
@@ -409,24 +383,27 @@ def build_super_graph(
 
         return torch.stack(scores).mean()
 
-    def output_dla_cossim_assignments(output_dla: torch.Tensor) -> torch.Tensor:
-        if len(output_dla) == 0:
-            logger.info("  Output-node DLA cossim clustering: no vectors")
-            return torch.empty(0, dtype=torch.long, device=output_dla.device)
+    def output_connectivity_cossim_assignments(output_node_indices: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if len(output_node_indices) == 0:
+            logger.info("  Output-node connectivity cossim clustering: no vectors")
+            return (
+                torch.empty(0, dtype=torch.long, device=output_node_indices.device),
+                torch.empty((0, 0), dtype=adjacency_matrix.dtype, device=adjacency_matrix.device),
+            )
 
-        projected_dla = project_dla_to_embedding_space(output_dla)
-        assignments = cossim_connected_components(projected_dla)
+        connectivity_vectors = neuron_connectivity_vectors(output_node_indices)
+        assignments = cossim_connected_components(connectivity_vectors)
         unique_assignments, cluster_sizes = torch.unique(assignments, return_counts=True)
-        score = silhouette_score_cossim(projected_dla, assignments)
+        score = silhouette_score_cossim(connectivity_vectors, assignments)
         logger.info(
-            "  Output-node embedding-projected DLA cossim clustering: eps=%.6g clusters=%d min_size=%d max_size=%d silhouette_score=%.6g",
+            "  Output-node connectivity cossim clustering: eps=%.6g clusters=%d min_size=%d max_size=%d silhouette_score=%.6g",
             float(cossim_eps),
             int(unique_assignments.numel()),
             int(cluster_sizes.min().item()),
             int(cluster_sizes.max().item()),
             float(score.item()),
         )
-        return assignments
+        return assignments, connectivity_vectors
 
     def build_output_node():
         kept_neurons = torch.where(kept_neuron_mask)[0]
@@ -562,7 +539,9 @@ def build_super_graph(
                 format_top_output_logits(top_k=20),
             )
 
-        cluster_assignments = output_dla_cossim_assignments(output_node_dla)
+        cluster_assignments, connectivity_vectors = output_connectivity_cossim_assignments(
+            output_node_indices,
+        )
         cluster_groups = []
         for cluster_id in torch.unique(cluster_assignments).tolist():
             cluster_mask = cluster_assignments == int(cluster_id)
@@ -599,16 +578,15 @@ def build_super_graph(
                 ):
                     logger.info("      top DLA logits %d: %s", line_idx, line)
 
-        if output_node_dla.numel():
-            projected_output_dla = project_dla_to_embedding_space(output_node_dla).detach().float()
-            projected_output_dla_normalized = projected_output_dla / projected_output_dla.norm(
+        if connectivity_vectors.numel():
+            connectivity_vectors_normalized = connectivity_vectors.detach().float() / connectivity_vectors.detach().float().norm(
                 dim=1,
                 keepdim=True,
             ).clamp(min=1e-12)
-            cossim_matrix = projected_output_dla_normalized @ projected_output_dla_normalized.T
+            cossim_matrix = connectivity_vectors_normalized @ connectivity_vectors_normalized.T
             cossim_threshold = 1.0 - float(cossim_eps)
             logger.info(
-                "  Output node embedding-projected DLA cossim matrix values > %.6g:",
+                "  Output node connectivity cossim matrix values > %.6g:",
                 cossim_threshold,
             )
             for row in cossim_matrix.detach().cpu().tolist():
