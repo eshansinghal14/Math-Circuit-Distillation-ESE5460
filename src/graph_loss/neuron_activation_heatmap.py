@@ -1,4 +1,4 @@
-"""Plot a graph-indexed neuron's activations over a numeric dataset."""
+"""Plot a specific MLP neuron's activations over a numeric dataset."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import torch
 import torch.nn.functional as F
 from huggingface_hub import login
 
-from graph_loss.utils import add_graph_build_args, resolve_torch_dtype
+from graph_loss.utils import DTYPE_CHOICES, resolve_torch_dtype
 from utils import HF_READ_TOKEN, default_datasets_dir, load_prompt_answer_json
 
 
@@ -69,52 +69,20 @@ def _parse_numeric_args(prompt: str) -> tuple[int, ...]:
     return tuple(int(value) for value in values)
 
 
-@torch.no_grad()
-def _resolve_graph_neuron_location(
+def _validate_neuron_location(
     model,
-    prompt: str,
-    neuron_idx: int,
-    prop_neurons_per_layer: float,
+    *,
+    layer: int,
+    token_pos: int,
+    neuron_id: int,
 ) -> tuple[int, int, int]:
-    ctx = model.setup_attribution(prompt, prop_neurons_per_layer=prop_neurons_per_layer)
-    if neuron_idx < 0 or neuron_idx >= int(ctx.neuron_locations.shape[0]):
-        raise IndexError(
-            f"neuron_idx={neuron_idx} out of range for reference graph "
-            f"with {int(ctx.neuron_locations.shape[0])} neurons",
-        )
-    layer, token_pos, neuron_id = ctx.neuron_locations[neuron_idx].tolist()
-    return int(layer), int(token_pos), int(neuron_id)
-
-
-def _resolve_requested_neuron_location(
-    model,
-    args: argparse.Namespace,
-    reference_prompt: str,
-) -> tuple[int, int, int]:
-    direct_location = (args.layer, args.token_pos, args.neuron_id)
-    if any(value is not None for value in direct_location):
-        if not all(value is not None for value in direct_location):
-            raise ValueError("--layer, --token-pos, and --neuron-id must be provided together")
-        layer, token_pos, neuron_id = direct_location
-        if not (0 <= layer < model.cfg.n_layers):
-            raise ValueError(f"--layer must be in [0, {model.cfg.n_layers}), got {layer}")
-        if token_pos < 0:
-            raise ValueError(f"--token-pos must be non-negative, got {token_pos}")
-        if not (0 <= neuron_id < model.cfg.d_mlp):
-            raise ValueError(f"--neuron-id must be in [0, {model.cfg.d_mlp}), got {neuron_id}")
-        return int(layer), int(token_pos), int(neuron_id)
-
-    if args.neuron_idx is None:
-        raise ValueError(
-            "Provide either --neuron-idx or the direct location "
-            "--layer --token-pos --neuron-id",
-        )
-    return _resolve_graph_neuron_location(
-        model,
-        reference_prompt,
-        args.neuron_idx,
-        args.prop_neurons_per_layer,
-    )
+    if not (0 <= layer < model.cfg.n_layers):
+        raise ValueError(f"--layer must be in [0, {model.cfg.n_layers}), got {layer}")
+    if token_pos < 0:
+        raise ValueError(f"--token-pos must be non-negative, got {token_pos}")
+    if not (0 <= neuron_id < model.cfg.d_mlp):
+        raise ValueError(f"--neuron-id must be in [0, {model.cfg.d_mlp}), got {neuron_id}")
+    return layer, token_pos, neuron_id
 
 
 def _select_mlp_neuron_weight(
@@ -360,22 +328,17 @@ def plot_neuron_activation_heatmap(args: argparse.Namespace) -> str:
     model = TransformerLensReplacementModel.from_pretrained(args.model, dtype=dtype)
     model.eval()
 
-    reference_prompt = samples[0][0]
-    layer, token_pos, neuron_id = _resolve_requested_neuron_location(
+    layer, token_pos, neuron_id = _validate_neuron_location(
         model,
-        args,
-        reference_prompt=reference_prompt,
+        layer=args.layer,
+        token_pos=args.token_pos,
+        neuron_id=args.neuron_id,
     )
     logger.info(
-        "Using neuron location layer=%d token=%d neuron=%d%s",
+        "Using neuron location layer=%d token=%d neuron=%d",
         layer,
         token_pos,
         neuron_id,
-        (
-            f" resolved from graph neuron {args.neuron_idx}"
-            if args.neuron_idx is not None
-            else ""
-        ),
     )
 
     values_by_arg: dict[tuple[int, ...], ActivationAccumulator] = defaultdict(ActivationAccumulator)
@@ -433,15 +396,13 @@ def plot_neuron_activation_heatmap(args: argparse.Namespace) -> str:
     output_path = args.output_path
     if output_path is None:
         dataset_stem = os.path.splitext(os.path.basename(dataset_path))[0]
-        neuron_label = (
-            f"neuron_{args.neuron_idx}"
-            if args.neuron_idx is not None
-            else f"layer_{layer}_token_{token_pos}_neuron_{neuron_id}"
+        output_path = (
+            f"layer_{layer}_token_{token_pos}_neuron_{neuron_id}"
+            f"_{dataset_stem}_activation_heatmap.png"
         )
-        output_path = f"{neuron_label}_{dataset_stem}_activation_heatmap.png"
 
     title = (
-        f"Neuron {args.neuron_idx if args.neuron_idx is not None else neuron_id} activation "
+        f"Neuron {neuron_id} activation "
         f"(layer={layer}, token={token_pos}, neuron={neuron_id})"
     )
     n_args = len(next(iter(values_by_arg)))
@@ -458,17 +419,12 @@ def plot_neuron_activation_heatmap(args: argparse.Namespace) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Plot a graph-indexed neuron's activations over a numeric dataset.",
+        description="Plot a specific MLP neuron's activations over a numeric dataset.",
     )
     parser.add_argument("--model", required=True, help="HuggingFace model name")
-    parser.add_argument(
-        "--neuron-idx",
-        type=int,
-        help="Graph neuron index from graph_neuron_idx logs, not the per-layer neuron id",
-    )
-    parser.add_argument("--layer", type=int, help="Direct layer index to avoid graph lookup")
-    parser.add_argument("--token-pos", type=int, help="Direct token position to avoid graph lookup")
-    parser.add_argument("--neuron-id", type=int, help="Direct per-layer MLP neuron id")
+    parser.add_argument("--layer", type=int, required=True, help="Layer index")
+    parser.add_argument("--token-pos", type=int, required=True, help="Token position")
+    parser.add_argument("--neuron-id", type=int, required=True, help="Per-layer MLP neuron id")
     parser.add_argument("--dataset-name", required=True, help="Dataset prefix, filename, or path")
     parser.add_argument("--output-path", help="Path for the output heatmap PNG")
     parser.add_argument("--limit", type=int, default=None, help="Optional sample limit")
@@ -479,7 +435,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=32,
         help="Batch size for activation forward passes",
     )
-    add_graph_build_args(parser)
+    parser.add_argument(
+        "--dtype",
+        choices=DTYPE_CHOICES,
+        default="float32",
+        help="Model dtype",
+    )
     return parser
 
 
