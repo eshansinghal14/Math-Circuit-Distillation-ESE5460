@@ -446,12 +446,12 @@ def build_super_graph(
         if output_dla.numel():
             log_softmax_output_dla = torch.log_softmax(output_dla.detach().float(), dim=1)
             output_entropies = -(log_softmax_output_dla.exp() * log_softmax_output_dla).sum(dim=1)
-            sorted_output_entropies = torch.sort(output_entropies, descending=True).values
+            sorted_negative_output_entropies = torch.sort(-output_entropies, descending=True).values
             plt.figure(figsize=(8, 4))
-            plt.plot(sorted_output_entropies.cpu().tolist(), marker="o")
+            plt.plot(sorted_negative_output_entropies.cpu().tolist(), marker="o")
             plt.xlabel("Output-node neuron rank")
-            plt.ylabel("Softmax DLA entropy")
-            plt.title("Output-node softmax DLA entropies, sorted high to low")
+            plt.ylabel("Negative softmax DLA entropy")
+            plt.title("Output-node negative softmax DLA entropies, sorted high to low")
             plt.tight_layout()
             plt.savefig("output_node_entropies.png")
             plt.close()
