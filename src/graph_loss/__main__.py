@@ -319,6 +319,18 @@ def main():
         "--supergraph_output_path",
         help="Optional path to save the supergraph (.pt)",
     )
+    parser.add_argument(
+        "--hdbscan_min_cluster_size",
+        type=int,
+        default=3,
+        help="HDBSCAN min_cluster_size for output-node DLA clustering",
+    )
+    parser.add_argument(
+        "--hdbscan_min_samples",
+        type=int,
+        default=2,
+        help="HDBSCAN min_samples for output-node DLA clustering",
+    )
 
     args = parser.parse_args()
 
@@ -376,6 +388,8 @@ def main():
         graph,
         model,
         prune_result=prune_result,
+        hdbscan_min_cluster_size=args.hdbscan_min_cluster_size,
+        hdbscan_min_samples=args.hdbscan_min_samples,
     )
     _log_supergraph_summary(
         graph,

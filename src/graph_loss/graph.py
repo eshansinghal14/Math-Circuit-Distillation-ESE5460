@@ -272,6 +272,8 @@ def build_super_graph(
     graph: Graph,
     model,
     prune_result: PruneResult | None = None,
+    hdbscan_min_cluster_size: int = 3,
+    hdbscan_min_samples: int = 2,
 ) -> SuperGraph:
     """Create a single supernode from the selected output-node neurons."""
 
@@ -341,8 +343,8 @@ def build_super_graph(
         HDBSCAN = importlib.import_module("sklearn.cluster").HDBSCAN
         clusterer = HDBSCAN(
             metric="precomputed",
-            min_cluster_size=3,
-            min_samples=2,
+            min_cluster_size=max(2, int(hdbscan_min_cluster_size)),
+            min_samples=max(1, int(hdbscan_min_samples)),
             allow_single_cluster=True,
         )
         raw_labels = clusterer.fit_predict(distances).tolist()
