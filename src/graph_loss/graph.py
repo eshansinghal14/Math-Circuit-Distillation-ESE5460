@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import importlib
 import logging
+import math
+import re
 from typing import NamedTuple
 
-import matplotlib.pyplot as plt
 import torch
+import torch.nn.functional as F
 
 from graph_loss.attribution.targets import LogitTarget
 from graph_loss.neuron_activation_heatmap import (
     build_neuron_activation_write_result,
-    save_cluster_activation_heatmap_pdfs,
+    save_supernode_activation_heatmap_pdf,
 )
 from graph_loss.utils import UnifiedConfig, convert_nnsight_config_to_transformerlens
 
@@ -276,19 +279,28 @@ def build_super_graph(
     model,
     prune_result: PruneResult | None = None,
     cossim_eps: float = 0.1,
+    embedding_sigma: float = 1.5,
+    embedding_eps: float | None = None,
+    computation_sigma: float = 1.5,
+    computation_eps: float | None = None,
     dataset: str | None = None,
     activation_forward_batch_size: int = 32,
 ) -> SuperGraph:
-    """Create a single supernode from the selected output-node neurons."""
+    """Cluster kept neurons into numeric-token embedding and final-token computation supernodes."""
 
     if prune_result is not None:
         graph = graph.apply_prune_result(prune_result)
 
-    n_logits = graph.n_logits
-    n_tokens = graph.n_tokens
+    if embedding_eps is None:
+        embedding_eps = cossim_eps
+    if computation_eps is None:
+        computation_eps = cossim_eps
+    if embedding_eps < 0.0 or computation_eps < 0.0:
+        raise ValueError("embedding_eps and computation_eps must be non-negative")
+    if embedding_sigma < 0.0 or computation_sigma < 0.0:
+        raise ValueError("embedding_sigma and computation_sigma must be non-negative")
+
     n_neurons = graph.n_neurons
-    token_start = n_neurons
-    logit_start = token_start + n_tokens
     logger = logging.getLogger(__name__)
     kept_neuron_mask = torch.ones(n_neurons, dtype=torch.bool, device=graph.adjacency_device)
     if prune_result is not None:
@@ -298,63 +310,66 @@ def build_super_graph(
         )
 
     adjacency_matrix = graph.adjacency_matrix
-    all_nodes_basis = torch.zeros(
-        adjacency_matrix.shape[0],
-        adjacency_matrix.shape[0],
-        dtype=adjacency_matrix.dtype,
-        device=adjacency_matrix.device,
-    )
-    all_nodes_basis[
-        torch.arange(adjacency_matrix.shape[0], device=adjacency_matrix.device), 
-        torch.arange(adjacency_matrix.shape[0], device=adjacency_matrix.device)
-    ] = 1
 
-    logger.info("  Computing logit influence for supergraph")
-    logit_influence = compute_node_influence(adjacency_matrix, all_nodes_basis)
-    logit_probabilities = graph.logit_probabilities.to(
-        device=adjacency_matrix.device,
-        dtype=adjacency_matrix.dtype,
-    )
-    # node_influence_vectors = (
-    #     logit_influence.T[:n_neurons][:, :logit_start] * (1 - logit_probabilities) * logit_probabilities
-    # )
-    node_influence_vectors = logit_influence.T[:n_neurons]
+    def decoded_prompt_tokens() -> list[str]:
+        token_ids = graph.input_tokens.detach().cpu().flatten().tolist()
+        return [model.tokenizer.decode([int(token_id)]) for token_id in token_ids]
 
-    def neuron_connectivity_vectors(neuron_indices: torch.Tensor) -> torch.Tensor:
-        neuron_adjacency = adjacency_matrix[:n_neurons, :n_neurons]
-        neuron_indices = neuron_indices.to(device=neuron_adjacency.device, dtype=torch.long)
-        incoming_from_upstream = neuron_adjacency[neuron_indices, :]
-        outgoing_to_downstream = neuron_adjacency[:, neuron_indices].T
-        return torch.cat([incoming_from_upstream, outgoing_to_downstream], dim=1)
+    def token_contains_number(token_text: str) -> bool:
+        return re.search(r"\d", token_text) is not None
 
-    def find_output_elbow_count(sorted_scores: torch.Tensor) -> int:
-        n_scores = int(sorted_scores.numel())
-        if n_scores <= 2:
-            return n_scores
+    def spatial_activation_similarity(activation_maps: torch.Tensor, sigma: float) -> torch.Tensor:
+        if len(activation_maps) == 0:
+            raise ValueError("spatial_activation_similarity requires at least one activation map")
+        if len(activation_maps) == 1:
+            return torch.ones((1, 1), dtype=torch.float32)
 
-        score_range = sorted_scores[0] - sorted_scores[-1]
-        if score_range.abs() <= 1e-12:
-            return n_scores
+        try:
+            gaussian_filter = importlib.import_module("scipy.ndimage").gaussian_filter
+        except ImportError as exc:
+            raise ImportError(
+                "scipy is required for Gaussian-smoothed supergraph clustering"
+            ) from exc
 
-        x = torch.linspace(0, 1, n_scores, device=sorted_scores.device, dtype=sorted_scores.dtype)
-        y = (sorted_scores - sorted_scores[-1]) / (
-            sorted_scores[0] - sorted_scores[-1]
-        ).clamp(min=1e-12)
-        distance_from_diagonal = (1 - x) - y
-        return int(distance_from_diagonal.argmax().item()) + 1
+        activation_maps = torch.nan_to_num(activation_maps.detach().float().cpu())
+        smoothed = torch.empty_like(activation_maps)
+        activation_arrays = activation_maps.numpy()
+        for row_idx in range(activation_maps.shape[0]):
+            smoothed[row_idx] = torch.from_numpy(
+                gaussian_filter(activation_arrays[row_idx], sigma=float(sigma))
+            )
 
-    def cossim_connected_components(X: torch.Tensor) -> torch.Tensor:
-        if len(X) == 0:
-            raise ValueError("cossim_connected_components requires at least one point")
-        if len(X) == 1:
-            return torch.zeros(1, dtype=torch.long, device=X.device)
+        flat_maps = smoothed.flatten(start_dim=1)
+        flat_maps = F.normalize(flat_maps, p=2, dim=1, eps=1e-12)
+        return flat_maps @ flat_maps.T
 
-        X_norm = X / X.norm(dim=1, keepdim=True).clamp(min=1e-12)
-        cossim_matrix = X_norm @ X_norm.T
-        connected = cossim_matrix >= 1.0 - float(cossim_eps)
-        labels = torch.full((len(X),), -1, dtype=torch.long, device=X.device)
+    def unembedding_write_similarity(w_down_vectors: torch.Tensor) -> torch.Tensor:
+        if len(w_down_vectors) == 0:
+            raise ValueError("unembedding_write_similarity requires at least one vector")
+        if len(w_down_vectors) == 1:
+            return torch.ones((1, 1), dtype=torch.float32)
+
+        W_U = model.unembed.W_U.detach()
+        projected_logits = (
+            w_down_vectors.to(device=W_U.device, dtype=W_U.dtype)
+            @ W_U
+        ).detach().float().cpu()
+        projected_logits = F.normalize(projected_logits, p=2, dim=1, eps=1e-12)
+        return projected_logits @ projected_logits.T
+
+    def angular_distance_connected_components(distance_matrix: torch.Tensor, eps: float) -> torch.Tensor:
+        if distance_matrix.ndim != 2 or distance_matrix.shape[0] != distance_matrix.shape[1]:
+            raise ValueError(
+                f"Expected a square distance matrix, got {tuple(distance_matrix.shape)}"
+            )
+        if distance_matrix.shape[0] == 0:
+            raise ValueError("angular_distance_connected_components requires at least one point")
+
+        connected = distance_matrix <= float(eps)
+        connected.fill_diagonal_(True)
+        labels = torch.full((distance_matrix.shape[0],), -1, dtype=torch.long)
         cluster_id = 0
-        for start_idx in range(len(X)):
+        for start_idx in range(distance_matrix.shape[0]):
             if labels[start_idx] >= 0:
                 continue
             stack = [start_idx]
@@ -368,314 +383,196 @@ def build_super_graph(
             cluster_id += 1
         return labels
 
-    def silhouette_score_cossim(X: torch.Tensor, assignments: torch.Tensor) -> torch.Tensor:
-        unique_assignments = torch.unique(assignments)
-        if len(unique_assignments) <= 1 or len(unique_assignments) >= len(X):
-            return torch.tensor(float("nan"), device=X.device)
-
-        X_norm = X / X.norm(dim=1, keepdim=True).clamp(min=1e-12)
-        dists = 1 - X_norm @ X_norm.T
-        scores = []
-        for i in range(len(X)):
-            same_cluster = assignments == assignments[i]
-            other_clusters = unique_assignments[unique_assignments != assignments[i]]
-            same_cluster[i] = False
-            a = dists[i, same_cluster].mean() if same_cluster.any() else torch.tensor(0.0, device=X.device)
-            b = torch.stack([
-                dists[i, assignments == cluster].mean()
-                for cluster in other_clusters
-            ]).min()
-            scores.append((b - a) / torch.maximum(a, b).clamp(min=1e-12))
-
-        return torch.stack(scores).mean()
-
-    def output_cossim_assignments(
-        output_node_indices: torch.Tensor,
-        cossim_vectors: torch.Tensor,
+    def cluster_phase(
         *,
-        label: str,
+        phase_name: str,
+        phase_rows: torch.Tensor,
+        activation_maps: torch.Tensor,
+        w_down_vectors: torch.Tensor,
+        sigma: float,
+        eps: float,
     ) -> torch.Tensor:
-        if len(output_node_indices) == 0 or cossim_vectors.numel() == 0:
-            logger.info("  Output-node %s cossim clustering: no vectors", label)
-            return torch.empty(0, dtype=torch.long, device=output_node_indices.device)
+        if phase_rows.numel() == 0:
+            logger.info("  %s clustering: no neurons", phase_name)
+            return torch.empty(0, dtype=torch.long)
 
-        local_assignments = cossim_connected_components(cossim_vectors)
-        assignments = local_assignments.to(device=output_node_indices.device)
+        activation_similarity = spatial_activation_similarity(activation_maps, sigma)
+        write_similarity = unembedding_write_similarity(w_down_vectors)
+        combined_similarity = (activation_similarity * write_similarity).clamp(min=-1.0, max=1.0)
+        distance_matrix = torch.arccos(combined_similarity) / math.pi
+        assignments = angular_distance_connected_components(distance_matrix, eps)
         unique_assignments, cluster_sizes = torch.unique(assignments, return_counts=True)
-        score = silhouette_score_cossim(cossim_vectors, local_assignments)
         logger.info(
-            "  Output-node %s cossim clustering: eps=%.6g clusters=%d min_size=%d max_size=%d silhouette_score=%.6g",
-            label,
-            float(cossim_eps),
+            "  %s clustering: sigma=%.6g eps=%.6g neurons=%d clusters=%d min_size=%d max_size=%d",
+            phase_name,
+            float(sigma),
+            float(eps),
+            int(phase_rows.numel()),
             int(unique_assignments.numel()),
             int(cluster_sizes.min().item()),
             int(cluster_sizes.max().item()),
-            float(score.item()),
         )
         return assignments
 
-    def build_output_node():
-        kept_neurons = torch.where(kept_neuron_mask)[0]
-        device = model.unembed.W_U.device
-        W_U = model.unembed.W_U.to(device=device)
-        w_out_cache = {}
-        write_vectors = []
-        activation_magnitudes = []
+    def aggregate_nanmean(values: torch.Tensor, dim: int) -> torch.Tensor:
+        if values.shape[dim] == 1:
+            return values.squeeze(dim)
+        if hasattr(torch, "nanmean"):
+            return torch.nanmean(values, dim=dim)
 
-        for neuron_idx in kept_neurons.tolist():
-            layer = int(graph.neuron_locations[neuron_idx, 0].item())
-            neuron_id = int(graph.neuron_locations[neuron_idx, 2].item())
-            if layer not in w_out_cache:
-                old_mlp = model.blocks[layer].mlp.old_mlp
-                w_out_cache[layer] = model._row_oriented_weight(old_mlp.W_out.to(device=device))
+        valid = ~torch.isnan(values)
+        safe_values = torch.nan_to_num(values)
+        counts = valid.sum(dim=dim).clamp(min=1)
+        means = safe_values.sum(dim=dim) / counts
+        means[valid.sum(dim=dim) == 0] = float("nan")
+        return means
 
-            activation = graph.neuron_activations[neuron_idx].to(device=device, dtype=W_U.dtype)
-            write_vectors.append(activation * w_out_cache[layer][neuron_id].to(dtype=W_U.dtype))
-            activation_magnitudes.append(activation.abs())
-
-        if not write_vectors:
-            return (
-                kept_neurons[:0],
-                torch.empty(0, device=kept_neurons.device),
-                torch.empty((0, W_U.shape[1]), device=device, dtype=W_U.dtype),
-                0,
-                torch.empty(0),
+    def format_member_locations(members: list[int]) -> str:
+        locations = graph.neuron_locations.detach().cpu()
+        formatted = []
+        for graph_neuron_idx in members:
+            layer = int(locations[graph_neuron_idx, 0].item())
+            token_pos = int(locations[graph_neuron_idx, 1].item())
+            neuron_id = int(locations[graph_neuron_idx, 2].item())
+            formatted.append(
+                f"{graph_neuron_idx}:(layer={layer}, token={token_pos}, neuron={neuron_id})"
             )
+        return ", ".join(formatted)
 
-        dla_matrix = torch.stack(write_vectors) @ W_U
-        target_vocab_indices = torch.tensor(
-            [target.vocab_idx for target in graph.logit_targets],
-            device=device,
-            dtype=torch.long,
-        )
+    kept_neuron_indices_device = torch.where(kept_neuron_mask)[0]
+    kept_neuron_indices = kept_neuron_indices_device.detach().cpu()
+    logger.info("  Kept neurons for supergraph: %d", int(kept_neuron_indices.numel()))
 
-        dla_normalized = dla_matrix / dla_matrix.norm(dim=1, keepdim=True).clamp(min=1e-12)
-        target_probabilities = logit_probabilities.to(device=device, dtype=dla_matrix.dtype)
-        activation_magnitudes_t = torch.stack(activation_magnitudes).clamp(min=1e-12)
-        neuron_scores = (
-            dla_matrix[:, target_vocab_indices] * target_probabilities
-        ).sum(dim=-1)
-        sorted_scores, sorted_positions = torch.sort(neuron_scores, descending=True)
-        elbow_count = find_output_elbow_count(sorted_scores)
-        output_node_positions = sorted_positions[:elbow_count].to(device=kept_neurons.device)
-        output_dla = dla_matrix[sorted_positions[:elbow_count]]
-        if output_dla.numel():
-            log_softmax_output_dla = torch.log_softmax(output_dla.detach().float(), dim=1)
-            output_entropies = -(log_softmax_output_dla.exp() * log_softmax_output_dla).sum(dim=1)
-            sorted_negative_output_entropies = torch.sort(-output_entropies, descending=True).values
-            plt.figure(figsize=(8, 4))
-            plt.plot(sorted_negative_output_entropies.cpu().tolist(), marker="o")
-            plt.xlabel("Output-node neuron rank")
-            plt.ylabel("Negative softmax DLA entropy")
-            plt.title("Output-node negative softmax DLA entropies, sorted high to low")
-            plt.tight_layout()
-            plt.savefig("output_node_entropies.png")
-            plt.close()
-
-        return (
-            kept_neurons[output_node_positions],
-            neuron_scores[output_node_positions.to(device=neuron_scores.device)].to(
-                device=kept_neurons.device,
-            ),
-            output_dla,
-            elbow_count,
-            sorted_scores.detach().float().cpu(),
-        )
-
-    def decode_vocab_token(vocab_idx: int) -> str:
-        token = model.tokenizer.decode([vocab_idx])
-        return token.replace("\n", "\\n").replace("\r", "\\r")
-
-    def format_top_dla_logit_lines(
-        dla_vector: torch.Tensor,
-        top_k: int = 30,
-        line_size: int = 10,
-    ) -> list[str]:
-        if dla_vector.numel() == 0:
-            return ["none"]
-        k = min(top_k, int(dla_vector.numel()))
-        values, indices = torch.topk(dla_vector.detach().float().cpu(), k=k)
-        formatted = [
-            f"{decode_vocab_token(int(idx.item()))!r}: {float(value.item()):.6g}"
-            for value, idx in zip(values, indices, strict=True)
-        ]
-        return [
-            ", ".join(formatted[start:start + line_size])
-            for start in range(0, len(formatted), line_size)
-        ]
-
-    def format_top_output_logits(top_k: int = 20) -> str:
-        if logit_probabilities.numel() == 0:
-            return "none"
-        k = min(top_k, int(logit_probabilities.numel()))
-        values, indices = torch.topk(logit_probabilities.detach().float().cpu(), k=k)
-        return ", ".join(
-            f"{graph.logit_targets[int(idx.item())].token_str!r}:{float(value.item()):.6g}"
-            for value, idx in zip(values, indices, strict=True)
-        )
-
-    def softmax_dla_entropy(dla_vector: torch.Tensor) -> float:
-        log_probs = torch.log_softmax(dla_vector.detach().float(), dim=0)
-        return float((-(log_probs.exp() * log_probs).sum()).item())
-
-    def log_output_node(
-        output_node_indices,
-        output_node_scores,
-        output_node_dla,
-        elbow_count,
-        all_sorted_scores,
-        cluster_assignments,
-        cossim_vectors,
-        *,
-        cossim_label: str,
-    ):
-        logger.info("  Output node members: %d", int(output_node_indices.numel()))
-        sorted_positions = torch.argsort(output_node_scores, descending=True)
-        output_node_indices = output_node_indices[sorted_positions]
-        output_node_scores = output_node_scores[sorted_positions]
-        output_node_dla = output_node_dla[sorted_positions.to(device=output_node_dla.device)]
-        cluster_assignments = cluster_assignments[sorted_positions.to(device=cluster_assignments.device)]
-        cossim_vectors = cossim_vectors[sorted_positions.to(device=cossim_vectors.device)]
-        if all_sorted_scores.numel():
-            plt.figure(figsize=(8, 4))
-            plt.plot(all_sorted_scores.tolist(), marker="o")
-            if 0 < elbow_count <= int(all_sorted_scores.numel()):
-                plt.axvline(elbow_count - 1, color="red", linestyle="--")
-            plt.xlabel("Neuron rank")
-            plt.ylabel("Normalized DLA score")
-            plt.title("Output-node normalized DLA scores, sorted high to low")
-            plt.tight_layout()
-            plt.savefig("output_node_scores.png")
-            plt.close()
-
-        if output_node_scores.numel():
-            logger.info(
-                "  Output node elbow: selected=%d elbow_score=%.6g max_score=%.6g",
-                int(elbow_count),
-                float(output_node_scores[-1].item()),
-                float(output_node_scores[0].item()),
-            )
-            logger.info(
-                "  top 20 logits: %s",
-                format_top_output_logits(top_k=20),
-            )
-
-        cluster_groups = []
-        for cluster_id in torch.unique(cluster_assignments).tolist():
-            cluster_mask = cluster_assignments == int(cluster_id)
-            cluster_rows = torch.where(cluster_mask)[0].tolist()
-            cluster_groups.append((int(cluster_id), cluster_mask, cluster_rows))
-        cluster_groups.sort(key=lambda group: len(group[2]), reverse=True)
-
-        for cluster_id, cluster_mask, cluster_rows in cluster_groups:
-            mean_dla_norm = output_node_dla[cluster_mask].detach().float().mean(dim=0).norm()
-            logger.info(
-                "  cluster %d size=%d mean_dla_norm=%.6g",
-                cluster_id,
-                len(cluster_rows),
-                float(mean_dla_norm.item()),
-            )
-            for row_idx in cluster_rows:
-                neuron_idx = int(output_node_indices[row_idx].item())
-                score = float(output_node_scores[row_idx].item())
-                layer = int(graph.neuron_locations[neuron_idx, 0].item())
-                token_pos = int(graph.neuron_locations[neuron_idx, 1].item())
-                neuron_id = int(graph.neuron_locations[neuron_idx, 2].item())
-                logger.info(
-                    "    graph_neuron_idx=%d layer=%d token=%d neuron=%d score=%.6g entropy=%.6g",
-                    neuron_idx,
-                    layer,
-                    token_pos,
-                    neuron_id,
-                    score,
-                    softmax_dla_entropy(output_node_dla[row_idx]),
-                )
-                for line_idx, line in enumerate(
-                    format_top_dla_logit_lines(output_node_dla[row_idx], top_k=30, line_size=10),
-                    start=1,
-                ):
-                    logger.info("      top DLA logits %d: %s", line_idx, line)
-
-        if cossim_vectors.numel():
-            cossim_vectors_normalized = cossim_vectors.detach().float() / cossim_vectors.detach().float().norm(
-                dim=1,
-                keepdim=True,
-            ).clamp(min=1e-12)
-            cossim_matrix = cossim_vectors_normalized @ cossim_vectors_normalized.T
-            cossim_threshold = 1.0 - float(cossim_eps)
-            logger.info(
-                "  Output node %s cossim matrix values > %.6g:",
-                cossim_label,
-                cossim_threshold,
-            )
-            for row in cossim_matrix.detach().cpu().tolist():
-                logger.info(
-                    "    [%s]",
-                    ", ".join(
-                        f"{value:.6g}" if value > cossim_threshold else ""
-                        for value in row
-                    ),
-                )
-
-    logger.info("  Building output node")
-    (
-        output_node_indices,
-        output_node_scores,
-        output_node_dla,
-        output_node_count,
-        all_output_scores,
-    ) = build_output_node()
-
-    if dataset and output_node_indices.numel():
-        logger.info("  Building output-node activation-write matrices from dataset: %s", dataset)
-        output_neuron_locations = graph.neuron_locations[output_node_indices].detach().cpu()
+    if dataset and kept_neuron_indices.numel():
+        logger.info("  Building activation-write matrices from dataset: %s", dataset)
+        kept_neuron_locations = graph.neuron_locations[kept_neuron_indices_device].detach().cpu()
         activation_write_result = build_neuron_activation_write_result(
             model,
             dataset,
-            output_neuron_locations,
+            kept_neuron_locations,
             forward_batch_size=activation_forward_batch_size,
         )
-        activation_write_matrices = activation_write_result.write_matrices
-        cossim_vectors = torch.nan_to_num(activation_write_matrices.detach().float()).flatten(start_dim=1)
-        cluster_assignments = output_cossim_assignments(
-            output_node_indices,
-            cossim_vectors,
-            label="activation-write",
-        )
-        saved_paths = save_cluster_activation_heatmap_pdfs(
-            activation_write_result.activations,
-            activation_write_result.numeric_args,
-            cluster_assignments,
-            output_node_indices.detach().cpu(),
-            graph.neuron_locations.detach().cpu(),
-            output_dir=".",
-        )
-        for saved_path in saved_paths:
-            logger.info("  Saved activation-write cluster heatmap PDF: %s", saved_path)
-        cossim_label = "activation-write"
+        prompt_tokens = decoded_prompt_tokens()
+        numeric_token_positions = [
+            token_pos
+            for token_pos, token_text in enumerate(prompt_tokens)
+            if token_contains_number(token_text)
+        ]
+        non_numeric_token_positions = [
+            token_pos
+            for token_pos, token_text in enumerate(prompt_tokens)
+            if not token_contains_number(token_text)
+        ]
+        computation_token_pos = non_numeric_token_positions[-1] if non_numeric_token_positions else None
+        if len(numeric_token_positions) > len(activation_write_result.arg_values):
+            logger.warning(
+                "  Found %d numeric prompt tokens but activation grid has %d argument dims; extra numeric tokens will be skipped",
+                len(numeric_token_positions),
+                len(activation_write_result.arg_values),
+            )
+
+        kept_token_positions = kept_neuron_locations[:, 1]
+        supernodes: list[list[int]] = []
+        supernode_heatmaps: list[tuple[torch.Tensor, list[list[int]], list[int], str]] = []
+
+        for arg_dim, token_pos in enumerate(numeric_token_positions[:len(activation_write_result.arg_values)]):
+            phase_rows = torch.where(kept_token_positions == int(token_pos))[0]
+            if phase_rows.numel() == 0:
+                logger.info(
+                    "  Embedding clustering for token_pos=%d arg_dim=%d: no neurons",
+                    int(token_pos),
+                    int(arg_dim),
+                )
+                continue
+
+            embedding_maps = activation_write_result.activations[phase_rows].detach().float()
+            for reduce_dim in range(len(activation_write_result.arg_values) - 1, -1, -1):
+                if reduce_dim != arg_dim:
+                    embedding_maps = aggregate_nanmean(embedding_maps, dim=reduce_dim + 1)
+
+            assignments = cluster_phase(
+                phase_name=f"embedding token_pos={int(token_pos)} arg_dim={int(arg_dim)}",
+                phase_rows=phase_rows,
+                activation_maps=embedding_maps,
+                w_down_vectors=activation_write_result.w_down_vectors[phase_rows],
+                sigma=embedding_sigma,
+                eps=embedding_eps,
+            )
+            for cluster_id in torch.unique(assignments).tolist():
+                cluster_rows = torch.where(assignments == int(cluster_id))[0]
+                result_rows = phase_rows[cluster_rows]
+                members = kept_neuron_indices[result_rows].tolist()
+                supernodes.append([int(member) for member in members])
+                cluster_maps = embedding_maps[cluster_rows]
+                aggregate_map = aggregate_nanmean(cluster_maps, dim=0)
+                token_text = prompt_tokens[int(token_pos)].replace("\n", "\\n").replace("\r", "\\r")
+                supernode_heatmaps.append((
+                    aggregate_map,
+                    [activation_write_result.arg_values[arg_dim]],
+                    [int(member) for member in members],
+                    f"supernode {len(supernodes) - 1}: embedding token {int(token_pos)} {token_text!r}",
+                ))
+
+        if computation_token_pos is None:
+            logger.info("  No non-numeric token found for computation clustering")
+        else:
+            phase_rows = torch.where(kept_token_positions == int(computation_token_pos))[0]
+            if phase_rows.numel() == 0:
+                logger.info(
+                    "  Computation clustering for token_pos=%d: no neurons",
+                    int(computation_token_pos),
+                )
+            else:
+                computation_maps = activation_write_result.activations[phase_rows].detach().float()
+                assignments = cluster_phase(
+                    phase_name=f"computation token_pos={int(computation_token_pos)}",
+                    phase_rows=phase_rows,
+                    activation_maps=computation_maps,
+                    w_down_vectors=activation_write_result.w_down_vectors[phase_rows],
+                    sigma=computation_sigma,
+                    eps=computation_eps,
+                )
+                for cluster_id in torch.unique(assignments).tolist():
+                    cluster_rows = torch.where(assignments == int(cluster_id))[0]
+                    result_rows = phase_rows[cluster_rows]
+                    members = kept_neuron_indices[result_rows].tolist()
+                    supernodes.append([int(member) for member in members])
+                    cluster_maps = computation_maps[cluster_rows]
+                    aggregate_map = aggregate_nanmean(cluster_maps, dim=0)
+                    token_text = prompt_tokens[int(computation_token_pos)].replace("\n", "\\n").replace("\r", "\\r")
+                    supernode_heatmaps.append((
+                        aggregate_map,
+                        activation_write_result.arg_values,
+                        [int(member) for member in members],
+                        f"supernode {len(supernodes) - 1}: computation token {int(computation_token_pos)} {token_text!r}",
+                    ))
+
+        for supernode_idx, members in enumerate(supernodes):
+            logger.info(
+                "  supernode %d neuron locations: %s",
+                supernode_idx,
+                format_member_locations(members),
+            )
+
+        for supernode_idx, (activation_grid, heatmap_arg_values, members, title) in enumerate(supernode_heatmaps):
+            saved_path = save_supernode_activation_heatmap_pdf(
+                activation_grid,
+                heatmap_arg_values,
+                members,
+                graph.neuron_locations.detach().cpu(),
+                output_path=f"supernode_{supernode_idx}.pdf",
+                title=title,
+            )
+            logger.info("  Saved supernode heatmap PDF: %s", saved_path)
     else:
-        cossim_vectors = neuron_connectivity_vectors(output_node_indices)
-        cluster_assignments = output_cossim_assignments(
-            output_node_indices,
-            cossim_vectors,
-            label="connectivity",
-        )
-        cossim_label = "connectivity"
+        if dataset:
+            logger.info("  No kept neurons for dataset activation clustering")
+        else:
+            logger.info("  No dataset provided; using all kept neurons as one supernode")
+        supernodes = [kept_neuron_indices.tolist()] if kept_neuron_indices.numel() else []
 
-    log_output_node(
-        output_node_indices,
-        output_node_scores,
-        output_node_dla,
-        output_node_count,
-        all_output_scores,
-        cluster_assignments,
-        cossim_vectors,
-        cossim_label=cossim_label,
-    )
-
-    logger.info("  Aggregating output-node supergraph")
+    logger.info("  Aggregating supergraph")
     adj_matrix_norm = normalize_matrix(adjacency_matrix)
-    supernodes = [output_node_indices.tolist()]
     num_supernodes = len(supernodes)
     supernode_adj_matrix = torch.zeros(
         num_supernodes,
@@ -684,12 +581,14 @@ def build_super_graph(
         device=adjacency_matrix.device,
     )
     for t in range(num_supernodes):
-        total_input = torch.abs(adj_matrix_norm[:, supernodes[t]]).sum(dim=0)
-        internal_input = torch.abs(adj_matrix_norm[supernodes[t]][:, supernodes[t]]).sum(dim=0)
+        target_members = supernodes[t]
+        total_input = torch.abs(adj_matrix_norm[:, target_members]).sum(dim=0)
+        internal_input = torch.abs(adj_matrix_norm[target_members][:, target_members]).sum(dim=0)
         frac_external = (total_input - internal_input) / total_input.clamp(min=1e-10)
         
         for s in range(num_supernodes):
-            sum_A = adj_matrix_norm[supernodes[t]][:, supernodes[s]].sum(dim=1)
+            source_members = supernodes[s]
+            sum_A = adj_matrix_norm[target_members][:, source_members].sum(dim=1)
             supernode_adj_matrix[t, s] = (frac_external * sum_A).sum(dim=0) / frac_external.sum(dim=0).clamp(min=1e-10)
 
     return SuperGraph(supernode_adjacency_matrix=supernode_adj_matrix, supernodes=supernodes)

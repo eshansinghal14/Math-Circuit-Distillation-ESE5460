@@ -35,9 +35,13 @@ class ActivationAccumulator:
 
 @dataclass
 class ActivationWriteResult:
-    write_matrices: torch.Tensor
     activations: torch.Tensor
-    numeric_args: list[tuple[int, ...]]
+    w_down_vectors: torch.Tensor
+    arg_values: list[list[int]]
+
+    def __iter__(self):
+        yield self.activations
+        yield self.w_down_vectors
 
 
 def _resolve_dataset_path(dataset_name: str) -> str:
@@ -250,7 +254,7 @@ def build_neuron_activation_write_result(
     limit: int | None = None,
     log_interval: int = 100,
 ) -> ActivationWriteResult:
-    """Return per-neuron activations and activation * W_out matrices for valid dataset prompts."""
+    """Return activation grids and down-projection vectors for the requested neurons."""
     logger = logging.getLogger(__name__)
     if forward_batch_size <= 0:
         raise ValueError("forward_batch_size must be positive")
@@ -305,24 +309,24 @@ def build_neuron_activation_write_result(
     if not prompts:
         raise ValueError(f"Dataset has no samples: {dataset_path}")
 
+    arg_values = [
+        sorted({numeric_args[dim] for numeric_args in numeric_args_by_prompt})
+        for dim in range(len(numeric_args_by_prompt[0]))
+    ]
+    arg_to_idx = [
+        {value: idx for idx, value in enumerate(values)}
+        for values in arg_values
+    ]
+    grid_shape = tuple(len(values) for values in arg_values)
     d_model = int(model.cfg.d_model)
-    write_matrices = torch.full(
-        (len(locations), len(prompts), d_model),
-        float("nan"),
-        dtype=torch.float32,
-        device="cpu",
-    )
-    activation_values = torch.full(
-        (len(locations), len(prompts)),
-        float("nan"),
-        dtype=torch.float32,
-        device="cpu",
-    )
+    activation_sums = torch.zeros((len(locations), *grid_shape), dtype=torch.float32)
+    activation_counts = torch.zeros((len(locations), *grid_shape), dtype=torch.float32)
+    w_down_vectors = torch.empty((len(locations), d_model), dtype=torch.float32)
     if not locations:
         return ActivationWriteResult(
-            write_matrices=write_matrices,
-            activations=activation_values,
-            numeric_args=numeric_args_by_prompt,
+            activations=torch.full((0, *grid_shape), float("nan"), dtype=torch.float32),
+            w_down_vectors=w_down_vectors,
+            arg_values=arg_values,
         )
 
     location_groups: dict[tuple[int, int], list[tuple[int, int]]] = defaultdict(list)
@@ -332,9 +336,13 @@ def build_neuron_activation_write_result(
         if layer not in w_out_cache:
             old_mlp = model.blocks[layer].mlp.old_mlp
             w_out_cache[layer] = model._row_oriented_weight(old_mlp.W_out.to(device=model.cfg.device))
+        w_down_vectors[location_idx] = w_out_cache[layer][neuron_id].detach().float().cpu()
 
     for batch_start in range(0, len(prompts), forward_batch_size):
         batch_prompts = prompts[batch_start:batch_start + forward_batch_size]
+        batch_numeric_args = numeric_args_by_prompt[
+            batch_start:batch_start + len(batch_prompts)
+        ]
         input_ids, lengths = _tokenize_prompt_batch(model, batch_prompts)
         max_len = input_ids.shape[1]
         active_groups = {
@@ -410,40 +418,38 @@ def build_neuron_activation_write_result(
                 if token_pos == 0:
                     activations.zero_()
 
-                activation_values[
-                    location_idx,
-                    batch_start:batch_start + len(batch_prompts),
-                ] = activations.detach().float().cpu().masked_fill(
-                    (~valid_at_pos).detach().cpu(),
-                    float("nan"),
-                )
-                write_matrix = activations[:, None] * w_out_cache[layer][neuron_id].to(
-                    device=mlp_input_at_pos.device,
-                    dtype=activations.dtype,
-                )[None, :]
-                write_matrix = write_matrix.detach().float().cpu()
-                invalid_rows = (~valid_at_pos).detach().cpu()
-                write_matrix[invalid_rows] = float("nan")
-                write_matrices[
-                    location_idx,
-                    batch_start:batch_start + len(batch_prompts),
-                ] = write_matrix
+                for numeric_args, activation, is_valid in zip(
+                    batch_numeric_args,
+                    activations.detach().float().cpu(),
+                    valid_at_pos.detach().cpu(),
+                    strict=True,
+                ):
+                    if not bool(is_valid.item()):
+                        continue
+                    grid_idx = tuple(
+                        arg_to_idx[dim][arg_value]
+                        for dim, arg_value in enumerate(numeric_args)
+                    )
+                    activation_sums[(location_idx, *grid_idx)] += float(activation.item())
+                    activation_counts[(location_idx, *grid_idx)] += 1.0
 
         processed = batch_start + len(batch_prompts)
         if log_interval and processed % log_interval == 0:
-            logger.info("Processed %d activation-write samples", processed)
+            logger.info("Processed %d activation samples", processed)
 
+    activations = activation_sums / activation_counts.clamp(min=1.0)
+    activations[activation_counts == 0] = float("nan")
     logger.info(
-        "Built activation-write matrix for %d neurons x %d problems from %s (skipped=%d)",
+        "Built activation grid for %d neurons with arg dims %s from %s (skipped=%d)",
         len(locations),
-        len(prompts),
+        grid_shape,
         dataset_path,
         skipped,
     )
     return ActivationWriteResult(
-        write_matrices=write_matrices,
-        activations=activation_values,
-        numeric_args=numeric_args_by_prompt,
+        activations=activations,
+        w_down_vectors=w_down_vectors,
+        arg_values=arg_values,
     )
 
 
@@ -457,20 +463,22 @@ def build_neuron_activation_write_matrix(
     limit: int | None = None,
     log_interval: int = 100,
 ) -> torch.Tensor:
-    """Return activation * W_out matrices with shape [neurons, problems, d_model]."""
-    return build_neuron_activation_write_result(
+    """Return flattened activation-grid * W_down matrices with shape [neurons, grid_points, d_model]."""
+    result = build_neuron_activation_write_result(
         model,
         dataset_name,
         neuron_locations,
         forward_batch_size=forward_batch_size,
         limit=limit,
         log_interval=log_interval,
-    ).write_matrices
+    )
+    flat_activations = torch.nan_to_num(result.activations.detach().float()).flatten(start_dim=1)
+    return flat_activations[:, :, None] * result.w_down_vectors[:, None, :]
 
 
 def save_cluster_activation_heatmap_pdfs(
     activations: torch.Tensor,
-    numeric_args: list[tuple[int, ...]],
+    arg_values: list[list[int]],
     assignments: torch.Tensor,
     neuron_indices: torch.Tensor,
     neuron_locations: torch.Tensor,
@@ -488,20 +496,13 @@ def save_cluster_activation_heatmap_pdfs(
     neuron_indices_cpu = neuron_indices.detach().cpu()
     locations_cpu = neuron_locations.detach().cpu()
 
-    def values_by_arg_for_row(row_idx: int) -> dict[tuple[int, ...], ActivationAccumulator]:
-        values_by_arg: dict[tuple[int, ...], ActivationAccumulator] = defaultdict(ActivationAccumulator)
-        for args, activation in zip(numeric_args, activation_values[row_idx].tolist(), strict=True):
-            if activation == activation:
-                values_by_arg[args].add(float(activation))
-        return values_by_arg
-
     def save_activation_page(
         pdf: PdfPages,
-        values_by_arg: dict[tuple[int, ...], ActivationAccumulator],
+        activation_grid: torch.Tensor,
         *,
         title: str,
     ) -> None:
-        if not values_by_arg:
+        if torch.isnan(activation_grid).all():
             fig, ax = plt.subplots(figsize=(8, 4))
             ax.text(0.5, 0.5, "No valid activations", ha="center", va="center")
             ax.set_axis_off()
@@ -511,25 +512,19 @@ def save_cluster_activation_heatmap_pdfs(
             plt.close(fig)
             return
 
-        n_args = len(next(iter(values_by_arg)))
+        n_args = len(arg_values)
         if n_args == 1:
-            xs = sorted(arg[0] for arg in values_by_arg)
-            ys = [values_by_arg[(x,)].mean for x in xs]
+            xs = arg_values[0]
+            ys = activation_grid.tolist()
             fig, ax = plt.subplots(figsize=(8, 4))
             ax.plot(xs, ys, marker="o")
             ax.set_xlabel("arg 1")
             ax.set_ylabel("activation")
             ax.set_title(title)
         elif n_args == 2:
-            xs = sorted({arg[0] for arg in values_by_arg})
-            ys = sorted({arg[1] for arg in values_by_arg})
-            x_to_idx = {value: idx for idx, value in enumerate(xs)}
-            y_to_idx = {value: idx for idx, value in enumerate(ys)}
-            heatmap = torch.full((len(ys), len(xs)), float("nan"), dtype=torch.float32)
-            for (x, y), stats in values_by_arg.items():
-                if stats.count:
-                    heatmap[y_to_idx[y], x_to_idx[x]] = stats.mean
-
+            xs = arg_values[0]
+            ys = arg_values[1]
+            heatmap = activation_grid.T.contiguous()
             fig, ax = plt.subplots(figsize=(8, 6))
             image = ax.imshow(
                 heatmap.numpy(),
@@ -543,9 +538,12 @@ def save_cluster_activation_heatmap_pdfs(
             ax.set_title(title)
         else:
             points = []
-            for (x, y, z), stats in values_by_arg.items():
-                if stats.count:
-                    points.append((x, y, z, stats.mean))
+            for x_idx, x in enumerate(arg_values[0]):
+                for y_idx, y in enumerate(arg_values[1]):
+                    for z_idx, z in enumerate(arg_values[2]):
+                        activation = activation_grid[x_idx, y_idx, z_idx]
+                        if activation == activation:
+                            points.append((x, y, z, float(activation.item())))
 
             fig = plt.figure(figsize=(8, 6))
             ax = fig.add_subplot(111, projection="3d")
@@ -579,12 +577,101 @@ def save_cluster_activation_heatmap_pdfs(
                 )
                 save_activation_page(
                     pdf,
-                    values_by_arg_for_row(row_idx),
+                    activation_values[row_idx],
                     title=title,
                 )
         saved_paths.append(output_path)
 
     return saved_paths
+
+
+def save_supernode_activation_heatmap_pdf(
+    activation_grid: torch.Tensor,
+    arg_values: list[list[int]],
+    members: list[int],
+    neuron_locations: torch.Tensor,
+    *,
+    output_path: str,
+    title: str,
+) -> str:
+    """Save one aggregate activation heatmap for a supernode."""
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+    activation_grid = activation_grid.detach().float().cpu()
+    locations_cpu = neuron_locations.detach().cpu()
+    member_locations = []
+    for graph_neuron_idx in members:
+        layer = int(locations_cpu[graph_neuron_idx, 0].item())
+        token_pos = int(locations_cpu[graph_neuron_idx, 1].item())
+        neuron_id = int(locations_cpu[graph_neuron_idx, 2].item())
+        member_locations.append(
+            f"idx={graph_neuron_idx} layer={layer} token={token_pos} neuron={neuron_id}"
+        )
+
+    with PdfPages(output_path) as pdf:
+        if torch.isnan(activation_grid).all():
+            fig, ax = plt.subplots(figsize=(8, 4))
+            ax.text(0.5, 0.5, "No valid activations", ha="center", va="center")
+            ax.set_axis_off()
+        else:
+            n_args = len(arg_values)
+            if n_args == 1:
+                xs = arg_values[0]
+                ys = activation_grid.tolist()
+                fig, ax = plt.subplots(figsize=(8, 4))
+                ax.plot(xs, ys, marker="o")
+                ax.set_xlabel("arg 1")
+                ax.set_ylabel("mean activation")
+            elif n_args == 2:
+                xs = arg_values[0]
+                ys = arg_values[1]
+                heatmap = activation_grid.T.contiguous()
+                fig, ax = plt.subplots(figsize=(8, 6))
+                image = ax.imshow(
+                    heatmap.numpy(),
+                    origin="lower",
+                    aspect="auto",
+                    extent=[min(xs), max(xs), min(ys), max(ys)],
+                )
+                fig.colorbar(image, ax=ax, label="mean activation")
+                ax.set_xlabel("arg 1")
+                ax.set_ylabel("arg 2")
+            else:
+                points = []
+                for x_idx, x in enumerate(arg_values[0]):
+                    for y_idx, y in enumerate(arg_values[1]):
+                        for z_idx, z in enumerate(arg_values[2]):
+                            activation = activation_grid[x_idx, y_idx, z_idx]
+                            if activation == activation:
+                                points.append((x, y, z, float(activation.item())))
+
+                fig = plt.figure(figsize=(8, 6))
+                ax = fig.add_subplot(111, projection="3d")
+                if points:
+                    xs, ys, zs, activation_colors = zip(*points, strict=True)
+                    scatter = ax.scatter(xs, ys, zs, c=activation_colors, cmap="viridis")
+                    fig.colorbar(scatter, ax=ax, label="mean activation")
+                ax.set_xlabel("arg 1")
+                ax.set_ylabel("arg 2")
+                ax.set_zlabel("arg 3")
+
+        ax.set_title(title)
+        if member_locations:
+            fig.text(
+                0.01,
+                0.01,
+                "\n".join(member_locations[:12]),
+                ha="left",
+                va="bottom",
+                fontsize=6,
+            )
+        fig.tight_layout()
+        pdf.savefig(fig)
+        plt.close(fig)
+
+    return output_path
 
 
 def _plot_1d(

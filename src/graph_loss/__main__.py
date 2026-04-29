@@ -323,7 +323,31 @@ def main():
         "--cossim_eps",
         type=float,
         default=0.1,
-        help="Cosine-distance epsilon for output-node DLA connected-component clustering",
+        help="Deprecated fallback clustering epsilon; use --embedding_eps and --computation_eps",
+    )
+    parser.add_argument(
+        "--embedding_sigma",
+        type=float,
+        default=1.5,
+        help="Gaussian smoothing sigma for numeric-token embedding supernode clustering",
+    )
+    parser.add_argument(
+        "--embedding_eps",
+        type=float,
+        default=0.1,
+        help="Angular distance epsilon for numeric-token embedding supernode clustering",
+    )
+    parser.add_argument(
+        "--computation_sigma",
+        type=float,
+        default=1.5,
+        help="Gaussian smoothing sigma for final-token computation supernode clustering",
+    )
+    parser.add_argument(
+        "--computation_eps",
+        type=float,
+        default=0.1,
+        help="Angular distance epsilon for final-token computation supernode clustering",
     )
     parser.add_argument(
         "--dataset",
@@ -396,6 +420,10 @@ def main():
         model,
         prune_result=prune_result,
         cossim_eps=args.cossim_eps,
+        embedding_sigma=args.embedding_sigma,
+        embedding_eps=args.embedding_eps,
+        computation_sigma=args.computation_sigma,
+        computation_eps=args.computation_eps,
         dataset=args.dataset,
         activation_forward_batch_size=args.activation_forward_batch_size,
     )
