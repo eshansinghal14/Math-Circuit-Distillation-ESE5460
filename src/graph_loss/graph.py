@@ -427,24 +427,19 @@ def build_super_graph(
             )
 
         dla_matrix = torch.stack(write_vectors) @ W_U
-        positive_dla = dla_matrix.detach().float().clamp(min=0)
-        positive_dla_l1 = positive_dla.norm(p=1, dim=1)
-        prefilter_concentrations = torch.where(
-            positive_dla_l1 > 1e-12,
-            (positive_dla.norm(p=2, dim=1) ** 2) / (positive_dla_l1 ** 2),
-            torch.zeros_like(positive_dla_l1),
-        )
-        sorted_prefilter_concentrations = torch.sort(
-            prefilter_concentrations,
+        log_softmax_dla = torch.log_softmax(dla_matrix.detach().float(), dim=1)
+        prefilter_entropies = -(log_softmax_dla.exp() * log_softmax_dla).sum(dim=1)
+        sorted_prefilter_entropies = torch.sort(
+            prefilter_entropies,
             descending=True,
         ).values
         plt.figure(figsize=(8, 4))
-        plt.plot(sorted_prefilter_concentrations.cpu().tolist(), marker="o")
+        plt.plot(sorted_prefilter_entropies.cpu().tolist(), marker="o")
         plt.xlabel("Kept neuron rank")
-        plt.ylabel("Positive DLA concentration")
-        plt.title("Pre-filter positive DLA concentrations, sorted high to low")
+        plt.ylabel("Softmax DLA entropy")
+        plt.title("Pre-filter softmax DLA entropies, sorted high to low")
         plt.tight_layout()
-        plt.savefig("output_node_concentrations.png")
+        plt.savefig("output_node_entropies.png")
         plt.close()
 
         target_vocab_indices = torch.tensor(
@@ -531,12 +526,9 @@ def build_super_graph(
             for value, idx in zip(values, indices, strict=True)
         )
 
-    def positive_dla_concentration(dla_vector: torch.Tensor) -> float:
-        positive_dla = dla_vector.detach().float().clamp(min=0)
-        l1_norm = positive_dla.norm(p=1)
-        if l1_norm <= 1e-12:
-            return 0.0
-        return float(((positive_dla.norm(p=2) ** 2) / (l1_norm ** 2)).item())
+    def softmax_dla_entropy(dla_vector: torch.Tensor) -> float:
+        log_probs = torch.log_softmax(dla_vector.detach().float(), dim=0)
+        return float((-(log_probs.exp() * log_probs).sum()).item())
 
     def log_output_node(output_node_indices, output_node_scores, output_node_dla, elbow_count, all_sorted_scores):
         logger.info("  Output node members: %d", int(output_node_indices.numel()))
@@ -579,13 +571,13 @@ def build_super_graph(
             token_pos = int(graph.neuron_locations[neuron_idx, 1].item())
             neuron_id = int(graph.neuron_locations[neuron_idx, 2].item())
             logger.info(
-                "    graph_neuron_idx=%d layer=%d token=%d neuron=%d score=%.6g concentration=%.6g",
+                "    graph_neuron_idx=%d layer=%d token=%d neuron=%d score=%.6g entropy=%.6g",
                 neuron_idx,
                 layer,
                 token_pos,
                 neuron_id,
                 float(score),
-                positive_dla_concentration(output_node_dla[row_idx]),
+                softmax_dla_entropy(output_node_dla[row_idx]),
             )
             logger.info(
                 "      top DLA logits probs: %s",
