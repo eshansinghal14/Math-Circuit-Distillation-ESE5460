@@ -20,6 +20,7 @@ from graph_loss.neuron_activation_heatmap import (
 from graph_loss.utils import (
     ActivationWriteResult,
     UnifiedConfig,
+    activation_arg_values_from_shape,
     activation_write_cache_file,
     convert_nnsight_config_to_transformerlens,
     load_activation_write_cache,
@@ -328,6 +329,7 @@ def build_super_graph(
     activation_forward_batch_size: int = 32,
     activation_write_cache_path: str | None = None,
     model_name: str | None = None,
+    cluster_method: str = "full_search",
 ) -> SuperGraph:
     """Cluster kept neurons into numeric-token embedding and final-token computation supernodes."""
 
@@ -342,6 +344,8 @@ def build_super_graph(
         raise ValueError("embedding_eps and computation_eps must be non-negative")
     if embedding_sigma < 0.0 or computation_sigma < 0.0:
         raise ValueError("embedding_sigma and computation_sigma must be non-negative")
+    if cluster_method not in {"full_search", "ablation"}:
+        raise ValueError("cluster_method must be one of: full_search, ablation")
 
     n_neurons = graph.n_neurons
     logger = logging.getLogger(__name__)
@@ -468,6 +472,135 @@ def build_super_graph(
         )
         return assignments
 
+    @torch.no_grad()
+    def compute_ablation_prob_deltas(neuron_indices: torch.Tensor) -> torch.Tensor:
+        if graph.n_logits == 0:
+            return torch.empty((neuron_indices.numel(), 0), dtype=torch.float32)
+        if activation_forward_batch_size <= 0:
+            raise ValueError("activation_forward_batch_size must be positive")
+
+        input_ids = graph.input_tokens.to(model.cfg.device)
+        target_token_ids = graph.logit_token_ids.to(device=input_ids.device)
+        if target_token_ids.numel() and int(target_token_ids.max().item()) >= model.cfg.d_vocab:
+            raise ValueError("Ablation clustering only supports real vocabulary logit targets")
+
+        baseline_logits = model(input_ids)
+        baseline_probs = torch.softmax(baseline_logits[0, -1], dim=-1)[target_token_ids]
+
+        device = input_ids.device
+        dtype = baseline_logits.dtype
+        selected_locations = graph.neuron_locations[neuron_indices].to(device=device)
+        selected_activations = graph.neuron_activations[neuron_indices].to(
+            device=device,
+            dtype=dtype,
+        )
+        source_vectors = torch.empty(
+            neuron_indices.numel(),
+            model.cfg.d_model,
+            device=device,
+            dtype=dtype,
+        )
+        w_out_cache = {}
+        for local_idx in range(neuron_indices.numel()):
+            layer = int(selected_locations[local_idx, 0].item())
+            neuron_id = int(selected_locations[local_idx, 2].item())
+            if layer not in w_out_cache:
+                old_mlp = model.blocks[layer].mlp.old_mlp
+                w_out_cache[layer] = model._row_oriented_weight(
+                    old_mlp.W_out.to(device=device, dtype=dtype)
+                )
+            source_vectors[local_idx] = selected_activations[local_idx] * w_out_cache[layer][neuron_id]
+
+        deltas = torch.empty(
+            neuron_indices.numel(),
+            graph.n_logits,
+            dtype=torch.float32,
+            device="cpu",
+        )
+        total_batches = math.ceil(neuron_indices.numel() / activation_forward_batch_size)
+
+        def make_ablation_hook(
+            batch_indices: torch.Tensor,
+            positions: torch.Tensor,
+            vectors: torch.Tensor,
+        ):
+            def hook_fn(acts: torch.Tensor, hook):
+                acts_out = acts.clone()
+                acts_out[batch_indices, positions] -= vectors.to(device=acts.device, dtype=acts.dtype)
+                return acts_out
+
+            return hook_fn
+
+        for batch_idx, start in enumerate(
+            range(0, neuron_indices.numel(), activation_forward_batch_size),
+            start=1,
+        ):
+            end = min(start + activation_forward_batch_size, neuron_indices.numel())
+            batch_locations = selected_locations[start:end]
+            batch_vectors = source_vectors[start:end]
+            hooks = []
+            for layer in batch_locations[:, 0].unique().tolist():
+                layer_idx = int(layer)
+                layer_mask = batch_locations[:, 0] == layer_idx
+                batch_indices = torch.where(layer_mask)[0].to(device=device)
+                hooks.append(
+                    (
+                        f"blocks.{layer_idx}.{model.feature_output_hook}",
+                        make_ablation_hook(
+                            batch_indices,
+                            batch_locations[layer_mask, 1].to(device=device),
+                            batch_vectors[layer_mask],
+                        ),
+                    )
+                )
+
+            ablated_logits = model.run_with_hooks(
+                input_ids.expand(end - start, -1),
+                fwd_hooks=hooks,
+            )
+            ablated_probs = torch.softmax(ablated_logits[:, -1], dim=-1)[:, target_token_ids]
+            deltas[start:end] = (baseline_probs.unsqueeze(0) - ablated_probs).detach().float().cpu()
+
+            logger.info(
+                "  ablation clustering batch %d/%d: neurons %d-%d",
+                batch_idx,
+                total_batches,
+                int(neuron_indices[start].item()),
+                int(neuron_indices[end - 1].item()),
+            )
+
+        return deltas
+
+    def cluster_by_ablation_prob_deltas(neuron_indices: torch.Tensor) -> list[list[int]]:
+        if neuron_indices.numel() == 0:
+            return []
+        if graph.n_logits == 0:
+            logger.info("  Ablation clustering: no logit targets")
+            return [[int(member)] for member in neuron_indices.tolist()]
+
+        deltas = compute_ablation_prob_deltas(neuron_indices)
+        normalized_deltas = F.normalize(deltas, p=2, dim=1, eps=1e-12)
+        similarity = (normalized_deltas @ normalized_deltas.T).clamp(min=-1.0, max=1.0)
+        distance_matrix = torch.arccos(similarity) / math.pi
+        assignments = angular_distance_connected_components(distance_matrix, computation_eps)
+        unique_assignments, cluster_sizes = torch.unique(assignments, return_counts=True)
+        logger.info(
+            "  ablation clustering: eps=%.6g neurons=%d clusters=%d min_size=%d max_size=%d",
+            float(computation_eps),
+            int(neuron_indices.numel()),
+            int(unique_assignments.numel()),
+            int(cluster_sizes.min().item()),
+            int(cluster_sizes.max().item()),
+        )
+
+        clustered: list[list[int]] = []
+        for cluster_id in unique_assignments.tolist():
+            cluster_rows = torch.where(assignments == int(cluster_id))[0]
+            members = [int(member) for member in neuron_indices[cluster_rows].tolist()]
+            members.sort(key=lambda member: abs(float(node_influence[member].item())), reverse=True)
+            clustered.append(members)
+        return clustered
+
     def aggregate_nanmean(values: torch.Tensor, dim: int) -> torch.Tensor:
         if values.shape[dim] == 1:
             return values.squeeze(dim)
@@ -512,45 +645,102 @@ def build_super_graph(
         order_tensor = torch.tensor(order, dtype=torch.long)
         return [int(members[idx]) for idx in order], activation_maps[order_tensor]
 
+    def all_model_neuron_locations() -> torch.Tensor:
+        n_layers = int(model.cfg.n_layers)
+        n_pos = int(graph.n_pos)
+        d_mlp = int(model.cfg.d_mlp)
+        layers = torch.arange(n_layers, dtype=torch.long).repeat_interleave(n_pos * d_mlp)
+        token_positions = torch.arange(n_pos, dtype=torch.long).repeat_interleave(d_mlp).repeat(n_layers)
+        neuron_ids = torch.arange(d_mlp, dtype=torch.long).repeat(n_layers * n_pos)
+        return torch.stack([layers, token_positions, neuron_ids], dim=1)
+
+    def full_model_location_indices(neuron_locations: torch.Tensor) -> torch.Tensor:
+        locations = neuron_locations.detach().cpu().to(dtype=torch.long)
+        n_pos = int(graph.n_pos)
+        d_mlp = int(model.cfg.d_mlp)
+        return (locations[:, 0] * n_pos + locations[:, 1]) * d_mlp + locations[:, 2]
+
+    def w_down_vectors_for_locations(neuron_locations: torch.Tensor) -> torch.Tensor:
+        locations = neuron_locations.detach().cpu().to(dtype=torch.long)
+        d_model = int(model.cfg.d_model)
+        w_down_vectors = torch.empty((locations.shape[0], d_model), dtype=torch.float32)
+        w_out_cache: dict[int, torch.Tensor] = {}
+        for location_idx, (layer_t, _token_pos_t, neuron_id_t) in enumerate(locations):
+            layer = int(layer_t.item())
+            neuron_id = int(neuron_id_t.item())
+            if layer not in w_out_cache:
+                old_mlp = model.blocks[layer].mlp.old_mlp
+                w_out_cache[layer] = model._row_oriented_weight(
+                    old_mlp.W_out.to(device=model.cfg.device)
+                )
+            w_down_vectors[location_idx] = w_out_cache[layer][neuron_id].detach().float().cpu()
+        return w_down_vectors
+
     kept_neuron_indices_device = torch.where(kept_neuron_mask)[0]
     kept_neuron_indices = kept_neuron_indices_device.detach().cpu()
     logger.info("  Kept neurons for supergraph: %d", int(kept_neuron_indices.numel()))
 
-    if dataset and kept_neuron_indices.numel():
+    if cluster_method == "ablation" and kept_neuron_indices.numel():
+        logger.info("  Building supernodes with ablation probability-delta clustering")
+        supernodes = cluster_by_ablation_prob_deltas(kept_neuron_indices)
+        supernode_order = sorted(
+            range(len(supernodes)),
+            key=lambda idx: supernode_influence(supernodes[idx]),
+            reverse=True,
+        )
+        supernodes = [supernodes[idx] for idx in supernode_order]
+        for supernode_idx, members in enumerate(supernodes):
+            logger.info(
+                "  supernode %d influence=%.6g neuron locations: %s",
+                supernode_idx,
+                supernode_influence(members),
+                format_member_locations(members),
+            )
+    elif dataset and kept_neuron_indices.numel():
         logger.info("  Building activation-write matrices from dataset: %s", dataset)
-        all_neuron_locations = graph.neuron_locations.detach().cpu()
         kept_neuron_locations = graph.neuron_locations[kept_neuron_indices_device].detach().cpu()
-        cache_file = None
         if activation_write_cache_path:
             resolved_model_name = model_name or getattr(model.cfg, "model_name", "model")
+            all_neuron_locations = all_model_neuron_locations()
+            kept_cache_indices = full_model_location_indices(kept_neuron_locations)
             cache_file = activation_write_cache_file(
                 activation_write_cache_path,
                 str(resolved_model_name),
                 dataset,
-                all_neuron_locations,
+                n_layers=int(model.cfg.n_layers),
+                n_pos=int(graph.n_pos),
+                d_mlp=int(model.cfg.d_mlp),
             )
 
-        if cache_file and os.path.isfile(cache_file):
-            logger.info("  Loading cached activation-write result: %s", cache_file)
-            full_activation_write_result = load_activation_write_cache(
-                cache_file,
-                expected_neuron_count=int(all_neuron_locations.shape[0]),
+            if os.path.isfile(cache_file):
+                logger.info("  Loading cached activation grids: %s", cache_file)
+                full_activations = load_activation_write_cache(
+                    cache_file,
+                    expected_neuron_count=int(all_neuron_locations.shape[0]),
+                )
+            else:
+                full_activation_write_result = build_neuron_activation_write_result(
+                    model,
+                    dataset,
+                    all_neuron_locations,
+                    forward_batch_size=activation_forward_batch_size,
+                    include_w_down_vectors=False,
+                )
+                full_activations = full_activation_write_result.activations
+                logger.info("  Saving activation grid cache: %s", cache_file)
+                save_activation_write_cache(cache_file, full_activation_write_result)
+            activation_write_result = ActivationWriteResult(
+                activations=full_activations[kept_cache_indices],
+                w_down_vectors=w_down_vectors_for_locations(kept_neuron_locations),
+                arg_values=activation_arg_values_from_shape(full_activations),
             )
         else:
-            full_activation_write_result = build_neuron_activation_write_result(
+            activation_write_result = build_neuron_activation_write_result(
                 model,
                 dataset,
-                all_neuron_locations,
+                kept_neuron_locations,
                 forward_batch_size=activation_forward_batch_size,
             )
-            if cache_file:
-                logger.info("  Saving activation-write result cache: %s", cache_file)
-                save_activation_write_cache(cache_file, full_activation_write_result)
-        activation_write_result = ActivationWriteResult(
-            activations=full_activation_write_result.activations[kept_neuron_indices],
-            w_down_vectors=full_activation_write_result.w_down_vectors[kept_neuron_indices],
-            arg_values=full_activation_write_result.arg_values,
-        )
         prompt_tokens = decoded_prompt_tokens()
         numeric_token_positions = [
             token_pos

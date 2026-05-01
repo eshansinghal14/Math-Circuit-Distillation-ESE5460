@@ -584,6 +584,17 @@ def main():
         help="Angular distance epsilon for final-token computation supernode clustering",
     )
     parser.add_argument(
+        "--cluster-method",
+        "--cluster_method",
+        dest="cluster_method",
+        choices=("full_search", "ablation"),
+        default="full_search",
+        help=(
+            "Supernode clustering method. full_search uses the existing dataset activation-write "
+            "clustering; ablation clusters by cosine similarity of zero-ablation probability deltas."
+        ),
+    )
+    parser.add_argument(
         "--dataset",
         help=(
             "Optional dataset prefix, filename, or path for activation-write "
@@ -683,6 +694,7 @@ def main():
         activation_forward_batch_size=args.activation_forward_batch_size,
         activation_write_cache_path=args.activation_write_cache_path,
         model_name=args.model,
+        cluster_method=args.cluster_method,
     )
     _log_supergraph_summary(
         graph,

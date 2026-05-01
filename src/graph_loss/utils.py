@@ -165,51 +165,43 @@ def activation_write_cache_file(
     cache_root: str,
     model_name: str,
     dataset: str,
-    neuron_locations: torch.Tensor,
+    *,
+    n_layers: int,
+    n_pos: int,
+    d_mlp: int,
 ) -> str:
     model_cache_dir = os.path.join(cache_root, safe_cache_segment(model_name))
     os.makedirs(model_cache_dir, exist_ok=True)
 
-    locations_cpu = neuron_locations.detach().cpu().to(dtype=torch.long).contiguous()
     key = hashlib.sha256()
-    key.update(b"activation-write-cache-v1")
+    key.update(b"activation-write-cache-v2")
     key.update(dataset.encode("utf-8"))
-    key.update(str(tuple(locations_cpu.shape)).encode("utf-8"))
-    key.update(locations_cpu.numpy().tobytes())
+    key.update(f"n_layers={int(n_layers)};n_pos={int(n_pos)};d_mlp={int(d_mlp)}".encode("utf-8"))
     return os.path.join(model_cache_dir, f"activation_write_{key.hexdigest()[:16]}.pt")
 
 
 def load_activation_write_cache(
     path: str,
     expected_neuron_count: int,
-) -> ActivationWriteResult:
+) -> torch.Tensor:
     data = torch.load(path, weights_only=False, map_location="cpu")
-    activations = data["activations"].detach().float().cpu()
-    w_down_vectors = data["w_down_vectors"].detach().float().cpu()
-    arg_values = data["arg_values"]
+    activations = data["activations"].detach().cpu()
     if activations.shape[0] != expected_neuron_count:
         raise ValueError(
             f"Cached activations contain {activations.shape[0]} neurons, "
             f"expected {expected_neuron_count}: {path}"
         )
-    if w_down_vectors.shape[0] != expected_neuron_count:
-        raise ValueError(
-            f"Cached w_down vectors contain {w_down_vectors.shape[0]} neurons, "
-            f"expected {expected_neuron_count}: {path}"
-        )
-    return ActivationWriteResult(
-        activations=activations,
-        w_down_vectors=w_down_vectors,
-        arg_values=arg_values,
-    )
+    return activations
 
 
 def save_activation_write_cache(path: str, result: ActivationWriteResult) -> None:
     torch.save(
         {
-            "activations": result.activations.detach().float().cpu(),
-            "w_down_vectors": result.w_down_vectors.detach().float().cpu(),
-            "arg_values": result.arg_values,
+            "activations": result.activations.detach().to(dtype=torch.float16).cpu(),
         },
         path,
     )
+
+
+def activation_arg_values_from_shape(activations: torch.Tensor) -> list[list[int]]:
+    return [list(range(int(dim_size))) for dim_size in activations.shape[1:]]

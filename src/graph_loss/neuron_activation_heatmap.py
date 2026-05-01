@@ -242,6 +242,7 @@ def build_neuron_activation_write_result(
     forward_batch_size: int = 32,
     limit: int | None = None,
     log_interval: int = 100,
+    include_w_down_vectors: bool = True,
 ) -> ActivationWriteResult:
     """Return activation grids and down-projection vectors for the requested neurons."""
     logger = logging.getLogger(__name__)
@@ -310,7 +311,10 @@ def build_neuron_activation_write_result(
     d_model = int(model.cfg.d_model)
     activation_sums = torch.zeros((len(locations), *grid_shape), dtype=torch.float32)
     activation_counts = torch.zeros((len(locations), *grid_shape), dtype=torch.float32)
-    w_down_vectors = torch.empty((len(locations), d_model), dtype=torch.float32)
+    w_down_vectors = torch.empty(
+        (len(locations), d_model if include_w_down_vectors else 0),
+        dtype=torch.float32,
+    )
     if not locations:
         return ActivationWriteResult(
             activations=torch.full((0, *grid_shape), float("nan"), dtype=torch.float32),
@@ -322,10 +326,11 @@ def build_neuron_activation_write_result(
     w_out_cache: dict[int, torch.Tensor] = {}
     for location_idx, (layer, token_pos, neuron_id) in enumerate(locations):
         location_groups[(layer, token_pos)].append((location_idx, neuron_id))
-        if layer not in w_out_cache:
+        if include_w_down_vectors and layer not in w_out_cache:
             old_mlp = model.blocks[layer].mlp.old_mlp
             w_out_cache[layer] = model._row_oriented_weight(old_mlp.W_out.to(device=model.cfg.device))
-        w_down_vectors[location_idx] = w_out_cache[layer][neuron_id].detach().float().cpu()
+        if include_w_down_vectors:
+            w_down_vectors[location_idx] = w_out_cache[layer][neuron_id].detach().float().cpu()
 
     for batch_start in range(0, len(prompts), forward_batch_size):
         batch_prompts = prompts[batch_start:batch_start + forward_batch_size]
