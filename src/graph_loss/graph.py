@@ -465,44 +465,6 @@ def build_super_graph(
             return 0.0
         return float(node_influence[torch.tensor(members, dtype=torch.long)].sum().item())
 
-    def sort_cluster_by_variance(
-        members: list[int],
-        activation_maps: torch.Tensor,
-        variance_maps: torch.Tensor | None = None,
-    ) -> tuple[list[int], torch.Tensor, list[float]]:
-        if not members:
-            return members, activation_maps, []
-
-        score_maps = activation_maps if variance_maps is None else variance_maps
-        flat_maps = score_maps.detach().float().reshape(score_maps.shape[0], -1)
-        valid = ~torch.isnan(flat_maps)
-        counts = valid.sum(dim=1)
-        safe_maps = torch.nan_to_num(flat_maps)
-        means = safe_maps.sum(dim=1) / counts.clamp(min=1)
-        centered = torch.where(valid, flat_maps - means[:, None], torch.zeros_like(flat_maps))
-        variances = centered.square().sum(dim=1) / counts.clamp(min=1)
-        variances[counts == 0] = 0.0
-        total_var = float(variances.sum().item())
-        if total_var <= 0.0:
-            variance_fractions = torch.zeros_like(variances)
-        else:
-            variance_fractions = variances / total_var
-
-        order = sorted(
-            range(len(members)),
-            key=lambda idx: (
-                float(variance_fractions[idx].item()),
-                float(node_influence[members[idx]].item()),
-            ),
-            reverse=True,
-        )
-        order_tensor = torch.tensor(order, dtype=torch.long)
-        return (
-            [int(members[idx]) for idx in order],
-            activation_maps[order_tensor],
-            [float(variance_fractions[idx].item()) for idx in order],
-        )
-
     def sort_cluster_by_influence(
         members: list[int],
         activation_maps: torch.Tensor,
@@ -577,9 +539,7 @@ def build_super_graph(
 
         kept_token_positions = kept_neuron_locations[:, 1]
         supernodes: list[list[int]] = []
-        supernode_heatmaps: list[
-            tuple[torch.Tensor, list[list[int]], list[int], str, list[float] | None]
-        ] = []
+        supernode_heatmaps: list[tuple[torch.Tensor, list[list[int]], list[int], str]] = []
 
         for arg_dim, token_pos in enumerate(numeric_token_positions[:len(activation_write_result.arg_values)]):
             phase_rows = torch.where(kept_token_positions == int(token_pos))[0]
@@ -609,11 +569,9 @@ def build_super_graph(
                 result_rows = phase_rows[cluster_rows]
                 members = kept_neuron_indices[result_rows].tolist()
                 cluster_maps = embedding_maps[cluster_rows]
-                cluster_variance_maps = activation_write_result.activations[result_rows].detach().float()
-                members, cluster_maps, variance_fractions = sort_cluster_by_variance(
+                members, cluster_maps = sort_cluster_by_influence(
                     [int(member) for member in members],
                     cluster_maps,
-                    variance_maps=cluster_variance_maps,
                 )
                 supernodes.append(members)
                 token_text = prompt_tokens[int(token_pos)].replace("\n", "\\n").replace("\r", "\\r")
@@ -622,7 +580,6 @@ def build_super_graph(
                     [activation_write_result.arg_values[arg_dim]],
                     members,
                     f"embedding token {int(token_pos)} {token_text!r}",
-                    variance_fractions,
                 ))
 
         if computation_token_pos is None:
@@ -660,7 +617,6 @@ def build_super_graph(
                         activation_write_result.arg_values,
                         members,
                         f"computation token {int(computation_token_pos)} {token_text!r}",
-                        None,
                     ))
 
         supernode_order = sorted(
@@ -679,19 +635,7 @@ def build_super_graph(
                 format_member_locations(members),
             )
 
-        for supernode_idx, (
-            activation_grid,
-            heatmap_arg_values,
-            members,
-            title,
-            variance_fractions,
-        ) in enumerate(supernode_heatmaps):
-            member_title_suffixes = None
-            if variance_fractions is not None:
-                member_title_suffixes = [
-                    f"frac of var={variance_fraction:.3f}"
-                    for variance_fraction in variance_fractions
-                ]
+        for supernode_idx, (activation_grid, heatmap_arg_values, members, title) in enumerate(supernode_heatmaps):
             saved_path = save_supernode_activation_heatmap_pdf(
                 activation_grid,
                 heatmap_arg_values,
@@ -699,7 +643,6 @@ def build_super_graph(
                 graph.neuron_locations.detach().cpu(),
                 output_path=f"supernode_{supernode_idx}.pdf",
                 title=f"supernode {supernode_idx}: {title}",
-                member_title_suffixes=member_title_suffixes,
             )
             logger.info("  Saved supernode heatmap PDF: %s", saved_path)
     else:
