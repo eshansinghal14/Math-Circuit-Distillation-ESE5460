@@ -362,6 +362,15 @@ def main():
         default=32,
         help="Batch size for dataset activation-write forward passes",
     )
+    parser.add_argument(
+        "--activation-write-cache-path",
+        "--activation_write_cache_path",
+        dest="activation_write_cache_path",
+        help=(
+            "Optional cache root for dataset activation-write results. "
+            "A model-name folder is created inside this path."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -426,6 +435,8 @@ def main():
         computation_eps=args.computation_eps,
         dataset=args.dataset,
         activation_forward_batch_size=args.activation_forward_batch_size,
+        activation_write_cache_path=args.activation_write_cache_path,
+        model_name=args.model,
     )
     _log_supergraph_summary(
         graph,

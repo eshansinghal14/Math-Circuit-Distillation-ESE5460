@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import logging
 import math
+import os
 import re
 from typing import NamedTuple
 
@@ -13,6 +15,7 @@ import torch.nn.functional as F
 
 from graph_loss.attribution.targets import LogitTarget
 from graph_loss.neuron_activation_heatmap import (
+    ActivationWriteResult,
     build_neuron_activation_write_result,
     save_supernode_activation_heatmap_pdf,
 )
@@ -274,6 +277,62 @@ class SuperGraph(NamedTuple):
     supernodes: list[list[int]]       # old node ids inside each new node
 
 
+def _safe_cache_segment(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip())
+    return safe.strip("._") or "model"
+
+
+def _activation_write_cache_file(
+    cache_root: str,
+    model_name: str,
+    dataset: str,
+    neuron_locations: torch.Tensor,
+) -> str:
+    model_cache_dir = os.path.join(cache_root, _safe_cache_segment(model_name))
+    os.makedirs(model_cache_dir, exist_ok=True)
+
+    locations_cpu = neuron_locations.detach().cpu().to(dtype=torch.long).contiguous()
+    key = hashlib.sha256()
+    key.update(b"activation-write-cache-v1")
+    key.update(dataset.encode("utf-8"))
+    key.update(str(tuple(locations_cpu.shape)).encode("utf-8"))
+    key.update(locations_cpu.numpy().tobytes())
+    return os.path.join(model_cache_dir, f"activation_write_{key.hexdigest()[:16]}.pt")
+
+
+def _load_activation_write_cache(path: str, expected_neuron_count: int) -> ActivationWriteResult:
+    data = torch.load(path, weights_only=False, map_location="cpu")
+    activations = data["activations"].detach().float().cpu()
+    w_down_vectors = data["w_down_vectors"].detach().float().cpu()
+    arg_values = data["arg_values"]
+    if activations.shape[0] != expected_neuron_count:
+        raise ValueError(
+            f"Cached activations contain {activations.shape[0]} neurons, "
+            f"expected {expected_neuron_count}: {path}"
+        )
+    if w_down_vectors.shape[0] != expected_neuron_count:
+        raise ValueError(
+            f"Cached w_down vectors contain {w_down_vectors.shape[0]} neurons, "
+            f"expected {expected_neuron_count}: {path}"
+        )
+    return ActivationWriteResult(
+        activations=activations,
+        w_down_vectors=w_down_vectors,
+        arg_values=arg_values,
+    )
+
+
+def _save_activation_write_cache(path: str, result: ActivationWriteResult) -> None:
+    torch.save(
+        {
+            "activations": result.activations.detach().float().cpu(),
+            "w_down_vectors": result.w_down_vectors.detach().float().cpu(),
+            "arg_values": result.arg_values,
+        },
+        path,
+    )
+
+
 def build_super_graph(
     graph: Graph,
     model,
@@ -285,6 +344,8 @@ def build_super_graph(
     computation_eps: float | None = None,
     dataset: str | None = None,
     activation_forward_batch_size: int = 32,
+    activation_write_cache_path: str | None = None,
+    model_name: str | None = None,
 ) -> SuperGraph:
     """Cluster kept neurons into numeric-token embedding and final-token computation supernodes."""
 
@@ -446,12 +507,32 @@ def build_super_graph(
     if dataset and kept_neuron_indices.numel():
         logger.info("  Building activation-write matrices from dataset: %s", dataset)
         kept_neuron_locations = graph.neuron_locations[kept_neuron_indices_device].detach().cpu()
-        activation_write_result = build_neuron_activation_write_result(
-            model,
-            dataset,
-            kept_neuron_locations,
-            forward_batch_size=activation_forward_batch_size,
-        )
+        cache_file = None
+        if activation_write_cache_path:
+            resolved_model_name = model_name or getattr(model.cfg, "model_name", "model")
+            cache_file = _activation_write_cache_file(
+                activation_write_cache_path,
+                str(resolved_model_name),
+                dataset,
+                kept_neuron_locations,
+            )
+
+        if cache_file and os.path.isfile(cache_file):
+            logger.info("  Loading cached activation-write result: %s", cache_file)
+            activation_write_result = _load_activation_write_cache(
+                cache_file,
+                expected_neuron_count=int(kept_neuron_locations.shape[0]),
+            )
+        else:
+            activation_write_result = build_neuron_activation_write_result(
+                model,
+                dataset,
+                kept_neuron_locations,
+                forward_batch_size=activation_forward_batch_size,
+            )
+            if cache_file:
+                logger.info("  Saving activation-write result cache: %s", cache_file)
+                _save_activation_write_cache(cache_file, activation_write_result)
         prompt_tokens = decoded_prompt_tokens()
         numeric_token_positions = [
             token_pos
