@@ -15,7 +15,7 @@ import torch
 import torch.nn.functional as F
 from huggingface_hub import login
 
-from graph_loss.utils import DTYPE_CHOICES, resolve_torch_dtype
+from graph_loss.utils import ActivationWriteResult, DTYPE_CHOICES, resolve_torch_dtype
 from utils import HF_READ_TOKEN, default_datasets_dir, load_prompt_answer_json
 
 
@@ -31,17 +31,6 @@ class ActivationAccumulator:
     @property
     def mean(self) -> float:
         return self.total / self.count
-
-
-@dataclass
-class ActivationWriteResult:
-    activations: torch.Tensor
-    w_down_vectors: torch.Tensor
-    arg_values: list[list[int]]
-
-    def __iter__(self):
-        yield self.activations
-        yield self.w_down_vectors
 
 
 def _resolve_dataset_path(dataset_name: str) -> str:

@@ -1,4 +1,7 @@
 import argparse
+import hashlib
+import os
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -6,6 +9,17 @@ import torch
 
 
 DTYPE_CHOICES = ["float32", "bfloat16", "float16", "fp32", "bf16", "fp16"]
+
+
+@dataclass
+class ActivationWriteResult:
+    activations: torch.Tensor
+    w_down_vectors: torch.Tensor
+    arg_values: list[list[int]]
+
+    def __iter__(self):
+        yield self.activations
+        yield self.w_down_vectors
 
 
 @dataclass
@@ -140,3 +154,62 @@ def resolve_torch_dtype(dtype: str) -> torch.dtype:
     }
     dtype_name = dtype_mapping.get(dtype, dtype)
     return getattr(torch, dtype_name)
+
+
+def safe_cache_segment(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip())
+    return safe.strip("._") or "model"
+
+
+def activation_write_cache_file(
+    cache_root: str,
+    model_name: str,
+    dataset: str,
+    neuron_locations: torch.Tensor,
+) -> str:
+    model_cache_dir = os.path.join(cache_root, safe_cache_segment(model_name))
+    os.makedirs(model_cache_dir, exist_ok=True)
+
+    locations_cpu = neuron_locations.detach().cpu().to(dtype=torch.long).contiguous()
+    key = hashlib.sha256()
+    key.update(b"activation-write-cache-v1")
+    key.update(dataset.encode("utf-8"))
+    key.update(str(tuple(locations_cpu.shape)).encode("utf-8"))
+    key.update(locations_cpu.numpy().tobytes())
+    return os.path.join(model_cache_dir, f"activation_write_{key.hexdigest()[:16]}.pt")
+
+
+def load_activation_write_cache(
+    path: str,
+    expected_neuron_count: int,
+) -> ActivationWriteResult:
+    data = torch.load(path, weights_only=False, map_location="cpu")
+    activations = data["activations"].detach().float().cpu()
+    w_down_vectors = data["w_down_vectors"].detach().float().cpu()
+    arg_values = data["arg_values"]
+    if activations.shape[0] != expected_neuron_count:
+        raise ValueError(
+            f"Cached activations contain {activations.shape[0]} neurons, "
+            f"expected {expected_neuron_count}: {path}"
+        )
+    if w_down_vectors.shape[0] != expected_neuron_count:
+        raise ValueError(
+            f"Cached w_down vectors contain {w_down_vectors.shape[0]} neurons, "
+            f"expected {expected_neuron_count}: {path}"
+        )
+    return ActivationWriteResult(
+        activations=activations,
+        w_down_vectors=w_down_vectors,
+        arg_values=arg_values,
+    )
+
+
+def save_activation_write_cache(path: str, result: ActivationWriteResult) -> None:
+    torch.save(
+        {
+            "activations": result.activations.detach().float().cpu(),
+            "w_down_vectors": result.w_down_vectors.detach().float().cpu(),
+            "arg_values": result.arg_values,
+        },
+        path,
+    )
