@@ -349,7 +349,7 @@ def _save_influence_calibration_plot(
     fig, ax = plt.subplots(figsize=(8, 4.5))
     ax.scatter(layers, spearman_values, alpha=0.65, s=14)
     ax.set_xlabel("Neuron layer")
-    ax.set_ylabel("Spearman rho(graph influence, DLA)")
+    ax.set_ylabel("Spearman rho(graph influence, ablation delta)")
     ax.set_title("Neuron Influence Calibration")
     ax.set_ylim(-1.05, 1.05)
     ax.grid(True, alpha=0.3)
@@ -358,11 +358,112 @@ def _save_influence_calibration_plot(
     plt.close(fig)
 
 
+@torch.no_grad()
+def _compute_neuron_logit_prob_deltas(
+    graph: Graph,
+    model: TransformerLensReplacementModel,
+    *,
+    batch_size: int,
+    logger: logging.Logger,
+) -> torch.Tensor:
+    if graph.n_logits == 0:
+        return torch.empty((graph.n_neurons, 0), dtype=torch.float32)
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+
+    input_ids = graph.input_tokens.to(model.cfg.device)
+    target_token_ids = graph.logit_token_ids.to(device=input_ids.device)
+    if target_token_ids.numel() and int(target_token_ids.max().item()) >= model.cfg.d_vocab:
+        raise ValueError("Ablation calibration only supports real vocabulary logit targets")
+
+    baseline_logits = model(input_ids)
+    baseline_probs = torch.softmax(baseline_logits[0, -1], dim=-1)[target_token_ids]
+
+    device = input_ids.device
+    dtype = baseline_logits.dtype
+    neuron_locations = graph.neuron_locations.to(device=device)
+    neuron_activations = graph.neuron_activations.to(device=device, dtype=dtype)
+    source_vectors = torch.empty(
+        graph.n_neurons,
+        model.cfg.d_model,
+        device=device,
+        dtype=dtype,
+    )
+    w_out_cache = {}
+    for node_id in range(graph.n_neurons):
+        layer = int(neuron_locations[node_id, 0].item())
+        neuron_id = int(neuron_locations[node_id, 2].item())
+        if layer not in w_out_cache:
+            old_mlp = model.blocks[layer].mlp.old_mlp
+            w_out_cache[layer] = model._row_oriented_weight(
+                old_mlp.W_out.to(device=device, dtype=dtype)
+            )
+        source_vectors[node_id] = neuron_activations[node_id] * w_out_cache[layer][neuron_id]
+
+    deltas = torch.empty(
+        graph.n_neurons,
+        graph.n_logits,
+        dtype=torch.float32,
+        device="cpu",
+    )
+    total_batches = math.ceil(graph.n_neurons / batch_size)
+
+    def make_ablation_hook(
+        batch_indices: torch.Tensor,
+        positions: torch.Tensor,
+        vectors: torch.Tensor,
+    ):
+        def hook_fn(acts: torch.Tensor, hook):
+            acts_out = acts.clone()
+            acts_out[batch_indices, positions] -= vectors.to(device=acts.device, dtype=acts.dtype)
+            return acts_out
+
+        return hook_fn
+
+    for batch_idx, start in enumerate(range(0, graph.n_neurons, batch_size), start=1):
+        end = min(start + batch_size, graph.n_neurons)
+        batch_locations = neuron_locations[start:end]
+        batch_vectors = source_vectors[start:end]
+        hooks = []
+        for layer in batch_locations[:, 0].unique().tolist():
+            layer_idx = int(layer)
+            layer_mask = batch_locations[:, 0] == layer_idx
+            batch_indices = torch.where(layer_mask)[0].to(device=device)
+            hooks.append(
+                (
+                    f"blocks.{layer_idx}.{model.feature_output_hook}",
+                    make_ablation_hook(
+                        batch_indices,
+                        batch_locations[layer_mask, 1].to(device=device),
+                        batch_vectors[layer_mask],
+                    ),
+                )
+            )
+
+        ablated_logits = model.run_with_hooks(
+            input_ids.expand(end - start, -1),
+            fwd_hooks=hooks,
+        )
+        ablated_probs = torch.softmax(ablated_logits[:, -1], dim=-1)[:, target_token_ids]
+        deltas[start:end] = (baseline_probs.unsqueeze(0) - ablated_probs).detach().float().cpu()
+
+        logger.info(
+            "  ablation calibration batch %d/%d: neurons %d-%d",
+            batch_idx,
+            total_batches,
+            start,
+            end - 1,
+        )
+
+    return deltas
+
+
 def _run_influence_calibration(
     graph: Graph,
     model: TransformerLensReplacementModel,
     *,
     alpha: float,
+    batch_size: int,
     output_path: str,
     logger: logging.Logger,
 ) -> None:
@@ -375,7 +476,12 @@ def _run_influence_calibration(
     spearmanr = scipy_stats.spearmanr
 
     graph_influence = compute_neuron_logit_influence(graph, alpha=alpha).detach().float().cpu()
-    dla = _compute_neuron_dla_on_logit_targets(graph, model).detach().float().cpu()
+    ablation_delta = _compute_neuron_logit_prob_deltas(
+        graph,
+        model,
+        batch_size=batch_size,
+        logger=logger,
+    )
     layers = [int(row[0].item()) for row in graph.neuron_locations.detach().cpu()]
     spearman_values = []
 
@@ -388,7 +494,7 @@ def _run_influence_calibration(
             warnings.simplefilter("ignore")
             rho = spearmanr(
                 graph_influence[node_id].numpy(),
-                dla[node_id].numpy(),
+                ablation_delta[node_id].numpy(),
                 nan_policy="omit",
             ).statistic
         spearman_values.append(float(rho))
@@ -437,7 +543,8 @@ def main():
         action="store_true",
         help=(
             "Build the graph, then compare each neuron's graph logit influence "
-            "against DLA with Spearman correlation instead of building a supergraph"
+            "against zero-ablation logit probability deltas with Spearman correlation "
+            "instead of building a supergraph"
         ),
     )
     parser.add_argument(
@@ -564,6 +671,7 @@ def main():
             graph,
             model,
             alpha=args.alpha,
+            batch_size=args.activation_forward_batch_size,
             output_path=args.influence_calibration_output_path,
             logger=logger,
         )

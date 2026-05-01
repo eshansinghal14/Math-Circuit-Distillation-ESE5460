@@ -213,10 +213,11 @@ def _scale_neuron_influence_by_layer(
 
     scaled = influence.clone()
     neuron_layers = neuron_layers.to(device=scaled.device)
+    neuron_influence = scaled[: len(neuron_layers)]
     for layer in range(n_layers):
         d = n_layers - layer
         mask = neuron_layers == layer
-        scaled[: len(neuron_layers)][mask] *= (1 / (1 - alpha)) ** d
+        neuron_influence[mask] *= (1 / (1 - alpha)) ** d
     return scaled
 
 
