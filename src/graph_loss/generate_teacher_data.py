@@ -98,6 +98,7 @@ def _save_supergraph(path: str, supergraph: SuperGraph) -> None:
         {
             "supernode_adjacency_matrix": supergraph.supernode_adjacency_matrix,
             "supernodes": supergraph.supernodes,
+            "supernode_prob_deltas": supergraph.supernode_prob_deltas,
         },
         path,
     )

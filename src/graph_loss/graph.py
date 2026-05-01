@@ -314,6 +314,7 @@ def prune_graph(
 class SuperGraph(NamedTuple):
     supernode_adjacency_matrix: torch.Tensor
     supernodes: list[list[int]]       # old node ids inside each new node
+    supernode_prob_deltas: torch.Tensor | None = None
 
 
 def build_super_graph(
@@ -751,13 +752,19 @@ def build_super_graph(
 
     def sort_supernodes_by_output_prob_delta(
         supernodes_to_sort: list[list[int]],
-    ) -> tuple[list[list[int]], list[float]]:
+    ) -> tuple[list[list[int]], torch.Tensor, list[float]]:
         if not supernodes_to_sort:
-            return supernodes_to_sort, []
+            empty_deltas = torch.empty((0, graph.n_logits), dtype=torch.float32)
+            return supernodes_to_sort, empty_deltas, []
         deltas = compute_supernode_ablation_prob_deltas(supernodes_to_sort)
         scores = deltas.norm(dim=1).tolist()
         order = sorted(range(len(supernodes_to_sort)), key=lambda idx: scores[idx], reverse=True)
-        return [supernodes_to_sort[idx] for idx in order], [float(scores[idx]) for idx in order]
+        order_tensor = torch.tensor(order, dtype=torch.long)
+        return (
+            [supernodes_to_sort[idx] for idx in order],
+            deltas[order_tensor],
+            [float(scores[idx]) for idx in order],
+        )
 
     def sort_cluster_by_abs_influence(
         members: list[int],
@@ -811,7 +818,9 @@ def build_super_graph(
     if cluster_method == "ablation" and kept_neuron_indices.numel():
         logger.info("  Building supernodes with ablation probability-delta clustering")
         supernodes = cluster_by_ablation_prob_deltas(kept_neuron_indices)
-        supernodes, supernode_prob_delta_norms = sort_supernodes_by_output_prob_delta(supernodes)
+        supernodes, supernode_prob_deltas, supernode_prob_delta_norms = (
+            sort_supernodes_by_output_prob_delta(supernodes)
+        )
         for supernode_idx, (members, prob_delta_norm) in enumerate(
             zip(supernodes, supernode_prob_delta_norms, strict=True)
         ):
@@ -975,8 +984,10 @@ def build_super_graph(
             key=lambda idx: supernode_prob_delta_norms[idx],
             reverse=True,
         )
+        supernode_order_tensor = torch.tensor(supernode_order, dtype=torch.long)
         supernodes = [supernodes[idx] for idx in supernode_order]
         supernode_heatmaps = [supernode_heatmaps[idx] for idx in supernode_order]
+        supernode_prob_deltas = supernode_deltas[supernode_order_tensor]
         supernode_prob_delta_norms = [float(supernode_prob_delta_norms[idx]) for idx in supernode_order]
 
         for supernode_idx, (members, prob_delta_norm) in enumerate(
@@ -1008,6 +1019,7 @@ def build_super_graph(
         fallback_members = [int(member) for member in kept_neuron_indices.tolist()]
         fallback_members.sort(key=lambda member: abs(float(node_influence[member].item())), reverse=True)
         supernodes = [fallback_members] if fallback_members else []
+        supernode_prob_deltas = compute_supernode_ablation_prob_deltas(supernodes)
 
     logger.info("  Aggregating supergraph")
     adj_matrix_norm = normalize_matrix(adjacency_matrix)
@@ -1029,7 +1041,11 @@ def build_super_graph(
             sum_A = adj_matrix_norm[target_members][:, source_members].sum(dim=1)
             supernode_adj_matrix[t, s] = (frac_external * sum_A).sum(dim=0) / frac_external.sum(dim=0).clamp(min=1e-10)
 
-    return SuperGraph(supernode_adjacency_matrix=supernode_adj_matrix, supernodes=supernodes)
+    return SuperGraph(
+        supernode_adjacency_matrix=supernode_adj_matrix,
+        supernodes=supernodes,
+        supernode_prob_deltas=supernode_prob_deltas,
+    )
 
 
 def extract_supernode_members(supergraph: SuperGraph, graph: Graph, model) -> list[dict]:

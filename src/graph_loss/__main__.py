@@ -6,7 +6,6 @@ import warnings
 import torch
 from huggingface_hub import login
 
-from graph_loss.align import compute_supernode_dla
 from graph_loss.attribution.attribute import attribute
 from graph_loss.graph import (
     Graph,
@@ -14,7 +13,6 @@ from graph_loss.graph import (
     SuperGraph,
     build_super_graph,
     compute_neuron_logit_influence,
-    extract_supernode_members,
     prune_graph,
 )
 from graph_loss.replacement_model import TransformerLensReplacementModel
@@ -49,42 +47,35 @@ def _format_top_logit_targets(graph: Graph, limit: int = 5) -> str:
     )
 
 
-def _decode_vocab_token(model: TransformerLensReplacementModel, vocab_idx: int) -> str:
-    token = model.tokenizer.decode([vocab_idx])
-    return token.replace("\n", "\\n").replace("\r", "\\r")
-
-
-@torch.no_grad()
-def _log_supernode_top_dla_logits(
+def _log_supernode_top_prob_deltas(
     supergraph: SuperGraph,
     graph: Graph,
-    model: TransformerLensReplacementModel,
     *,
     logger: logging.Logger,
-    top_k: int = 10,
 ) -> None:
-    members = extract_supernode_members(supergraph, graph, model)
-    W_U = model.unembed.W_U.to(device=graph.adjacency_device)
-
-    logger.info("Supernode top DLA logits")
-    if not members:
+    logger.info("Supernode top probability deltas")
+    if not supergraph.supernodes:
         logger.info("  no supernodes")
         return
+    if supergraph.supernode_prob_deltas is None:
+        logger.info("  no stored supernode probability deltas")
+        return
+    if graph.n_logits == 0 or supergraph.supernode_prob_deltas.shape[1] == 0:
+        logger.info("  no logit targets")
+        return
 
-    for member in members:
-        cluster_id = int(member["cluster_id"])
-        dla = compute_supernode_dla(member, W_U).detach().float().cpu()
-        k = min(top_k, int(dla.numel()))
-        values, indices = torch.topk(dla, k=k)
-        formatted = ", ".join(
-            f"{_decode_vocab_token(model, int(idx.item()))!r}:{float(value.item()):.6g}"
-            for value, idx in zip(values, indices, strict=True)
-        )
+    deltas = supergraph.supernode_prob_deltas.detach().float().cpu()
+    for supernode_idx, members in enumerate(supergraph.supernodes):
+        delta = deltas[supernode_idx]
+        top_idx = int(torch.argmax(delta.abs()).item())
+        top_target = graph.logit_targets[top_idx]
         logger.info(
-            "  supernode %d (size=%d): %s",
-            cluster_id,
-            int(member["size"]),
-            formatted,
+            "  supernode %d (size=%d): top_delta_logit=%r vocab_idx=%d delta=%.6g",
+            supernode_idx,
+            len(members),
+            top_target.token_str,
+            int(top_target.vocab_idx),
+            float(delta[top_idx].item()),
         )
 
 
@@ -294,6 +285,7 @@ def _save_supergraph(path: str, supergraph: SuperGraph) -> None:
         {
             "supernode_adjacency_matrix": supergraph.supernode_adjacency_matrix,
             "supernodes": supergraph.supernodes,
+            "supernode_prob_deltas": supergraph.supernode_prob_deltas,
         },
         path,
     )
@@ -701,7 +693,7 @@ def main():
         supergraph,
         logger=logger,
     )
-    _log_supernode_top_dla_logits(supergraph, graph, model, logger=logger)
+    _log_supernode_top_prob_deltas(supergraph, graph, logger=logger)
     if args.supergraph_output_path:
         logger.info("Saving supergraph to %s", args.supergraph_output_path)
         _save_supergraph(args.supergraph_output_path, supergraph)
