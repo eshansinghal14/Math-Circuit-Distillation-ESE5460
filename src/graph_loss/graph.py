@@ -172,6 +172,20 @@ def normalize_matrix(matrix: torch.Tensor) -> torch.Tensor:
     return normalized / normalized.sum(dim=1, keepdim=True).clamp(min=1e-10)
 
 
+def normalize_signed_matrices(matrix: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    math_dtype = (
+        torch.float32
+        if matrix.dtype in (torch.float16, torch.bfloat16)
+        else matrix.dtype
+    )
+    signed = matrix.to(dtype=math_dtype)
+    positive = signed.clamp(min=0)
+    negative = signed.clamp(max=0).abs()
+    positive = positive / positive.sum(dim=1, keepdim=True).clamp(min=1e-10)
+    negative = negative / negative.sum(dim=1, keepdim=True).clamp(min=1e-10)
+    return positive, negative
+
+
 def compute_influence(
     A: torch.Tensor,
     logit_weights: torch.Tensor,
@@ -197,7 +211,10 @@ def compute_influence(
 
 
 def compute_node_influence(adjacency_matrix: torch.Tensor, logit_weights: torch.Tensor):
-    return compute_influence(normalize_matrix(adjacency_matrix), logit_weights)
+    positive, negative = normalize_signed_matrices(adjacency_matrix)
+    positive_influence = compute_influence(positive, logit_weights)
+    negative_influence = compute_influence(negative, logit_weights)
+    return positive_influence - negative_influence
 
 
 def _scale_neuron_influence_by_layer(
@@ -235,10 +252,14 @@ def compute_neuron_logit_influence(graph: Graph, alpha: float = 0.0) -> torch.Te
 
 
 def compute_edge_influence(pruned_matrix: torch.Tensor, logit_weights: torch.Tensor):
-    normalized_pruned = normalize_matrix(pruned_matrix)
-    pruned_influence = compute_influence(normalized_pruned, logit_weights)
+    positive, negative = normalize_signed_matrices(pruned_matrix)
+    normalized_pruned = positive + negative
+    pruned_influence = compute_influence(positive, logit_weights) - compute_influence(
+        negative,
+        logit_weights,
+    )
     pruned_influence += logit_weights
-    edge_scores = normalized_pruned * pruned_influence[:, None]
+    edge_scores = normalized_pruned * pruned_influence.abs()[:, None]
     return edge_scores
 
 
@@ -291,7 +312,8 @@ def prune_graph(
         graph.cfg.n_layers,
         alpha,
     )
-    node_mask = node_influence >= find_threshold(node_influence, node_threshold)
+    node_scores = node_influence.abs()
+    node_mask = node_scores >= find_threshold(node_scores, node_threshold)
     node_mask[token_start:] = True
 
     pruned_matrix = adjacency_matrix.clone()
@@ -313,7 +335,7 @@ def prune_graph(
         node_mask[:n_neurons] &= edge_mask[:, :n_neurons].any(0)
         node_mask[:n_neurons] &= edge_mask[:n_neurons].any(1)
 
-    sorted_scores, sorted_indices = torch.sort(node_influence, descending=True)
+    sorted_scores, sorted_indices = torch.sort(node_scores, descending=True)
     cumulative_scores = torch.cumsum(sorted_scores, dim=0) / torch.sum(sorted_scores)
     final_scores = torch.zeros_like(node_influence)
     final_scores[sorted_indices] = cumulative_scores
