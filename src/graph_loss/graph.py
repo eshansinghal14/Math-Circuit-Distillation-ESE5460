@@ -498,7 +498,7 @@ def build_super_graph(
             return 0.0
         return float(node_influence[torch.tensor(members, dtype=torch.long)].sum().item())
 
-    def sort_cluster_by_influence(
+    def sort_cluster_by_abs_influence(
         members: list[int],
         activation_maps: torch.Tensor,
     ) -> tuple[list[int], torch.Tensor]:
@@ -506,7 +506,7 @@ def build_super_graph(
             return members, activation_maps
         order = sorted(
             range(len(members)),
-            key=lambda idx: float(node_influence[members[idx]].item()),
+            key=lambda idx: abs(float(node_influence[members[idx]].item())),
             reverse=True,
         )
         order_tensor = torch.tensor(order, dtype=torch.long)
@@ -602,7 +602,7 @@ def build_super_graph(
                 result_rows = phase_rows[cluster_rows]
                 members = kept_neuron_indices[result_rows].tolist()
                 cluster_maps = embedding_maps[cluster_rows]
-                members, cluster_maps = sort_cluster_by_influence(
+                members, cluster_maps = sort_cluster_by_abs_influence(
                     [int(member) for member in members],
                     cluster_maps,
                 )
@@ -639,7 +639,7 @@ def build_super_graph(
                     result_rows = phase_rows[cluster_rows]
                     members = kept_neuron_indices[result_rows].tolist()
                     cluster_maps = computation_maps[cluster_rows]
-                    members, cluster_maps = sort_cluster_by_influence(
+                    members, cluster_maps = sort_cluster_by_abs_influence(
                         [int(member) for member in members],
                         cluster_maps,
                     )
@@ -684,7 +684,7 @@ def build_super_graph(
         else:
             logger.info("  No dataset provided; using all kept neurons as one supernode")
         fallback_members = [int(member) for member in kept_neuron_indices.tolist()]
-        fallback_members.sort(key=lambda member: float(node_influence[member].item()), reverse=True)
+        fallback_members.sort(key=lambda member: abs(float(node_influence[member].item())), reverse=True)
         supernodes = [fallback_members] if fallback_members else []
 
     logger.info("  Aggregating supergraph")
