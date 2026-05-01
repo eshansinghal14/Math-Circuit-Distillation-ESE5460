@@ -371,6 +371,17 @@ def build_super_graph(
         )
 
     adjacency_matrix = graph.adjacency_matrix
+    logit_weights = torch.zeros(
+        adjacency_matrix.shape[0],
+        dtype=adjacency_matrix.dtype,
+        device=adjacency_matrix.device,
+    )
+    if graph.n_logits:
+        logit_weights[-graph.n_logits:] = graph.logit_probabilities.to(
+            device=adjacency_matrix.device,
+            dtype=adjacency_matrix.dtype,
+        )
+    node_influence = compute_node_influence(adjacency_matrix, logit_weights).detach().float().cpu()
 
     def decoded_prompt_tokens() -> list[str]:
         token_ids = graph.input_tokens.detach().cpu().flatten().tolist()
@@ -500,6 +511,25 @@ def build_super_graph(
             )
         return ", ".join(formatted)
 
+    def supernode_influence(members: list[int]) -> float:
+        if not members:
+            return 0.0
+        return float(node_influence[torch.tensor(members, dtype=torch.long)].sum().item())
+
+    def sort_cluster_by_influence(
+        members: list[int],
+        activation_maps: torch.Tensor,
+    ) -> tuple[list[int], torch.Tensor]:
+        if not members:
+            return members, activation_maps
+        order = sorted(
+            range(len(members)),
+            key=lambda idx: float(node_influence[members[idx]].item()),
+            reverse=True,
+        )
+        order_tensor = torch.tensor(order, dtype=torch.long)
+        return [int(members[idx]) for idx in order], activation_maps[order_tensor]
+
     kept_neuron_indices_device = torch.where(kept_neuron_mask)[0]
     kept_neuron_indices = kept_neuron_indices_device.detach().cpu()
     logger.info("  Kept neurons for supergraph: %d", int(kept_neuron_indices.numel()))
@@ -583,14 +613,18 @@ def build_super_graph(
                 cluster_rows = torch.where(assignments == int(cluster_id))[0]
                 result_rows = phase_rows[cluster_rows]
                 members = kept_neuron_indices[result_rows].tolist()
-                supernodes.append([int(member) for member in members])
                 cluster_maps = embedding_maps[cluster_rows]
+                members, cluster_maps = sort_cluster_by_influence(
+                    [int(member) for member in members],
+                    cluster_maps,
+                )
+                supernodes.append(members)
                 token_text = prompt_tokens[int(token_pos)].replace("\n", "\\n").replace("\r", "\\r")
                 supernode_heatmaps.append((
                     cluster_maps,
                     [activation_write_result.arg_values[arg_dim]],
-                    [int(member) for member in members],
-                    f"supernode {len(supernodes) - 1}: embedding token {int(token_pos)} {token_text!r}",
+                    members,
+                    f"embedding token {int(token_pos)} {token_text!r}",
                 ))
 
         if computation_token_pos is None:
@@ -616,20 +650,33 @@ def build_super_graph(
                     cluster_rows = torch.where(assignments == int(cluster_id))[0]
                     result_rows = phase_rows[cluster_rows]
                     members = kept_neuron_indices[result_rows].tolist()
-                    supernodes.append([int(member) for member in members])
                     cluster_maps = computation_maps[cluster_rows]
+                    members, cluster_maps = sort_cluster_by_influence(
+                        [int(member) for member in members],
+                        cluster_maps,
+                    )
+                    supernodes.append(members)
                     token_text = prompt_tokens[int(computation_token_pos)].replace("\n", "\\n").replace("\r", "\\r")
                     supernode_heatmaps.append((
                         cluster_maps,
                         activation_write_result.arg_values,
-                        [int(member) for member in members],
-                        f"supernode {len(supernodes) - 1}: computation token {int(computation_token_pos)} {token_text!r}",
+                        members,
+                        f"computation token {int(computation_token_pos)} {token_text!r}",
                     ))
+
+        supernode_order = sorted(
+            range(len(supernodes)),
+            key=lambda idx: supernode_influence(supernodes[idx]),
+            reverse=True,
+        )
+        supernodes = [supernodes[idx] for idx in supernode_order]
+        supernode_heatmaps = [supernode_heatmaps[idx] for idx in supernode_order]
 
         for supernode_idx, members in enumerate(supernodes):
             logger.info(
-                "  supernode %d neuron locations: %s",
+                "  supernode %d influence=%.6g neuron locations: %s",
                 supernode_idx,
+                supernode_influence(members),
                 format_member_locations(members),
             )
 
@@ -640,7 +687,7 @@ def build_super_graph(
                 members,
                 graph.neuron_locations.detach().cpu(),
                 output_path=f"supernode_{supernode_idx}.pdf",
-                title=title,
+                title=f"supernode {supernode_idx}: {title}",
             )
             logger.info("  Saved supernode heatmap PDF: %s", saved_path)
     else:
@@ -648,7 +695,9 @@ def build_super_graph(
             logger.info("  No kept neurons for dataset activation clustering")
         else:
             logger.info("  No dataset provided; using all kept neurons as one supernode")
-        supernodes = [kept_neuron_indices.tolist()] if kept_neuron_indices.numel() else []
+        fallback_members = [int(member) for member in kept_neuron_indices.tolist()]
+        fallback_members.sort(key=lambda member: float(node_influence[member].item()), reverse=True)
+        supernodes = [fallback_members] if fallback_members else []
 
     logger.info("  Aggregating supergraph")
     adj_matrix_norm = normalize_matrix(adjacency_matrix)

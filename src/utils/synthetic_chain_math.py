@@ -219,8 +219,8 @@ def generate_math_dataset(
     _write(dataset_fname, rows)
 
     if split_test_frac is not None:
-        if not (0.0 < split_test_frac < 1.0):
-            raise ValueError("split_test_frac must be in (0, 1).")
+        if not (0.0 <= split_test_frac < 1.0):
+            raise ValueError("split_test_frac must be in [0, 1).")
         if not dataset_fname.endswith("_all.json"):
             raise ValueError(
                 "split_test_frac requires dataset_fname to end with '_all.json' "
