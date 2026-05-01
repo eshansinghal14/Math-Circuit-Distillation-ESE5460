@@ -515,11 +515,17 @@ def save_cluster_activation_heatmap_pdfs(
         n_args = len(arg_values)
         if n_args == 1:
             xs = arg_values[0]
-            ys = activation_grid.tolist()
-            fig, ax = plt.subplots(figsize=(8, 4))
-            ax.plot(xs, ys, marker="o")
+            heatmap = activation_grid.unsqueeze(0)
+            fig, ax = plt.subplots(figsize=(8, 2.5))
+            image = ax.imshow(
+                heatmap.numpy(),
+                origin="lower",
+                aspect="auto",
+                extent=[min(xs), max(xs), 0, 1],
+            )
+            fig.colorbar(image, ax=ax, label="activation")
             ax.set_xlabel("arg 1")
-            ax.set_ylabel("activation")
+            ax.set_yticks([])
             ax.set_title(title)
         elif n_args == 2:
             xs = arg_values[0]
@@ -629,11 +635,17 @@ def save_supernode_activation_heatmap_pdf(
                 n_args = len(arg_values)
                 if n_args == 1:
                     xs = arg_values[0]
-                    ys = activation_grid.tolist()
-                    fig, ax = plt.subplots(figsize=(8, 4))
-                    ax.plot(xs, ys, marker="o")
+                    heatmap = activation_grid.unsqueeze(0)
+                    fig, ax = plt.subplots(figsize=(8, 2.5))
+                    image = ax.imshow(
+                        heatmap.numpy(),
+                        origin="lower",
+                        aspect="auto",
+                        extent=[min(xs), max(xs), 0, 1],
+                    )
+                    fig.colorbar(image, ax=ax, label="activation")
                     ax.set_xlabel("arg 1")
-                    ax.set_ylabel("activation")
+                    ax.set_yticks([])
                 elif n_args == 2:
                     xs = arg_values[0]
                     ys = arg_values[1]
@@ -682,15 +694,21 @@ def _plot_1d(
     title: str,
 ) -> None:
     xs = sorted(arg[0] for arg in values_by_arg)
-    ys = [values_by_arg[(x,)].mean for x in xs]
-    plt.figure(figsize=(8, 4))
-    plt.plot(xs, ys, marker="o")
-    plt.xlabel("arg 1")
-    plt.ylabel("activation")
-    plt.title(title)
-    plt.tight_layout()
-    plt.savefig(output_path)
-    plt.close()
+    heatmap = torch.tensor([[values_by_arg[(x,)].mean for x in xs]], dtype=torch.float32)
+    fig, ax = plt.subplots(figsize=(8, 2.5))
+    image = ax.imshow(
+        heatmap.numpy(),
+        origin="lower",
+        aspect="auto",
+        extent=[min(xs), max(xs), 0, 1],
+    )
+    fig.colorbar(image, ax=ax, label="activation")
+    ax.set_xlabel("arg 1")
+    ax.set_yticks([])
+    ax.set_title(title)
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
 
 
 def _plot_2d(
