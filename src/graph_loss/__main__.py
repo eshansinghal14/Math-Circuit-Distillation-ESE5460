@@ -52,6 +52,7 @@ def _log_supernode_top_prob_deltas(
     graph: Graph,
     *,
     logger: logging.Logger,
+    top_k: int = 10,
 ) -> None:
     logger.info("Supernode top probability deltas")
     if not supergraph.supernodes:
@@ -67,15 +68,17 @@ def _log_supernode_top_prob_deltas(
     deltas = supergraph.supernode_prob_deltas.detach().float().cpu()
     for supernode_idx, members in enumerate(supergraph.supernodes):
         delta = deltas[supernode_idx]
-        top_idx = int(torch.argmax(delta.abs()).item())
-        top_target = graph.logit_targets[top_idx]
+        k = min(top_k, int(delta.numel()))
+        values, indices = torch.topk(delta.abs(), k=k)
+        formatted = ", ".join(
+            f"{graph.logit_targets[int(idx.item())].token_str!r}:{float(delta[int(idx.item())].item()):.6g}"
+            for _value, idx in zip(values, indices, strict=True)
+        )
         logger.info(
-            "  supernode %d (size=%d): top_delta_logit=%r vocab_idx=%d delta=%.6g",
+            "  supernode %d (size=%d): %s",
             supernode_idx,
             len(members),
-            top_target.token_str,
-            int(top_target.vocab_idx),
-            float(delta[top_idx].item()),
+            formatted,
         )
 
 
