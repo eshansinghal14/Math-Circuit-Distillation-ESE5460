@@ -200,11 +200,37 @@ def compute_node_influence(adjacency_matrix: torch.Tensor, logit_weights: torch.
     return compute_influence(normalize_matrix(adjacency_matrix), logit_weights)
 
 
-def compute_neuron_logit_influence(graph: Graph) -> torch.Tensor:
+def _scale_neuron_influence_by_layer(
+    influence: torch.Tensor,
+    neuron_layers: torch.Tensor,
+    n_layers: int,
+    alpha: float,
+) -> torch.Tensor:
+    if alpha >= 1.0:
+        raise ValueError("alpha must be less than 1.0")
+    if alpha == 0.0 or len(neuron_layers) == 0:
+        return influence
+
+    scaled = influence.clone()
+    neuron_layers = neuron_layers.to(device=scaled.device)
+    for layer in range(n_layers):
+        d = n_layers - layer
+        mask = neuron_layers == layer
+        scaled[: len(neuron_layers)][mask] *= (1 / (1 - alpha)) ** d
+    return scaled
+
+
+def compute_neuron_logit_influence(graph: Graph, alpha: float = 0.0) -> torch.Tensor:
     """Return direct graph attribution from each neuron to each selected logit."""
     logit_start = graph.n_neurons + graph.n_tokens
     logit_rows = slice(logit_start, logit_start + graph.n_logits)
-    return graph.adjacency_matrix[logit_rows, : graph.n_neurons].transpose(0, 1)
+    influence = graph.adjacency_matrix[logit_rows, : graph.n_neurons].transpose(0, 1)
+    return _scale_neuron_influence_by_layer(
+        influence,
+        graph.neuron_locations[:, 0],
+        graph.cfg.n_layers,
+        alpha,
+    )
 
 
 def compute_edge_influence(pruned_matrix: torch.Tensor, logit_weights: torch.Tensor):
@@ -229,7 +255,12 @@ class PruneResult(NamedTuple):
     cumulative_scores: torch.Tensor
 
 
-def prune_graph(graph: Graph, node_threshold: float = 0.8, edge_threshold: float = 0.98) -> PruneResult:
+def prune_graph(
+    graph: Graph,
+    node_threshold: float = 0.8,
+    edge_threshold: float = 0.98,
+    alpha: float = 0.0,
+) -> PruneResult:
     """Prune low-influence neurons while always retaining token and logit nodes."""
 
     if node_threshold > 1.0 or node_threshold < 0.0:
@@ -253,7 +284,12 @@ def prune_graph(graph: Graph, node_threshold: float = 0.8, edge_threshold: float
         dtype=adjacency_matrix.dtype,
     )
 
-    node_influence = compute_node_influence(adjacency_matrix, logit_weights)
+    node_influence = _scale_neuron_influence_by_layer(
+        compute_node_influence(adjacency_matrix, logit_weights),
+        graph.neuron_locations[:, 0],
+        graph.cfg.n_layers,
+        alpha,
+    )
     node_mask = node_influence >= find_threshold(node_influence, node_threshold)
     node_mask[token_start:] = True
 
@@ -302,6 +338,7 @@ def build_super_graph(
     activation_forward_batch_size: int = 32,
     activation_write_cache_path: str | None = None,
     model_name: str | None = None,
+    alpha: float = 0.0,
 ) -> SuperGraph:
     """Cluster kept neurons into numeric-token embedding and final-token computation supernodes."""
 
@@ -337,7 +374,12 @@ def build_super_graph(
             device=adjacency_matrix.device,
             dtype=adjacency_matrix.dtype,
         )
-    node_influence = compute_node_influence(adjacency_matrix, logit_weights).detach().float().cpu()
+    node_influence = _scale_neuron_influence_by_layer(
+        compute_node_influence(adjacency_matrix, logit_weights),
+        graph.neuron_locations[:, 0],
+        graph.cfg.n_layers,
+        alpha,
+    ).detach().float().cpu()
 
     def decoded_prompt_tokens() -> list[str]:
         token_ids = graph.input_tokens.detach().cpu().flatten().tolist()

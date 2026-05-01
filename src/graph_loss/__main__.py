@@ -362,6 +362,7 @@ def _run_influence_calibration(
     graph: Graph,
     model: TransformerLensReplacementModel,
     *,
+    alpha: float,
     output_path: str,
     logger: logging.Logger,
 ) -> None:
@@ -373,7 +374,7 @@ def _run_influence_calibration(
         raise ImportError("scipy is required for --test-influence-calibration") from exc
     spearmanr = scipy_stats.spearmanr
 
-    graph_influence = compute_neuron_logit_influence(graph).detach().float().cpu()
+    graph_influence = compute_neuron_logit_influence(graph, alpha=alpha).detach().float().cpu()
     dla = _compute_neuron_dla_on_logit_targets(graph, model).detach().float().cpu()
     layers = [int(row[0].item()) for row in graph.neuron_locations.detach().cpu()]
     spearman_values = []
@@ -445,6 +446,12 @@ def main():
         dest="influence_calibration_output_path",
         default="influence_calibration_spearman.png",
         help="Path to save the influence calibration scatter plot",
+    )
+    parser.add_argument(
+        "--alpha",
+        type=float,
+        default=0.0,
+        help="Layer-depth scaling alpha for neuron logit influence",
     )
     parser.add_argument(
         "--cossim_eps",
@@ -535,6 +542,7 @@ def main():
             graph,
             node_threshold=args.node_threshold,
             edge_threshold=args.edge_threshold,
+            alpha=args.alpha,
         )
         _log_prune_summary(
             graph,
@@ -555,6 +563,7 @@ def main():
         _run_influence_calibration(
             graph,
             model,
+            alpha=args.alpha,
             output_path=args.influence_calibration_output_path,
             logger=logger,
         )
@@ -575,6 +584,7 @@ def main():
         activation_forward_batch_size=args.activation_forward_batch_size,
         activation_write_cache_path=args.activation_write_cache_path,
         model_name=args.model,
+        alpha=args.alpha,
     )
     _log_supergraph_summary(
         graph,
