@@ -18,6 +18,7 @@ from graph_loss.neuron_activation_heatmap import (
     save_supernode_activation_heatmap_pdf,
 )
 from graph_loss.utils import (
+    ActivationWriteResult,
     UnifiedConfig,
     activation_write_cache_file,
     convert_nnsight_config_to_transformerlens,
@@ -522,6 +523,7 @@ def build_super_graph(
 
     if dataset and kept_neuron_indices.numel():
         logger.info("  Building activation-write matrices from dataset: %s", dataset)
+        all_neuron_locations = graph.neuron_locations.detach().cpu()
         kept_neuron_locations = graph.neuron_locations[kept_neuron_indices_device].detach().cpu()
         cache_file = None
         if activation_write_cache_path:
@@ -530,25 +532,30 @@ def build_super_graph(
                 activation_write_cache_path,
                 str(resolved_model_name),
                 dataset,
-                kept_neuron_locations,
+                all_neuron_locations,
             )
 
         if cache_file and os.path.isfile(cache_file):
             logger.info("  Loading cached activation-write result: %s", cache_file)
-            activation_write_result = load_activation_write_cache(
+            full_activation_write_result = load_activation_write_cache(
                 cache_file,
-                expected_neuron_count=int(kept_neuron_locations.shape[0]),
+                expected_neuron_count=int(all_neuron_locations.shape[0]),
             )
         else:
-            activation_write_result = build_neuron_activation_write_result(
+            full_activation_write_result = build_neuron_activation_write_result(
                 model,
                 dataset,
-                kept_neuron_locations,
+                all_neuron_locations,
                 forward_batch_size=activation_forward_batch_size,
             )
             if cache_file:
                 logger.info("  Saving activation-write result cache: %s", cache_file)
-                save_activation_write_cache(cache_file, activation_write_result)
+                save_activation_write_cache(cache_file, full_activation_write_result)
+        activation_write_result = ActivationWriteResult(
+            activations=full_activation_write_result.activations[kept_neuron_indices],
+            w_down_vectors=full_activation_write_result.w_down_vectors[kept_neuron_indices],
+            arg_values=full_activation_write_result.arg_values,
+        )
         prompt_tokens = decoded_prompt_tokens()
         numeric_token_positions = [
             token_pos
