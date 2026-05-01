@@ -82,6 +82,34 @@ def _log_supernode_top_prob_deltas(
         )
 
 
+def _plot_supernode_prob_delta_norms(
+    supergraph: SuperGraph,
+    *,
+    output_path: str,
+    logger: logging.Logger,
+) -> None:
+    if supergraph.supernode_prob_deltas is None:
+        logger.info("Skipping supernode probability-delta norm plot: no stored deltas")
+        return
+    if supergraph.supernode_prob_deltas.numel() == 0:
+        logger.info("Skipping supernode probability-delta norm plot: no deltas")
+        return
+
+    import matplotlib.pyplot as plt
+
+    norms = supergraph.supernode_prob_deltas.detach().float().cpu().norm(dim=1)
+    xs = list(range(int(norms.numel())))
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.bar(xs, norms.tolist())
+    ax.set_xlabel("supernode")
+    ax.set_ylabel("||probability delta||")
+    ax.set_title("Supernode Probability Delta Norms")
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+    logger.info("Saved supernode probability-delta norm plot: %s", output_path)
+
+
 def _log_graph_summary(graph: Graph, *, logger: logging.Logger, stage: str) -> None:
     total_nodes = graph.n_nodes
     total_edges = int(graph.adjacency_matrix.count_nonzero().item())
@@ -611,6 +639,13 @@ def main():
             "A model-name folder is created inside this path."
         ),
     )
+    parser.add_argument(
+        "--supernode-prob-delta-norm-output-path",
+        "--supernode_prob_delta_norm_output_path",
+        dest="supernode_prob_delta_norm_output_path",
+        default="supernode_prob_delta_norms.png",
+        help="Path for the post-supergraph supernode probability-delta norm plot",
+    )
 
     args = parser.parse_args()
 
@@ -697,6 +732,11 @@ def main():
         logger=logger,
     )
     _log_supernode_top_prob_deltas(supergraph, graph, logger=logger)
+    _plot_supernode_prob_delta_norms(
+        supergraph,
+        output_path=args.supernode_prob_delta_norm_output_path,
+        logger=logger,
+    )
     if args.supergraph_output_path:
         logger.info("Saving supergraph to %s", args.supergraph_output_path)
         _save_supergraph(args.supergraph_output_path, supergraph)
