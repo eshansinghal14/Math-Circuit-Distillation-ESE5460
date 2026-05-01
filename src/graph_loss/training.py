@@ -21,7 +21,7 @@ from graph_loss.hf_adapter import (
     HFLlamaGraphAdapter,
     extract_hf_supernode_members,
 )
-from graph_loss.loss import compute_L_graph
+from graph_loss.loss import compute_graph_loss
 
 
 @dataclass
@@ -38,6 +38,7 @@ class GraphAuxConfig:
     graph_edge_threshold: float = 0.98
     graph_similarity_threshold: float = 0.7
     graph_max_fan_out: int = 4
+    graph_node_weight: float = 0.1  # weight of DLA node loss within L_graph
 
 
 def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
@@ -181,7 +182,7 @@ def compute_prompt_graph_loss(
 
     teacher_ids = list(range(len(teacher_supergraph.supernodes)))
     student_ids = list(range(len(student_supergraph.supernodes)))
-    graph_loss = compute_L_graph(
+    graph_loss, loss_breakdown = compute_graph_loss(
         teacher_supergraph.supernode_adjacency_matrix.detach().to(
             device=student_supergraph.supernode_adjacency_matrix.device,
             dtype=student_supergraph.supernode_adjacency_matrix.dtype,
@@ -190,6 +191,9 @@ def compute_prompt_graph_loss(
         alignment.mapping,
         teacher_ids,
         student_ids,
+        teacher_dla=alignment.teacher_dla,
+        student_dla=alignment.student_dla,
+        node_weight=config.graph_node_weight,
     )
 
     metrics = {
@@ -205,6 +209,7 @@ def compute_prompt_graph_loss(
             if alignment.best_sim
             else 0.0
         ),
+        **loss_breakdown,
     }
     return graph_loss, metrics
 

@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 
 
-def compute_L_graph(
+def _compute_edge_loss(
     W_T: torch.Tensor,
     W_S: torch.Tensor,
     mapping: dict[int, set[int]],
@@ -10,6 +10,7 @@ def compute_L_graph(
     student_ids: list[int],
     epsilon: float = 1e-4,
 ) -> torch.Tensor:
+    """Edge-level structural loss: penalize student edges that under-cover teacher edges."""
     t_id2idx = {cid: i for i, cid in enumerate(teacher_ids)}
     s_id2idx = {cid: i for i, cid in enumerate(student_ids)}
     device = W_T.device
@@ -56,37 +57,85 @@ def compute_L_graph(
     return loss
 
 
+def _compute_node_loss(
+    teacher_dla: dict[int, torch.Tensor],
+    student_dla: dict[int, torch.Tensor],
+    mapping: dict[int, set[int]],
+    epsilon: float = 1e-4,
+) -> torch.Tensor:
+    """Node-level functional loss: L2 on DLA mismatch between aligned supernodes.
 
-def compute_L_total(
-    L_task: torch.Tensor,
-    L_graph: torch.Tensor,
-    L_repr: torch.Tensor | None = None,
-    beta_graph: float = 0.1,
-    alpha_repr: float = 0.01,
-    error_contamination: float = 0.0,
-    contamination_threshold: float = 0.3,
+    For each teacher supernode t mapped to student supernodes {s1, s2, ...},
+    penalize the distance between the teacher's DLA and the closest student DLA.
+    """
+    device = next(iter(teacher_dla.values())).device if teacher_dla else torch.device("cpu")
+    dtype = next(iter(teacher_dla.values())).dtype if teacher_dla else torch.float32
+
+    loss = torch.tensor(0.0, device=device, dtype=dtype)
+    count = 0
+
+    for t_id, s_ids in mapping.items():
+        if not s_ids or t_id not in teacher_dla:
+            continue
+        t_vec = teacher_dla[t_id]
+
+        # Best-matching student supernode (min L2 distance)
+        min_dist_sq = None
+        for s_id in s_ids:
+            if s_id not in student_dla:
+                continue
+            s_vec = student_dla[s_id].to(device=device, dtype=dtype)
+            dist_sq = (t_vec - s_vec).pow(2).sum()
+            if min_dist_sq is None or dist_sq < min_dist_sq:
+                min_dist_sq = dist_sq
+
+        if min_dist_sq is not None:
+            loss = loss + min_dist_sq
+            count += 1
+
+    if count > 0:
+        loss = loss / count
+
+    return loss
+
+
+def compute_graph_loss(
+    W_T: torch.Tensor,
+    W_S: torch.Tensor,
+    mapping: dict[int, set[int]],
+    teacher_ids: list[int],
+    student_ids: list[int],
+    teacher_dla: dict[int, torch.Tensor] | None = None,
+    student_dla: dict[int, torch.Tensor] | None = None,
+    epsilon: float = 1e-4,
+    edge_weight: float = 1.0,
+    node_weight: float = 0.1,
 ) -> tuple[torch.Tensor, dict]:
-    # L_total = L_task + \beta·L_graph + \alpha·L_repr
-    if error_contamination > contamination_threshold:
-        graph_scale = max(0.0, 1.0 - error_contamination)
+    """Unified graph loss: edge structure + node DLA matching."""
+    edge_loss = _compute_edge_loss(W_T, W_S, mapping, teacher_ids, student_ids, epsilon)
+
+    if teacher_dla is not None and student_dla is not None and node_weight > 0:
+        node_loss = _compute_node_loss(teacher_dla, student_dla, mapping, epsilon)
     else:
-        graph_scale = 1.0
+        node_loss = torch.tensor(0.0, device=W_T.device, dtype=W_T.dtype)
 
-    weighted_graph = beta_graph * graph_scale * L_graph
-    weighted_repr = (
-        alpha_repr * L_repr
-        if L_repr is not None
-        else torch.tensor(0.0, device=L_task.device)
-    )
-
-    total = L_task + weighted_graph + weighted_repr
+    total = edge_weight * edge_loss + node_weight * node_loss
 
     return total, {
-        "L_task": L_task.item(),
-        "L_graph_raw": L_graph.item(),
-        "L_graph_weighted": weighted_graph.item(),
-        "L_repr_weighted": weighted_repr.item(),
-        "graph_scale": graph_scale,
-        "error_contamination": error_contamination,
-        "L_total": total.item(),
+        "edge_loss": edge_loss.item(),
+        "node_loss": node_loss.item(),
+        "graph_loss_total": total.item(),
     }
+
+
+# Backward-compatible alias so existing notebooks/scripts don't break.
+def compute_L_graph(
+    W_T: torch.Tensor,
+    W_S: torch.Tensor,
+    mapping: dict[int, set[int]],
+    teacher_ids: list[int],
+    student_ids: list[int],
+    epsilon: float = 1e-4,
+) -> torch.Tensor:
+    """Legacy wrapper — returns edge loss only (no node loss)."""
+    return _compute_edge_loss(W_T, W_S, mapping, teacher_ids, student_ids, epsilon)
