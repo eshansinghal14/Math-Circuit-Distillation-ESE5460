@@ -200,6 +200,13 @@ def compute_node_influence(adjacency_matrix: torch.Tensor, logit_weights: torch.
     return compute_influence(normalize_matrix(adjacency_matrix), logit_weights)
 
 
+def compute_neuron_logit_influence(graph: Graph) -> torch.Tensor:
+    """Return direct graph attribution from each neuron to each selected logit."""
+    logit_start = graph.n_neurons + graph.n_tokens
+    logit_rows = slice(logit_start, logit_start + graph.n_logits)
+    return graph.adjacency_matrix[logit_rows, : graph.n_neurons].transpose(0, 1)
+
+
 def compute_edge_influence(pruned_matrix: torch.Tensor, logit_weights: torch.Tensor):
     normalized_pruned = normalize_matrix(pruned_matrix)
     pruned_influence = compute_influence(normalized_pruned, logit_weights)

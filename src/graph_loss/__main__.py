@@ -1,5 +1,7 @@
 import argparse
 import logging
+import math
+import warnings
 
 import torch
 from huggingface_hub import login
@@ -11,6 +13,7 @@ from graph_loss.graph import (
     PruneResult,
     SuperGraph,
     build_super_graph,
+    compute_neuron_logit_influence,
     extract_supernode_members,
     prune_graph,
 )
@@ -296,6 +299,114 @@ def _save_supergraph(path: str, supergraph: SuperGraph) -> None:
     )
 
 
+@torch.no_grad()
+def _compute_neuron_dla_on_logit_targets(
+    graph: Graph,
+    model: TransformerLensReplacementModel,
+) -> torch.Tensor:
+    if graph.n_logits == 0:
+        return torch.empty((graph.n_neurons, 0), dtype=torch.float32)
+
+    target_token_ids = graph.logit_token_ids.to(device=graph.adjacency_device)
+    W_U_targets = model.unembed.W_U.to(device=graph.adjacency_device)[:, target_token_ids]
+    result = torch.empty(
+        graph.n_neurons,
+        graph.n_logits,
+        dtype=W_U_targets.dtype,
+        device=graph.adjacency_device,
+    )
+    w_out_cache = {}
+
+    for node_id in range(graph.n_neurons):
+        layer = int(graph.neuron_locations[node_id, 0].item())
+        neuron_id = int(graph.neuron_locations[node_id, 2].item())
+        if layer not in w_out_cache:
+            old_mlp = model.blocks[layer].mlp.old_mlp
+            w_out_cache[layer] = model._row_oriented_weight(
+                old_mlp.W_out.to(device=graph.adjacency_device, dtype=W_U_targets.dtype)
+            )
+
+        activation = graph.neuron_activations[node_id].to(
+            device=graph.adjacency_device,
+            dtype=W_U_targets.dtype,
+        )
+        result[node_id] = activation * (w_out_cache[layer][neuron_id] @ W_U_targets)
+
+    return result
+
+
+def _save_influence_calibration_plot(
+    *,
+    layers: list[int],
+    spearman_values: list[float],
+    output_path: str,
+) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    ax.scatter(layers, spearman_values, alpha=0.65, s=14)
+    ax.set_xlabel("Neuron layer")
+    ax.set_ylabel("Spearman rho(graph influence, DLA)")
+    ax.set_title("Neuron Influence Calibration")
+    ax.set_ylim(-1.05, 1.05)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _run_influence_calibration(
+    graph: Graph,
+    model: TransformerLensReplacementModel,
+    *,
+    output_path: str,
+    logger: logging.Logger,
+) -> None:
+    import importlib
+
+    try:
+        scipy_stats = importlib.import_module("scipy.stats")
+    except ImportError as exc:
+        raise ImportError("scipy is required for --test-influence-calibration") from exc
+    spearmanr = scipy_stats.spearmanr
+
+    graph_influence = compute_neuron_logit_influence(graph).detach().float().cpu()
+    dla = _compute_neuron_dla_on_logit_targets(graph, model).detach().float().cpu()
+    layers = [int(row[0].item()) for row in graph.neuron_locations.detach().cpu()]
+    spearman_values = []
+
+    for node_id in range(graph.n_neurons):
+        if graph.n_logits < 2:
+            spearman_values.append(float("nan"))
+            continue
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            rho = spearmanr(
+                graph_influence[node_id].numpy(),
+                dla[node_id].numpy(),
+                nan_policy="omit",
+            ).statistic
+        spearman_values.append(float(rho))
+
+    valid_values = [value for value in spearman_values if not math.isnan(value)]
+    logger.info(
+        "Influence calibration Spearman values: valid=%d/%d mean=%.6g",
+        len(valid_values),
+        len(spearman_values),
+        sum(valid_values) / len(valid_values) if valid_values else float("nan"),
+    )
+    logger.info("Saving influence calibration scatter plot to %s", output_path)
+    _save_influence_calibration_plot(
+        layers=layers,
+        spearman_values=spearman_values,
+        output_path=output_path,
+    )
+
+
 def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     logger = logging.getLogger(__name__)
@@ -318,6 +429,22 @@ def main():
     parser.add_argument(
         "--supergraph_output_path",
         help="Optional path to save the supergraph (.pt)",
+    )
+    parser.add_argument(
+        "--test-influence-calibration",
+        dest="test_influence_calibration",
+        action="store_true",
+        help=(
+            "Build the graph, then compare each neuron's graph logit influence "
+            "against DLA with Spearman correlation instead of building a supergraph"
+        ),
+    )
+    parser.add_argument(
+        "--influence-calibration-output-path",
+        "--influence_calibration_output_path",
+        dest="influence_calibration_output_path",
+        default="influence_calibration_spearman.png",
+        help="Path to save the influence calibration scatter plot",
     )
     parser.add_argument(
         "--cossim_eps",
@@ -422,6 +549,17 @@ def main():
             
         logger.info("Applying prune masks to graph")
         graph = graph.apply_prune_result(prune_result)
+
+    if args.test_influence_calibration:
+        logger.info("Running influence calibration test")
+        _run_influence_calibration(
+            graph,
+            model,
+            output_path=args.influence_calibration_output_path,
+            logger=logger,
+        )
+        logger.info("Done")
+        return
 
     logger.info("Running build_super_graph")
     supergraph = build_super_graph(
