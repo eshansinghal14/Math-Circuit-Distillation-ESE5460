@@ -586,7 +586,7 @@ def save_cluster_activation_heatmap_pdfs(
 
 
 def save_supernode_activation_heatmap_pdf(
-    activation_grid: torch.Tensor,
+    activation_grids: torch.Tensor,
     arg_values: list[list[int]],
     members: list[int],
     neuron_locations: torch.Tensor,
@@ -594,82 +594,83 @@ def save_supernode_activation_heatmap_pdf(
     output_path: str,
     title: str,
 ) -> str:
-    """Save one aggregate activation heatmap for a supernode."""
+    """Save one activation heatmap page per neuron in a supernode."""
     output_dir = os.path.dirname(output_path)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
-    activation_grid = activation_grid.detach().float().cpu()
+    activation_grids = activation_grids.detach().float().cpu()
+    if activation_grids.shape[0] != len(members):
+        raise ValueError(
+            f"Expected one activation grid per member, got {activation_grids.shape[0]} "
+            f"grids for {len(members)} members"
+        )
+
     locations_cpu = neuron_locations.detach().cpu()
-    member_locations = []
-    for graph_neuron_idx in members:
+    member_locations = {}
+    for member_idx, graph_neuron_idx in enumerate(members):
         layer = int(locations_cpu[graph_neuron_idx, 0].item())
         token_pos = int(locations_cpu[graph_neuron_idx, 1].item())
         neuron_id = int(locations_cpu[graph_neuron_idx, 2].item())
-        member_locations.append(
-            f"idx={graph_neuron_idx} layer={layer} token={token_pos} neuron={neuron_id}"
+        member_locations[member_idx] = (
+            f"idx={graph_neuron_idx} layer={layer} token={token_pos} neuron={neuron_id}",
+            neuron_id,
         )
 
     with PdfPages(output_path) as pdf:
-        if torch.isnan(activation_grid).all():
-            fig, ax = plt.subplots(figsize=(8, 4))
-            ax.text(0.5, 0.5, "No valid activations", ha="center", va="center")
-            ax.set_axis_off()
-        else:
-            n_args = len(arg_values)
-            if n_args == 1:
-                xs = arg_values[0]
-                ys = activation_grid.tolist()
+        for member_idx, activation_grid in enumerate(activation_grids):
+            location_text, neuron_id = member_locations[member_idx]
+            page_title = f"{title}\nNeuron {neuron_id} ({location_text})"
+            if torch.isnan(activation_grid).all():
                 fig, ax = plt.subplots(figsize=(8, 4))
-                ax.plot(xs, ys, marker="o")
-                ax.set_xlabel("arg 1")
-                ax.set_ylabel("mean activation")
-            elif n_args == 2:
-                xs = arg_values[0]
-                ys = arg_values[1]
-                heatmap = activation_grid.T.contiguous()
-                fig, ax = plt.subplots(figsize=(8, 6))
-                image = ax.imshow(
-                    heatmap.numpy(),
-                    origin="lower",
-                    aspect="auto",
-                    extent=[min(xs), max(xs), min(ys), max(ys)],
-                )
-                fig.colorbar(image, ax=ax, label="mean activation")
-                ax.set_xlabel("arg 1")
-                ax.set_ylabel("arg 2")
+                ax.text(0.5, 0.5, "No valid activations", ha="center", va="center")
+                ax.set_axis_off()
             else:
-                points = []
-                for x_idx, x in enumerate(arg_values[0]):
-                    for y_idx, y in enumerate(arg_values[1]):
-                        for z_idx, z in enumerate(arg_values[2]):
-                            activation = activation_grid[x_idx, y_idx, z_idx]
-                            if activation == activation:
-                                points.append((x, y, z, float(activation.item())))
+                n_args = len(arg_values)
+                if n_args == 1:
+                    xs = arg_values[0]
+                    ys = activation_grid.tolist()
+                    fig, ax = plt.subplots(figsize=(8, 4))
+                    ax.plot(xs, ys, marker="o")
+                    ax.set_xlabel("arg 1")
+                    ax.set_ylabel("activation")
+                elif n_args == 2:
+                    xs = arg_values[0]
+                    ys = arg_values[1]
+                    heatmap = activation_grid.T.contiguous()
+                    fig, ax = plt.subplots(figsize=(8, 6))
+                    image = ax.imshow(
+                        heatmap.numpy(),
+                        origin="lower",
+                        aspect="auto",
+                        extent=[min(xs), max(xs), min(ys), max(ys)],
+                    )
+                    fig.colorbar(image, ax=ax, label="activation")
+                    ax.set_xlabel("arg 1")
+                    ax.set_ylabel("arg 2")
+                else:
+                    points = []
+                    for x_idx, x in enumerate(arg_values[0]):
+                        for y_idx, y in enumerate(arg_values[1]):
+                            for z_idx, z in enumerate(arg_values[2]):
+                                activation = activation_grid[x_idx, y_idx, z_idx]
+                                if activation == activation:
+                                    points.append((x, y, z, float(activation.item())))
 
-                fig = plt.figure(figsize=(8, 6))
-                ax = fig.add_subplot(111, projection="3d")
-                if points:
-                    xs, ys, zs, activation_colors = zip(*points, strict=True)
-                    scatter = ax.scatter(xs, ys, zs, c=activation_colors, cmap="viridis")
-                    fig.colorbar(scatter, ax=ax, label="mean activation")
-                ax.set_xlabel("arg 1")
-                ax.set_ylabel("arg 2")
-                ax.set_zlabel("arg 3")
+                    fig = plt.figure(figsize=(8, 6))
+                    ax = fig.add_subplot(111, projection="3d")
+                    if points:
+                        xs, ys, zs, activation_colors = zip(*points, strict=True)
+                        scatter = ax.scatter(xs, ys, zs, c=activation_colors, cmap="viridis")
+                        fig.colorbar(scatter, ax=ax, label="activation")
+                    ax.set_xlabel("arg 1")
+                    ax.set_ylabel("arg 2")
+                    ax.set_zlabel("arg 3")
 
-        ax.set_title(title)
-        if member_locations:
-            fig.text(
-                0.01,
-                0.01,
-                "\n".join(member_locations[:12]),
-                ha="left",
-                va="bottom",
-                fontsize=6,
-            )
-        fig.tight_layout()
-        pdf.savefig(fig)
-        plt.close(fig)
+            ax.set_title(page_title)
+            fig.tight_layout()
+            pdf.savefig(fig)
+            plt.close(fig)
 
     return output_path
 

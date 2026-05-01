@@ -585,10 +585,9 @@ def build_super_graph(
                 members = kept_neuron_indices[result_rows].tolist()
                 supernodes.append([int(member) for member in members])
                 cluster_maps = embedding_maps[cluster_rows]
-                aggregate_map = aggregate_nanmean(cluster_maps, dim=0)
                 token_text = prompt_tokens[int(token_pos)].replace("\n", "\\n").replace("\r", "\\r")
                 supernode_heatmaps.append((
-                    aggregate_map,
+                    cluster_maps,
                     [activation_write_result.arg_values[arg_dim]],
                     [int(member) for member in members],
                     f"supernode {len(supernodes) - 1}: embedding token {int(token_pos)} {token_text!r}",
@@ -619,10 +618,9 @@ def build_super_graph(
                     members = kept_neuron_indices[result_rows].tolist()
                     supernodes.append([int(member) for member in members])
                     cluster_maps = computation_maps[cluster_rows]
-                    aggregate_map = aggregate_nanmean(cluster_maps, dim=0)
                     token_text = prompt_tokens[int(computation_token_pos)].replace("\n", "\\n").replace("\r", "\\r")
                     supernode_heatmaps.append((
-                        aggregate_map,
+                        cluster_maps,
                         activation_write_result.arg_values,
                         [int(member) for member in members],
                         f"supernode {len(supernodes) - 1}: computation token {int(computation_token_pos)} {token_text!r}",
