@@ -97,10 +97,19 @@ def _plot_supernode_prob_delta_norms(
 
     import matplotlib.pyplot as plt
 
-    norms = supergraph.supernode_prob_deltas.detach().float().cpu().norm(dim=1)
+    norms = (
+        supergraph.all_supernode_prob_delta_norms.detach().float().cpu()
+        if supergraph.all_supernode_prob_delta_norms is not None
+        else supergraph.supernode_prob_deltas.detach().float().cpu().norm(dim=1)
+    )
     xs = list(range(int(norms.numel())))
     fig, ax = plt.subplots(figsize=(10, 4))
     ax.bar(xs, norms.tolist())
+    if supergraph.prob_delta_elbow_index is not None and int(norms.numel()):
+        elbow_idx = min(max(int(supergraph.prob_delta_elbow_index), 0), int(norms.numel()) - 1)
+        ax.axvline(elbow_idx, color="red", linestyle="--", label=f"elbow={elbow_idx}")
+        ax.scatter([elbow_idx], [float(norms[elbow_idx].item())], color="red", zorder=3)
+        ax.legend()
     ax.set_xlabel("supernode")
     ax.set_ylabel("||probability delta||")
     ax.set_title("Supernode Probability Delta Norms")
@@ -317,6 +326,8 @@ def _save_supergraph(path: str, supergraph: SuperGraph) -> None:
             "supernode_adjacency_matrix": supergraph.supernode_adjacency_matrix,
             "supernodes": supergraph.supernodes,
             "supernode_prob_deltas": supergraph.supernode_prob_deltas,
+            "all_supernode_prob_delta_norms": supergraph.all_supernode_prob_delta_norms,
+            "prob_delta_elbow_index": supergraph.prob_delta_elbow_index,
         },
         path,
     )

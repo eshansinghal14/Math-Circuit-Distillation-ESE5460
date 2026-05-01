@@ -245,6 +245,27 @@ def find_threshold(scores: torch.Tensor, threshold: float):
     return sorted_scores[threshold_index]
 
 
+def find_elbow(values: torch.Tensor | list[float]) -> int:
+    """Return the 0-based elbow index using max distance from the endpoint line."""
+    values_t = torch.as_tensor(values, dtype=torch.float32).flatten()
+    if values_t.numel() <= 2:
+        return int(max(values_t.numel() - 1, 0))
+
+    x = torch.linspace(0.0, 1.0, steps=int(values_t.numel()))
+    y_min = values_t.min()
+    y_range = (values_t.max() - y_min).clamp(min=1e-12)
+    y = (values_t - y_min) / y_range
+    points = torch.stack([x, y], dim=1)
+    start = points[0]
+    end = points[-1]
+    line = end - start
+    line_norm = line.norm().clamp(min=1e-12)
+    distances = torch.abs(
+        line[0] * (start[1] - points[:, 1]) - (start[0] - points[:, 0]) * line[1]
+    ) / line_norm
+    return int(torch.argmax(distances).item())
+
+
 class PruneResult(NamedTuple):
     node_mask: torch.Tensor
     edge_mask: torch.Tensor
@@ -315,6 +336,8 @@ class SuperGraph(NamedTuple):
     supernode_adjacency_matrix: torch.Tensor
     supernodes: list[list[int]]       # old node ids inside each new node
     supernode_prob_deltas: torch.Tensor | None = None
+    all_supernode_prob_delta_norms: torch.Tensor | None = None
+    prob_delta_elbow_index: int | None = None
 
 
 def build_super_graph(
@@ -766,6 +789,14 @@ def build_super_graph(
             [float(scores[idx]) for idx in order],
         )
 
+    def elbow_keep_count(norms: list[float]) -> tuple[int, int | None]:
+        if not norms:
+            return 0, None
+        elbow_idx = find_elbow(norms)
+        keep_count = max(1, int(elbow_idx))
+        keep_count = min(keep_count, len(norms))
+        return keep_count, elbow_idx
+
     def sort_cluster_by_abs_influence(
         members: list[int],
         activation_maps: torch.Tensor,
@@ -814,6 +845,8 @@ def build_super_graph(
     kept_neuron_indices_device = torch.where(kept_neuron_mask)[0]
     kept_neuron_indices = kept_neuron_indices_device.detach().cpu()
     logger.info("  Kept neurons for supergraph: %d", int(kept_neuron_indices.numel()))
+    all_supernode_prob_delta_norms = torch.empty(0, dtype=torch.float32)
+    prob_delta_elbow_index = None
 
     if cluster_method == "ablation" and kept_neuron_indices.numel():
         logger.info("  Building supernodes with ablation probability-delta clustering")
@@ -821,6 +854,20 @@ def build_super_graph(
         supernodes, supernode_prob_deltas, supernode_prob_delta_norms = (
             sort_supernodes_by_output_prob_delta(supernodes)
         )
+        all_supernode_prob_delta_norms = torch.tensor(
+            supernode_prob_delta_norms,
+            dtype=torch.float32,
+        )
+        keep_count, prob_delta_elbow_index = elbow_keep_count(supernode_prob_delta_norms)
+        logger.info(
+            "  Probability-delta elbow: index=%s keeping_supernodes=%d/%d",
+            prob_delta_elbow_index,
+            keep_count,
+            len(supernodes),
+        )
+        supernodes = supernodes[:keep_count]
+        supernode_prob_deltas = supernode_prob_deltas[:keep_count]
+        supernode_prob_delta_norms = supernode_prob_delta_norms[:keep_count]
         for supernode_idx, (members, prob_delta_norm) in enumerate(
             zip(supernodes, supernode_prob_delta_norms, strict=True)
         ):
@@ -989,6 +1036,21 @@ def build_super_graph(
         supernode_heatmaps = [supernode_heatmaps[idx] for idx in supernode_order]
         supernode_prob_deltas = supernode_deltas[supernode_order_tensor]
         supernode_prob_delta_norms = [float(supernode_prob_delta_norms[idx]) for idx in supernode_order]
+        all_supernode_prob_delta_norms = torch.tensor(
+            supernode_prob_delta_norms,
+            dtype=torch.float32,
+        )
+        keep_count, prob_delta_elbow_index = elbow_keep_count(supernode_prob_delta_norms)
+        logger.info(
+            "  Probability-delta elbow: index=%s keeping_supernodes=%d/%d",
+            prob_delta_elbow_index,
+            keep_count,
+            len(supernodes),
+        )
+        supernodes = supernodes[:keep_count]
+        supernode_heatmaps = supernode_heatmaps[:keep_count]
+        supernode_prob_deltas = supernode_prob_deltas[:keep_count]
+        supernode_prob_delta_norms = supernode_prob_delta_norms[:keep_count]
 
         for supernode_idx, (members, prob_delta_norm) in enumerate(
             zip(supernodes, supernode_prob_delta_norms, strict=True)
@@ -1020,6 +1082,10 @@ def build_super_graph(
         fallback_members.sort(key=lambda member: abs(float(node_influence[member].item())), reverse=True)
         supernodes = [fallback_members] if fallback_members else []
         supernode_prob_deltas = compute_supernode_ablation_prob_deltas(supernodes)
+        all_supernode_prob_delta_norms = supernode_prob_deltas.norm(dim=1).detach().float().cpu()
+        keep_count, prob_delta_elbow_index = elbow_keep_count(all_supernode_prob_delta_norms.tolist())
+        supernodes = supernodes[:keep_count]
+        supernode_prob_deltas = supernode_prob_deltas[:keep_count]
 
     logger.info("  Aggregating supergraph")
     adj_matrix_norm = normalize_matrix(adjacency_matrix)
@@ -1045,6 +1111,8 @@ def build_super_graph(
         supernode_adjacency_matrix=supernode_adj_matrix,
         supernodes=supernodes,
         supernode_prob_deltas=supernode_prob_deltas,
+        all_supernode_prob_delta_norms=all_supernode_prob_delta_norms,
+        prob_delta_elbow_index=prob_delta_elbow_index,
     )
 
 
