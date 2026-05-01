@@ -571,6 +571,94 @@ def build_super_graph(
 
         return deltas
 
+    @torch.no_grad()
+    def compute_supernode_ablation_prob_deltas(supernode_members: list[list[int]]) -> torch.Tensor:
+        if graph.n_logits == 0:
+            return torch.empty((len(supernode_members), 0), dtype=torch.float32)
+        if activation_forward_batch_size <= 0:
+            raise ValueError("activation_forward_batch_size must be positive")
+        if not supernode_members:
+            return torch.empty((0, graph.n_logits), dtype=torch.float32)
+
+        input_ids = graph.input_tokens.to(model.cfg.device)
+        target_token_ids = graph.logit_token_ids.to(device=input_ids.device)
+        if target_token_ids.numel() and int(target_token_ids.max().item()) >= model.cfg.d_vocab:
+            raise ValueError("Supernode probability-delta ranking only supports real vocabulary logit targets")
+
+        baseline_logits = model(input_ids)
+        baseline_probs = torch.softmax(baseline_logits[0, -1], dim=-1)[target_token_ids]
+        device = input_ids.device
+        dtype = baseline_logits.dtype
+
+        w_out_cache = {}
+
+        def source_vector_for_member(member: int) -> tuple[int, torch.Tensor]:
+            layer = int(graph.neuron_locations[member, 0].item())
+            neuron_id = int(graph.neuron_locations[member, 2].item())
+            if layer not in w_out_cache:
+                old_mlp = model.blocks[layer].mlp.old_mlp
+                w_out_cache[layer] = model._row_oriented_weight(
+                    old_mlp.W_out.to(device=device, dtype=dtype)
+                )
+            activation = graph.neuron_activations[member].to(device=device, dtype=dtype)
+            return layer, activation * w_out_cache[layer][neuron_id]
+
+        deltas = torch.empty(
+            len(supernode_members),
+            graph.n_logits,
+            dtype=torch.float32,
+            device="cpu",
+        )
+        total_batches = math.ceil(len(supernode_members) / activation_forward_batch_size)
+
+        def make_supernode_ablation_hook(entries: list[tuple[int, int, torch.Tensor]]):
+            def hook_fn(acts: torch.Tensor, hook):
+                acts_out = acts.clone()
+                for batch_idx, token_pos, vector in entries:
+                    acts_out[batch_idx, token_pos] -= vector.to(device=acts.device, dtype=acts.dtype)
+                return acts_out
+
+            return hook_fn
+
+        for batch_idx, start in enumerate(
+            range(0, len(supernode_members), activation_forward_batch_size),
+            start=1,
+        ):
+            batch_supernodes = supernode_members[start:start + activation_forward_batch_size]
+            entries_by_layer: dict[int, list[tuple[int, int, torch.Tensor]]] = {}
+            for local_supernode_idx, members in enumerate(batch_supernodes):
+                for member in members:
+                    layer, source_vector = source_vector_for_member(member)
+                    token_pos = int(graph.neuron_locations[member, 1].item())
+                    entries_by_layer.setdefault(layer, []).append(
+                        (local_supernode_idx, token_pos, source_vector)
+                    )
+
+            hooks = [
+                (
+                    f"blocks.{layer_idx}.{model.feature_output_hook}",
+                    make_supernode_ablation_hook(entries),
+                )
+                for layer_idx, entries in entries_by_layer.items()
+            ]
+            ablated_logits = model.run_with_hooks(
+                input_ids.expand(len(batch_supernodes), -1),
+                fwd_hooks=hooks,
+            )
+            ablated_probs = torch.softmax(ablated_logits[:, -1], dim=-1)[:, target_token_ids]
+            deltas[start:start + len(batch_supernodes)] = (
+                baseline_probs.unsqueeze(0) - ablated_probs
+            ).detach().float().cpu()
+            logger.info(
+                "  supernode probability-delta ranking batch %d/%d: supernodes %d-%d",
+                batch_idx,
+                total_batches,
+                start,
+                start + len(batch_supernodes) - 1,
+            )
+
+        return deltas
+
     def cluster_by_ablation_prob_deltas(neuron_indices: torch.Tensor) -> list[list[int]]:
         if neuron_indices.numel() == 0:
             return []
@@ -578,7 +666,10 @@ def build_super_graph(
             logger.info("  Ablation clustering: no logit targets")
             return [[int(member)] for member in neuron_indices.tolist()]
 
-        deltas = compute_ablation_prob_deltas(neuron_indices)
+        ensure_prob_deltas(neuron_indices)
+        deltas = torch.stack(
+            [prob_delta_by_neuron[int(member)] for member in neuron_indices.detach().cpu().tolist()]
+        )
         normalized_deltas = F.normalize(deltas, p=2, dim=1, eps=1e-12)
         similarity = (normalized_deltas @ normalized_deltas.T).clamp(min=-1.0, max=1.0)
         distance_matrix = torch.arccos(similarity) / math.pi
@@ -630,6 +721,43 @@ def build_super_graph(
         if not members:
             return 0.0
         return float(node_influence[torch.tensor(members, dtype=torch.long)].sum().item())
+
+    prob_delta_norm_by_neuron: dict[int, float] = {}
+    prob_delta_by_neuron: dict[int, torch.Tensor] = {}
+
+    def ensure_prob_deltas(neuron_indices: torch.Tensor) -> None:
+        missing = [
+            int(member)
+            for member in neuron_indices.detach().cpu().tolist()
+            if int(member) not in prob_delta_by_neuron
+        ]
+        if not missing:
+            return
+        missing_indices = torch.tensor(missing, dtype=torch.long)
+        deltas = compute_ablation_prob_deltas(missing_indices)
+        norms = deltas.norm(dim=1)
+        for member, delta, norm in zip(missing, deltas, norms, strict=True):
+            prob_delta_by_neuron[int(member)] = delta.detach().float().cpu()
+            prob_delta_norm_by_neuron[int(member)] = float(norm.item())
+
+    def supernode_prob_delta_norm(members: list[int]) -> float:
+        if not members:
+            return 0.0
+        ensure_prob_deltas(torch.tensor(members, dtype=torch.long))
+        if graph.n_logits == 0:
+            return 0.0
+        total_delta = torch.stack([prob_delta_by_neuron[member] for member in members]).sum(dim=0)
+        return float(total_delta.norm().item())
+
+    def sort_supernodes_by_output_prob_delta(
+        supernodes_to_sort: list[list[int]],
+    ) -> tuple[list[list[int]], list[float]]:
+        if not supernodes_to_sort:
+            return supernodes_to_sort, []
+        deltas = compute_supernode_ablation_prob_deltas(supernodes_to_sort)
+        scores = deltas.norm(dim=1).tolist()
+        order = sorted(range(len(supernodes_to_sort)), key=lambda idx: scores[idx], reverse=True)
+        return [supernodes_to_sort[idx] for idx in order], [float(scores[idx]) for idx in order]
 
     def sort_cluster_by_abs_influence(
         members: list[int],
@@ -683,16 +811,14 @@ def build_super_graph(
     if cluster_method == "ablation" and kept_neuron_indices.numel():
         logger.info("  Building supernodes with ablation probability-delta clustering")
         supernodes = cluster_by_ablation_prob_deltas(kept_neuron_indices)
-        supernode_order = sorted(
-            range(len(supernodes)),
-            key=lambda idx: supernode_influence(supernodes[idx]),
-            reverse=True,
-        )
-        supernodes = [supernodes[idx] for idx in supernode_order]
-        for supernode_idx, members in enumerate(supernodes):
+        supernodes, supernode_prob_delta_norms = sort_supernodes_by_output_prob_delta(supernodes)
+        for supernode_idx, (members, prob_delta_norm) in enumerate(
+            zip(supernodes, supernode_prob_delta_norms, strict=True)
+        ):
             logger.info(
-                "  supernode %d influence=%.6g neuron locations: %s",
+                "  supernode %d prob_delta_norm=%.6g influence=%.6g neuron locations: %s",
                 supernode_idx,
+                prob_delta_norm,
                 supernode_influence(members),
                 format_member_locations(members),
             )
@@ -842,18 +968,24 @@ def build_super_graph(
                         f"computation token {int(computation_token_pos)} {token_text!r}",
                     ))
 
+        supernode_deltas = compute_supernode_ablation_prob_deltas(supernodes)
+        supernode_prob_delta_norms = supernode_deltas.norm(dim=1).tolist()
         supernode_order = sorted(
             range(len(supernodes)),
-            key=lambda idx: supernode_influence(supernodes[idx]),
+            key=lambda idx: supernode_prob_delta_norms[idx],
             reverse=True,
         )
         supernodes = [supernodes[idx] for idx in supernode_order]
         supernode_heatmaps = [supernode_heatmaps[idx] for idx in supernode_order]
+        supernode_prob_delta_norms = [float(supernode_prob_delta_norms[idx]) for idx in supernode_order]
 
-        for supernode_idx, members in enumerate(supernodes):
+        for supernode_idx, (members, prob_delta_norm) in enumerate(
+            zip(supernodes, supernode_prob_delta_norms, strict=True)
+        ):
             logger.info(
-                "  supernode %d influence=%.6g neuron locations: %s",
+                "  supernode %d prob_delta_norm=%.6g influence=%.6g neuron locations: %s",
                 supernode_idx,
+                prob_delta_norm,
                 supernode_influence(members),
                 format_member_locations(members),
             )
