@@ -656,7 +656,8 @@ def build_super_graph(
             if hasattr(model, "model"):
                 out = model.model(input_ids.unsqueeze(0), output_hidden_states=True, return_dict=True)
                 final_resid = out.hidden_states[-1][0, -1]  # shape (d_model,)
-                norm_fn = model.model.norm
+                # For LlamaForCausalLM, the norm is in .model.norm
+                norm_fn = getattr(model.model, "model", model.model).norm
                 head_fn = model.lm_head
             else:
                 raise RuntimeError("Cannot approximate ablation prob deltas without hidden states")
