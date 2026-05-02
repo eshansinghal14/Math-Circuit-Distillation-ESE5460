@@ -89,9 +89,9 @@ def compute_prompt_graph_loss(
         batch_size=config.student_graph_batch_size,
         dtype=config.graph_dtype,
         verbose=config.verbose,
-        # create_graph=True: keeps Jacobian connected to student weights so
-        # the edge structural loss actually backprops to the student.
-        create_graph=True,
+        # Keep graph loss trainable through student activations/write vectors
+        # without retaining a full second-order graph for every attribution edge.
+        create_graph=False,
         detach_result=False,
     )
 
