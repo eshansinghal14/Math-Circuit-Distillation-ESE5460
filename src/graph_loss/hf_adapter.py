@@ -446,11 +446,12 @@ class HFLlamaGraphAdapter:
                 mlp_inputs[idx] = inputs[0]
             handles.append(layer.mlp.register_forward_pre_hook(pre_hook))
             
+        input_ids_2d = input_ids.unsqueeze(0)
         try:
             with self.autocast_context(dtype):
                 _ = self.model(
-                    input_ids=input_ids,
-                    attention_mask=torch.ones_like(input_ids),
+                    input_ids=input_ids_2d,
+                    attention_mask=torch.ones_like(input_ids_2d),
                     output_hidden_states=False,
                     use_cache=False,
                 )
