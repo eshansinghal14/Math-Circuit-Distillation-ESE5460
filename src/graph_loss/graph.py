@@ -616,7 +616,11 @@ def build_super_graph(
         if target_token_ids.numel() and int(target_token_ids.max().item()) >= model_d_vocab:
             raise ValueError("Supernode probability-delta ranking only supports real vocabulary logit targets")
 
-        baseline_logits = model(input_ids)
+        if hasattr(model, "run_with_hooks"):
+            baseline_logits = model(input_ids)
+        else:
+            baseline_logits = model.model(input_ids).logits
+            
         baseline_probs = torch.softmax(baseline_logits[0, -1], dim=-1)[target_token_ids]
         device = input_ids.device
         dtype = baseline_logits.dtype
