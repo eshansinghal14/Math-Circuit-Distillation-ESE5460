@@ -1764,6 +1764,8 @@ class ClusterDistillationTrainer:
                         if self._graph:
                             kl_for_backward.backward()
                             del loss, kl_loss, hard_ce, replay_ce
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
                             loss = self._backward_deferred_graph_loss(
                                 batch,
                                 metrics,
@@ -1812,6 +1814,8 @@ class ClusterDistillationTrainer:
                 if self._graph:
                     kl_for_backward.backward()
                     del loss, kl_loss, hard_ce, replay_ce
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
                     loss = self._backward_deferred_graph_loss(
                         batch,
                         metrics,
