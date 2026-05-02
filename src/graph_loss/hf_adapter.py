@@ -420,38 +420,6 @@ class HFLlamaGraphAdapter:
             graph = detach_graph(graph)
         return graph
 
-
-class _HFGraphConfig:
-    def __init__(self, adapter: HFLlamaGraphAdapter):
-        self.n_layers = adapter.n_layers
-        self.d_model = adapter.d_model
-        self.d_mlp = adapter.d_mlp
-        self.d_vocab = adapter.d_vocab
-        self.d_head = int(getattr(adapter.config, "head_dim", 0) or adapter.d_model // adapter.config.num_attention_heads)
-        self.n_heads = int(adapter.config.num_attention_heads)
-        self.n_key_value_heads = getattr(adapter.config, "num_key_value_heads", None)
-        name = getattr(adapter.config, "_name_or_path", None) or getattr(adapter.config, "name_or_path", "llama")
-        self.model_name = name
-        self.tokenizer_name = name
-
-    def to_dict(self) -> dict[str, Any]:
-        return vars(self)
-
-
-def detach_graph(graph: Graph) -> Graph:
-    return Graph(
-        input_string=graph.input_string,
-        input_tokens=graph.input_tokens.detach(),
-        neuron_locations=graph.neuron_locations.detach(),
-        adjacency_matrix=graph.adjacency_matrix.detach(),
-        cfg=graph.cfg,
-        neuron_activations=graph.neuron_activations.detach(),
-        logit_targets=graph.logit_targets,
-        logit_probabilities=graph.logit_probabilities.detach(),
-        vocab_size=graph.vocab_size,
-    )
-
-
     def compute_supernode_dlas_with_grad(
         self,
         prompt: str | torch.Tensor | list[int],
@@ -544,6 +512,37 @@ def detach_graph(graph: Graph) -> Graph:
             supernode_dlas[i] = sn_dla
             
         return supernode_dlas
+
+
+class _HFGraphConfig:
+    def __init__(self, adapter: HFLlamaGraphAdapter):
+        self.n_layers = adapter.n_layers
+        self.d_model = adapter.d_model
+        self.d_mlp = adapter.d_mlp
+        self.d_vocab = adapter.d_vocab
+        self.d_head = int(getattr(adapter.config, "head_dim", 0) or adapter.d_model // adapter.config.num_attention_heads)
+        self.n_heads = int(adapter.config.num_attention_heads)
+        self.n_key_value_heads = getattr(adapter.config, "num_key_value_heads", None)
+        name = getattr(adapter.config, "_name_or_path", None) or getattr(adapter.config, "name_or_path", "llama")
+        self.model_name = name
+        self.tokenizer_name = name
+
+    def to_dict(self) -> dict[str, Any]:
+        return vars(self)
+
+
+def detach_graph(graph: Graph) -> Graph:
+    return Graph(
+        input_string=graph.input_string,
+        input_tokens=graph.input_tokens.detach(),
+        neuron_locations=graph.neuron_locations.detach(),
+        adjacency_matrix=graph.adjacency_matrix.detach(),
+        cfg=graph.cfg,
+        neuron_activations=graph.neuron_activations.detach(),
+        logit_targets=graph.logit_targets,
+        logit_probabilities=graph.logit_probabilities.detach(),
+        vocab_size=graph.vocab_size,
+    )
 
 
 def extract_hf_supernode_members(
