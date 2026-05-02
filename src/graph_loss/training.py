@@ -8,19 +8,15 @@ from typing import Any
 
 import torch
 
-from graph_loss.align import align_supernodes
+from graph_loss.align import align_supernodes_prob_delta
 from graph_loss.attribution.attribute import attribute
 from graph_loss.graph import (
     SuperGraph,
     build_super_graph,
-    extract_supernode_members,
     normalize_matrix,
     prune_graph,
 )
-from graph_loss.hf_adapter import (
-    HFLlamaGraphAdapter,
-    extract_hf_supernode_members,
-)
+from graph_loss.hf_adapter import HFLlamaGraphAdapter
 from graph_loss.loss import compute_graph_loss
 
 
@@ -38,7 +34,7 @@ class GraphAuxConfig:
     graph_edge_threshold: float = 0.98
     graph_similarity_threshold: float = 0.7
     graph_max_fan_out: int = 4
-    graph_node_weight: float = 0.1  # weight of DLA node loss within L_graph
+    graph_node_weight: float = 0.1  # weight of prob-delta node loss within L_graph
 
 
 def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
@@ -153,31 +149,15 @@ def compute_prompt_graph_loss(
         )
 
     if config.verbose:
-        print("  [graph] aligning supernodes and computing graph loss")
-    teacher_members = extract_supernode_members(
+        print("  [graph] aligning supernodes via prob-delta and computing graph loss")
+    alignment = align_supernodes_prob_delta(
         teacher_supergraph,
-        teacher_graph,
-        teacher_graph_model,
-    )
-    student_members = extract_hf_supernode_members(
         student_supergraph,
+        teacher_graph,
         student_graph,
-        student_adapter,
-        detach=False,
-    )
-    alignment = align_supernodes(
-        teacher_members,
-        student_members,
-        teacher_graph_model.unembed.W_U.detach().to(
-            device=student_graph.adjacency_device,
-            dtype=config.graph_dtype or student_graph.adjacency_matrix.dtype,
-        ),
-        student_adapter.W_U.to(
-            device=student_graph.adjacency_device,
-            dtype=config.graph_dtype or student_graph.adjacency_matrix.dtype,
-        ),
         similarity_threshold=config.graph_similarity_threshold,
         max_fan_out=config.graph_max_fan_out,
+        n_vocab=teacher_graph_model.cfg.d_vocab,
     )
 
     teacher_ids = list(range(len(teacher_supergraph.supernodes)))

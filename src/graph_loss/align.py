@@ -32,6 +32,93 @@ def compute_supernode_dla(
     return write_vec @ W_U
 
 
+def _build_full_vocab_prob_deltas(
+    supergraph,
+    graph,
+    n_vocab: int,
+) -> torch.Tensor:
+    """Expand per-supernode prob-deltas from logit-target indices to full vocab.
+
+    Returns shape [n_supernodes, n_vocab] with zeros for non-target tokens.
+    """
+    n_supernodes = len(supergraph.supernodes)
+    full = torch.zeros(n_supernodes, n_vocab, dtype=torch.float32)
+
+    if supergraph.supernode_prob_deltas is None or supergraph.supernode_prob_deltas.numel() == 0:
+        return full
+
+    logit_token_ids = graph.logit_token_ids.cpu()
+    deltas = supergraph.supernode_prob_deltas.detach().float().cpu()
+
+    # deltas may have fewer rows than supernodes if prob-delta computation
+    # was only done for a subset, so cap the scatter.
+    n_rows = min(deltas.shape[0], n_supernodes)
+    for i in range(n_rows):
+        full[i, logit_token_ids] = deltas[i]
+
+    return full
+
+
+def align_supernodes_prob_delta(
+    teacher_supergraph,
+    student_supergraph,
+    teacher_graph,
+    student_graph,
+    *,
+    similarity_threshold: float = 0.3,
+    max_fan_out: int = 4,
+    n_vocab: int = 128000,
+) -> AlignmentResult:
+    """Align supernodes using ablation probability-delta cosine similarity.
+
+    This replaces DLA-based alignment with a signal that lives in shared
+    probability space, making cross-model comparison meaningful.
+    """
+    t_full = _build_full_vocab_prob_deltas(teacher_supergraph, teacher_graph, n_vocab)
+    s_full = _build_full_vocab_prob_deltas(student_supergraph, student_graph, n_vocab)
+
+    # Normalize for cosine similarity
+    t_norm = F.normalize(t_full, dim=1)
+    s_norm = F.normalize(s_full, dim=1)
+
+    # sim_matrix[i, j] = cosine similarity between teacher SN i and student SN j
+    sim_matrix = t_norm @ s_norm.T
+
+    result = AlignmentResult()
+
+    # Store the prob-delta vectors as "DLA" for backward compat with loss.py
+    for tid in range(t_full.shape[0]):
+        result.teacher_dla[tid] = t_full[tid]
+    for sid in range(s_full.shape[0]):
+        result.student_dla[sid] = s_full[sid]
+
+    n_teacher = sim_matrix.shape[0]
+    n_student = sim_matrix.shape[1]
+
+    for tid in range(n_teacher):
+        sims = sim_matrix[tid]
+        above = [
+            (sims[sid].item(), sid)
+            for sid in range(n_student)
+            if sims[sid].item() >= similarity_threshold
+        ]
+        above.sort(reverse=True)
+
+        if len(above) >= 2:
+            gap = above[0][0] - above[1][0]
+            if gap < 0.05:
+                result.mapping[tid] = {above[0][1]}
+                result.best_sim[tid] = above[0][0]
+                continue
+
+        above = above[:max_fan_out]
+        result.mapping[tid] = {sid for _, sid in above}
+        result.best_sim[tid] = above[0][0] if above else 0.0
+
+    return result
+
+
+# Legacy DLA-based alignment (kept for reference/comparison)
 def align_supernodes(
     teacher_supernodes: list[dict],
     student_supernodes: list[dict],
