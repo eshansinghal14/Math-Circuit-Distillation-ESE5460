@@ -604,9 +604,16 @@ def build_super_graph(
         if not supernode_members:
             return torch.empty((0, graph.n_logits), dtype=torch.float32)
 
-        input_ids = graph.input_tokens.to(model.cfg.device)
+        model_device = getattr(model, "device", None)
+        if model_device is None and hasattr(model, "cfg"):
+            model_device = model.cfg.device
+        model_d_vocab = getattr(model, "d_vocab", None)
+        if model_d_vocab is None and hasattr(model, "cfg"):
+            model_d_vocab = model.cfg.d_vocab
+
+        input_ids = graph.input_tokens.to(model_device)
         target_token_ids = graph.logit_token_ids.to(device=input_ids.device)
-        if target_token_ids.numel() and int(target_token_ids.max().item()) >= model.cfg.d_vocab:
+        if target_token_ids.numel() and int(target_token_ids.max().item()) >= model_d_vocab:
             raise ValueError("Supernode probability-delta ranking only supports real vocabulary logit targets")
 
         baseline_logits = model(input_ids)
@@ -620,10 +627,14 @@ def build_super_graph(
             layer = int(graph.neuron_locations[member, 0].item())
             neuron_id = int(graph.neuron_locations[member, 2].item())
             if layer not in w_out_cache:
-                old_mlp = model.blocks[layer].mlp.old_mlp
-                w_out_cache[layer] = model._row_oriented_weight(
-                    old_mlp.W_out.to(device=device, dtype=dtype)
-                )
+                if hasattr(model, "blocks"):
+                    old_mlp = model.blocks[layer].mlp.old_mlp
+                    w_out_cache[layer] = model._row_oriented_weight(
+                        old_mlp.W_out.to(device=device, dtype=dtype)
+                    )
+                else:
+                    _, _, out_rows, _, _ = model._layer_weights(layer, device=device, dtype=dtype)
+                    w_out_cache[layer] = out_rows
             activation = graph.neuron_activations[member].to(device=device, dtype=dtype)
             return layer, activation * w_out_cache[layer][neuron_id]
 
@@ -633,53 +644,78 @@ def build_super_graph(
             dtype=torch.float32,
             device="cpu",
         )
-        total_batches = math.ceil(len(supernode_members) / activation_forward_batch_size)
 
-        def make_supernode_ablation_hook(entries: list[tuple[int, int, torch.Tensor]]):
-            def hook_fn(acts: torch.Tensor, hook):
-                acts_out = acts.clone()
-                for batch_idx, token_pos, vector in entries:
-                    acts_out[batch_idx, token_pos] -= vector.to(device=acts.device, dtype=acts.dtype)
-                return acts_out
+        has_hooks = hasattr(model, "run_with_hooks")
 
-            return hook_fn
+        if not has_hooks:
+            # Fast DLA approximation for HFLlamaGraphAdapter
+            if hasattr(model, "model"):
+                out = model.model(input_ids, output_hidden_states=True, return_dict=True)
+                final_resid = out.hidden_states[-1][0, -1]  # shape (d_model,)
+                norm_fn = model.model.norm
+                head_fn = model.lm_head
+            else:
+                raise RuntimeError("Cannot approximate ablation prob deltas without hidden states")
 
-        for batch_idx, start in enumerate(
-            range(0, len(supernode_members), activation_forward_batch_size),
-            start=1,
-        ):
-            batch_supernodes = supernode_members[start:start + activation_forward_batch_size]
-            entries_by_layer: dict[int, list[tuple[int, int, torch.Tensor]]] = {}
-            for local_supernode_idx, members in enumerate(batch_supernodes):
+            for i, members in enumerate(supernode_members):
+                total_source = torch.zeros_like(final_resid)
                 for member in members:
-                    layer, source_vector = source_vector_for_member(member)
-                    token_pos = int(graph.neuron_locations[member, 1].item())
-                    entries_by_layer.setdefault(layer, []).append(
-                        (local_supernode_idx, token_pos, source_vector)
-                    )
+                    _, source_vector = source_vector_for_member(member)
+                    total_source += source_vector
+                
+                ablated_resid = final_resid - total_source
+                ablated_logits = head_fn(norm_fn(ablated_resid.unsqueeze(0).unsqueeze(0)))[0, 0]
+                ablated_probs = torch.softmax(ablated_logits, dim=-1)[target_token_ids]
+                deltas[i] = (baseline_probs - ablated_probs).detach().float().cpu()
 
-            hooks = [
-                (
-                    f"blocks.{layer_idx}.{model.feature_output_hook}",
-                    make_supernode_ablation_hook(entries),
+        else:
+            # Full network ablation using hooks for HookedTransformer
+            total_batches = math.ceil(len(supernode_members) / activation_forward_batch_size)
+
+            def make_supernode_ablation_hook(entries: list[tuple[int, int, torch.Tensor]]):
+                def hook_fn(acts: torch.Tensor, hook):
+                    acts_out = acts.clone()
+                    for batch_idx, token_pos, vector in entries:
+                        acts_out[batch_idx, token_pos] -= vector.to(device=acts.device, dtype=acts.dtype)
+                    return acts_out
+                return hook_fn
+
+            for batch_idx, start in enumerate(
+                range(0, len(supernode_members), activation_forward_batch_size),
+                start=1,
+            ):
+                batch_supernodes = supernode_members[start:start + activation_forward_batch_size]
+                entries_by_layer: dict[int, list[tuple[int, int, torch.Tensor]]] = {}
+                for local_supernode_idx, members in enumerate(batch_supernodes):
+                    for member in members:
+                        layer, source_vector = source_vector_for_member(member)
+                        token_pos = int(graph.neuron_locations[member, 1].item())
+                        entries_by_layer.setdefault(layer, []).append(
+                            (local_supernode_idx, token_pos, source_vector)
+                        )
+
+                hooks = [
+                    (
+                        f"blocks.{layer_idx}.{model.feature_output_hook}",
+                        make_supernode_ablation_hook(entries),
+                    )
+                    for layer_idx, entries in entries_by_layer.items()
+                ]
+                ablated_logits = model.run_with_hooks(
+                    input_ids.expand(len(batch_supernodes), -1),
+                    fwd_hooks=hooks,
                 )
-                for layer_idx, entries in entries_by_layer.items()
-            ]
-            ablated_logits = model.run_with_hooks(
-                input_ids.expand(len(batch_supernodes), -1),
-                fwd_hooks=hooks,
-            )
-            ablated_probs = torch.softmax(ablated_logits[:, -1], dim=-1)[:, target_token_ids]
-            deltas[start:start + len(batch_supernodes)] = (
-                baseline_probs.unsqueeze(0) - ablated_probs
-            ).detach().float().cpu()
-            logger.info(
-                "  supernode probability-delta ranking batch %d/%d: supernodes %d-%d",
-                batch_idx,
-                total_batches,
-                start,
-                start + len(batch_supernodes) - 1,
-            )
+                ablated_probs = torch.softmax(ablated_logits[:, -1], dim=-1)[:, target_token_ids]
+                deltas[start:start + len(batch_supernodes)] = (
+                    baseline_probs.unsqueeze(0) - ablated_probs
+                ).detach().float().cpu()
+                logger.info(
+                    "  supernode probability-delta ranking batch %d/%d: supernodes %d-%d",
+                    batch_idx,
+                    total_batches,
+                    start,
+                    start + len(batch_supernodes) - 1,
+                )
 
         return deltas
 
