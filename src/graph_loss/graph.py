@@ -619,7 +619,7 @@ def build_super_graph(
         if hasattr(model, "run_with_hooks"):
             baseline_logits = model(input_ids)
         else:
-            baseline_logits = model.model(input_ids).logits
+            baseline_logits = model.model(input_ids.unsqueeze(0)).logits
             
         baseline_probs = torch.softmax(baseline_logits[0, -1], dim=-1)[target_token_ids]
         device = input_ids.device
@@ -654,7 +654,7 @@ def build_super_graph(
         if not has_hooks:
             # Fast DLA approximation for HFLlamaGraphAdapter
             if hasattr(model, "model"):
-                out = model.model(input_ids, output_hidden_states=True, return_dict=True)
+                out = model.model(input_ids.unsqueeze(0), output_hidden_states=True, return_dict=True)
                 final_resid = out.hidden_states[-1][0, -1]  # shape (d_model,)
                 norm_fn = model.model.norm
                 head_fn = model.lm_head
