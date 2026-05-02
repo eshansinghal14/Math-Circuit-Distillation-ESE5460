@@ -116,11 +116,12 @@ def compute_prompt_graph_loss(
     if config.verbose:
         print("  [graph] building teacher supergraph")
     supergraph_start = time.perf_counter()
-    teacher_supergraph = build_super_graph(
-        teacher_graph,
-        teacher_graph_model,
-        prune_result=teacher_prune_result,
-    )
+    with torch.no_grad():
+        teacher_supergraph = build_super_graph(
+            teacher_graph,
+            teacher_graph_model,
+            prune_result=teacher_prune_result,
+        )
     if config.verbose:
         print(
             "  [graph] teacher supergraph complete: "
