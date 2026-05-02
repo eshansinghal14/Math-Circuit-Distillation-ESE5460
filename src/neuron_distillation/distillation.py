@@ -1102,11 +1102,21 @@ class ClusterDistillationTrainer:
             self.teacher_graph_model.eval()
 
         # Optimizer
-        self.optimizer = AdamW(
-            params=self.student.parameters(),
-            lr=config.learning_rate,
-            weight_decay=config.weight_decay,
-        )
+        try:
+            import bitsandbytes as bnb
+            self.optimizer = bnb.optim.PagedAdamW8bit(
+                params=self.student.parameters(),
+                lr=config.learning_rate,
+                weight_decay=config.weight_decay,
+            )
+            print("Using 8-bit Paged AdamW optimizer to save memory.")
+        except ImportError:
+            self.optimizer = AdamW(
+                params=self.student.parameters(),
+                lr=config.learning_rate,
+                weight_decay=config.weight_decay,
+            )
+            print("Using standard AdamW optimizer (install bitsandbytes for memory savings).")
 
         # Dataset / loader (padding + kl_mask over the full next-token sequence)
         self.dataset = AddDataset(train_data, self.tokenizer)
