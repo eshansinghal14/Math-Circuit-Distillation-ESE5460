@@ -450,6 +450,7 @@ class HFLlamaGraphAdapter:
             with self.autocast_context(dtype):
                 _ = self.model(
                     input_ids=input_ids,
+                    attention_mask=torch.ones_like(input_ids),
                     output_hidden_states=False,
                     use_cache=False,
                 )
