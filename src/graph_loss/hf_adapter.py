@@ -348,36 +348,6 @@ class HFLlamaGraphAdapter:
                 )
             return chunk_out, chunk_mlp_inputs, chunk_mlp_outputs, chunk_embed_out
 
-        def source_scores_single(target: torch.Tensor) -> torch.Tensor:
-            source_tensors = [mlp_outputs[idx] for idx in range(self.n_layers)] + [embed_out]
-            grads = torch.autograd.grad(
-                target,
-                source_tensors,
-                retain_graph=True,
-                create_graph=create_graph,
-                allow_unused=True,
-            )
-            row = torch.zeros(source_count, dtype=source_vectors_t.dtype, device=self.device)
-            for layer_idx in range(self.n_layers):
-                layer_mask = source_layer_by_node_t == layer_idx
-                if not layer_mask.any():
-                    continue
-                grad = grads[layer_idx]
-                if grad is None:
-                    continue
-                layer_indices = torch.where(layer_mask)[0]
-                locs = neuron_locations_t[layer_mask]
-                grad_vecs = grad[0, locs[:, 1], :].to(source_vectors_t.dtype)
-                row[layer_indices] = (
-                    grad_vecs * source_vectors_t[layer_indices]
-                ).sum(dim=-1)
-            token_grad = grads[-1]
-            if token_grad is not None:
-                token_vectors = embed_out.squeeze(0).to(source_vectors_t.dtype)
-                row[n_neurons:source_count] = (
-                    token_grad.squeeze(0).to(source_vectors_t.dtype) * token_vectors
-                ).sum(dim=-1)
-            return row
 
         def source_scores_neuron_chunk(start_idx: int, end_idx: int) -> torch.Tensor:
             batch_len = end_idx - start_idx
@@ -395,7 +365,7 @@ class HFLlamaGraphAdapter:
                 torch.stack(terms).sum(),
                 source_tensors,
                 retain_graph=False,
-                create_graph=False,
+                create_graph=create_graph,
                 allow_unused=True,
             )
             return _source_scores_from_grads(grads, batch_len)
@@ -415,7 +385,7 @@ class HFLlamaGraphAdapter:
                 terms.sum(),
                 source_tensors,
                 retain_graph=False,
-                create_graph=False,
+                create_graph=create_graph,
                 allow_unused=True,
             )
             return _source_scores_from_grads(grads, batch_len)
@@ -424,40 +394,14 @@ class HFLlamaGraphAdapter:
             end = min(start + max(1, batch_size), n_neurons)
             if verbose:
                 print(f"    [graph] neuron rows {start}:{end} / {n_neurons}")
-            if create_graph:
-                target_values = []
-                for row_idx in range(start, end):
-                    layer_idx = int(neuron_locations_t[row_idx, 0].item())
-                    pos_idx = int(neuron_locations_t[row_idx, 1].item())
-                    target_values.append((
-                        mlp_inputs[layer_idx][0, pos_idx].to(target_encoders_t.dtype)
-                        * target_encoders_t[row_idx]
-                    ).sum())
-                adjacency[start:end, :source_count] = torch.stack(
-                    [source_scores_single(target) for target in target_values],
-                    dim=0,
-                )
-            else:
-                adjacency[start:end, :source_count] = source_scores_neuron_chunk(start, end)
+            adjacency[start:end, :source_count] = source_scores_neuron_chunk(start, end)
 
         logit_start = n_neurons + n_tokens
         for start in range(0, n_logits, max(1, batch_size)):
             end = min(start + max(1, batch_size), n_logits)
             if verbose:
                 print(f"    [graph] logit rows {start}:{end} / {n_logits}")
-            if create_graph:
-                logit_vecs = targets.logit_vectors[start:end].to(device=self.device)
-                target_values = (
-                    final_hidden[0, -1].to(logit_vecs.dtype).unsqueeze(0) * logit_vecs
-                ).sum(dim=-1)
-                adjacency[logit_start + start:logit_start + end, :source_count] = torch.stack(
-                    [source_scores_single(target) for target in target_values],
-                    dim=0,
-                )
-            else:
-                adjacency[logit_start + start:logit_start + end, :source_count] = (
-                    source_scores_logit_chunk(start, end)
-                )
+            adjacency[logit_start + start:logit_start + end, :source_count] = source_scores_logit_chunk(start, end)
 
         graph = Graph(
             input_string=self.tokenizer.decode(input_ids.detach().cpu().tolist()),
