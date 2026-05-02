@@ -452,6 +452,100 @@ def detach_graph(graph: Graph) -> Graph:
     )
 
 
+    def compute_supernode_dlas_with_grad(
+        self,
+        prompt: str | torch.Tensor | list[int],
+        supernodes: list[list[int]],
+        neuron_locations_t: torch.Tensor,
+        n_vocab: int,
+        dtype: torch.dtype | None = None,
+    ) -> dict[int, torch.Tensor]:
+        """Compute differentiable DLA for each supernode.
+        
+        Runs a standard forward pass (with autograd enabled) to capture intermediate
+        activations, and projects the specified neurons through W_out and W_U.
+        This provides a differentiable functional mapping from the student's structural 
+        activations to the vocab space, which trains the student model directly.
+        """
+        input_ids = self.ensure_tokenized(prompt)
+        device = self.device
+        
+        mlp_inputs = {}
+        handles = []
+        
+        for layer_idx, layer in enumerate(self.layers):
+            def pre_hook(_module, inputs, *, idx=layer_idx):
+                mlp_inputs[idx] = inputs[0]
+            handles.append(layer.mlp.register_forward_pre_hook(pre_hook))
+            
+        try:
+            with self.autocast_context(dtype):
+                _ = self.model(
+                    input_ids=input_ids,
+                    output_hidden_states=False,
+                    use_cache=False,
+                )
+        finally:
+            for handle in handles:
+                handle.remove()
+                
+        W_U = self.model.lm_head.weight  # [vocab_size, hidden_size]
+        
+        layer_neuron_acts = {}
+        for layer_idx in range(self.n_layers):
+            if layer_idx not in mlp_inputs:
+                continue
+            layer_input = mlp_inputs[layer_idx].squeeze(0) # [seq_len, hidden_size]
+            gate_rows, up_rows, out_rows, gate_bias, up_bias = self._layer_weights(
+                layer_idx, device=device, dtype=layer_input.dtype
+            )
+            
+            # Standard MLP forward to maintain gradient graph
+            gate_pre = layer_input @ gate_rows.T + gate_bias
+            up_pre = layer_input @ up_rows.T + up_bias
+            gate_act = F.silu(gate_pre)
+            neuron_activations = gate_act * up_pre  # [seq_len, d_mlp]
+            
+            layer_neuron_acts[layer_idx] = {
+                'acts': neuron_activations,
+                'out_rows': out_rows
+            }
+            
+        supernode_dlas = {}
+        
+        for i, sn_indices in enumerate(supernodes):
+            sn_dla = torch.zeros(n_vocab, device=device, dtype=W_U.dtype)
+            if not sn_indices:
+                supernode_dlas[i] = sn_dla
+                continue
+                
+            locations = neuron_locations_t[sn_indices] # [K, 3] (layer, pos, neuron)
+            
+            for layer_idx in torch.unique(locations[:, 0]):
+                mask = locations[:, 0] == layer_idx
+                locs = locations[mask] # [M, 3]
+                
+                poses = locs[:, 1]
+                neurons = locs[:, 2]
+                
+                acts = layer_neuron_acts[layer_idx.item()]['acts'][poses, neurons] # [M]
+                out_w = layer_neuron_acts[layer_idx.item()]['out_rows'][neurons] # [M, hidden_size]
+                
+                sn_source_vectors = acts.unsqueeze(-1) * out_w # [M, hidden_size]
+                sn_sum_source = sn_source_vectors.sum(dim=0) # [hidden_size]
+                
+                sn_dla_full = W_U @ sn_sum_source.to(W_U.dtype) # [vocab_size]
+                
+                if sn_dla_full.shape[0] >= n_vocab:
+                    sn_dla += sn_dla_full[:n_vocab]
+                else:
+                    sn_dla[:sn_dla_full.shape[0]] += sn_dla_full
+                
+            supernode_dlas[i] = sn_dla
+            
+        return supernode_dlas
+
+
 def extract_hf_supernode_members(
     supergraph: SuperGraph,
     graph: Graph,

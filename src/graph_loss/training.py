@@ -34,7 +34,8 @@ class GraphAuxConfig:
     graph_edge_threshold: float = 0.98
     graph_similarity_threshold: float = 0.7
     graph_max_fan_out: int = 4
-    graph_node_weight: float = 0.1  # weight of prob-delta node loss within L_graph
+    graph_node_weight: float = 1.0  # weight of prob-delta node loss within L_graph
+    graph_edge_weight: float = 0.0  # weight of edge structural loss within L_graph
 
 
 def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
@@ -165,6 +166,23 @@ def compute_prompt_graph_loss(
 
     teacher_ids = list(range(len(teacher_supergraph.supernodes)))
     student_ids = list(range(len(student_supergraph.supernodes)))
+    
+    # --- ANTHROPIC ALIGNMENT FIX ---
+    # Compute the student's DLA with gradients enabled via a normal forward pass.
+    # This avoids the massive OOM of building a Jacobian graph for edge-attribution,
+    # while providing a direct functional training signal to the student's circuit pathways.
+    if config.graph_node_weight > 0.0:
+        student_dla_with_grad_dict = student_adapter.compute_supernode_dlas_with_grad(
+            prompt=prompt,
+            supernodes=student_supergraph.supernodes,
+            neuron_locations_t=student_graph.neuron_locations,
+            n_vocab=teacher_graph_model.cfg.d_vocab,
+            dtype=config.graph_dtype,
+        )
+        # Replace the detached student DLAs with the differentiable ones
+        for sid, dla_tensor in student_dla_with_grad_dict.items():
+            alignment.student_dla[sid] = dla_tensor
+
     graph_loss, loss_breakdown = compute_graph_loss(
         teacher_supergraph.supernode_adjacency_matrix.detach().to(
             device=student_supergraph.supernode_adjacency_matrix.device,

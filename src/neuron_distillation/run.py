@@ -462,6 +462,18 @@ def main():
         help="Graph mode: cumulative edge influence threshold for pruning.",
     )
     parser.add_argument(
+        "--graph-node-weight",
+        type=float,
+        default=1.0,
+        help="Weight of the node DLA alignment loss (relative to edge structure loss). Set to 0.0 to disable.",
+    )
+    parser.add_argument(
+        "--graph-edge-weight",
+        type=float,
+        default=0.0,
+        help="Weight of the edge structural loss. Default 0.0 (OOM prevention).",
+    )
+    parser.add_argument(
         "--graph-similarity-threshold",
         type=float,
         default=0.7,
@@ -943,6 +955,8 @@ def main():
         graph_prune=args.graph_prune,
         graph_node_threshold=args.graph_node_threshold,
         graph_edge_threshold=args.graph_edge_threshold,
+        graph_node_weight=args.graph_node_weight,
+        graph_edge_weight=args.graph_edge_weight,
         graph_similarity_threshold=args.graph_similarity_threshold,
         graph_max_fan_out=args.graph_max_fan_out,
         save_best=args.save_best,
