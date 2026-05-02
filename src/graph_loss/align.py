@@ -42,16 +42,18 @@ def _build_full_vocab_prob_deltas(
     Returns shape [n_supernodes, n_vocab] with zeros for non-target tokens.
     """
     n_supernodes = len(supergraph.supernodes)
-    full = torch.zeros(n_supernodes, n_vocab, dtype=torch.float32)
 
     if supergraph.supernode_prob_deltas is None or supergraph.supernode_prob_deltas.numel() == 0:
-        return full
+        return torch.zeros(n_supernodes, n_vocab, dtype=torch.float32)
 
     logit_token_ids = graph.logit_token_ids.cpu()
     deltas = supergraph.supernode_prob_deltas.detach().float().cpu()
 
-    # deltas may have fewer rows than supernodes if prob-delta computation
-    # was only done for a subset, so cap the scatter.
+    # Expand n_vocab if token IDs exceed it (special tokens beyond stated vocab)
+    max_id = int(logit_token_ids.max().item()) + 1 if logit_token_ids.numel() else 0
+    actual_vocab = max(n_vocab, max_id)
+    full = torch.zeros(n_supernodes, actual_vocab, dtype=torch.float32)
+
     n_rows = min(deltas.shape[0], n_supernodes)
     for i in range(n_rows):
         full[i, logit_token_ids] = deltas[i]
@@ -76,6 +78,14 @@ def align_supernodes_prob_delta(
     """
     t_full = _build_full_vocab_prob_deltas(teacher_supergraph, teacher_graph, n_vocab)
     s_full = _build_full_vocab_prob_deltas(student_supergraph, student_graph, n_vocab)
+
+    # Pad to same width if special tokens caused different expansion
+    if t_full.shape[1] != s_full.shape[1]:
+        max_w = max(t_full.shape[1], s_full.shape[1])
+        if t_full.shape[1] < max_w:
+            t_full = F.pad(t_full, (0, max_w - t_full.shape[1]))
+        if s_full.shape[1] < max_w:
+            s_full = F.pad(s_full, (0, max_w - s_full.shape[1]))
 
     # Normalize for cosine similarity
     t_norm = F.normalize(t_full, dim=1)
