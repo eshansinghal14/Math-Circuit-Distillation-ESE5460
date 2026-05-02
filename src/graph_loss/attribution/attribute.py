@@ -258,13 +258,18 @@ def _run_attribution(
         input_string=model.tokenizer.decode(input_ids.detach().cpu().tolist()),
         input_tokens=input_ids,
         neuron_locations=ctx.neuron_locations,
-        neuron_activations=ctx.neuron_activations,
         adjacency_matrix=adjacency_matrix,
         cfg=model.cfg,
+        neuron_activations=ctx.neuron_activations,
         logit_targets=targets.logit_targets,
         logit_probabilities=targets.logit_probabilities,
         vocab_size=targets.vocab_size,
     )
+
+    # Free memory immediately to prevent PyTorch graph accumulation
+    ctx._resid_activations.clear()
+    del ctx
+    residual = None
 
     total_time = time.time() - start_time
     logger.info(f"Attribution completed in {total_time:.2f}s")
