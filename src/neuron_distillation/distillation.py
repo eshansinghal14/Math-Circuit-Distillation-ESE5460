@@ -2170,7 +2170,7 @@ class ClusterDistillationTrainer:
             print(f"  graph prop neurons/layer: {cfg.graph_prop_neurons_per_layer}")
             print(f"  teacher graph batch: {cfg.teacher_graph_batch_size}")
             print(f"  student graph batch: {cfg.student_graph_batch_size}")
-            print(f"  fast teacher graph: {cfg.fast_teacher_graph}")
+            print(f"  fast graph (TL+HF): {cfg.fast_teacher_graph}")
         elif self._circuit:
             print(f"  lambda_cluster:   {cfg.lambda_cluster}")
             print(f"  Cluster pairs:    {len(self.cluster_pairs)}")

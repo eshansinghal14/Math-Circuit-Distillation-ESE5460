@@ -36,7 +36,7 @@ class GraphAuxConfig:
     graph_max_fan_out: int = 4
     graph_node_weight: float = 1.0  # weight of prob-delta node loss within L_graph
     graph_edge_weight: float = 0.0  # weight of edge structural loss within L_graph
-    fast_teacher_graph: bool = False  # skip Phase-3 backward attribution on the TL teacher
+    fast_teacher_graph: bool = False  # skip expensive TL/HF backward graph; linear logit block + proxy influence
 
 
 def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
@@ -96,6 +96,7 @@ def compute_prompt_graph_loss(
         # without retaining a full second-order graph for every attribution edge.
         create_graph=False,
         detach_result=False,
+        fast=config.fast_teacher_graph,
     )
 
     teacher_prune_result = None

@@ -489,8 +489,9 @@ def main():
         "--fast-teacher-graph",
         action="store_true",
         help=(
-            "Graph mode: skip TransformerLens Phase-3 backward attribution on the teacher; "
-            "use a linear logit readout block + proxy influence (lower VRAM, faster steps)."
+            "Graph mode: fast linear graph for both models — skip expensive backward attribution on "
+            "the TransformerLens teacher (no Phase 1/3 autograd graph) and skip chunked autograd.grad "
+            "on the HF student (one inference forward + logit·write matrix). Much lower VRAM."
         ),
     )
     parser.add_argument(
@@ -891,7 +892,7 @@ def main():
         print(f"  prop_neurons/layer: {args.graph_prop_neurons_per_layer}")
         print(f"  teacher_graph_bs:   {args.teacher_graph_batch_size}")
         print(f"  student_graph_bs:   {args.student_graph_batch_size}")
-        print(f"  fast_teacher_graph: {args.fast_teacher_graph}")
+        print(f"  fast_graph (TL+HF): {args.fast_teacher_graph}")
         print(f"  verbose:            {args.verbose}")
         print(f"  prune:              {args.graph_prune}")
         print("=" * 60)

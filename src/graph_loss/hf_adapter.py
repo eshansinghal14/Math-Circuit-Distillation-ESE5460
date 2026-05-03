@@ -159,6 +159,7 @@ class HFLlamaGraphAdapter:
         verbose: bool = False,
         create_graph: bool = False,
         detach_result: bool | None = None,
+        fast: bool = False,
     ) -> Graph:
         if not (0.0 < prop_neurons_per_layer <= 1.0):
             raise ValueError("prop_neurons_per_layer must be in (0, 1]")
@@ -171,9 +172,12 @@ class HFLlamaGraphAdapter:
 
         def embed_hook(_module, _inputs, output):
             nonlocal embed_out
-            if not output.requires_grad:
-                output = output.detach().requires_grad_(True)
-            embed_out = output
+            if fast:
+                embed_out = output
+            else:
+                if not output.requires_grad:
+                    output = output.detach().requires_grad_(True)
+                embed_out = output
             return output
 
         handles.append(self.embed_tokens.register_forward_hook(embed_hook))
@@ -183,16 +187,20 @@ class HFLlamaGraphAdapter:
                 mlp_inputs[idx] = inputs[0]
 
             def out_hook(_module, _inputs, output, *, idx=layer_idx):
-                if not output.requires_grad:
-                    output = output.detach().requires_grad_(True)
-                mlp_outputs[idx] = output
+                if fast:
+                    mlp_outputs[idx] = output
+                else:
+                    if not output.requires_grad:
+                        output = output.detach().requires_grad_(True)
+                    mlp_outputs[idx] = output
                 return output
 
             handles.append(layer.mlp.register_forward_pre_hook(pre_hook))
             handles.append(layer.mlp.register_forward_hook(out_hook))
 
         try:
-            with self.autocast_context(dtype):
+            fwd_ctx = torch.inference_mode() if fast else contextlib.nullcontext()
+            with fwd_ctx, self.autocast_context(dtype):
                 out = self.model(
                     input_ids=input_batch,
                     attention_mask=torch.ones_like(input_batch, device=self.device),
@@ -265,6 +273,39 @@ class HFLlamaGraphAdapter:
         n_logits = len(targets)
         total_nodes = n_neurons + n_tokens + n_logits
         source_count = n_neurons + n_tokens
+        logit_start = n_neurons + n_tokens
+
+        if fast:
+            adjacency = torch.zeros(
+                total_nodes,
+                total_nodes,
+                dtype=source_vectors_t.dtype,
+                device=self.device,
+            )
+            lv = targets.logit_vectors.to(
+                device=self.device,
+                dtype=source_vectors_t.dtype,
+            )
+            adjacency[logit_start : logit_start + n_logits, :n_neurons] = lv @ source_vectors_t.T
+            graph = Graph(
+                input_string=self.tokenizer.decode(input_ids.detach().cpu().tolist()),
+                input_tokens=input_ids,
+                neuron_locations=neuron_locations_t,
+                adjacency_matrix=adjacency,
+                cfg=_HFGraphConfig(self),
+                neuron_activations=neuron_activations_t,
+                logit_targets=targets.logit_targets,
+                logit_probabilities=targets.logit_probabilities,
+                vocab_size=targets.vocab_size,
+                attribution_mode="fast",
+                neuron_write_vectors=source_vectors_t.clone(),
+            )
+            if detach_result is None:
+                detach_result = not create_graph
+            if detach_result:
+                graph = detach_graph(graph)
+            return graph
+
         adjacency = torch.zeros(
             total_nodes,
             total_nodes,
@@ -396,7 +437,6 @@ class HFLlamaGraphAdapter:
                 print(f"    [graph] neuron rows {start}:{end} / {n_neurons}")
             adjacency[start:end, :source_count] = source_scores_neuron_chunk(start, end)
 
-        logit_start = n_neurons + n_tokens
         for start in range(0, n_logits, max(1, batch_size)):
             end = min(start + max(1, batch_size), n_logits)
             if verbose:
