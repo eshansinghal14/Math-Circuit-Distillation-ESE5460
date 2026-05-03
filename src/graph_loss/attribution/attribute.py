@@ -160,16 +160,21 @@ def _run_attribution(
             100.0 * avg_captured_fraction,
         )
 
-    phase1_expand = 1 if fast else batch_size
-    logger.info("Phase 1: Running hooked forward pass")
-    phase_start = time.time()
-    with ctx.install_hooks(model):
-        residual = model.forward(
-            input_ids.expand(phase1_expand, -1),
-            stop_at_layer=model.cfg.n_layers,
+    if fast:
+        logger.info(
+            "Phase 1 (fast): Skipping second hooked forward — Phase 0 logits and writes are sufficient",
         )
-        ctx._resid_activations[-1] = model.ln_final(residual)
-    logger.info(f"Forward pass completed in {time.time() - phase_start:.2f}s")
+    else:
+        phase1_expand = batch_size
+        logger.info("Phase 1: Running hooked forward pass")
+        phase_start = time.time()
+        with ctx.install_hooks(model):
+            residual = model.forward(
+                input_ids.expand(phase1_expand, -1),
+                stop_at_layer=model.cfg.n_layers,
+            )
+            ctx._resid_activations[-1] = model.ln_final(residual)
+        logger.info(f"Forward pass completed in {time.time() - phase_start:.2f}s")
 
     logger.info("Phase 2: Building target specifications")
     phase_start = time.time()
