@@ -942,12 +942,59 @@ def build_super_graph(
     all_supernode_prob_delta_norms = torch.empty(0, dtype=torch.float32)
     prob_delta_elbow_index = None
 
+    # For fast-mode graphs, pre-populate prob_delta_by_neuron with DLA vectors
+    # (activation × W_out × W_U_logits) so that ensure_prob_deltas() skips ablation
+    # forward passes entirely.  This makes ablation clustering O(n_neurons × d_model)
+    # instead of O(n_neurons × forward_pass_cost).
+    _fast_dla_populated = False
+    if (
+        cluster_method == "ablation"
+        and graph.attribution_mode == "fast"
+        and graph.neuron_write_vectors is not None
+        and kept_neuron_indices.numel() > 0
+        and graph.n_logits > 0
+    ):
+        _wU = model.unembed.W_U if hasattr(model, "unembed") else model.W_U
+        _logit_ids = graph.logit_token_ids.to(_wU.device)
+        with torch.no_grad():
+            _W_U_logits = _wU.detach()[:, _logit_ids].float()  # [d_model, n_logits]
+            _kept_wv = (
+                graph.neuron_write_vectors[kept_neuron_indices_device]
+                .float()
+                .to(_W_U_logits.device)
+            )
+            _neuron_dla = (_kept_wv @ _W_U_logits).cpu()  # [K, n_logits]
+        for _k, _member in enumerate(kept_neuron_indices.tolist()):
+            _dla = _neuron_dla[_k]
+            prob_delta_by_neuron[_member] = _dla
+            prob_delta_norm_by_neuron[_member] = float(_dla.norm().item())
+        del _wU, _W_U_logits, _kept_wv, _neuron_dla
+        _fast_dla_populated = True
+        logger.info("  Fast DLA pre-population: %d neurons", int(kept_neuron_indices.numel()))
+
     if cluster_method == "ablation" and kept_neuron_indices.numel():
         logger.info("  Building supernodes with ablation probability-delta clustering")
         supernodes = cluster_by_ablation_prob_deltas(kept_neuron_indices)
-        supernodes, supernode_prob_deltas, supernode_prob_delta_norms = (
-            sort_supernodes_by_output_prob_delta(supernodes)
-        )
+
+        if _fast_dla_populated:
+            # Fast path: compute supernode DLAs by summing pre-computed member DLAs.
+            # No extra forward passes.
+            _sn_dla_list = []
+            for _sn in supernodes:
+                _sn_dla = torch.stack([prob_delta_by_neuron[_m] for _m in _sn]).sum(dim=0) if _sn else torch.zeros(graph.n_logits, dtype=torch.float32)
+                _sn_dla_list.append(_sn_dla)
+            supernode_prob_deltas = torch.stack(_sn_dla_list) if _sn_dla_list else torch.empty((0, graph.n_logits), dtype=torch.float32)
+            supernode_prob_delta_norms = supernode_prob_deltas.norm(dim=1).tolist()
+            _order = sorted(range(len(supernodes)), key=lambda _i: supernode_prob_delta_norms[_i], reverse=True)
+            supernodes = [supernodes[_i] for _i in _order]
+            if _order:
+                supernode_prob_deltas = supernode_prob_deltas[torch.tensor(_order, dtype=torch.long)]
+            supernode_prob_delta_norms = [supernode_prob_delta_norms[_i] for _i in _order]
+        else:
+            supernodes, supernode_prob_deltas, supernode_prob_delta_norms = (
+                sort_supernodes_by_output_prob_delta(supernodes)
+            )
+
         all_supernode_prob_delta_norms = torch.tensor(
             supernode_prob_delta_norms,
             dtype=torch.float32,

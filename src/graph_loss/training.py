@@ -130,6 +130,7 @@ def compute_prompt_graph_loss(
             teacher_graph_model,
             prune_result=teacher_prune_result,
             activation_forward_batch_size=config.teacher_graph_batch_size,
+            cluster_method="ablation",
         )
     if config.verbose:
         print(
@@ -147,6 +148,7 @@ def compute_prompt_graph_loss(
             student_adapter,
             prune_result=student_prune_result,
             activation_forward_batch_size=config.student_graph_batch_size,
+            cluster_method="ablation",
         )
     student_supergraph = _aggregate_supergraph_adjacency(
         student_graph,
