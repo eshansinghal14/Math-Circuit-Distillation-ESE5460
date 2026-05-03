@@ -199,7 +199,9 @@ class HFLlamaGraphAdapter:
             handles.append(layer.mlp.register_forward_hook(out_hook))
 
         try:
-            fwd_ctx = torch.inference_mode() if fast else contextlib.nullcontext()
+            # Use no_grad (not inference_mode): activations must be usable in later matmuls
+            # with parameter tensors that may still have requires_grad=True.
+            fwd_ctx = torch.no_grad() if fast else contextlib.nullcontext()
             with fwd_ctx, self.autocast_context(dtype):
                 out = self.model(
                     input_ids=input_batch,
