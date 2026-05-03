@@ -534,6 +534,9 @@ class _HFGraphConfig:
 
 
 def detach_graph(graph: Graph) -> Graph:
+    nw = graph.neuron_write_vectors
+    if nw is not None:
+        nw = nw.detach()
     return Graph(
         input_string=graph.input_string,
         input_tokens=graph.input_tokens.detach(),
@@ -544,6 +547,8 @@ def detach_graph(graph: Graph) -> Graph:
         logit_targets=graph.logit_targets,
         logit_probabilities=graph.logit_probabilities.detach(),
         vocab_size=graph.vocab_size,
+        attribution_mode=graph.attribution_mode,
+        neuron_write_vectors=nw,
     )
 
 

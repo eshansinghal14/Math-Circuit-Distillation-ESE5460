@@ -30,12 +30,17 @@ def attribute(
     offload: Literal["cpu", "disk", None] = None,
     verbose: bool = False,
     update_interval: int = 4,
+    fast: bool = False,
 ) -> Graph:
     """Compute a dense-backed neuron graph for a prompt.
 
     The dense adjacency layout is:
     ``[neurons, token_embeddings, logits]``.
     Token rows remain zero because tokens are source-only roots.
+
+    When ``fast`` is True, skip Phase 3 backward attribution: fill only a linear
+    logit readout block (demeaned unembed directions times residual write vectors)
+    and use ``attribution_mode='fast'`` for pruning / supergraph influence proxies.
     """
 
     if max_feature_nodes is not None:
@@ -67,6 +72,7 @@ def attribute(
             batch_size=batch_size,
             logger=logger,
             verbose=verbose,
+            fast=fast,
         )
     finally:
         if handler:
@@ -134,6 +140,7 @@ def _run_attribution(
     batch_size,
     logger,
     verbose,
+    fast: bool = False,
 ):
     start_time = time.time()
 
@@ -153,10 +160,14 @@ def _run_attribution(
             100.0 * avg_captured_fraction,
         )
 
+    phase1_expand = 1 if fast else batch_size
     logger.info("Phase 1: Running hooked forward pass")
     phase_start = time.time()
     with ctx.install_hooks(model):
-        residual = model.forward(input_ids.expand(batch_size, -1), stop_at_layer=model.cfg.n_layers)
+        residual = model.forward(
+            input_ids.expand(phase1_expand, -1),
+            stop_at_layer=model.cfg.n_layers,
+        )
         ctx._resid_activations[-1] = model.ln_final(residual)
     logger.info(f"Forward pass completed in {time.time() - phase_start:.2f}s")
 
@@ -175,84 +186,109 @@ def _run_attribution(
     n_tokens = len(input_ids)
     n_logits = len(targets)
     total_nodes = n_neurons + n_tokens + n_logits
+    logit_start = n_neurons + n_tokens
 
     logger.info(f"Neuron nodes: {n_neurons}, Token nodes: {n_tokens}, Logit nodes: {n_logits}")
 
     _check_dense_graph_size(total_nodes, ctx.source_vectors.dtype)
-    edge_row_chunks: list[torch.Tensor] = []
-    edge_col_chunks: list[torch.Tensor] = []
-    edge_value_chunks: list[torch.Tensor] = []
     logger.info(f"Target setup completed in {time.time() - phase_start:.2f}s")
 
-    logger.info("Phase 3: Computing neuron and logit attribution rows")
-    phase_start = time.time()
-    neuron_batches = math.ceil(n_neurons / batch_size)
-    logit_batches = math.ceil(n_logits / batch_size)
-    total_batches = neuron_batches + logit_batches
-    processed_batches = 0
+    neuron_write_vectors: torch.Tensor | None = None
 
-    neuron_rows = torch.arange(n_neurons, dtype=torch.long)
-    neuron_layers = ctx.neuron_locations[:, 0]
-    neuron_positions = ctx.neuron_locations[:, 1]
-
-    progress_bar = tqdm(
-        total=n_neurons + n_logits,
-        desc="Neuron graph attribution",
-        disable=not verbose,
-    )
-
-    processed_batches = _run_target_batches(
-        ctx=ctx,
-        target_rows=neuron_rows,
-        target_layers=neuron_layers,
-        target_positions=neuron_positions,
-        inject_values=ctx.target_encoders,
-        edge_row_chunks=edge_row_chunks,
-        edge_col_chunks=edge_col_chunks,
-        edge_value_chunks=edge_value_chunks,
-        batch_size=batch_size,
-        total_batches=total_batches,
-        processed_batches=processed_batches,
-        progress_bar=progress_bar,
-    )
-
-    logit_start = n_neurons + n_tokens
-    logit_rows = torch.arange(logit_start, logit_start + n_logits, dtype=torch.long)
-    logit_layers = torch.full((n_logits,), model.cfg.n_layers, device=input_ids.device, dtype=torch.long)
-    logit_positions = torch.full((n_logits,), len(input_ids) - 1, device=input_ids.device, dtype=torch.long)
-    processed_batches = _run_target_batches(
-        ctx=ctx,
-        target_rows=logit_rows,
-        target_layers=logit_layers,
-        target_positions=logit_positions,
-        inject_values=targets.logit_vectors,
-        edge_row_chunks=edge_row_chunks,
-        edge_col_chunks=edge_col_chunks,
-        edge_value_chunks=edge_value_chunks,
-        batch_size=batch_size,
-        total_batches=total_batches,
-        processed_batches=processed_batches,
-        progress_bar=progress_bar,
-    )
-
-    progress_bar.close()
-    logger.info(f"Attribution rows completed in {time.time() - phase_start:.2f}s")
-
-    adjacency_matrix = torch.zeros(
-        (total_nodes, total_nodes),
-        dtype=ctx.source_vectors.dtype,
-    )
-    if edge_value_chunks:
-        adjacency_indices = torch.stack(
-            [torch.cat(edge_row_chunks), torch.cat(edge_col_chunks)],
-            dim=0,
+    if fast:
+        logger.info("Phase 3 (fast): Skipping backward attribution; linear logit readout only")
+        phase_start = time.time()
+        neuron_write_vectors = ctx.source_vectors.clone()
+        adjacency_matrix = torch.zeros(
+            (total_nodes, total_nodes),
+            dtype=ctx.source_vectors.dtype,
+            device=ctx.source_vectors.device,
         )
-        adjacency_values = torch.cat(edge_value_chunks)
-        adjacency_matrix.index_put_(
-            (adjacency_indices[0], adjacency_indices[1]),
-            adjacency_values,
-            accumulate=True,
+        lv = targets.logit_vectors.to(
+            device=ctx.source_vectors.device,
+            dtype=ctx.source_vectors.dtype,
         )
+        scores = lv @ ctx.source_vectors.T
+        adjacency_matrix[logit_start : logit_start + n_logits, :n_neurons] = scores
+        logger.info(f"Fast attribution completed in {time.time() - phase_start:.2f}s")
+    else:
+        edge_row_chunks: list[torch.Tensor] = []
+        edge_col_chunks: list[torch.Tensor] = []
+        edge_value_chunks: list[torch.Tensor] = []
+
+        logger.info("Phase 3: Computing neuron and logit attribution rows")
+        phase_start = time.time()
+        neuron_batches = math.ceil(n_neurons / batch_size)
+        logit_batches = math.ceil(n_logits / batch_size)
+        total_batches = neuron_batches + logit_batches
+        processed_batches = 0
+
+        neuron_rows = torch.arange(n_neurons, dtype=torch.long)
+        neuron_layers = ctx.neuron_locations[:, 0]
+        neuron_positions = ctx.neuron_locations[:, 1]
+
+        progress_bar = tqdm(
+            total=n_neurons + n_logits,
+            desc="Neuron graph attribution",
+            disable=not verbose,
+        )
+
+        processed_batches = _run_target_batches(
+            ctx=ctx,
+            target_rows=neuron_rows,
+            target_layers=neuron_layers,
+            target_positions=neuron_positions,
+            inject_values=ctx.target_encoders,
+            edge_row_chunks=edge_row_chunks,
+            edge_col_chunks=edge_col_chunks,
+            edge_value_chunks=edge_value_chunks,
+            batch_size=batch_size,
+            total_batches=total_batches,
+            processed_batches=processed_batches,
+            progress_bar=progress_bar,
+        )
+
+        logit_rows = torch.arange(logit_start, logit_start + n_logits, dtype=torch.long)
+        logit_layers = torch.full((n_logits,), model.cfg.n_layers, device=input_ids.device, dtype=torch.long)
+        logit_positions = torch.full(
+            (n_logits,),
+            len(input_ids) - 1,
+            device=input_ids.device,
+            dtype=torch.long,
+        )
+        processed_batches = _run_target_batches(
+            ctx=ctx,
+            target_rows=logit_rows,
+            target_layers=logit_layers,
+            target_positions=logit_positions,
+            inject_values=targets.logit_vectors,
+            edge_row_chunks=edge_row_chunks,
+            edge_col_chunks=edge_col_chunks,
+            edge_value_chunks=edge_value_chunks,
+            batch_size=batch_size,
+            total_batches=total_batches,
+            processed_batches=processed_batches,
+            progress_bar=progress_bar,
+        )
+
+        progress_bar.close()
+        logger.info(f"Attribution rows completed in {time.time() - phase_start:.2f}s")
+
+        adjacency_matrix = torch.zeros(
+            (total_nodes, total_nodes),
+            dtype=ctx.source_vectors.dtype,
+        )
+        if edge_value_chunks:
+            adjacency_indices = torch.stack(
+                [torch.cat(edge_row_chunks), torch.cat(edge_col_chunks)],
+                dim=0,
+            )
+            adjacency_values = torch.cat(edge_value_chunks)
+            adjacency_matrix.index_put_(
+                (adjacency_indices[0], adjacency_indices[1]),
+                adjacency_values,
+                accumulate=True,
+            )
 
     graph = Graph(
         input_string=model.tokenizer.decode(input_ids.detach().cpu().tolist()),
@@ -264,6 +300,8 @@ def _run_attribution(
         logit_targets=targets.logit_targets,
         logit_probabilities=targets.logit_probabilities,
         vocab_size=targets.vocab_size,
+        attribution_mode="fast" if fast else "full",
+        neuron_write_vectors=neuron_write_vectors,
     )
 
     # Free memory immediately to prevent PyTorch graph accumulation

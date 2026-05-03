@@ -39,6 +39,8 @@ class Graph:
     vocab_size: int
     cfg: UnifiedConfig
     n_pos: int
+    attribution_mode: str
+    neuron_write_vectors: torch.Tensor | None
 
     def __init__(
         self,
@@ -51,6 +53,9 @@ class Graph:
         logit_targets: list[LogitTarget],
         logit_probabilities: torch.Tensor,
         vocab_size: int | None = None,
+        *,
+        attribution_mode: str = "full",
+        neuron_write_vectors: torch.Tensor | None = None,
     ):
         """Container for neuron/token/logit attribution graphs.
 
@@ -70,6 +75,8 @@ class Graph:
         self.neuron_locations = neuron_locations
         self.input_tokens = input_tokens
         self.neuron_activations = neuron_activations
+        self.attribution_mode = attribution_mode
+        self.neuron_write_vectors = neuron_write_vectors
 
     @property
     def n_neurons(self) -> int:
@@ -100,6 +107,8 @@ class Graph:
         self.neuron_locations = self.neuron_locations.to(device)
         self.neuron_activations = self.neuron_activations.to(device)
         self.logit_probabilities = self.logit_probabilities.to(device)
+        if self.neuron_write_vectors is not None:
+            self.neuron_write_vectors = self.neuron_write_vectors.to(device)
 
     @property
     def logit_token_ids(self) -> torch.Tensor:
@@ -122,6 +131,10 @@ class Graph:
             "adjacency_layout": "dense",
             "adjacency_matrix": self.adjacency_matrix,
         }
+        if self.attribution_mode != "full":
+            data["attribution_mode"] = self.attribution_mode
+        if self.neuron_write_vectors is not None:
+            data["neuron_write_vectors"] = self.neuron_write_vectors
         torch.save(data, path)
 
     @staticmethod
@@ -137,6 +150,8 @@ class Graph:
             logit_targets=data["logit_targets"],
             logit_probabilities=data["logit_probabilities"],
             vocab_size=data.get("vocab_size"),
+            attribution_mode=data.get("attribution_mode", "full"),
+            neuron_write_vectors=data.get("neuron_write_vectors"),
         )
 
     def apply_prune_result(self, prune_result: "PruneResult") -> "Graph":
@@ -161,6 +176,8 @@ class Graph:
             logit_targets=self.logit_targets,
             logit_probabilities=self.logit_probabilities,
             vocab_size=self.vocab_size,
+            attribution_mode=self.attribution_mode,
+            neuron_write_vectors=self.neuron_write_vectors,
         )
 
 def normalize_matrix(matrix: torch.Tensor) -> torch.Tensor:
@@ -216,6 +233,33 @@ def compute_node_influence(adjacency_matrix: torch.Tensor, logit_weights: torch.
     positive_influence = compute_influence(positive, logit_weights)
     negative_influence = compute_influence(negative, logit_weights)
     return positive_influence - negative_influence
+
+
+def compute_fast_proxy_node_influence(graph: Graph) -> torch.Tensor:
+    """Per-node scalar influence when ``attribution_mode == 'fast'`` (no full Jacobian graph).
+
+    Neurons ranked by residual write-vector norm; tokens and logits get uniform / prob weights
+    so pruning keeps them, matching ``prune_graph`` expectations.
+    """
+    device = graph.adjacency_device
+    dtype = graph.adjacency_matrix.dtype
+    n_neurons = graph.n_neurons
+    n_tokens = graph.n_tokens
+    n_logits = graph.n_logits
+    n_nodes = graph.n_nodes
+    out = torch.zeros(n_nodes, device=device, dtype=dtype)
+    nw = graph.neuron_write_vectors
+    if nw is not None and n_neurons > 0:
+        out[:n_neurons] = nw.to(device=device, dtype=dtype).norm(dim=-1)
+    token_start = n_neurons
+    logit_start = n_neurons + n_tokens
+    if n_tokens > 0:
+        out[token_start:logit_start] = torch.ones(n_tokens, device=device, dtype=dtype)
+    if n_logits > 0:
+        out[logit_start : logit_start + n_logits] = graph.logit_probabilities.to(
+            device=device, dtype=dtype,
+        ).clamp(min=torch.finfo(dtype).eps)
+    return out
 
 
 def compute_neuron_logit_influence(graph: Graph) -> torch.Tensor:
@@ -300,7 +344,10 @@ def prune_graph(
         dtype=adjacency_matrix.dtype,
     )
 
-    node_influence = compute_node_influence(adjacency_matrix, logit_weights)
+    if getattr(graph, "attribution_mode", "full") == "fast":
+        node_influence = compute_fast_proxy_node_influence(graph)
+    else:
+        node_influence = compute_node_influence(adjacency_matrix, logit_weights)
     node_scores = node_influence.abs()
     node_mask = node_scores >= find_threshold(node_scores, node_threshold)
     node_mask[token_start:] = True
@@ -309,7 +356,10 @@ def prune_graph(
     pruned_matrix[~node_mask] = 0
     pruned_matrix[:, ~node_mask] = 0
 
-    edge_scores = compute_edge_influence(pruned_matrix, logit_weights)
+    if getattr(graph, "attribution_mode", "full") == "fast":
+        edge_scores = pruned_matrix.abs()
+    else:
+        edge_scores = compute_edge_influence(pruned_matrix, logit_weights)
     edge_mask = edge_scores >= find_threshold(edge_scores.flatten(), edge_threshold)
 
     old_node_mask = node_mask.clone()
@@ -391,7 +441,10 @@ def build_super_graph(
             device=adjacency_matrix.device,
             dtype=adjacency_matrix.dtype,
         )
-    node_influence = compute_node_influence(adjacency_matrix, logit_weights).detach().float().cpu()
+    if getattr(graph, "attribution_mode", "full") == "fast":
+        node_influence = compute_fast_proxy_node_influence(graph).detach().float().cpu()
+    else:
+        node_influence = compute_node_influence(adjacency_matrix, logit_weights).detach().float().cpu()
 
     def decoded_prompt_tokens() -> list[str]:
         token_ids = graph.input_tokens.detach().cpu().flatten().tolist()

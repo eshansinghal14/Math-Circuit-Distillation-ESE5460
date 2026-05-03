@@ -173,6 +173,7 @@ class ClusterDistillationConfig:
     graph_edge_weight: float = 0.0
     graph_similarity_threshold: float = 0.7
     graph_max_fan_out: int = 4
+    fast_teacher_graph: bool = False
 
     # Greedy test accuracy: prompts batched for ``generate`` (independent of training batch size).
     eval_batch_size: int = 50
@@ -1088,6 +1089,7 @@ class ClusterDistillationTrainer:
             graph_edge_weight=config.graph_edge_weight,
             graph_similarity_threshold=config.graph_similarity_threshold,
             graph_max_fan_out=config.graph_max_fan_out,
+            fast_teacher_graph=config.fast_teacher_graph,
         )
         self.student_graph_adapter: Optional[HFLlamaGraphAdapter] = None
         self.teacher_graph_model = None
@@ -1719,6 +1721,8 @@ class ClusterDistillationTrainer:
         if self.student_graph_adapter is None or self.teacher_graph_model is None:
             raise RuntimeError("Graph mode models were not initialized.")
 
+        self._cuda_clear_after_graph_step()
+
         graph_loss, graph_metrics = backward_batch_graph_loss(
             prompts=batch["prompts"],
             teacher_graph_model=self.teacher_graph_model,
@@ -2166,6 +2170,7 @@ class ClusterDistillationTrainer:
             print(f"  graph prop neurons/layer: {cfg.graph_prop_neurons_per_layer}")
             print(f"  teacher graph batch: {cfg.teacher_graph_batch_size}")
             print(f"  student graph batch: {cfg.student_graph_batch_size}")
+            print(f"  fast teacher graph: {cfg.fast_teacher_graph}")
         elif self._circuit:
             print(f"  lambda_cluster:   {cfg.lambda_cluster}")
             print(f"  Cluster pairs:    {len(self.cluster_pairs)}")

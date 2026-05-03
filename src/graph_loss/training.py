@@ -36,6 +36,7 @@ class GraphAuxConfig:
     graph_max_fan_out: int = 4
     graph_node_weight: float = 1.0  # weight of prob-delta node loss within L_graph
     graph_edge_weight: float = 0.0  # weight of edge structural loss within L_graph
+    fast_teacher_graph: bool = False  # skip Phase-3 backward attribution on the TL teacher
 
 
 def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
@@ -80,6 +81,7 @@ def compute_prompt_graph_loss(
         prop_neurons_per_layer=config.prop_neurons_per_layer,
         batch_size=config.teacher_graph_batch_size,
         verbose=config.verbose,
+        fast=config.fast_teacher_graph,
     )
     if config.verbose:
         print(f"  [graph] building student graph for prompt: {prompt!r}")
@@ -194,6 +196,7 @@ def compute_prompt_graph_loss(
         student_ids,
         teacher_dla=alignment.teacher_dla,
         student_dla=alignment.student_dla,
+        edge_weight=config.graph_edge_weight,
         node_weight=config.graph_node_weight,
     )
 

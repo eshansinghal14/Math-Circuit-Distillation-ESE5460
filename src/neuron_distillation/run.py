@@ -486,6 +486,14 @@ def main():
         help="Graph mode: max student supernodes aligned to one teacher supernode.",
     )
     parser.add_argument(
+        "--fast-teacher-graph",
+        action="store_true",
+        help=(
+            "Graph mode: skip TransformerLens Phase-3 backward attribution on the teacher; "
+            "use a linear logit readout block + proxy influence (lower VRAM, faster steps)."
+        ),
+    )
+    parser.add_argument(
         "--no-poly-importance",
         action="store_true",
         help=(
@@ -883,6 +891,7 @@ def main():
         print(f"  prop_neurons/layer: {args.graph_prop_neurons_per_layer}")
         print(f"  teacher_graph_bs:   {args.teacher_graph_batch_size}")
         print(f"  student_graph_bs:   {args.student_graph_batch_size}")
+        print(f"  fast_teacher_graph: {args.fast_teacher_graph}")
         print(f"  verbose:            {args.verbose}")
         print(f"  prune:              {args.graph_prune}")
         print("=" * 60)
@@ -959,6 +968,7 @@ def main():
         graph_edge_weight=args.graph_edge_weight,
         graph_similarity_threshold=args.graph_similarity_threshold,
         graph_max_fan_out=args.graph_max_fan_out,
+        fast_teacher_graph=args.fast_teacher_graph,
         save_best=args.save_best,
         eval_max_new_tokens=eval_max_new_tokens,
         eval_print_samples=args.eval_print_samples,
