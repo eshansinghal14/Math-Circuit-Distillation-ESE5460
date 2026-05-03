@@ -8,11 +8,12 @@ from typing import Any
 
 import torch
 
-from graph_loss.align import align_supernodes_prob_delta
+from graph_loss.align import align_supernodes_prob_delta, compute_supernode_dla
 from graph_loss.attribution.attribute import attribute
 from graph_loss.graph import (
     SuperGraph,
     build_super_graph,
+    extract_supernode_members,
     normalize_matrix,
     prune_graph,
 )
@@ -85,9 +86,12 @@ def compute_prompt_graph_loss(
     )
     if config.verbose:
         print(f"  [graph] building student graph for prompt: {prompt!r}")
+    # Bug fix: force student to attribute over the same logit tokens as the teacher so that
+    # prob-delta vectors occupy the same vocabulary positions in both models, making cosine
+    # similarity alignment meaningful.
     student_graph = student_adapter.build_graph(
         prompt,
-        top_k_logits=config.top_k_logits,
+        attribution_targets=teacher_graph.logit_token_ids.cpu(),
         prop_neurons_per_layer=config.prop_neurons_per_layer,
         batch_size=config.student_graph_batch_size,
         dtype=config.graph_dtype,
@@ -148,6 +152,12 @@ def compute_prompt_graph_loss(
         student_graph,
         student_supergraph_structure.supernodes,
     )
+    # _aggregate_supergraph_adjacency creates a new SuperGraph without copying
+    # supernode_prob_deltas; preserve them so align_supernodes_prob_delta gets
+    # non-zero cosine similarities instead of all-zero vectors → empty mapping.
+    student_supergraph = student_supergraph._replace(
+        supernode_prob_deltas=student_supergraph_structure.supernode_prob_deltas
+    )
     if config.verbose:
         print(
             "  [graph] student supergraph complete: "
@@ -169,11 +179,22 @@ def compute_prompt_graph_loss(
 
     teacher_ids = list(range(len(teacher_supergraph.supernodes)))
     student_ids = list(range(len(student_supergraph.supernodes)))
-    
-    # --- ANTHROPIC ALIGNMENT FIX ---
-    # Compute the student's DLA with gradients enabled via a normal forward pass.
-    # This avoids the massive OOM of building a Jacobian graph for edge-attribution,
-    # while providing a direct functional training signal to the student's circuit pathways.
+
+    # Replace prob-delta vectors in alignment.teacher_dla with actual DLA projections
+    # (W_out @ W_U per supernode) so teacher and student losses are in the same space.
+    # The alignment mapping was already determined from prob-deltas above; we only
+    # overwrite the vectors used in _compute_node_loss, not the mapping itself.
+    if config.graph_node_weight > 0.0:
+        with torch.no_grad():
+            teacher_sn_members = extract_supernode_members(
+                teacher_supergraph, teacher_graph, teacher_graph_model
+            )
+            W_U_t = teacher_graph_model.unembed.W_U
+            n_vocab_t = teacher_graph_model.cfg.d_vocab
+            for sn in teacher_sn_members:
+                dla = compute_supernode_dla(sn, W_U_t)[:n_vocab_t]
+                alignment.teacher_dla[sn["cluster_id"]] = dla.detach()
+
     if config.graph_node_weight > 0.0:
         student_dla_with_grad_dict = student_adapter.compute_supernode_dlas_with_grad(
             prompt=prompt,

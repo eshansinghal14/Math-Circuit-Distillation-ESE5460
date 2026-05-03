@@ -17,3 +17,4 @@ latex/paper.fls
 latex/paper.fdb_latexmk
 latex/paper.synctex.gz
 datasets/
+.claude/

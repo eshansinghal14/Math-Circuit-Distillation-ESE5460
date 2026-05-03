@@ -524,37 +524,31 @@ class HFLlamaGraphAdapter:
             }
             
         supernode_dlas = {}
-        
+
         for i, sn_indices in enumerate(supernodes):
-            sn_dla = torch.zeros(n_vocab, device=device, dtype=W_U.dtype)
             if not sn_indices:
-                supernode_dlas[i] = sn_dla
+                supernode_dlas[i] = torch.zeros(n_vocab, device=device, dtype=W_U.dtype)
                 continue
-                
-            locations = neuron_locations_t[sn_indices] # [K, 3] (layer, pos, neuron)
-            
+
+            locations = neuron_locations_t[sn_indices]  # [K, 3] (layer, pos, neuron)
+
+            # Accumulate source write-vectors in d_model space using out-of-place + so that
+            # the computation graph is intact through every addition.  A single W_U matmul
+            # at the end avoids repeated vocab-space in-place ops that can silently detach
+            # gradients after the first iteration.
+            sn_total_source = torch.zeros(self.d_model, device=device, dtype=W_U.dtype)
             for layer_idx in torch.unique(locations[:, 0]):
                 mask = locations[:, 0] == layer_idx
-                locs = locations[mask] # [M, 3]
-                
+                locs = locations[mask]  # [M, 3]
                 poses = locs[:, 1]
                 neurons = locs[:, 2]
-                
-                acts = layer_neuron_acts[layer_idx.item()]['acts'][poses, neurons] # [M]
-                out_w = layer_neuron_acts[layer_idx.item()]['out_rows'][neurons] # [M, hidden_size]
-                
-                sn_source_vectors = acts.unsqueeze(-1) * out_w # [M, hidden_size]
-                sn_sum_source = sn_source_vectors.sum(dim=0) # [hidden_size]
-                
-                sn_dla_full = W_U @ sn_sum_source.to(W_U.dtype) # [vocab_size]
-                
-                if sn_dla_full.shape[0] >= n_vocab:
-                    sn_dla += sn_dla_full[:n_vocab]
-                else:
-                    sn_dla[:sn_dla_full.shape[0]] += sn_dla_full
-                
-            supernode_dlas[i] = sn_dla
-            
+                acts = layer_neuron_acts[layer_idx.item()]['acts'][poses, neurons]  # [M]
+                out_w = layer_neuron_acts[layer_idx.item()]['out_rows'][neurons]    # [M, hidden_size]
+                sn_sum_source = (acts.unsqueeze(-1) * out_w).sum(dim=0)            # [hidden_size]
+                sn_total_source = sn_total_source + sn_sum_source.to(sn_total_source.dtype)
+
+            supernode_dlas[i] = (W_U @ sn_total_source)[:n_vocab]
+
         return supernode_dlas
 
 
