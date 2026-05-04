@@ -2101,17 +2101,16 @@ class ClusterDistillationTrainer:
                     temperature=cfg.temperature,
                 )
             elif self.teacher_data_cache is not None:
-                # Estimate teacher accuracy from cached logits on the training subset.
-                # We pick the argmax of the last prompt-position logit and compare to answer.
+                # Estimate teacher accuracy from a small sample of cached logits (fast).
                 correct = 0
                 total = 0
-                for prompt, answer in self.train_data.items():
+                sample_items = list(self.train_data.items())[:50]
+                for prompt, answer in sample_items:
                     try:
                         rec = self.teacher_data_cache._load_logits_record(prompt, int(answer))
                         logits = rec["logits"]  # (seq_len, vocab)
                         prompt_ids = rec["input_ids"]
                         prompt_len = int(prompt_ids.numel())
-                        # Predict token after last prompt token
                         pred_id = int(logits[prompt_len - 1].argmax())
                         pred_str = self.tokenizer.decode([pred_id]).strip()
                         correct += int(str(answer) == pred_str or str(answer).startswith(pred_str))
