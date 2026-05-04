@@ -37,6 +37,7 @@ from utils import HF_READ_TOKEN, default_datasets_dir, load_prompt_answer_json, 
 
 
 MANIFEST_NAME = "manifest.json"
+SHARD_MANIFEST_PATTERN = "manifest_shard_"
 
 
 @dataclass
@@ -193,6 +194,13 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
         samples = samples[config.start_index:]
     if config.limit is not None:
         samples = samples[: config.limit]
+
+    is_shard = config.start_index != 0 or config.limit is not None
+    shard_end = config.start_index + len(samples) - 1 if samples else config.start_index
+    if is_shard:
+        manifest_filename = f"{SHARD_MANIFEST_PATTERN}{config.start_index:06d}_{shard_end:06d}.json"
+    else:
+        manifest_filename = MANIFEST_NAME
 
     if HF_READ_TOKEN:
         logger.info("Authenticating with Hugging Face token")
@@ -359,12 +367,51 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
                 "prune_result": _relative(prune_path, store_path) if prune_path else None,
             }
         )
-        manifest_path = os.path.join(store_path, MANIFEST_NAME)
+        manifest_path = os.path.join(store_path, manifest_filename)
         logger.info("Updating manifest at %s", manifest_path)
         _write_json(manifest_path, manifest)
         logger.info("Completed teacher data for sample %d", sample_idx)
 
     return manifest
+
+
+def merge_shard_manifests(store_path: str) -> dict[str, Any]:
+    """Merge all manifest_shard_*.json files in store_path into manifest.json.
+
+    Safe to call after all parallel shard jobs finish. Idempotent.
+    """
+    logger = logging.getLogger(__name__)
+    store_path = os.path.abspath(store_path)
+    shard_files = sorted(
+        f for f in os.listdir(store_path) if f.startswith(SHARD_MANIFEST_PATTERN) and f.endswith(".json")
+    )
+    if not shard_files:
+        raise FileNotFoundError(
+            f"No shard manifests found in {store_path!r}. "
+            f"Run generate_teacher_data.py with --start-index / --limit first."
+        )
+    logger.info("Found %d shard manifest(s): %s", len(shard_files), shard_files)
+
+    merged: dict[str, Any] = {}
+    all_samples: list[dict[str, Any]] = []
+    for fname in shard_files:
+        path = os.path.join(store_path, fname)
+        with open(path, "r", encoding="utf-8") as f:
+            shard = json.load(f)
+        if not merged:
+            merged = {k: v for k, v in shard.items() if k != "samples"}
+        all_samples.extend(shard.get("samples", []))
+        logger.info("  %s: %d samples", fname, len(shard.get("samples", [])))
+
+    all_samples.sort(key=lambda s: s["sample_index"])
+    merged["samples"] = all_samples
+
+    manifest_path = os.path.join(store_path, MANIFEST_NAME)
+    _write_json(manifest_path, merged)
+    logger.info(
+        "Merged %d total samples into %s", len(all_samples), manifest_path
+    )
+    return merged
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -417,12 +464,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_graph_build_args(parser)
     add_graph_prune_args(parser)
+    parser.add_argument(
+        "--merge-shards",
+        action="store_true",
+        help=(
+            "Instead of generating data, merge all manifest_shard_*.json files in "
+            "--store-path into a single manifest.json. Run this after all parallel "
+            "shard jobs complete."
+        ),
+    )
     return parser
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     args = build_parser().parse_args()
+
+    if args.merge_shards:
+        if not args.store_path:
+            raise SystemExit("--merge-shards requires --store-path")
+        merge_shard_manifests(args.store_path)
+        return
+
     config = TeacherDataConfig(
         store_path=args.store_path,
         dataset_file=args.dataset_file,

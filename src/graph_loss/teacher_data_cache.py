@@ -4,15 +4,45 @@ from typing import Any
 
 import torch
 
+_SHARD_PREFIX = "manifest_shard_"
+
+
+def _load_merged_manifest(cache_dir: str) -> dict[str, Any]:
+    """Load manifest.json, or merge all shard manifests on-the-fly if it doesn't exist."""
+    manifest_path = os.path.join(cache_dir, "manifest.json")
+    if os.path.exists(manifest_path):
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    shard_files = sorted(
+        f for f in os.listdir(cache_dir) if f.startswith(_SHARD_PREFIX) and f.endswith(".json")
+    )
+    if not shard_files:
+        raise FileNotFoundError(
+            f"No manifest.json or shard manifests found in {cache_dir!r}. "
+            "Run generate_teacher_data.py first."
+        )
+
+    merged: dict[str, Any] = {}
+    all_samples: list[dict[str, Any]] = []
+    for fname in shard_files:
+        with open(os.path.join(cache_dir, fname), "r", encoding="utf-8") as f:
+            shard = json.load(f)
+        if not merged:
+            merged = {k: v for k, v in shard.items() if k != "samples"}
+        all_samples.extend(shard.get("samples", []))
+
+    all_samples.sort(key=lambda s: s["sample_index"])
+    merged["samples"] = all_samples
+    return merged
+
 
 class TeacherDataCache:
     """Load per-prompt teacher logits and graph artifacts from `generate_teacher_data`."""
 
     def __init__(self, cache_dir: str):
         self.cache_dir = os.path.abspath(cache_dir)
-        manifest_path = os.path.join(self.cache_dir, "manifest.json")
-        with open(manifest_path, "r", encoding="utf-8") as f:
-            self.manifest: dict[str, Any] = json.load(f)
+        self.manifest: dict[str, Any] = _load_merged_manifest(self.cache_dir)
 
         self.teacher_model = self.manifest.get("teacher_model")
         self.student_model = self.manifest.get("student_model")
