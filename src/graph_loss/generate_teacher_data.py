@@ -334,7 +334,7 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
             "answer_len": distill_tensors["answer_len"],
             "sequence_len": int(distill_tensors["input_ids"].numel()),
             "artifacts": {
-                "graph": _relative(graph_path, sample_dir),
+                "graph": _relative(graph_path, sample_dir) if not config.skip_graph_save else None,
                 "prune_result": _relative(prune_path, sample_dir) if prune_path else None,
                 "supergraph": _relative(supergraph_path, sample_dir),
                 "teacher_supernode_dla": _relative(dla_path, sample_dir),
