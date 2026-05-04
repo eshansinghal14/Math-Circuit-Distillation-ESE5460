@@ -2100,13 +2100,32 @@ class ClusterDistillationTrainer:
                     eval_label="teacher baseline",
                     temperature=cfg.temperature,
                 )
+            elif self.teacher_data_cache is not None:
+                # Estimate teacher accuracy from cached logits on the training subset.
+                # We pick the argmax of the last prompt-position logit and compare to answer.
+                correct = 0
+                total = 0
+                for prompt, answer in self.train_data.items():
+                    try:
+                        rec = self.teacher_data_cache._load_logits_record(prompt, int(answer))
+                        logits = rec["logits"]  # (seq_len, vocab)
+                        prompt_ids = rec["input_ids"]
+                        prompt_len = int(prompt_ids.numel())
+                        # Predict token after last prompt token
+                        pred_id = int(logits[prompt_len - 1].argmax())
+                        pred_str = self.tokenizer.decode([pred_id]).strip()
+                        correct += int(str(answer) == pred_str or str(answer).startswith(pred_str))
+                        total += 1
+                    except Exception:
+                        pass
+                teacher_base = correct / total if total > 0 else 0.0
             else:
                 teacher_base = 0.0
             print(f"  Student baseline accuracy: {student_base:.4f}")
             if self.teacher is not None:
                 print(f"  Teacher baseline accuracy: {teacher_base:.4f}")
             elif self.teacher_data_cache is not None:
-                print("  Teacher baseline accuracy: skipped (using cached teacher logits)")
+                print(f"  Teacher baseline accuracy (cached train subset, greedy): {teacher_base:.4f}")
             elif self._graph:
                 print(
                     "  Teacher baseline accuracy: skipped "
