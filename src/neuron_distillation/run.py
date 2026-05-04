@@ -673,10 +673,9 @@ def main():
     if args.graph_max_fan_out < 1:
         raise SystemExit("--graph-max-fan-out must be >= 1")
     graph_dtype = resolve_torch_dtype(args.dtype)
-    if args.teacher_data_cache and args.mode != "standard":
+    if args.teacher_data_cache and args.mode == "circuit":
         raise SystemExit(
-            "--teacher-data-cache currently supports --mode standard only; "
-            "circuit and graph modes require live teacher computation."
+            "--teacher-data-cache is not supported in --mode circuit."
         )
     replay_data = None
     replay_loss_weight = 0.0

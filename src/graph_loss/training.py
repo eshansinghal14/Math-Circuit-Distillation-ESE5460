@@ -291,11 +291,17 @@ def _load_cached_teacher(
     prompt: str,
     answer: int,
     device: torch.device,
-) -> CachedTeacherPromptData:
-    """Load one prompt's teacher artifacts from disk and reconstruct a SuperGraph."""
+) -> CachedTeacherPromptData | None:
+    """Load one prompt's teacher artifacts from disk and reconstruct a SuperGraph.
+
+    Returns None on a cache miss so callers can fall back to KL-only loss.
+    """
     from graph_loss.graph import SuperGraph  # local import to avoid circular
 
-    sg_data = cache.load_teacher_supergraph(prompt, answer)
+    try:
+        sg_data = cache.load_teacher_supergraph(prompt, answer)
+    except KeyError:
+        return None
     logit_token_ids: torch.Tensor | None = sg_data.get("logit_token_ids")
     supergraph = SuperGraph(
         supernode_adjacency_matrix=sg_data["supernode_adjacency_matrix"].to(device),
@@ -338,6 +344,9 @@ def compute_batch_graph_loss(
             if teacher_cache is not None and answers is not None
             else None
         )
+        if cached is None and teacher_graph_model is None:
+            # Cache miss and no live teacher — skip graph loss for this prompt.
+            continue
         prompt_loss, prompt_metrics = compute_prompt_graph_loss(
             prompt=prompt,
             teacher_graph_model=teacher_graph_model,
@@ -394,6 +403,9 @@ def backward_batch_graph_loss(
             if teacher_cache is not None and answers is not None
             else None
         )
+        if cached is None and teacher_graph_model is None:
+            # Cache miss and no live teacher — skip graph loss for this prompt.
+            continue
         prompt_loss, prompt_metrics = compute_prompt_graph_loss(
             prompt=prompt,
             teacher_graph_model=teacher_graph_model,
