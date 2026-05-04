@@ -788,9 +788,13 @@ def build_super_graph(
         deltas = torch.stack(
             [prob_delta_by_neuron[int(member)] for member in neuron_indices.detach().cpu().tolist()]
         )
-        normalized_deltas = F.normalize(deltas, p=2, dim=1, eps=1e-12)
+        # Run the expensive [K, n_logits] @ [n_logits, K] similarity matmul on GPU
+        # (fast-DLA path stores GPU tensors; fallback stores CPU — move accordingly).
+        _sim_device = graph.adjacency_device
+        normalized_deltas = F.normalize(deltas.to(_sim_device), p=2, dim=1, eps=1e-12)
         similarity = (normalized_deltas @ normalized_deltas.T).clamp(min=-1.0, max=1.0)
-        distance_matrix = torch.arccos(similarity) / math.pi
+        # Connected-components uses Python loops → must be on CPU
+        distance_matrix = (torch.arccos(similarity) / math.pi).cpu()
         assignments = angular_distance_connected_components(distance_matrix, computation_eps)
         unique_assignments, cluster_sizes = torch.unique(assignments, return_counts=True)
         logger.info(
@@ -963,10 +967,10 @@ def build_super_graph(
                 .float()
                 .to(_W_U_logits.device)
             )
-            _neuron_dla = (_kept_wv @ _W_U_logits).cpu()  # [K, n_logits]
+            _neuron_dla = _kept_wv @ _W_U_logits  # [K, n_logits], kept on GPU
         for _k, _member in enumerate(kept_neuron_indices.tolist()):
             _dla = _neuron_dla[_k]
-            prob_delta_by_neuron[_member] = _dla
+            prob_delta_by_neuron[_member] = _dla  # GPU tensor; clustering matmul stays on GPU
             prob_delta_norm_by_neuron[_member] = float(_dla.norm().item())
         del _wU, _W_U_logits, _kept_wv, _neuron_dla
         _fast_dla_populated = True

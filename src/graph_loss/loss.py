@@ -63,29 +63,32 @@ def _compute_node_loss(
     mapping: dict[int, set[int]],
     epsilon: float = 1e-4,
 ) -> torch.Tensor:
-    """Node-level functional loss: L2 on DLA mismatch between aligned supernodes.
+    """Node-level functional loss: cosine distance between aligned DLA vectors.
+
+    Uses normalized L2 (= 2*(1 - cosine_similarity)) so the loss is scale-invariant
+    and bounded in [0, 4], regardless of whether DLAs are in logit or probability space.
 
     For each teacher supernode t mapped to student supernodes {s1, s2, ...},
-    penalize the distance between the teacher's DLA and the closest student DLA.
+    penalize the angular distance to the best-matching student supernode.
     """
     device = next(iter(teacher_dla.values())).device if teacher_dla else torch.device("cpu")
-    dtype = next(iter(teacher_dla.values())).dtype if teacher_dla else torch.float32
 
-    loss = torch.tensor(0.0, device=device, dtype=dtype)
+    loss = torch.tensor(0.0, device=device, dtype=torch.float32)
     count = 0
 
     for t_id, s_ids in mapping.items():
         if not s_ids or t_id not in teacher_dla:
             continue
-        t_vec = teacher_dla[t_id]
+        # Normalize teacher vector once (detached — teacher is frozen)
+        t_vec = F.normalize(teacher_dla[t_id].float().to(device), dim=0)
 
-        # Best-matching student supernode (min L2 distance)
+        # Best-matching student supernode (min normalized L2 = min cosine distance)
         min_dist_sq = None
         for s_id in s_ids:
             if s_id not in student_dla:
                 continue
-            s_vec = student_dla[s_id].to(device=device, dtype=dtype)
-            dist_sq = (t_vec - s_vec).pow(2).sum()
+            s_vec = F.normalize(student_dla[s_id].float().to(device), dim=0)
+            dist_sq = (t_vec - s_vec).pow(2).sum()  # in [0, 4]
             if min_dist_sq is None or dist_sq < min_dist_sq:
                 min_dist_sq = dist_sq
 
