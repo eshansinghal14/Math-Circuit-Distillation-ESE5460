@@ -60,6 +60,14 @@ class TeacherDataConfig:
     fast: bool = True
     cluster_method: str = "ablation"
     skip_graph_save: bool = True
+    cossim_eps: float = 0.1
+    embedding_sigma: float = 1.5
+    embedding_eps: float = 0.1
+    computation_sigma: float = 1.5
+    computation_eps: float = 0.1
+    dataset: str | None = None
+    activation_forward_batch_size: int = 32
+    activation_write_cache_path: str | None = None
 
 
 def _resolve_dataset_file(dataset_file: str) -> str:
@@ -289,6 +297,15 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
                 graph_for_supergraph,
                 model,
                 prune_result=prune_result,
+            cossim_eps=config.cossim_eps,
+            embedding_sigma=config.embedding_sigma,
+            embedding_eps=config.embedding_eps,
+            computation_sigma=config.computation_sigma,
+            computation_eps=config.computation_eps,
+            dataset=config.dataset,
+            activation_forward_batch_size=config.activation_forward_batch_size,
+            activation_write_cache_path=config.activation_write_cache_path,
+            model_name=config.teacher_model,
                 cluster_method=config.cluster_method,
             )
         _log_supergraph_summary(
@@ -449,8 +466,63 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--cluster-method",
+        "--cluster_method",
+        dest="cluster_method",
+        choices=("full_search", "ablation"),
         default="ablation",
         help="Supergraph clustering method (default: ablation)",
+    )
+    parser.add_argument(
+        "--cossim_eps",
+        type=float,
+        default=0.1,
+        help="Deprecated fallback clustering epsilon; use --embedding_eps and --computation_eps",
+    )
+    parser.add_argument(
+        "--embedding_sigma",
+        type=float,
+        default=1.5,
+        help="Gaussian smoothing sigma for numeric-token embedding supernode clustering",
+    )
+    parser.add_argument(
+        "--embedding_eps",
+        type=float,
+        default=0.1,
+        help="Angular distance epsilon for numeric-token embedding supernode clustering",
+    )
+    parser.add_argument(
+        "--computation_sigma",
+        type=float,
+        default=1.5,
+        help="Gaussian smoothing sigma for final-token computation supernode clustering",
+    )
+    parser.add_argument(
+        "--computation_eps",
+        type=float,
+        default=0.1,
+        help="Angular distance epsilon for final-token computation supernode clustering",
+    )
+    parser.add_argument(
+        "--dataset",
+        help=(
+            "Optional dataset prefix, filename, or path for activation-write "
+            "output-neuron clustering and per-cluster PDF heatmaps"
+        ),
+    )
+    parser.add_argument(
+        "--activation_forward_batch_size",
+        type=int,
+        default=32,
+        help="Batch size for dataset activation-write forward passes",
+    )
+    parser.add_argument(
+        "--activation-write-cache-path",
+        "--activation_write_cache_path",
+        dest="activation_write_cache_path",
+        help=(
+            "Optional cache root for dataset activation-write results. "
+            "A model-name folder is created inside this path."
+        ),
     )
     parser.add_argument(
         "--skip-graph-save",
@@ -507,6 +579,14 @@ def main() -> None:
         fast=args.fast,
         cluster_method=args.cluster_method,
         skip_graph_save=args.skip_graph_save,
+        cossim_eps=args.cossim_eps,
+        embedding_sigma=args.embedding_sigma,
+        embedding_eps=args.embedding_eps,
+        computation_sigma=args.computation_sigma,
+        computation_eps=args.computation_eps,
+        dataset=args.dataset,
+        activation_forward_batch_size=args.activation_forward_batch_size,
+        activation_write_cache_path=args.activation_write_cache_path,
     )
     generate_teacher_data(config)
 
