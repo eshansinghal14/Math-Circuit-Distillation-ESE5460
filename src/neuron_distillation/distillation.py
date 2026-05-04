@@ -1149,7 +1149,7 @@ class ClusterDistillationTrainer:
             print("Using standard AdamW optimizer (install bitsandbytes for memory savings).")
 
         # Dataset / loader (padding + kl_mask over the full next-token sequence)
-        self.dataset = AddDataset(train_data, self.tokenizer)
+        self.dataset = AddDataset(self.train_data, self.tokenizer)
         self.loader = DataLoader(
             self.dataset,
             batch_size=config.batch_size,
