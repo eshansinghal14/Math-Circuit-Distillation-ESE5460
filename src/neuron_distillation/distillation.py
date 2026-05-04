@@ -999,7 +999,6 @@ class ClusterDistillationTrainer:
                 "teacher_data_cache is not supported in circuit mode."
             )
         self.cluster_pairs = cluster_pairs
-        self.train_data = train_data
         self.test_data = test_data
         self.extra_eval_data = extra_eval_data or {}
         self.replay_data = replay_data
@@ -1028,6 +1027,26 @@ class ClusterDistillationTrainer:
             if config.teacher_data_cache
             else None
         )
+        # When a cache is present in graph mode, restrict training to only prompts
+        # that were pre-generated.  This guarantees every training step gets the
+        # full graph loss signal instead of silently falling back to KL-only for
+        # the uncached majority.
+        if self.teacher_data_cache is not None and self._graph:
+            cached_keys = self.teacher_data_cache._samples  # {(prompt, answer): ...}
+            filtered = {p: a for p, a in train_data.items() if (p, a) in cached_keys}
+            n_orig, n_kept = len(train_data), len(filtered)
+            print(
+                f"Graph cache filter: {n_kept}/{n_orig} training prompts have cached teacher data "
+                f"({100 * n_kept / max(n_orig, 1):.1f}%). Training on cached subset only."
+            )
+            if n_kept == 0:
+                raise RuntimeError(
+                    "No training prompts found in teacher cache. "
+                    "Run generate_teacher_data.py first, or remove --teacher-data-cache."
+                )
+            self.train_data = filtered
+        else:
+            self.train_data = train_data
         if student is not None:
             self.student = student
         else:
