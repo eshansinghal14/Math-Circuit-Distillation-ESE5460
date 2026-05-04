@@ -40,13 +40,20 @@ def _build_full_vocab_prob_deltas(
     """Expand per-supernode prob-deltas from logit-target indices to full vocab.
 
     Returns shape [n_supernodes, n_vocab] with zeros for non-target tokens.
+    ``graph`` may be None when the teacher supergraph was loaded from cache; in
+    that case the supergraph must carry its own ``logit_token_ids``.
     """
     n_supernodes = len(supergraph.supernodes)
 
     if supergraph.supernode_prob_deltas is None or supergraph.supernode_prob_deltas.numel() == 0:
         return torch.zeros(n_supernodes, n_vocab, dtype=torch.float32)
 
-    logit_token_ids = graph.logit_token_ids.cpu()
+    if graph is not None:
+        logit_token_ids = graph.logit_token_ids.cpu()
+    elif getattr(supergraph, "logit_token_ids", None) is not None:
+        logit_token_ids = supergraph.logit_token_ids.cpu()
+    else:
+        return torch.zeros(n_supernodes, n_vocab, dtype=torch.float32)
     deltas = supergraph.supernode_prob_deltas.detach().float().cpu()
 
     # Expand n_vocab if token IDs exceed it (special tokens beyond stated vocab)

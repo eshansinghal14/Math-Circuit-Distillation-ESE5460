@@ -994,10 +994,9 @@ class ClusterDistillationTrainer:
         self._standard = config.distillation_mode == "standard"
         self._circuit = config.distillation_mode == "circuit"
         self._graph = config.distillation_mode == "graph"
-        if config.teacher_data_cache and not self._standard:
+        if config.teacher_data_cache and self._circuit:
             raise ValueError(
-                "teacher_data_cache currently supports standard KL mode only. "
-                "Circuit and graph modes require live teacher computation."
+                "teacher_data_cache is not supported in circuit mode."
             )
         self.cluster_pairs = cluster_pairs
         self.train_data = train_data
@@ -1099,13 +1098,19 @@ class ClusterDistillationTrainer:
                 self.tokenizer,
                 self.device,
             )
-            print(f"Loading teacher graph model: {config.teacher_model}")
-            self.teacher_graph_model = TransformerLensReplacementModel.from_pretrained(
-                config.teacher_model,
-                device=self.device,
-                dtype=config.graph_dtype or teacher_dtype,
-            )
-            self.teacher_graph_model.eval()
+            if self.teacher_data_cache is not None:
+                print(
+                    "Graph mode: skipping TransformerLens teacher load — "
+                    "using pre-generated teacher cache for graph attribution."
+                )
+            else:
+                print(f"Loading teacher graph model: {config.teacher_model}")
+                self.teacher_graph_model = TransformerLensReplacementModel.from_pretrained(
+                    config.teacher_model,
+                    device=self.device,
+                    dtype=config.graph_dtype or teacher_dtype,
+                )
+                self.teacher_graph_model.eval()
 
         # Optimizer
         try:
@@ -1492,14 +1497,20 @@ class ClusterDistillationTrainer:
                 graph_loss = None
                 graph_metrics: Dict[str, Any] = {}
                 if self._graph and compute_graph_loss:
-                    if self.student_graph_adapter is None or self.teacher_graph_model is None:
-                        raise RuntimeError("Graph mode models were not initialized.")
+                    if self.student_graph_adapter is None:
+                        raise RuntimeError("Graph mode student adapter was not initialized.")
+                    if self.teacher_graph_model is None and self.teacher_data_cache is None:
+                        raise RuntimeError(
+                            "Graph mode requires either a teacher graph model or a teacher data cache."
+                        )
                     graph_loss, graph_metrics = compute_batch_graph_loss(
                         prompts=batch["prompts"],
                         teacher_graph_model=self.teacher_graph_model,
                         student_adapter=self.student_graph_adapter,
                         config=self.graph_loss_config,
                         device=self.device,
+                        teacher_cache=self.teacher_data_cache,
+                        answers=batch.get("answers"),
                     )
 
                 total = distill_kl
@@ -1718,8 +1729,12 @@ class ClusterDistillationTrainer:
     ) -> torch.Tensor:
         if not self._graph:
             return non_graph_loss
-        if self.student_graph_adapter is None or self.teacher_graph_model is None:
-            raise RuntimeError("Graph mode models were not initialized.")
+        if self.student_graph_adapter is None:
+            raise RuntimeError("Graph mode student adapter was not initialized.")
+        if self.teacher_graph_model is None and self.teacher_data_cache is None:
+            raise RuntimeError(
+                "Graph mode requires either a teacher graph model or a teacher data cache."
+            )
 
         self._cuda_clear_after_graph_step()
 
@@ -1730,6 +1745,8 @@ class ClusterDistillationTrainer:
             config=self.graph_loss_config,
             device=self.device,
             loss_scale=self.config.lambda_graph,
+            teacher_cache=self.teacher_data_cache,
+            answers=batch.get("answers"),
         )
         graph_weighted = self.config.lambda_graph * graph_loss
         total = non_graph_loss.detach() + graph_weighted

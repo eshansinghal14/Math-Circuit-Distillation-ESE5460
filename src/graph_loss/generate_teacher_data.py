@@ -56,6 +56,8 @@ class TeacherDataConfig:
     limit: int | None = None
     start_index: int = 0
     overwrite: bool = False
+    fast: bool = True
+    cluster_method: str = "ablation"
 
 
 def _resolve_dataset_file(dataset_file: str) -> str:
@@ -93,17 +95,19 @@ def _save_prune_result(path: str, prune_result: PruneResult) -> None:
     )
 
 
-def _save_supergraph(path: str, supergraph: SuperGraph) -> None:
-    torch.save(
-        {
-            "supernode_adjacency_matrix": supergraph.supernode_adjacency_matrix,
-            "supernodes": supergraph.supernodes,
-            "supernode_prob_deltas": supergraph.supernode_prob_deltas,
-            "all_supernode_prob_delta_norms": supergraph.all_supernode_prob_delta_norms,
-            "prob_delta_elbow_index": supergraph.prob_delta_elbow_index,
-        },
-        path,
-    )
+def _save_supergraph(
+    path: str, supergraph: SuperGraph, logit_token_ids: torch.Tensor | None = None
+) -> None:
+    data: dict[str, Any] = {
+        "supernode_adjacency_matrix": supergraph.supernode_adjacency_matrix,
+        "supernodes": supergraph.supernodes,
+        "supernode_prob_deltas": supergraph.supernode_prob_deltas,
+        "all_supernode_prob_delta_norms": supergraph.all_supernode_prob_delta_norms,
+        "prob_delta_elbow_index": supergraph.prob_delta_elbow_index,
+    }
+    if logit_token_ids is not None:
+        data["logit_token_ids"] = logit_token_ids.cpu()
+    torch.save(data, path)
 
 
 def _build_distillation_tensors(prompt: str, answer: int, tokenizer) -> dict[str, Any]:
@@ -228,7 +232,7 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
         os.makedirs(sample_dir, exist_ok=True)
 
         logger.info("Generating teacher data for sample %d: %r", sample_idx, prompt)
-        logger.info("Running attribution graph build")
+        logger.info("Running attribution graph build (fast=%s)", config.fast)
         graph = attribute(
             prompt=prompt,
             model=model,
@@ -236,6 +240,7 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
             prop_neurons_per_layer=config.prop_neurons_per_layer,
             batch_size=config.batch_size,
             verbose=config.verbose,
+            fast=config.fast,
         )
         _log_graph_summary(graph, logger=logger, stage="Built")
 
@@ -266,11 +271,12 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
             logger.info("Applying prune masks to graph")
             graph_for_supergraph = graph.apply_prune_result(prune_result)
 
-        logger.info("Running build_super_graph")
+        logger.info("Running build_super_graph (cluster_method=%s)", config.cluster_method)
         supergraph = build_super_graph(
             graph_for_supergraph,
             model,
             prune_result=prune_result,
+            cluster_method=config.cluster_method,
         )
         _log_supergraph_summary(
             graph_for_supergraph,
@@ -279,7 +285,7 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
         )
         supergraph_path = os.path.join(sample_dir, "supergraph.pt")
         logger.info("Saving supergraph to %s", supergraph_path)
-        _save_supergraph(supergraph_path, supergraph)
+        _save_supergraph(supergraph_path, supergraph, logit_token_ids=graph.logit_token_ids)
         _log_pipeline_comparison(
             graph_for_supergraph,
             supergraph,
@@ -376,6 +382,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=int, default=None, help="Optional number of samples")
     parser.add_argument("--start-index", type=int, default=0, help="Dataset index to start at")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing sample folders")
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        default=True,
+        help="Use fast attribution (skip Jacobian; linear logit readout only). Default: True.",
+    )
+    parser.add_argument(
+        "--no-fast",
+        action="store_false",
+        dest="fast",
+        help="Use full Jacobian attribution instead of fast mode.",
+    )
+    parser.add_argument(
+        "--cluster-method",
+        default="ablation",
+        help="Supergraph clustering method (default: ablation)",
+    )
     add_graph_build_args(parser)
     add_graph_prune_args(parser)
     return parser
@@ -400,6 +423,8 @@ def main() -> None:
         limit=args.limit,
         start_index=args.start_index,
         overwrite=args.overwrite,
+        fast=args.fast,
+        cluster_method=args.cluster_method,
     )
     generate_teacher_data(config)
 

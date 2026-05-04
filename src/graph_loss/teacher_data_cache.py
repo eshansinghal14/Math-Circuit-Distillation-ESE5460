@@ -48,6 +48,11 @@ class TeacherDataCache:
             raise FileNotFoundError("Teacher cache sample has no supergraph artifact")
         return torch.load(path, map_location="cpu", weights_only=False)
 
+    def load_logit_token_ids(self, prompt: str, answer: int) -> torch.Tensor | None:
+        """Return the teacher's top-k logit token IDs saved during pregeneration, or None."""
+        data = self.load_teacher_supergraph(prompt, answer)
+        return data.get("logit_token_ids")
+
     def load_teacher_supernode_dla(self, prompt: str, answer: int) -> dict[str, Any]:
         path = self.get_artifact_path(prompt, answer, "teacher_supernode_dla")
         if path is None:

@@ -388,6 +388,7 @@ class SuperGraph(NamedTuple):
     supernode_prob_deltas: torch.Tensor | None = None
     all_supernode_prob_delta_norms: torch.Tensor | None = None
     prob_delta_elbow_index: int | None = None
+    logit_token_ids: torch.Tensor | None = None
 
 
 def build_super_graph(
