@@ -114,7 +114,7 @@ def add_graph_build_args(parser: argparse.ArgumentParser) -> None:
         help="Fraction of neurons to keep per layer",
     )
     parser.add_argument(
-        "--batch_size",
+        "--attribution_batch_size",
         type=int,
         default=512,
         help="Batch size for attribution backward passes",

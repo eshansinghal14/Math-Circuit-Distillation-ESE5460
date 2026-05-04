@@ -49,7 +49,7 @@ class TeacherDataConfig:
     dtype: str = "float32"
     top_k_logits: int | None = 20
     prop_neurons_per_layer: float = 0.1
-    batch_size: int = 512
+    attribution_batch_size: int = 256
     verbose: bool = False
     prune: bool = False
     node_threshold: float = 0.8
@@ -247,7 +247,7 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
             model=model,
             top_k_logits=config.top_k_logits,
             prop_neurons_per_layer=config.prop_neurons_per_layer,
-            batch_size=config.batch_size,
+            batch_size=config.attribution_batch_size,
             verbose=config.verbose,
             fast=config.fast,
         )
@@ -494,7 +494,7 @@ def main() -> None:
         dtype=args.dtype,
         top_k_logits=args.top_k_logits,
         prop_neurons_per_layer=args.prop_neurons_per_layer,
-        batch_size=args.batch_size,
+        attribution_batch_size=args.attribution_batch_size,
         verbose=args.verbose,
         prune=args.prune,
         node_threshold=args.node_threshold,

@@ -678,7 +678,7 @@ def main():
         model=model,
         top_k_logits=args.top_k_logits,
         prop_neurons_per_layer=args.prop_neurons_per_layer,
-        batch_size=args.batch_size,
+        batch_size=args.attribution_batch_size,
         verbose=args.verbose,
     )
     _log_graph_summary(graph, logger=logger, stage="Built")
