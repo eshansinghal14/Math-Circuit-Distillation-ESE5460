@@ -58,6 +58,7 @@ class TeacherDataConfig:
     overwrite: bool = False
     fast: bool = True
     cluster_method: str = "ablation"
+    skip_graph_save: bool = True
 
 
 def _resolve_dataset_file(dataset_file: str) -> str:
@@ -244,9 +245,12 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
         )
         _log_graph_summary(graph, logger=logger, stage="Built")
 
-        graph_path = os.path.join(sample_dir, "graph.pt")
-        logger.info("Saving graph to %s", graph_path)
-        graph.to_pt(graph_path)
+        if not config.skip_graph_save:
+            graph_path = os.path.join(sample_dir, "graph.pt")
+            logger.info("Saving graph to %s", graph_path)
+            graph.to_pt(graph_path)
+        else:
+            logger.info("Skipping graph.pt save (--skip-graph-save)")
 
         prune_result = None
         graph_for_supergraph = graph
@@ -399,6 +403,18 @@ def build_parser() -> argparse.ArgumentParser:
         default="ablation",
         help="Supergraph clustering method (default: ablation)",
     )
+    parser.add_argument(
+        "--skip-graph-save",
+        action="store_true",
+        default=True,
+        help="Skip saving the full graph.pt file (~21MB/sample, not needed for training). Default: True.",
+    )
+    parser.add_argument(
+        "--no-skip-graph-save",
+        action="store_false",
+        dest="skip_graph_save",
+        help="Save the full graph.pt file for each sample.",
+    )
     add_graph_build_args(parser)
     add_graph_prune_args(parser)
     return parser
@@ -425,6 +441,7 @@ def main() -> None:
         overwrite=args.overwrite,
         fast=args.fast,
         cluster_method=args.cluster_method,
+        skip_graph_save=args.skip_graph_save,
     )
     generate_teacher_data(config)
 
