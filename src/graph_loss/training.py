@@ -312,12 +312,24 @@ def _load_cached_teacher(
         # Embed logit_token_ids so _build_full_vocab_prob_deltas works without graph
         logit_token_ids=logit_token_ids,
     )
-    dla_data = cache.load_teacher_supernode_dla(prompt, answer)
-    dla_dict: dict[int, torch.Tensor] = {
-        int(cid): vec.to(device)
-        for cid, vec in zip(dla_data["cluster_ids"], dla_data["dla"])
-    }
-    n_vocab = int(dla_data["dla"].shape[-1]) if dla_data["dla"].numel() > 0 else cache.teacher_vocab_size
+    prob_deltas = sg_data.get("supernode_prob_deltas")
+    if prob_deltas is not None and prob_deltas.numel() > 0:
+        # Prefer ablation prob-deltas over DLA as the teacher node-loss target.
+        # The alignment step (`align_supernodes_prob_delta`) already scatters
+        # these 1000-dim vectors into full vocab space via logit_token_ids and
+        # stores them in `alignment.teacher_dla`.  Returning an empty dla_dict
+        # prevents the subsequent override loop in `compute_prompt_graph_loss`
+        # from replacing those prob-delta targets with the cheaper DLA vectors.
+        dla_dict: dict[int, torch.Tensor] = {}
+        n_vocab = cache.teacher_vocab_size
+    else:
+        # Fallback for caches generated without prob-deltas (fast-mode / legacy).
+        dla_data = cache.load_teacher_supernode_dla(prompt, answer)
+        dla_dict = {
+            int(cid): vec.to(device)
+            for cid, vec in zip(dla_data["cluster_ids"], dla_data["dla"])
+        }
+        n_vocab = int(dla_data["dla"].shape[-1]) if dla_data["dla"].numel() > 0 else cache.teacher_vocab_size
     return CachedTeacherPromptData(
         supergraph=supergraph,
         dla_dict=dla_dict,
