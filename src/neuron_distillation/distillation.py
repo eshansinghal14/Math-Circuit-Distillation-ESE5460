@@ -2101,23 +2101,7 @@ class ClusterDistillationTrainer:
                     temperature=cfg.temperature,
                 )
             elif self.teacher_data_cache is not None:
-                # Estimate teacher accuracy from a small sample of cached logits (fast).
-                correct = 0
-                total = 0
-                sample_items = list(self.train_data.items())[:50]
-                for prompt, answer in sample_items:
-                    try:
-                        rec = self.teacher_data_cache._load_logits_record(prompt, int(answer))
-                        logits = rec["logits"]  # (seq_len, vocab)
-                        prompt_ids = rec["input_ids"]
-                        prompt_len = int(prompt_ids.numel())
-                        pred_id = int(logits[prompt_len - 1].argmax())
-                        pred_str = self.tokenizer.decode([pred_id]).strip()
-                        correct += int(str(answer) == pred_str or str(answer).startswith(pred_str))
-                        total += 1
-                    except Exception:
-                        pass
-                teacher_base = correct / total if total > 0 else 0.0
+                teacher_base = 0.0
             else:
                 teacher_base = 0.0
             print(f"  Student baseline accuracy: {student_base:.4f}")
