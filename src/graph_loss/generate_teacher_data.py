@@ -292,10 +292,11 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
             graph_for_supergraph = graph.apply_prune_result(prune_result)
 
         logger.info("Running build_super_graph (cluster_method=%s)", config.cluster_method)
-        supergraph = build_super_graph(
-            graph_for_supergraph,
-            model,
-            prune_result=prune_result,
+        with torch.no_grad():
+            supergraph = build_super_graph(
+                graph_for_supergraph,
+                model,
+                prune_result=prune_result,
             cossim_eps=config.cossim_eps,
             embedding_sigma=config.embedding_sigma,
             embedding_eps=config.embedding_eps,
@@ -305,8 +306,8 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
             activation_forward_batch_size=config.activation_forward_batch_size,
             activation_write_cache_path=config.activation_write_cache_path,
             model_name=config.teacher_model,
-            cluster_method=config.cluster_method,
-        )
+                cluster_method=config.cluster_method,
+            )
         _log_supergraph_summary(
             graph_for_supergraph,
             supergraph,
@@ -324,12 +325,13 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
 
         dla_path = os.path.join(sample_dir, "teacher_supernode_dla.pt")
         logger.info("Saving teacher supernode DLA to %s", dla_path)
-        _save_teacher_supernode_dla(
-            dla_path,
-            supergraph=supergraph,
-            graph=graph_for_supergraph,
-            model=model,
-        )
+        with torch.no_grad():
+            _save_teacher_supernode_dla(
+                dla_path,
+                supergraph=supergraph,
+                graph=graph_for_supergraph,
+                model=model,
+            )
 
         logger.info("Computing teacher logits for distillation cache")
         distill_tensors = _build_distillation_tensors(prompt, answer, tokenizer)
