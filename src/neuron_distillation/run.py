@@ -317,6 +317,8 @@ def main():
                         help="Path to circuit-discovery checkpoint .pt (circuit mode; auto-detected from --save-dir root if omitted)")
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--train-limit", type=int, default=None,
+                        help="Cap the training set to the first N examples.")
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--temperature", type=float, default=2.0)
@@ -909,6 +911,8 @@ def main():
     print("Loading dataset")
     print("=" * 60)
     train_data = load_prompt_answer_json(train_path)
+    if args.train_limit is not None:
+        train_data = dict(list(train_data.items())[: args.train_limit])
     test_data = load_prompt_answer_json(test_path)
     print(f"  Train: {len(train_data)} examples")
     print(f"  Test:  {len(test_data)} examples")
