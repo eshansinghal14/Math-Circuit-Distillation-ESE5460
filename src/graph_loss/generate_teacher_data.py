@@ -355,7 +355,7 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
                 "teacher_logits": _relative(logits_path, store_path),
                 "supergraph": _relative(supergraph_path, store_path),
                 "teacher_supernode_dla": _relative(dla_path, store_path),
-                "graph": _relative(graph_path, store_path),
+                "graph": _relative(graph_path, store_path) if not config.skip_graph_save else None,
                 "prune_result": _relative(prune_path, store_path) if prune_path else None,
             }
         )
