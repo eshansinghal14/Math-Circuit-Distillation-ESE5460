@@ -53,7 +53,7 @@ def load_model(model_name):
     ).to(device)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.pad_token = tokenizer.eos_token
-    # Match neuron_distillation AddDataset/collate_fn (right-pad); eval/generate use same side.
+    # Match distillation AddDataset/collate_fn (right-pad); eval/generate use same side.
     tokenizer.padding_side = "right"
     return model, patch_tokenizer_no_special_tokens(tokenizer)
 

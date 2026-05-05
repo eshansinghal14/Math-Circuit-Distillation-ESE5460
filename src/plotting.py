@@ -9,7 +9,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from cka_loss import stable_rank_centered_gram
 from utils import (
     NEURON_CLUSTERING_STUDENT_SUBPATH,
     NEURON_CLUSTERING_SUBDIR,
@@ -127,7 +126,7 @@ def _write_random_ablation_poly_json(
     source_basename: str,
     max_poly_degree_cap: int,
 ) -> None:
-    """Save polyfit metadata for :func:`utils.expected_performance_drop_from_random_ablation_poly`."""
+    """Save polyfit metadata for random-ablation plots."""
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     payload = {
         "format": "numpy_polyfit",
@@ -170,8 +169,7 @@ def save_random_ablation_1b_8b_plot(
 
     Also writes ``random_ablation_poly_1b.json`` / ``random_ablation_poly_8b.json`` under
     ``results/random_ablation_poly/<dataset>/`` (see :func:`utils.random_ablation_poly_output_dir`)
-    with ``numpy.polyfit`` coefficients (evaluate with
-    :func:`utils.expected_performance_drop_from_random_ablation_poly`).
+    with ``numpy.polyfit`` coefficients.
     """
     if directory is None:
         directory = os.path.join(
@@ -442,163 +440,6 @@ def _neuron_id_to_feature_row_inv(indices_per_subclass: torch.Tensor) -> Dict[in
     return {int(indices_per_subclass[i]): i for i in range(int(indices_per_subclass.numel()))}
 
 
-def _cuda_device_for_stable_rank() -> torch.device:
-    """CUDA device for per-cluster :func:`cka_loss.stable_rank_centered_gram` (required)."""
-    if not torch.cuda.is_available():
-        raise RuntimeError(
-            "teacher stable-rank helpers require CUDA (torch.cuda.is_available() is False).",
-        )
-    return torch.device("cuda")
-
-
-def teacher_cluster_stable_ranks_centered_gram(
-    cluster_pt_path: str,
-    subclass_features_pt_path: str,
-    *,
-    subclass: Optional[int] = None,
-) -> Tuple[int, Dict[int, float]]:
-    """Stable rank of the teacher's centered Gram matrix per cluster (tokens × neurons in cluster).
-
-    Uses the same column centering as linear CKA (:func:`cka_loss.stable_rank_centered_gram`).
-    ``cluster_pt_path`` should be the **8b (teacher)** cluster checkpoint. ``subclass_features_pt_path``
-    must be that model's ``subclass_features.pt`` in the same ``neuron_clustering/.../<model_dir>/`` tree.
-
-    Requires CUDA; raises :exc:`RuntimeError` if ``torch.cuda.is_available()`` is false.
-
-    Returns:
-        ``(k, {cluster_id -> stable_rank})`` with ``nan`` for empty clusters.
-    """
-    d = torch.load(cluster_pt_path, map_location="cpu", weights_only=False)
-    sc = int(d["subclass"]) if subclass is None else int(subclass)
-    k = int(d.get("k", len(d["cluster_to_indices"])))
-    c2i = d["cluster_to_indices"]
-
-    ckpt = torch.load(subclass_features_pt_path, map_location="cpu", weights_only=False)
-    fp = ckpt["features_per_subclass"]
-    ip = ckpt["indices_per_subclass"]
-    if sc not in fp or sc not in ip:
-        raise KeyError(f"subclass {sc} not in features checkpoint {subclass_features_pt_path!r}")
-    feat = fp[sc].float()
-    idx_feat = ip[sc]
-    inv = _neuron_id_to_feature_row_inv(idx_feat)
-    comp_dev = _cuda_device_for_stable_rank()
-
-    out: Dict[int, float] = {}
-    with torch.inference_mode():
-        for j in range(k):
-            cj = c2i.get(j)
-            if cj is None or (hasattr(cj, "numel") and cj.numel() == 0):
-                out[j] = float("nan")
-                continue
-            rows = _neuron_rows_for_cluster(cj, inv)
-            if not rows:
-                out[j] = float("nan")
-                continue
-            x_rows = feat[rows, :]  # [|C|, n_tokens]
-            X = x_rows.T.contiguous().to(comp_dev, non_blocking=True)  # (n_tokens, |C|)
-            sr = stable_rank_centered_gram(X)
-            out[j] = float(sr.item())
-
-    return k, out
-
-
-def print_clustering_teacher_stable_rank_table(
-    data_dirs: Sequence[str],
-    num_clusters: Sequence[Dict[str, int]],
-    *,
-    subclass: int = 0,
-    row_labels: Optional[Sequence[str]] = None,
-    row_label_header: str = "run",
-    out: Optional[TextIO] = None,
-    float_fmt: str = "{:.4g}",
-    return_text: bool = False,
-) -> Optional[str]:
-    """Print a text table: one row per ``data_dir``, columns = teacher (8b) cluster stable rank.
-
-    Same path layout as :func:`print_clustering_cluster_counts_table` (8b under
-    :data:`utils.NEURON_CLUSTERING_TEACHER_SUBPATH`). Loads ``subclass_features.pt`` next to the 8b
-    cluster checkpoint.
-
-    Stable rank is ``||G||_F^2 / ||G||_2^2`` for ``G = X_c X_c.T`` with column-centered activations
-    ``X`` (tokens × neurons in cluster), matching :func:`cka_loss.stable_rank_centered_gram`.
-
-    Requires CUDA (see :func:`teacher_cluster_stable_ranks_centered_gram`).
-
-    By default this only prints and returns ``None``. In Jupyter/IPython, returning the same string
-    you print causes a second display with ``\\n`` shown as escapes; set ``return_text=True`` when you
-    need the table string (e.g. to write a file).
-
-    Returns:
-        The table string if ``return_text`` is true; otherwise ``None``.
-    """
-    if len(num_clusters) != len(data_dirs):
-        raise ValueError(
-            f"num_clusters length {len(num_clusters)} != data_dirs length {len(data_dirs)}",
-        )
-    for m in num_clusters:
-        for key in ("1b", "8b"):
-            if key not in m:
-                raise KeyError(f"each num_clusters entry must include {key!r}, got {list(m.keys())!r}")
-
-    max_k = max(int(m["8b"]) for m in num_clusters)
-
-    if row_labels is not None and len(row_labels) != len(data_dirs):
-        raise ValueError(
-            f"row_labels length {len(row_labels)} != data_dirs length {len(data_dirs)}",
-        )
-
-    parsed: List[Tuple[str, int, Dict[int, float]]] = []
-    for i, raw in enumerate(data_dirs):
-        root = os.path.abspath(raw)
-        if not os.path.isdir(root):
-            raise FileNotFoundError(f"Not a directory: {root!r}")
-        kmap = num_clusters[i]
-        _p1, p8 = _cluster_pt_paths_under_data_dir(
-            root,
-            kmap,
-            subclass=subclass,
-        )
-        p_feat = _subclass_features_pt_from_cluster_pt(p8)
-        if not os.path.isfile(p_feat):
-            raise FileNotFoundError(
-                f"Missing subclass_features.pt for teacher: {p_feat!r}",
-            )
-        kk, ranks = teacher_cluster_stable_ranks_centered_gram(
-            p8, p_feat, subclass=subclass,
-        )
-        label = row_labels[i] if row_labels is not None else os.path.basename(root.rstrip(os.sep))
-        parsed.append((label, kk, ranks))
-
-    if not parsed:
-        msg = "data_dirs is empty"
-        print(msg, file=out or sys.stdout)
-        return msg if return_text else None
-
-    rows: List[List[str]] = []
-    for label, _kk, ranks in parsed:
-        row = [label]
-        for cid in range(max_k):
-            v = ranks.get(cid)
-            if v is None or v != v:  # missing cluster or nan
-                row.append("nan")
-            else:
-                row.append(float_fmt.format(v))
-        rows.append(row)
-
-    headers = [row_label_header] + [f"cluster_{j}" for j in range(max_k)]
-    col_widths = [max(len(headers[i]), max((len(r[i]) for r in rows), default=0)) for i in range(len(headers))]
-
-    def fmt_row(cells: List[str]) -> str:
-        return "  ".join(c.ljust(col_widths[i]) for i, c in enumerate(cells))
-
-    lines = [fmt_row(headers), "  ".join("-" * col_widths[i] for i in range(len(headers)))]
-    for r in rows:
-        lines.append(fmt_row(r[: len(headers)]))
-    text = "\n".join(lines) + "\n"
-    print(text, end="", file=out or sys.stdout)
-    return text if return_text else None
-
-
 def _safe_stem(name: str) -> str:
     s = re.sub(r"[^\w\-.]+", "_", name.strip())
     return s or "curve"
@@ -668,75 +509,6 @@ def _trailing_moving_average(
     )
     out_x = xs[w - 1 :]
     return out_x, out_y
-
-
-def _grad_ratio_kl_over_cka(
-    kl: np.ndarray,
-    cka: np.ndarray,
-    eps: float = 1e-12,
-) -> np.ndarray:
-    """Per-epoch ``‖g_KL‖ / ‖g_{λ·CKA}‖`` (NaN where inputs invalid)."""
-    return np.abs(kl) / (np.abs(cka) + eps)
-
-
-def _block_mean_hline_segments(
-    xs: np.ndarray,
-    ys: np.ndarray,
-    block_epochs: int,
-) -> List[Tuple[float, float, float]]:
-    """For each contiguous index block of size ``block_epochs``, return ``(x_left, x_right, mean_y)``."""
-    n = len(xs)
-    out: List[Tuple[float, float, float]] = []
-    if n == 0:
-        return out
-    w = max(1, int(block_epochs))
-    for start in range(0, n, w):
-        end = min(start + w, n)
-        block_x = xs[start:end]
-        block_y = ys[start:end]
-        mean_y = float(np.nanmean(block_y))
-        x_left = float(block_x[0])
-        x_right = float(block_x[-1])
-        out.append((x_left, x_right, mean_y))
-    return out
-
-
-def _kc_weighted_denominator_per_epoch(
-    kc_lam1_epochs: List[Any],
-    importance: Sequence[float],
-    p: Sequence[float],
-    cluster_keys: Sequence[str],
-    eps: float = 1e-12,
-) -> np.ndarray:
-    """``sum_k importance_k * p_k / λ_max(K_c)_{k,epoch}`` per epoch (NaN if empty denom)."""
-    n_ep = len(kc_lam1_epochs)
-    out = np.full(n_ep, np.nan, dtype=float)
-    imp = [float(x) for x in importance]
-    pv = [float(x) for x in p]
-    keys = list(cluster_keys)
-    if not (len(imp) == len(pv) == len(keys)):
-        raise ValueError(
-            "importance, p, and cluster_keys must have the same length "
-            f"({len(imp)}, {len(pv)}, {len(keys)}).",
-        )
-    for i in range(n_ep):
-        row = kc_lam1_epochs[i]
-        if not isinstance(row, dict):
-            continue
-        s = 0.0
-        ok = False
-        for ik, pk, key in zip(imp, pv, keys):
-            lam = row.get(key)
-            if lam is None:
-                continue
-            lv = float(lam)
-            if not np.isfinite(lv) or lv <= eps:
-                continue
-            s += ik * pk / (lv + eps)
-            ok = True
-        if ok and s > 0:
-            out[i] = s
-    return out
 
 
 def _format_param_value(v: Any) -> str:
@@ -878,123 +650,6 @@ def plot_training_histories_param_sweep(
     return primary
 
 
-def plot_training_history_kl_cka_grad_ratios(
-    data_dir: str,
-    importance: Sequence[float],
-    p: Sequence[float],
-    cluster_keys: Sequence[str],
-    *,
-    block_epochs: int = 5,
-    history_filename: str = "training_history.json",
-    x_key: str = "epoch",
-    output_dir: Optional[str] = None,
-    out_name: str = "kl_cka_grad_ratio",
-    figure_width_in: float = 5.5,
-    figure_height_in: float = 4.2,
-    save_pdf: bool = True,
-    save_png: bool = True,
-) -> str:
-    """Plot grad-norm ratios from a single run's ``training_history.json``.
-
-    **Top:** Per-epoch ``kl_grad_norm / cka_grad_norm`` (line), plus horizontal segments
-    whose level is the **mean ratio** over each contiguous block of ``block_epochs`` epochs
-    (spanning the first to last epoch in that block; repeated along the full run).
-
-    **Bottom:** ``|kl_grad_norm| / D`` where ``D = sum_k importance_k * p_k / lam_k`` and
-    ``lam_k`` is ``kc_lam1[epoch][cluster_keys[k]]`` (``kc_lam1`` is the list of per-epoch
-    dicts in the JSON). Keys must match those written by training (e.g. ``s0_us1_ut2``).
-
-    Args:
-        data_dir: Directory containing ``history_filename``.
-        importance: Per-cluster weights, same length as ``p`` and ``cluster_keys``.
-        p: Per-cluster multipliers.
-        cluster_keys: Keys into each epoch's ``kc_lam1`` dict.
-        block_epochs: Epochs per block for the top-panel stepwise horizontal means.
-    """
-    if not save_pdf and not save_png:
-        raise ValueError("At least one of save_pdf, save_png must be True")
-    root = os.path.abspath(data_dir)
-    if not os.path.isdir(root):
-        raise NotADirectoryError(f"Not a directory: {root!r}")
-    path = os.path.join(root, history_filename)
-    if not os.path.isfile(path):
-        raise FileNotFoundError(f"Missing {history_filename!r} in {root!r}")
-
-    hist = _load_training_history(path)
-    if "kl_grad_norm" not in hist or "cka_grad_norm" not in hist:
-        raise KeyError(
-            "History must contain 'kl_grad_norm' and 'cka_grad_norm' "
-            f"(keys: {list(hist.keys())!r})",
-        )
-
-    xs, kl = _series_x_y(hist, "kl_grad_norm", x_key)
-    _, cka = _series_x_y(hist, "cka_grad_norm", x_key)
-    ratio = _grad_ratio_kl_over_cka(kl, cka)
-
-    kc_epochs = hist.get("kc_lam1")
-    if kc_epochs is None:
-        raise KeyError(
-            "History must contain 'kc_lam1' (list of per-epoch dicts) for the weighted plot.",
-        )
-    if not isinstance(kc_epochs, list) or len(kc_epochs) != len(kl):
-        raise ValueError(
-            "kc_lam1 must be a list with the same length as kl_grad_norm.",
-        )
-
-    denom = _kc_weighted_denominator_per_epoch(
-        kc_epochs, importance, p, cluster_keys,
-    )
-    weighted_ratio = np.abs(kl) / denom
-
-    block_segs = _block_mean_hline_segments(xs, ratio, block_epochs)
-
-    out_dir = _output_dir_or_cwd(output_dir)
-    os.makedirs(out_dir, exist_ok=True)
-    stem = os.path.join(out_dir, _safe_stem(out_name))
-
-    with plt.rc_context(_NEURIPS_RC):
-        fig, (ax0, ax1) = plt.subplots(
-            2,
-            1,
-            figsize=(figure_width_in, figure_height_in),
-            sharex=True,
-        )
-
-        ax0.plot(
-            xs,
-            ratio,
-            color="0.35",
-            linewidth=0.9,
-            alpha=0.85,
-            label=r"$\|g_{\mathrm{KL}}\|/\|g_{\lambda\mathrm{CKA}}\|$",
-        )
-        for bi, (x0, x1, ym) in enumerate(block_segs):
-            ax0.hlines(
-                ym,
-                x0,
-                x1,
-                colors="C0",
-                linewidth=1.8,
-                label=f"Block mean ($n={max(1, int(block_epochs))}$ ep.)" if bi == 0 else None,
-            )
-        ax0.set_ylabel(r"$\|g_{\mathrm{KL}}\|/\|g_{\lambda\mathrm{CKA}}\|$")
-        ax0.legend(loc="best", frameon=False, fontsize=7)
-
-        ax1.plot(xs, weighted_ratio, color="C3", linewidth=1.2, clip_on=False)
-        ax1.set_xlabel(x_key.replace("_", " "))
-        ax1.set_ylabel(r"$|g_{\mathrm{KL}}| \;/\; \sum_k \alpha_k p_k / \lambda_{\max}(K_c)_k$")
-
-        fig.tight_layout()
-        if save_pdf:
-            fig.savefig(f"{stem}.pdf", format="pdf")
-        if save_png:
-            fig.savefig(f"{stem}.png", format="png", dpi=300)
-        plt.close(fig)
-
-    primary = f"{stem}.pdf" if save_pdf else f"{stem}.png"
-    return primary
-
-
 def _sorted_neuron_scores(cossim: Sequence[float], num_points: int) -> Tuple[np.ndarray, np.ndarray]:
     arr = np.asarray(cossim, dtype=np.float64)
     d = int(arr.size)
@@ -1101,73 +756,7 @@ def plot_neuron_scores(
     return primary
 
 
-def plot_k_vs_loss(model_name: str) -> None:
-    from neuron_distillation.clustering import _save_k_vs_concordance_plot
-
-    base_dir = os.path.join("..", "results", NEURON_CLUSTERING_SUBDIR, model_name)
-    json_path = os.path.join(base_dir, "k_gs_testing.json")
-
-    if not os.path.exists(json_path):
-        raise FileNotFoundError(f"Could not find {json_path}. Run neuron_clustering.py first to generate it.")
-
-    with open(json_path, "r") as f:
-        k_gs_testing = json.load(f)
-
-    conc_path = os.path.join(base_dir, "k_gs_concordance.json")
-    k_gs_concordance: Optional[Dict[str, Any]] = None
-    if os.path.isfile(conc_path):
-        with open(conc_path, "r") as f:
-            k_gs_concordance = json.load(f)
-
-    os.makedirs(base_dir, exist_ok=True)
-    label = os.path.basename(base_dir)
-
-    for subclass_str, k_dict in k_gs_testing.items():
-        ks = sorted(int(k) for k in k_dict.keys())
-        losses = [float(k_dict[str(k)]) for k in ks]
-
-        plt.figure(figsize=(6, 4))
-        plt.plot(ks, losses, marker="o")
-        plt.xlabel("k (number of clusters)")
-        plt.ylabel("Mean cosine distance to centroids (loss)")
-        plt.title(f"k-means loss vs k for {label}, subclass {subclass_str}")
-        plt.grid(True, alpha=0.3)
-
-        out_path = os.path.join(base_dir, f"k_vs_loss_subclass_{subclass_str}.png")
-        plt.savefig(out_path, bbox_inches="tight")
-        plt.close()
-        print(f"Saved plot to {out_path}")
-
-        if k_gs_concordance is not None:
-            sub_c = k_gs_concordance.get(subclass_str)
-            if sub_c is None:
-                sub_c = k_gs_concordance.get(str(int(subclass_str)))
-            if sub_c:
-                concs = [float(sub_c[str(k)]) for k in ks]
-                _save_k_vs_concordance_plot(
-                    ks,
-                    concs,
-                    plots_dir=base_dir,
-                    model_name=label,
-                    subclass=int(subclass_str),
-                )
-                conc_out = os.path.join(base_dir, f"k_vs_concordance_subclass_{subclass_str}.png")
-                print(f"Saved plot to {conc_out}")
-
 if __name__ == "__main__":
-    # plot_training_histories_param_sweep(
-    #     data_dirs=[
-    #         "2d_add/1_class_0.01-lam0.1",
-    #         "2d_add/1_class_0.01-lam0.5",
-    #         "2d_add/1_class_0.01-lam1.0",
-    #         "2d_add/1_class_0.01-lam5.0",
-    #     ],
-    #     param_name="lambda_cluster",
-    #     param_values=[0.1, 0.5, 1.0, 5.0],
-    #     metrics=["kl_loss", "cluster_loss", "accuracy"],
-    #     smooth_window=10,
-    # )
-
     # plot_training_histories_param_sweep(
     #   data_dirs=[
     #       "2d_add/1_class_0.001",

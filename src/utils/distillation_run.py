@@ -1,8 +1,52 @@
 import os
+from dataclasses import dataclass
 from typing import Optional, Tuple
 
-from .config import STUDENT_MODEL_DIR, STUDENT_WEIGHTS_FILE
+import torch
+
+from .config import (
+    EVAL_MAX_NEW_TOKENS,
+    LLAMA_1B_MODEL_NAME,
+    LLAMA_8B_MODEL_NAME,
+    STUDENT_MODEL_DIR,
+    STUDENT_WEIGHTS_FILE,
+)
+from .device import get_default_device
 from .fs import most_recent_subdirectory
+
+
+@dataclass
+class DistillationConfig:
+    teacher_model: str = LLAMA_8B_MODEL_NAME
+    student_model: str = LLAMA_1B_MODEL_NAME
+    epochs: int = 50
+    batch_size: int = 32
+    learning_rate: float = 1e-4
+    temperature: float = 2.0
+    grad_clip: float = 1.0
+    lambda_graph: float = 0.1
+    graph_dtype: Optional[torch.dtype] = None
+    graph_top_k_logits: Optional[int] = 20
+    graph_prop_neurons_per_layer: float = 0.1
+    teacher_graph_batch_size: int = 512
+    student_graph_batch_size: int = 1
+    graph_verbose: bool = False
+    graph_prune: bool = False
+    graph_node_threshold: float = 0.8
+    graph_edge_threshold: float = 0.98
+    graph_node_weight: float = 1.0
+    graph_edge_weight: float = 0.0
+    graph_similarity_threshold: float = 0.7
+    graph_max_fan_out: int = 4
+    fast_teacher_graph: bool = False
+    eval_batch_size: int = 50
+    step_log_interval: int = 50
+    save_best: bool = False
+    eval_max_new_tokens: int = EVAL_MAX_NEW_TOKENS
+    save_dir: str = "results/distillation"
+    teacher_data_cache: Optional[str] = None
+    seed: int = 42
+    device: torch.device = get_default_device()
 
 
 def resolve_distillation_run_dir(

@@ -9,7 +9,6 @@ from .answer_parsing import (
     _normalize_numeric_str,
     _slice_text_after_reasoning,
     extract_numeric_answer_from_text,
-    parse_answer,
 )
 from .config import EVAL_MAX_NEW_TOKENS
 from .dataset_json import json_to_prompt_answer_dict
@@ -140,24 +139,18 @@ def run_hf_benchmark(
 
 
 @torch.no_grad()
-def evaluate(
+def evaluate_prompt_answer_dict(
     model,
     tokenizer,
-    test_path: str,
+    data: Dict[str, int],
     batch_size: int = 32,
     max_new_tokens: Optional[int] = None,
     debug_decode: int = 0,
     debug_tag: Optional[str] = None,
 ) -> float:
-    """Greedy generation accuracy on a math test JSON (right padding; int after ``=``).
-
-    Uses the same padding side as :class:`neuron_distillation.distillation.AddDataset` /
-    ``collate_fn`` so RoPE positions match distillation training.
-    """
+    """Greedy generation accuracy on a prompt-answer mapping using right padding."""
     if max_new_tokens is None:
         max_new_tokens = EVAL_MAX_NEW_TOKENS
-    with open(test_path, "r", encoding="utf-8") as f:
-        data = json_to_prompt_answer_dict(json.load(f))
     prompts = list(data.keys())
     answers = list(data.values())
 
@@ -260,19 +253,3 @@ def test_model(
 
     return results
 
-
-def eval_model(results_fname, log: bool = True):
-    with open(results_fname, "r", encoding="utf-8") as f:
-        results = json.load(f)
-    if not results:
-        return 0.0
-
-    correct = 0
-    for res in results:
-        if parse_answer(res["response"]) == int(res["answer"]):
-            correct += 1
-
-    acc = correct / len(results)
-    if log:
-        print("Accuracy: ", acc)
-    return acc

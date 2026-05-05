@@ -1,23 +1,5 @@
-from .ablation_polyfit import expected_performance_drop_from_random_ablation_poly
-from .answer_parsing import (
-    _extract_int_after_equals,
-    _gsm8k_gold_answer_str,
-    _normalize_numeric_str,
-    _slice_text_after_reasoning,
-    extract_numeric_answer_from_text,
-    parse_answer,
-)
-from .circuit_checkpoint import (
-    _extract_circuit_model_state_dict,
-    _resolve_ckpt_path,
-    _stack_layer_activations,
-    load_model_checkpoint,
-)
+from .answer_parsing import parse_answer
 from .config import (
-    CIRCUIT_DISCOVERY_CKPT_DIR,
-    DATASET_ALL_SUFFIX,
-    DATASET_TEST_SUFFIX,
-    DATASET_TRAIN_SUFFIX,
     EVAL_MAX_NEW_TOKENS,
     HF_READ_TOKEN,
     LLAMA_1B_MODEL_NAME,
@@ -25,72 +7,37 @@ from .config import (
     NEURON_CLUSTERING_STUDENT_SUBPATH,
     NEURON_CLUSTERING_SUBDIR,
     NEURON_CLUSTERING_TEACHER_SUBPATH,
-    REPO_ROOT,
-    SRC_ROOT,
     STUDENT_MODEL_DIR,
-    STUDENT_WEIGHTS_FILE,
 )
-from .dataset_json import (
-    _load_dataset_rows,
-    json_to_prompt_answer_dict,
-    load_prompt_answer_json,
-    mix_datasets,
-)
+from .dataset_json import json_to_prompt_answer_dict, load_prompt_answer_json
 from .dataset_paths import (
-    _resolve_dataset_output_path,
-    _safe_dataset_segment,
     dataset_all_json_path,
-    dataset_test_json_path,
-    dataset_train_json_path,
     default_datasets_dir,
     random_ablation_poly_output_dir,
-    require_dataset_prefix,
     resolve_test_path,
     resolve_train_test_paths,
 )
-from .device import get_default_device
-from .distillation_run import resolve_distillation_run_dir
+from .device import get_default_device, seed_all
+from .distillation_batch import AddDataset, collate_fn, masked_kl_loss
+from .distillation_run import DistillationConfig, resolve_distillation_run_dir
+from .distillation_trainer import DistillationTrainer
 from .eval_inference import (
-    eval_model,
-    evaluate,
-    load_hf_benchmark_rows,
+    evaluate_prompt_answer_dict,
     run_hf_benchmark,
     test_model,
 )
-from .fs import (
-    load_training_state,
-    most_recent_subdirectory,
-    rm_dir_tree,
-    save_training_state,
-    training_state_path,
-)
+from .fs import most_recent_subdirectory, rm_dir_tree
 from .hf_models import (
     load_model,
     load_student_model_for_distillation,
-    logged_in,
     patch_tokenizer_no_special_tokens,
 )
-from .model_dims import mlp_flatten_dim_from_model, mlp_flatten_dim_from_pretrained_id
-from .synthetic_chain_math import (
-    _eval_pemdas_plus_mul,
-    _format_chain_prompt,
-    _iter_chain_pairs,
-    _sample_chain_pairs,
-    generate_math_dataset,
-    normalize_op_patterns,
-)
-from .synthetic_expr import (
-    _fmt_expr_answer,
-    _rand_expr_number,
-    _safe_eval_bin,
-    generate_expression_json_dataset,
-)
+from .synthetic_chain_math import generate_math_dataset, normalize_op_patterns
 
 __all__ = [
-    "CIRCUIT_DISCOVERY_CKPT_DIR",
-    "DATASET_ALL_SUFFIX",
-    "DATASET_TEST_SUFFIX",
-    "DATASET_TRAIN_SUFFIX",
+    "AddDataset",
+    "DistillationConfig",
+    "DistillationTrainer",
     "EVAL_MAX_NEW_TOKENS",
     "HF_READ_TOKEN",
     "LLAMA_1B_MODEL_NAME",
@@ -98,61 +45,28 @@ __all__ = [
     "NEURON_CLUSTERING_STUDENT_SUBPATH",
     "NEURON_CLUSTERING_SUBDIR",
     "NEURON_CLUSTERING_TEACHER_SUBPATH",
-    "REPO_ROOT",
-    "SRC_ROOT",
     "STUDENT_MODEL_DIR",
-    "STUDENT_WEIGHTS_FILE",
-    "_eval_pemdas_plus_mul",
-    "_extract_circuit_model_state_dict",
-    "_extract_int_after_equals",
-    "_fmt_expr_answer",
-    "_format_chain_prompt",
-    "_gsm8k_gold_answer_str",
-    "_iter_chain_pairs",
-    "_load_dataset_rows",
-    "_normalize_numeric_str",
-    "_rand_expr_number",
-    "_resolve_ckpt_path",
-    "_resolve_dataset_output_path",
-    "_safe_dataset_segment",
-    "_safe_eval_bin",
-    "_sample_chain_pairs",
-    "_slice_text_after_reasoning",
-    "_stack_layer_activations",
+    "collate_fn",
     "dataset_all_json_path",
-    "dataset_test_json_path",
-    "dataset_train_json_path",
     "default_datasets_dir",
-    "eval_model",
-    "evaluate",
-    "expected_performance_drop_from_random_ablation_poly",
-    "extract_numeric_answer_from_text",
-    "generate_expression_json_dataset",
+    "evaluate_prompt_answer_dict",
     "generate_math_dataset",
     "get_default_device",
     "json_to_prompt_answer_dict",
-    "load_hf_benchmark_rows",
     "load_model",
-    "load_model_checkpoint",
     "load_prompt_answer_json",
     "load_student_model_for_distillation",
-    "load_training_state",
-    "logged_in",
-    "mix_datasets",
-    "mlp_flatten_dim_from_model",
-    "mlp_flatten_dim_from_pretrained_id",
+    "masked_kl_loss",
     "most_recent_subdirectory",
     "normalize_op_patterns",
     "parse_answer",
     "patch_tokenizer_no_special_tokens",
     "random_ablation_poly_output_dir",
-    "require_dataset_prefix",
     "resolve_distillation_run_dir",
     "resolve_test_path",
     "resolve_train_test_paths",
     "rm_dir_tree",
     "run_hf_benchmark",
-    "save_training_state",
+    "seed_all",
     "test_model",
-    "training_state_path",
 ]

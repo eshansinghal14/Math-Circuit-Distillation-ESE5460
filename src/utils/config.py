@@ -6,10 +6,8 @@ try:
     HF_READ_TOKEN = getattr(_constants, "HF_READ_TOKEN", "") or getattr(
         _constants, "HF_TOKEN", ""
     )
-    CIRCUIT_DISCOVERY_CKPT_DIR = getattr(_constants, "CIRCUIT_DISCOVERY_CKPT_DIR", "")
 except ModuleNotFoundError:
     HF_READ_TOKEN = ""
-    CIRCUIT_DISCOVERY_CKPT_DIR = os.environ.get("CIRCUIT_DISCOVERY_CKPT_DIR", "")
 
 if not HF_READ_TOKEN:
     HF_READ_TOKEN = os.environ.get("HF_READ_TOKEN", "") or os.environ.get("HF_TOKEN", "")
@@ -20,7 +18,7 @@ REPO_ROOT = os.path.abspath(os.path.join(SRC_ROOT, ".."))
 # Prompts end with "=" and all 2-3 digit answers (20-198) are single tokens in Llama-3 BPE.
 EVAL_MAX_NEW_TOKENS = 1
 
-# --- Distillation run dirs / checkpoints (used by ``neuron_distillation``) ------------
+# --- Distillation run dirs / checkpoints ---------------------------------------------
 STUDENT_MODEL_DIR = "student_model"
 # Legacy fast-checkpoint filename (older runs may still contain this file).
 STUDENT_WEIGHTS_FILE = "student_weights.pt"
@@ -28,8 +26,7 @@ STUDENT_WEIGHTS_FILE = "student_weights.pt"
 LLAMA_1B_MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 LLAMA_8B_MODEL_NAME = "meta-llama/Meta-Llama-3-8B-Instruct"
 
-# Top-level folder under each run root where :mod:`neuron_distillation.clustering` writes
-# (must match ``_neuron_clustering_run_dir``).
+# Legacy neuron-clustering result locations kept for plotting/analysis helpers.
 NEURON_CLUSTERING_SUBDIR = "neuron_clustering"
 # HF model ids as nested path segments under ``<run>/neuron_clustering/``.
 NEURON_CLUSTERING_STUDENT_SUBPATH = LLAMA_1B_MODEL_NAME

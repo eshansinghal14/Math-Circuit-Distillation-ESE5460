@@ -1,0 +1,214 @@
+﻿"""CLI for simplified KL + graph-loss distillation."""
+
+from __future__ import annotations
+
+import argparse
+import os
+from typing import Dict
+
+from graph_loss.utils import DTYPE_CHOICES, resolve_torch_dtype
+from utils import (
+    EVAL_MAX_NEW_TOKENS,
+    LLAMA_1B_MODEL_NAME,
+    LLAMA_8B_MODEL_NAME,
+    DistillationConfig,
+    DistillationTrainer,
+    get_default_device,
+    load_prompt_answer_json,
+    load_student_model_for_distillation,
+    resolve_distillation_run_dir,
+    resolve_test_path,
+    resolve_train_test_paths,
+)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Simplified KL distillation with optional graph-loss auxiliary objective.",
+    )
+    parser.add_argument("--student-model", type=str, default=LLAMA_1B_MODEL_NAME)
+    parser.add_argument("--teacher-model", type=str, default=LLAMA_8B_MODEL_NAME)
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default=None,
+        metavar="PREFIX",
+        help="Dataset prefix, e.g. 2d_add for datasets/2d_add_train.json + _test.json.",
+    )
+    parser.add_argument("--datasets-dir", type=str, default=None)
+    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--train-limit", type=int, default=None)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--temperature", type=float, default=2.0)
+    parser.add_argument("--grad-clip", type=float, default=1.0)
+    parser.add_argument("--lambda-graph", type=float, default=0.1)
+    parser.add_argument("--dtype", choices=DTYPE_CHOICES, default="float32")
+    parser.add_argument("--graph-top-k-logits", type=int, default=20)
+    parser.add_argument("--graph-prop-neurons-per-layer", type=float, default=0.1)
+    parser.add_argument("--graph-batch-size", type=int, default=None)
+    parser.add_argument("--teacher-graph-batch-size", type=int, default=512)
+    parser.add_argument("--student-graph-batch-size", type=int, default=1)
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--graph-prune", action="store_true")
+    parser.add_argument("--graph-node-threshold", type=float, default=0.8)
+    parser.add_argument("--graph-edge-threshold", type=float, default=0.98)
+    parser.add_argument("--graph-node-weight", type=float, default=1.0)
+    parser.add_argument("--graph-edge-weight", type=float, default=0.0)
+    parser.add_argument("--graph-similarity-threshold", type=float, default=0.7)
+    parser.add_argument("--graph-max-fan-out", type=int, default=4)
+    parser.add_argument("--fast-teacher-graph", action="store_true")
+    parser.add_argument("--eval-max-new-tokens", type=int, default=None)
+    parser.add_argument("--eval-batch-size", type=int, default=50)
+    parser.add_argument("--eval-datasets", nargs="*", default=None, metavar="DATASET")
+    parser.add_argument("--teacher-data-cache", type=str, default=None, metavar="PATH")
+    parser.add_argument(
+        "--save-dir",
+        type=str,
+        default=os.path.join(os.path.dirname(__file__), "..", "results", "distillation"),
+    )
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--checkpoint-run", default=None, metavar="PATH")
+    parser.add_argument("--save-best", action="store_true")
+    parser.add_argument("--step-log-interval", type=int, default=50)
+    parser.add_argument("--seed", type=int, default=42)
+    return parser
+
+
+def validate_args(args: argparse.Namespace) -> None:
+    if args.dataset is None:
+        raise SystemExit("--dataset is required.")
+    if args.epochs < 0:
+        raise SystemExit("--epochs must be >= 0")
+    if args.batch_size < 1:
+        raise SystemExit("--batch-size must be >= 1")
+    if args.eval_batch_size < 1:
+        raise SystemExit("--eval-batch-size must be >= 1")
+    if args.step_log_interval < 1:
+        raise SystemExit("--step-log-interval must be >= 1")
+    if args.lambda_graph < 0:
+        raise SystemExit("--lambda-graph must be >= 0")
+    if args.graph_top_k_logits is not None and args.graph_top_k_logits <= 0:
+        raise SystemExit("--graph-top-k-logits must be positive")
+    if not (0.0 < args.graph_prop_neurons_per_layer <= 1.0):
+        raise SystemExit("--graph-prop-neurons-per-layer must be in (0, 1]")
+    if args.graph_batch_size is not None and args.graph_batch_size < 1:
+        raise SystemExit("--graph-batch-size must be >= 1")
+    if args.teacher_graph_batch_size < 1:
+        raise SystemExit("--teacher-graph-batch-size must be >= 1")
+    if args.student_graph_batch_size < 1:
+        raise SystemExit("--student-graph-batch-size must be >= 1")
+    if not (0.0 <= args.graph_node_threshold <= 1.0):
+        raise SystemExit("--graph-node-threshold must be in [0, 1]")
+    if not (0.0 <= args.graph_edge_threshold <= 1.0):
+        raise SystemExit("--graph-edge-threshold must be in [0, 1]")
+    if not (0.0 <= args.graph_similarity_threshold <= 1.0):
+        raise SystemExit("--graph-similarity-threshold must be in [0, 1]")
+    if args.graph_max_fan_out < 1:
+        raise SystemExit("--graph-max-fan-out must be >= 1")
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+    validate_args(args)
+    if args.graph_batch_size is not None:
+        args.teacher_graph_batch_size = args.graph_batch_size
+        args.student_graph_batch_size = args.graph_batch_size
+
+    train_path, test_path, dataset_prefix = resolve_train_test_paths(
+        dataset=args.dataset,
+        datasets_dir=args.datasets_dir,
+    )
+    run_dir, student_source = resolve_distillation_run_dir(
+        os.path.abspath(args.save_dir),
+        resume=args.resume,
+        checkpoint_run=args.checkpoint_run,
+    )
+    os.makedirs(run_dir, exist_ok=True)
+
+    print("=" * 60)
+    print("Configuration")
+    print("=" * 60)
+    print(f"  dataset (prefix):   {dataset_prefix}")
+    print(f"  train_path:         {train_path}")
+    print(f"  test_path:          {test_path}")
+    print(f"  lambda_graph:       {args.lambda_graph}")
+    print(f"  graph dtype:        {args.dtype}")
+    print(f"  teacher cache:      {args.teacher_data_cache or 'none'}")
+    print(f"  save_dir:           {run_dir}")
+    print("=" * 60)
+
+    train_data = load_prompt_answer_json(train_path)
+    if args.train_limit is not None:
+        train_data = dict(list(train_data.items())[: args.train_limit])
+    test_data = load_prompt_answer_json(test_path)
+    extra_eval_data: Dict[str, Dict[str, int]] = {}
+    if args.eval_datasets:
+        for eval_dataset in args.eval_datasets:
+            eval_test_path, eval_prefix = resolve_test_path(
+                dataset=eval_dataset,
+                datasets_dir=args.datasets_dir,
+            )
+            extra_eval_data[eval_prefix] = load_prompt_answer_json(eval_test_path)
+    print(f"  Train: {len(train_data)} examples")
+    print(f"  Test:  {len(test_data)} examples")
+
+    device = get_default_device()
+    student, tokenizer = load_student_model_for_distillation(
+        student_source,
+        args.student_model,
+        device,
+    )
+
+    trainer = DistillationTrainer(
+        config=DistillationConfig(
+            teacher_model=args.teacher_model,
+            student_model=args.student_model,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            learning_rate=args.lr,
+            temperature=args.temperature,
+            grad_clip=args.grad_clip,
+            lambda_graph=args.lambda_graph,
+            graph_dtype=resolve_torch_dtype(args.dtype),
+            graph_top_k_logits=args.graph_top_k_logits,
+            graph_prop_neurons_per_layer=args.graph_prop_neurons_per_layer,
+            teacher_graph_batch_size=args.teacher_graph_batch_size,
+            student_graph_batch_size=args.student_graph_batch_size,
+            graph_verbose=args.verbose,
+            graph_prune=args.graph_prune,
+            graph_node_threshold=args.graph_node_threshold,
+            graph_edge_threshold=args.graph_edge_threshold,
+            graph_node_weight=args.graph_node_weight,
+            graph_edge_weight=args.graph_edge_weight,
+            graph_similarity_threshold=args.graph_similarity_threshold,
+            graph_max_fan_out=args.graph_max_fan_out,
+            fast_teacher_graph=args.fast_teacher_graph,
+            save_best=args.save_best,
+            eval_max_new_tokens=(
+                args.eval_max_new_tokens
+                if args.eval_max_new_tokens is not None
+                else EVAL_MAX_NEW_TOKENS
+            ),
+            eval_batch_size=args.eval_batch_size,
+            save_dir=run_dir,
+            teacher_data_cache=args.teacher_data_cache,
+            step_log_interval=args.step_log_interval,
+            seed=args.seed,
+            device=device,
+        ),
+        train_data=train_data,
+        test_data=test_data,
+        extra_eval_data=extra_eval_data,
+        tokenizer=tokenizer,
+        student=student,
+        resume=student_source is not None,
+    )
+    history = trainer.train()
+    if "accuracy" in history and history["accuracy"]:
+        print(f"Best accuracy: {max(history['accuracy']):.4f}")
+
+
+if __name__ == "__main__":
+    main()
