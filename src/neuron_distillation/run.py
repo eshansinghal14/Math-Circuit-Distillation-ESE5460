@@ -436,6 +436,27 @@ def main():
         help="Graph mode: student attribution row chunk size. Keep small because it tracks graph-loss gradients.",
     )
     parser.add_argument(
+        "--student-computation-eps",
+        dest="student_computation_eps",
+        type=float,
+        default=0.1,
+        help="Graph mode: angular distance threshold for student supernode clustering (computation phase).",
+    )
+    parser.add_argument(
+        "--student-embedding-eps",
+        dest="student_embedding_eps",
+        type=float,
+        default=0.1,
+        help="Graph mode: angular distance threshold for student supernode clustering (embedding phase).",
+    )
+    parser.add_argument(
+        "--student-activation-forward-batch-size",
+        dest="student_activation_forward_batch_size",
+        type=int,
+        default=32,
+        help="Graph mode: batch size for student ablation forward passes during supernode clustering.",
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Graph mode: print live graph construction progress.",
@@ -964,6 +985,9 @@ def main():
         graph_prop_neurons_per_layer=args.graph_prop_neurons_per_layer,
         teacher_graph_batch_size=args.teacher_graph_batch_size,
         student_graph_batch_size=args.student_graph_batch_size,
+        student_computation_eps=args.student_computation_eps,
+        student_embedding_eps=args.student_embedding_eps,
+        student_activation_forward_batch_size=args.student_activation_forward_batch_size,
         graph_verbose=args.verbose,
         graph_prune=args.graph_prune,
         graph_node_threshold=args.graph_node_threshold,

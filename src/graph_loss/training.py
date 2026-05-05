@@ -54,6 +54,10 @@ class GraphAuxConfig:
     graph_node_weight: float = 1.0  # weight of prob-delta node loss within L_graph
     graph_edge_weight: float = 0.0  # weight of edge structural loss within L_graph
     fast_teacher_graph: bool = False  # skip expensive TL/HF backward graph; linear logit block + proxy influence
+    # Supergraph clustering params for the student (mirrors build_super_graph args)
+    student_computation_eps: float = 0.1
+    student_embedding_eps: float = 0.1
+    student_activation_forward_batch_size: int = 32
 
 
 def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
@@ -189,7 +193,9 @@ def compute_prompt_graph_loss(
             student_graph,
             student_adapter,
             prune_result=student_prune_result,
-            activation_forward_batch_size=config.student_graph_batch_size,
+            activation_forward_batch_size=config.student_activation_forward_batch_size,
+            computation_eps=config.student_computation_eps,
+            embedding_eps=config.student_embedding_eps,
             cluster_method="ablation",
         )
     student_supergraph = _aggregate_supergraph_adjacency(

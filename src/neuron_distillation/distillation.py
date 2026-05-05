@@ -174,6 +174,9 @@ class ClusterDistillationConfig:
     graph_similarity_threshold: float = 0.7
     graph_max_fan_out: int = 4
     fast_teacher_graph: bool = False
+    student_computation_eps: float = 0.1
+    student_embedding_eps: float = 0.1
+    student_activation_forward_batch_size: int = 32
 
     # Greedy test accuracy: prompts batched for ``generate`` (independent of training batch size).
     eval_batch_size: int = 50
@@ -1108,6 +1111,9 @@ class ClusterDistillationTrainer:
             graph_similarity_threshold=config.graph_similarity_threshold,
             graph_max_fan_out=config.graph_max_fan_out,
             fast_teacher_graph=config.fast_teacher_graph,
+            student_computation_eps=config.student_computation_eps,
+            student_embedding_eps=config.student_embedding_eps,
+            student_activation_forward_batch_size=config.student_activation_forward_batch_size,
         )
         self.student_graph_adapter: Optional[HFLlamaGraphAdapter] = None
         self.teacher_graph_model = None
