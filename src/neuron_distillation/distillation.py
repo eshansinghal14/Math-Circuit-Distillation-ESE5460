@@ -1030,11 +1030,11 @@ class ClusterDistillationTrainer:
             if config.teacher_data_cache
             else None
         )
-        # When a cache is present in graph mode, restrict training to only prompts
-        # that were pre-generated.  This guarantees every training step gets the
-        # full graph loss signal instead of silently falling back to KL-only for
-        # the uncached majority.
-        if self.teacher_data_cache is not None and self._graph:
+        # When a cache is present, restrict training to only prompts that were
+        # pre-generated.  In graph mode this guarantees every step gets a graph
+        # loss signal; in standard mode it lets KL-only diagnostics run on the
+        # same prompt subset as graph runs for apples-to-apples comparison.
+        if self.teacher_data_cache is not None:
             cached_keys = self.teacher_data_cache._samples  # {(prompt, answer): ...}
             filtered = {p: a for p, a in train_data.items() if (p, a) in cached_keys}
             n_orig, n_kept = len(train_data), len(filtered)
