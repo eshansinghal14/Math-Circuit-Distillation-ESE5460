@@ -954,7 +954,6 @@ def build_super_graph(
     _fast_dla_populated = False
     if (
         cluster_method == "ablation"
-        and graph.attribution_mode == "fast"
         and graph.neuron_write_vectors is not None
         and kept_neuron_indices.numel() > 0
         and graph.n_logits > 0
@@ -976,7 +975,6 @@ def build_super_graph(
         del _wU, _W_U_logits, _kept_wv, _neuron_dla
         _fast_dla_populated = True
         logger.info("  Fast DLA pre-population: %d neurons", int(kept_neuron_indices.numel()))
-
     if cluster_method == "ablation" and kept_neuron_indices.numel():
         logger.info("  Building supernodes with ablation probability-delta clustering")
         supernodes = cluster_by_ablation_prob_deltas(kept_neuron_indices)

@@ -160,6 +160,7 @@ class HFLlamaGraphAdapter:
         create_graph: bool = False,
         detach_result: bool | None = None,
         fast: bool = False,
+        skip_logit_attribution: bool = False,
     ) -> Graph:
         if not (0.0 < prop_neurons_per_layer <= 1.0):
             raise ValueError("prop_neurons_per_layer must be in (0, 1]")
@@ -316,7 +317,17 @@ class HFLlamaGraphAdapter:
         )
 
         def _source_scores_from_grads(grads, batch_len: int) -> torch.Tensor:
-            rows = torch.zeros(batch_len, source_count, dtype=source_vectors_t.dtype, device=self.device)
+            # Build rows differentiably via scatter_add (out-of-place) so the
+            # gradient through source_vectors_t / embed_out propagates back to
+            # the student model parameters.  In-place setitem on a freshly-zeroed
+            # leaf tensor silently drops grad tracking, which previously made the
+            # edge loss gradient identically zero.
+            rows = torch.zeros(
+                batch_len,
+                source_count,
+                dtype=source_vectors_t.dtype,
+                device=self.device,
+            )
             for layer_idx in range(self.n_layers):
                 layer_mask = source_layer_by_node_t == layer_idx
                 if not layer_mask.any():
@@ -327,15 +338,24 @@ class HFLlamaGraphAdapter:
                 layer_indices = torch.where(layer_mask)[0]
                 locs = neuron_locations_t[layer_mask]
                 grad_vecs = grad[:, locs[:, 1], :].to(source_vectors_t.dtype)
-                rows[:, layer_indices] = (
+                scores = (
                     grad_vecs * source_vectors_t[layer_indices].unsqueeze(0)
-                ).sum(dim=-1)
+                ).sum(dim=-1)  # [batch_len, n_layer_neurons]
+                col_indices = layer_indices.unsqueeze(0).expand(batch_len, -1)
+                rows = rows.scatter_add(1, col_indices, scores)
             token_grad = grads[-1]
             if token_grad is not None:
                 token_vectors = embed_out.squeeze(0).to(source_vectors_t.dtype)
-                rows[:, n_neurons:source_count] = (
+                token_scores = (
                     token_grad.to(source_vectors_t.dtype) * token_vectors.unsqueeze(0)
-                ).sum(dim=-1)
+                ).sum(dim=-1)  # [batch_len, n_pos]
+                token_indices = torch.arange(
+                    n_neurons,
+                    source_count,
+                    device=self.device,
+                    dtype=torch.long,
+                ).unsqueeze(0).expand(batch_len, -1)
+                rows = rows.scatter_add(1, token_indices, token_scores)
             return rows
 
         def _expanded_forward(batch_len: int):
@@ -439,12 +459,17 @@ class HFLlamaGraphAdapter:
                 print(f"    [graph] neuron rows {start}:{end} / {n_neurons}")
             adjacency[start:end, :source_count] = source_scores_neuron_chunk(start, end)
 
-        for start in range(0, n_logits, max(1, batch_size)):
-            end = min(start + max(1, batch_size), n_logits)
-            if verbose:
-                print(f"    [graph] logit rows {start}:{end} / {n_logits}")
-            adjacency[logit_start + start:logit_start + end, :source_count] = source_scores_logit_chunk(start, end)
+        if not skip_logit_attribution:
+            for start in range(0, n_logits, max(1, batch_size)):
+                end = min(start + max(1, batch_size), n_logits)
+                if verbose:
+                    print(f"    [graph] logit rows {start}:{end} / {n_logits}")
+                adjacency[logit_start + start:logit_start + end, :source_count] = source_scores_logit_chunk(start, end)
 
+        # Always populate neuron_write_vectors in full mode: this lets the
+        # supergraph clustering pre-populate prob_delta_by_neuron via DLA
+        # (write_vector @ W_U_logits) instead of needing the adjacency
+        # [logits, neurons] block.  Critical when skip_logit_attribution=True.
         graph = Graph(
             input_string=self.tokenizer.decode(input_ids.detach().cpu().tolist()),
             input_tokens=input_ids,
@@ -455,6 +480,7 @@ class HFLlamaGraphAdapter:
             logit_targets=targets.logit_targets,
             logit_probabilities=targets.logit_probabilities,
             vocab_size=targets.vocab_size,
+            neuron_write_vectors=source_vectors_t.detach().clone(),
         )
         if detach_result is None:
             detach_result = not create_graph

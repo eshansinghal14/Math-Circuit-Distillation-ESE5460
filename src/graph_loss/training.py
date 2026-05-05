@@ -54,6 +54,10 @@ class GraphAuxConfig:
     graph_node_weight: float = 1.0  # weight of prob-delta node loss within L_graph
     graph_edge_weight: float = 0.0  # weight of edge structural loss within L_graph
     fast_teacher_graph: bool = False  # skip expensive TL/HF backward graph; linear logit block + proxy influence
+    # Supergraph clustering params for the student (mirrors build_super_graph args)
+    student_computation_eps: float = 0.1
+    student_embedding_eps: float = 0.1
+    student_activation_forward_batch_size: int = 32
 
 
 def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
@@ -160,6 +164,10 @@ def compute_prompt_graph_loss(
         print(f"  [graph] building student graph for prompt: {prompt!r}")
     # Force student to attribute over the same logit tokens as the teacher so that
     # prob-delta vectors occupy the same vocabulary positions in both models.
+    # The student uses full Jacobian attribution (fast=False) to populate real
+    # neuron-to-neuron edges, so the supernode adjacency aggregated by
+    # _aggregate_supergraph_adjacency carries genuine causal structure rather than
+    # the all-zero block produced by fast/DLA-only attribution.
     student_graph = student_adapter.build_graph(
         prompt,
         attribution_targets=logit_token_ids.cpu() if logit_token_ids is not None else None,
@@ -169,7 +177,12 @@ def compute_prompt_graph_loss(
         verbose=config.verbose,
         create_graph=False,
         detach_result=False,
-        fast=config.fast_teacher_graph,
+        fast=False,
+        # The student adjacency [logits, neurons] block is only used for
+        # supergraph clustering, which the DLA pre-population path covers
+        # using neuron_write_vectors. Skip the ~1000 logit backward passes
+        # to cut peak memory roughly in half.
+        skip_logit_attribution=True,
     )
 
     student_prune_result = None
@@ -189,7 +202,9 @@ def compute_prompt_graph_loss(
             student_graph,
             student_adapter,
             prune_result=student_prune_result,
-            activation_forward_batch_size=config.student_graph_batch_size,
+            activation_forward_batch_size=config.student_activation_forward_batch_size,
+            computation_eps=config.student_computation_eps,
+            embedding_eps=config.student_embedding_eps,
             cluster_method="ablation",
         )
     student_supergraph = _aggregate_supergraph_adjacency(
@@ -312,12 +327,24 @@ def _load_cached_teacher(
         # Embed logit_token_ids so _build_full_vocab_prob_deltas works without graph
         logit_token_ids=logit_token_ids,
     )
-    dla_data = cache.load_teacher_supernode_dla(prompt, answer)
-    dla_dict: dict[int, torch.Tensor] = {
-        int(cid): vec.to(device)
-        for cid, vec in zip(dla_data["cluster_ids"], dla_data["dla"])
-    }
-    n_vocab = int(dla_data["dla"].shape[-1]) if dla_data["dla"].numel() > 0 else cache.teacher_vocab_size
+    prob_deltas = sg_data.get("supernode_prob_deltas")
+    if prob_deltas is not None and prob_deltas.numel() > 0:
+        # Prefer ablation prob-deltas over DLA as the teacher node-loss target.
+        # The alignment step (`align_supernodes_prob_delta`) already scatters
+        # these 1000-dim vectors into full vocab space via logit_token_ids and
+        # stores them in `alignment.teacher_dla`.  Returning an empty dla_dict
+        # prevents the subsequent override loop in `compute_prompt_graph_loss`
+        # from replacing those prob-delta targets with the cheaper DLA vectors.
+        dla_dict: dict[int, torch.Tensor] = {}
+        n_vocab = cache.teacher_vocab_size
+    else:
+        # Fallback for caches generated without prob-deltas (fast-mode / legacy).
+        dla_data = cache.load_teacher_supernode_dla(prompt, answer)
+        dla_dict = {
+            int(cid): vec.to(device)
+            for cid, vec in zip(dla_data["cluster_ids"], dla_data["dla"])
+        }
+        n_vocab = int(dla_data["dla"].shape[-1]) if dla_data["dla"].numel() > 0 else cache.teacher_vocab_size
     return CachedTeacherPromptData(
         supergraph=supergraph,
         dla_dict=dla_dict,

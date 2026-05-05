@@ -127,6 +127,11 @@ class DistillationTrainer:
                 graph_similarity_threshold=config.graph_similarity_threshold,
                 graph_max_fan_out=config.graph_max_fan_out,
                 fast_teacher_graph=config.fast_teacher_graph,
+                student_computation_eps=config.student_computation_eps,
+                student_embedding_eps=config.student_embedding_eps,
+                student_activation_forward_batch_size=(
+                    config.student_activation_forward_batch_size
+                ),
             )
             self.student_graph_adapter = HFLlamaGraphAdapter(
                 self.student,

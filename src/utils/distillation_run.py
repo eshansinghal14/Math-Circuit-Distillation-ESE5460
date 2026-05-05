@@ -39,6 +39,9 @@ class DistillationConfig:
     graph_similarity_threshold: float = 0.7
     graph_max_fan_out: int = 4
     fast_teacher_graph: bool = False
+    student_computation_eps: float = 0.1
+    student_embedding_eps: float = 0.1
+    student_activation_forward_batch_size: int = 32
     eval_batch_size: int = 50
     step_log_interval: int = 50
     save_best: bool = False

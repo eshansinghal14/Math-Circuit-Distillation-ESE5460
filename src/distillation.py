@@ -1,4 +1,4 @@
-﻿"""CLI for simplified KL + graph-loss distillation."""
+"""CLI for simplified KL + graph-loss distillation."""
 
 from __future__ import annotations
 
@@ -49,6 +49,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--graph-batch-size", type=int, default=None)
     parser.add_argument("--teacher-graph-batch-size", type=int, default=512)
     parser.add_argument("--student-graph-batch-size", type=int, default=1)
+    parser.add_argument(
+        "--student-computation-eps",
+        type=float,
+        default=0.1,
+        help="Angular distance threshold for student supernode clustering.",
+    )
+    parser.add_argument(
+        "--student-embedding-eps",
+        type=float,
+        default=0.1,
+        help="Angular distance threshold for student embedding supernode clustering.",
+    )
+    parser.add_argument(
+        "--student-activation-forward-batch-size",
+        type=int,
+        default=32,
+        help="Batch size for student ablation forwards during supernode clustering.",
+    )
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--graph-prune", action="store_true")
     parser.add_argument("--graph-node-threshold", type=float, default=0.8)
@@ -98,6 +116,12 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--teacher-graph-batch-size must be >= 1")
     if args.student_graph_batch_size < 1:
         raise SystemExit("--student-graph-batch-size must be >= 1")
+    if args.student_computation_eps < 0:
+        raise SystemExit("--student-computation-eps must be >= 0")
+    if args.student_embedding_eps < 0:
+        raise SystemExit("--student-embedding-eps must be >= 0")
+    if args.student_activation_forward_batch_size < 1:
+        raise SystemExit("--student-activation-forward-batch-size must be >= 1")
     if not (0.0 <= args.graph_node_threshold <= 1.0):
         raise SystemExit("--graph-node-threshold must be in [0, 1]")
     if not (0.0 <= args.graph_edge_threshold <= 1.0):
@@ -185,6 +209,9 @@ def main() -> None:
             graph_similarity_threshold=args.graph_similarity_threshold,
             graph_max_fan_out=args.graph_max_fan_out,
             fast_teacher_graph=args.fast_teacher_graph,
+            student_computation_eps=args.student_computation_eps,
+            student_embedding_eps=args.student_embedding_eps,
+            student_activation_forward_batch_size=args.student_activation_forward_batch_size,
             save_best=args.save_best,
             eval_max_new_tokens=(
                 args.eval_max_new_tokens
