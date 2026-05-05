@@ -178,6 +178,11 @@ def compute_prompt_graph_loss(
         create_graph=False,
         detach_result=False,
         fast=False,
+        # The student adjacency [logits, neurons] block is only used for
+        # supergraph clustering, which the DLA pre-population path covers
+        # using neuron_write_vectors. Skip the ~1000 logit backward passes
+        # to cut peak memory roughly in half.
+        skip_logit_attribution=True,
     )
 
     student_prune_result = None

@@ -954,7 +954,6 @@ def build_super_graph(
     _fast_dla_populated = False
     if (
         cluster_method == "ablation"
-        and graph.attribution_mode == "fast"
         and graph.neuron_write_vectors is not None
         and kept_neuron_indices.numel() > 0
         and graph.n_logits > 0
@@ -976,30 +975,6 @@ def build_super_graph(
         del _wU, _W_U_logits, _kept_wv, _neuron_dla
         _fast_dla_populated = True
         logger.info("  Fast DLA pre-population: %d neurons", int(kept_neuron_indices.numel()))
-    elif (
-        cluster_method == "ablation"
-        and graph.attribution_mode == "full"
-        and kept_neuron_indices.numel() > 0
-        and graph.n_logits > 0
-    ):
-        # Full-Jacobian mode (e.g. HF student): the adjacency [logits, neurons] block
-        # already contains real per-neuron Jacobian attribution scores. Use them
-        # directly as prob_delta vectors for clustering, avoiding the TL-only
-        # compute_ablation_prob_deltas helper (which expects model.cfg / run_with_hooks).
-        with torch.no_grad():
-            _neuron_logit = compute_neuron_logit_influence(graph)  # [n_neurons, n_logits]
-            _kept_deltas = _neuron_logit[kept_neuron_indices_device].float()
-        for _k, _member in enumerate(kept_neuron_indices.tolist()):
-            _delta = _kept_deltas[_k]
-            prob_delta_by_neuron[_member] = _delta
-            prob_delta_norm_by_neuron[_member] = float(_delta.norm().item())
-        del _neuron_logit, _kept_deltas
-        _fast_dla_populated = True
-        logger.info(
-            "  Full-Jacobian prob-delta pre-population: %d neurons",
-            int(kept_neuron_indices.numel()),
-        )
-
     if cluster_method == "ablation" and kept_neuron_indices.numel():
         logger.info("  Building supernodes with ablation probability-delta clustering")
         supernodes = cluster_by_ablation_prob_deltas(kept_neuron_indices)

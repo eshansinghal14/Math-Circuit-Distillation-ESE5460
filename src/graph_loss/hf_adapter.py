@@ -160,6 +160,7 @@ class HFLlamaGraphAdapter:
         create_graph: bool = False,
         detach_result: bool | None = None,
         fast: bool = False,
+        skip_logit_attribution: bool = False,
     ) -> Graph:
         if not (0.0 < prop_neurons_per_layer <= 1.0):
             raise ValueError("prop_neurons_per_layer must be in (0, 1]")
@@ -439,12 +440,17 @@ class HFLlamaGraphAdapter:
                 print(f"    [graph] neuron rows {start}:{end} / {n_neurons}")
             adjacency[start:end, :source_count] = source_scores_neuron_chunk(start, end)
 
-        for start in range(0, n_logits, max(1, batch_size)):
-            end = min(start + max(1, batch_size), n_logits)
-            if verbose:
-                print(f"    [graph] logit rows {start}:{end} / {n_logits}")
-            adjacency[logit_start + start:logit_start + end, :source_count] = source_scores_logit_chunk(start, end)
+        if not skip_logit_attribution:
+            for start in range(0, n_logits, max(1, batch_size)):
+                end = min(start + max(1, batch_size), n_logits)
+                if verbose:
+                    print(f"    [graph] logit rows {start}:{end} / {n_logits}")
+                adjacency[logit_start + start:logit_start + end, :source_count] = source_scores_logit_chunk(start, end)
 
+        # Always populate neuron_write_vectors in full mode: this lets the
+        # supergraph clustering pre-populate prob_delta_by_neuron via DLA
+        # (write_vector @ W_U_logits) instead of needing the adjacency
+        # [logits, neurons] block.  Critical when skip_logit_attribution=True.
         graph = Graph(
             input_string=self.tokenizer.decode(input_ids.detach().cpu().tolist()),
             input_tokens=input_ids,
@@ -455,6 +461,7 @@ class HFLlamaGraphAdapter:
             logit_targets=targets.logit_targets,
             logit_probabilities=targets.logit_probabilities,
             vocab_size=targets.vocab_size,
+            neuron_write_vectors=source_vectors_t.detach().clone(),
         )
         if detach_result is None:
             detach_result = not create_graph
