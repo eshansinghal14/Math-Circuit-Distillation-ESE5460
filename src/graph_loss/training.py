@@ -61,25 +61,30 @@ class GraphAuxConfig:
 
 
 def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
-    """Aggregate a differentiable graph adjacency using fixed supernode membership."""
+    """Aggregate a differentiable graph adjacency using fixed supernode membership.
+
+    Uses torch.stack (out-of-place) instead of in-place setitem so that the
+    gradient from the edge loss flows back through supernode_adjacency_matrix
+    → adjacency_matrix → source_vectors_t → model parameters (down_proj.weight).
+    In-place setitem into a torch.zeros leaf tensor silently breaks the grad chain.
+    """
     adj_matrix_norm = normalize_matrix(graph.adjacency_matrix)
     num_supernodes = len(supernodes)
-    supernode_adj_matrix = torch.zeros(
-        num_supernodes,
-        num_supernodes,
-        dtype=adj_matrix_norm.dtype,
-        device=adj_matrix_norm.device,
-    )
+    rows = []
     for t in range(num_supernodes):
         total_input = torch.abs(adj_matrix_norm[:, supernodes[t]]).sum(dim=0)
         internal_input = torch.abs(adj_matrix_norm[supernodes[t]][:, supernodes[t]]).sum(dim=0)
         frac_external = (total_input - internal_input) / total_input.clamp(min=1e-10)
+        row_entries = []
         for s in range(num_supernodes):
             sum_A = adj_matrix_norm[supernodes[t]][:, supernodes[s]].sum(dim=1)
-            supernode_adj_matrix[t, s] = (
+            entry = (
                 (frac_external * sum_A).sum(dim=0)
                 / frac_external.sum(dim=0).clamp(min=1e-10)
             )
+            row_entries.append(entry)
+        rows.append(torch.stack(row_entries))
+    supernode_adj_matrix = torch.stack(rows)
     return SuperGraph(
         supernode_adjacency_matrix=supernode_adj_matrix,
         supernodes=supernodes,
