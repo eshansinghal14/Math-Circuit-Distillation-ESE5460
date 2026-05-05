@@ -164,10 +164,10 @@ def compute_prompt_graph_loss(
         print(f"  [graph] building student graph for prompt: {prompt!r}")
     # Force student to attribute over the same logit tokens as the teacher so that
     # prob-delta vectors occupy the same vocabulary positions in both models.
-    # Always use fast=True for the student: the HF adapter doesn't support Jacobian
-    # attribution, and fast mode (DLA-based) enables the pre-population shortcut in
-    # build_super_graph so clustering never calls the TransformerLens-specific
-    # compute_ablation_prob_deltas.
+    # The student uses full Jacobian attribution (fast=False) to populate real
+    # neuron-to-neuron edges, so the supernode adjacency aggregated by
+    # _aggregate_supergraph_adjacency carries genuine causal structure rather than
+    # the all-zero block produced by fast/DLA-only attribution.
     student_graph = student_adapter.build_graph(
         prompt,
         attribution_targets=logit_token_ids.cpu() if logit_token_ids is not None else None,
@@ -177,7 +177,7 @@ def compute_prompt_graph_loss(
         verbose=config.verbose,
         create_graph=False,
         detach_result=False,
-        fast=True,
+        fast=False,
     )
 
     student_prune_result = None
