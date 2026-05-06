@@ -23,7 +23,7 @@ from graph_loss.graph import (
     prune_graph,
 )
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
-from graph_loss.loss import compute_graph_loss
+from graph_loss.loss import compute_graph_loss, compute_logit_focus_loss
 from graph_loss.teacher_data_cache import TeacherDataCache
 
 
@@ -72,9 +72,16 @@ class GraphAuxConfig:
     # as the student's "supernode_prob_delta" alignment signal — these capture
     # cross-layer + attention-mediated paths and are sign-comparable to the
     # cached teacher prob-deltas.
-    student_skip_logit_attribution: bool = False
+    # For the logit-focus loss (Phase 3), skip_logit_attribution=True is correct:
+    # focus is computed via a separate cheap forward pass, not from B's logit rows.
+    student_skip_logit_attribution: bool = True
     # Optional: log per-prompt cosine-matrix stats for the supernode alignment.
     align_diagnostic: bool = False
+    # Phase 3 loss weight: KL divergence between teacher and student logit-focus
+    # distributions (sum of |DLA_neuron| across all selected neurons, normalized
+    # to a probability distribution over the top-K logit targets).  Requires no
+    # cross-model alignment or supernode matching.
+    graph_focus_weight: float = 0.0
 
 
 def _aggregate_supernode_logit_influence(
@@ -166,6 +173,21 @@ def _log_alignment_diagnostic(
         f"frac>=thr({similarity_threshold:.2f})={frac_at_thr:.2f} "
         f"frac>=0.30={frac_at_03:.2f}"
     )
+
+
+def _compute_teacher_logit_focus(teacher_supergraph: SuperGraph) -> torch.Tensor | None:
+    """Return a [n_logits] teacher logit-focus vector from cached prob-deltas.
+
+    Specifically: ``|supernode_prob_deltas|.sum(0)`` — for each of the top-K
+    cached logit targets, the total magnitude of ablation-based causal influence
+    across all teacher supernodes.  This is always computed without grad.
+
+    Returns ``None`` if the supergraph has no cached prob-deltas.
+    """
+    pd = teacher_supergraph.supernode_prob_deltas  # [n_teacher_sn, n_logits] or None
+    if pd is None or pd.numel() == 0:
+        return None
+    return pd.detach().float().abs().sum(0)  # [n_logits]
 
 
 def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
@@ -477,6 +499,34 @@ def compute_prompt_graph_loss(
     )
     print(f"  [grad-trace] graph_loss.requires_grad = {graph_loss.requires_grad}, value = {graph_loss.item():.6f}")
 
+    # ------------------------------------------------------------------
+    # Phase 3: logit-focus distribution loss (no alignment required)
+    # ------------------------------------------------------------------
+    focus_loss_value = 0.0
+    if config.graph_focus_weight > 0.0 and logit_token_ids is not None:
+        teacher_focus = _compute_teacher_logit_focus(teacher_supergraph)
+        if teacher_focus is not None and teacher_focus.numel() > 0:
+            student_focus = student_adapter.compute_logit_focus_vector_with_grad(
+                prompt=prompt,
+                neuron_locations_t=student_graph.neuron_locations,
+                logit_token_ids=logit_token_ids,
+                dtype=config.graph_dtype,
+            )
+            # Restrict teacher_focus to the same n_logits as student_focus in case
+            # the cached teacher used a different top_k (or a different subset).
+            n_l = student_focus.shape[0]
+            t_focus = teacher_focus[:n_l].to(
+                device=student_focus.device, dtype=student_focus.dtype
+            )
+            focus_loss = compute_logit_focus_loss(t_focus, student_focus)
+            focus_loss_value = float(focus_loss.item())
+            print(
+                f"  [focus] teacher_focus_sum={float(t_focus.sum()):.4f} "
+                f"student_focus_sum={float(student_focus.sum().item()):.4f} "
+                f"focus_loss={focus_loss_value:.6f} grad={focus_loss.requires_grad}"
+            )
+            graph_loss = graph_loss + config.graph_focus_weight * focus_loss
+
     metrics = {
         "teacher_supernodes": len(teacher_ids),
         "student_supernodes": len(student_ids),
@@ -490,6 +540,7 @@ def compute_prompt_graph_loss(
             if alignment.best_sim
             else 0.0
         ),
+        "focus_loss": focus_loss_value,
         **loss_breakdown,
     }
     return graph_loss, metrics

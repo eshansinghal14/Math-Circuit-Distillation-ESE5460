@@ -545,6 +545,104 @@ class HFLlamaGraphAdapter:
             graph = detach_graph(graph)
         return graph
 
+    def compute_logit_focus_vector_with_grad(
+        self,
+        prompt: str | torch.Tensor | list[int],
+        neuron_locations_t: torch.Tensor,
+        logit_token_ids: torch.Tensor,
+        dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
+        """Compute a differentiable [n_logits] logit-focus vector for all selected neurons.
+
+        For each selected neuron i at (layer_idx, pos_idx, neuron_id):
+
+            DLA_i = a_i · W_out[neuron_id] @ W_U[:, logit_token_ids]
+
+        Returns ``Σ_i |DLA_i|`` — an un-normalised [n_logits] vector representing the
+        total absolute DLA influence that all selected neurons exert on each of the
+        top-K logit targets for this prompt.
+
+        Callers should normalise to a distribution before computing KL loss.
+
+        The result is differentiable through:
+          - ``a_i`` (gate/up_proj activations, via SiLU-gated MLP forward)
+          - ``W_out[neuron_id]`` (down_proj.weight)
+
+        One extra forward pass is performed (no Jacobian, no batch expansion).
+        """
+        input_ids = self.ensure_tokenized(prompt)
+        device = self.device
+
+        mlp_inputs: dict[int, torch.Tensor] = {}
+        handles = []
+
+        for layer_idx, layer in enumerate(self.layers):
+            def pre_hook(_module, inputs, *, idx=layer_idx):
+                mlp_inputs[idx] = inputs[0]
+            handles.append(layer.mlp.register_forward_pre_hook(pre_hook))
+
+        input_ids_2d = input_ids.unsqueeze(0)
+        try:
+            with self.autocast_context(dtype):
+                _ = self.model(
+                    input_ids=input_ids_2d,
+                    attention_mask=torch.ones_like(input_ids_2d),
+                    output_hidden_states=False,
+                    use_cache=False,
+                )
+        finally:
+            for handle in handles:
+                handle.remove()
+
+        logit_ids = logit_token_ids.to(device=device, dtype=torch.long)
+        n_logits = int(logit_ids.numel())
+        W_U = self.model.lm_head.weight  # [vocab_size, hidden_size]
+        act_dtype = next(iter(mlp_inputs.values())).dtype if mlp_inputs else W_U.dtype
+        # [n_logits, hidden_size]
+        W_U_logits = W_U[logit_ids].to(dtype=act_dtype)
+
+        focus_parts: list[torch.Tensor] = []
+
+        for layer_idx in range(self.n_layers):
+            if layer_idx not in mlp_inputs:
+                continue
+            layer_mask = neuron_locations_t[:, 0] == layer_idx
+            if not layer_mask.any():
+                continue
+
+            locs = neuron_locations_t[layer_mask]    # [K, 3]
+            poses = locs[:, 1]                        # [K]
+            neurons = locs[:, 2]                      # [K]
+
+            layer_input = mlp_inputs[layer_idx].squeeze(0)  # [seq_len, d_model]
+            gate_rows, up_rows, out_rows, gate_bias, up_bias = self._layer_weights(
+                layer_idx, device=device, dtype=layer_input.dtype
+            )
+
+            pos_inputs = layer_input[poses]                           # [K, d_model]
+            gate_pre = pos_inputs @ gate_rows.T + gate_bias           # [K, d_mlp]
+            up_pre = pos_inputs @ up_rows.T + up_bias                 # [K, d_mlp]
+            gate_act = F.silu(gate_pre)
+            all_acts = gate_act * up_pre                              # [K, d_mlp]
+
+            k_range = torch.arange(locs.shape[0], device=device)
+            a_i = all_acts[k_range, neurons]                          # [K]
+            w_out_i = out_rows[neurons]                               # [K, d_model]
+
+            # source_vecs[k] = a_i[k] * w_out_i[k],  shape [K, d_model]
+            source_vecs = a_i.unsqueeze(-1) * w_out_i                 # [K, d_model]
+
+            # DLA = source_vecs @ W_U_logits.T → [K, n_logits]
+            dla = source_vecs @ W_U_logits.to(source_vecs.dtype).T
+
+            focus_parts.append(dla.abs())                             # [K, n_logits]
+
+        if not focus_parts:
+            zero = torch.zeros(n_logits, device=device, dtype=W_U.dtype)
+            return zero
+
+        return torch.cat(focus_parts, dim=0).sum(dim=0)   # [n_logits]
+
     def compute_supernode_dlas_with_grad(
         self,
         prompt: str | torch.Tensor | list[int],

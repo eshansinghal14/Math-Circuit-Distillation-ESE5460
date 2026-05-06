@@ -134,6 +134,7 @@ class DistillationTrainer:
                 ),
                 student_skip_logit_attribution=config.student_skip_logit_attribution,
                 align_diagnostic=config.align_diagnostic,
+                graph_focus_weight=config.graph_focus_weight,
             )
             self.student_graph_adapter = HFLlamaGraphAdapter(
                 self.student,

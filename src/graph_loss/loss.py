@@ -154,3 +154,27 @@ def compute_L_graph(
 ) -> torch.Tensor:
     """Legacy wrapper — returns edge loss only (no node loss)."""
     return _compute_edge_loss(W_T, W_S, mapping, teacher_ids, student_ids, epsilon)
+
+
+def compute_logit_focus_loss(
+    teacher_focus: torch.Tensor,
+    student_focus: torch.Tensor,
+    eps: float = 1e-10,
+) -> torch.Tensor:
+    """Phase-3 loss: KL(teacher_focus || student_focus), both normalised to distributions.
+
+    ``teacher_focus`` and ``student_focus`` are un-normalised [n_logits] vectors of
+    non-negative values representing total causal influence on each of the top-K logit
+    targets for a given prompt.
+
+    * Teacher: ``|supernode_prob_deltas|.sum(0)`` — sum of ablation-delta magnitudes.
+    * Student: ``Σ_neuron |DLA_neuron @ W_U[:, logit_ids]|`` — sum of DLA magnitudes.
+
+    After L1 normalisation, ``F.kl_div`` computes KL(teacher || student), encouraging
+    the student's neurons to concentrate their DLA signal on the same output tokens as
+    the teacher's circuits.  No cross-model alignment is required.
+    """
+    t_norm = teacher_focus / teacher_focus.sum().clamp(min=eps)
+    s_norm = student_focus / student_focus.sum().clamp(min=eps)
+    # F.kl_div(log_input, target) = Σ target * (log_target - log_input) = KL(target || input)
+    return F.kl_div(s_norm.clamp(min=eps).log(), t_norm.detach(), reduction="sum")

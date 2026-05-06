@@ -73,6 +73,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--graph-edge-threshold", type=float, default=0.98)
     parser.add_argument("--graph-node-weight", type=float, default=1.0)
     parser.add_argument("--graph-edge-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--graph-focus-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Weight for Phase-3 logit-focus distribution loss "
+            "(KL(teacher_focus || student_focus), no alignment required). "
+            "Set >0 to enable, e.g. --graph-focus-weight 1.0. "
+            "When this is the only active graph loss term, also set "
+            "--graph-node-weight 0 --graph-edge-weight 0."
+        ),
+    )
     parser.add_argument("--graph-similarity-threshold", type=float, default=0.7)
     parser.add_argument("--graph-max-fan-out", type=int, default=4)
     parser.add_argument("--fast-teacher-graph", action="store_true")
@@ -180,6 +192,7 @@ def main() -> None:
     print(f"  lambda_graph:       {args.lambda_graph}")
     print(f"  graph node weight:  {args.graph_node_weight}")
     print(f"  graph edge weight:  {args.graph_edge_weight}")
+    print(f"  graph focus weight: {args.graph_focus_weight}")
     print(f"  graph dtype:        {args.dtype}")
     print(f"  teacher cache:      {args.teacher_data_cache or 'none'}")
     print(f"  save_dir:           {run_dir}")
@@ -236,6 +249,7 @@ def main() -> None:
             student_activation_forward_batch_size=args.student_activation_forward_batch_size,
             student_skip_logit_attribution=args.student_skip_logit_attribution,
             align_diagnostic=args.align_diagnostic,
+            graph_focus_weight=args.graph_focus_weight,
             save_best=args.save_best,
             eval_max_new_tokens=(
                 args.eval_max_new_tokens
