@@ -321,7 +321,8 @@ def compute_prompt_graph_loss(
         # logit influence aggregated per supernode (see below).
         skip_logit_attribution=config.student_skip_logit_attribution,
     )
-    print(f"  [grad-trace] student_graph.adjacency_matrix.requires_grad = {student_graph.adjacency_matrix.requires_grad}")
+    if config.align_diagnostic:
+        print(f"  [grad-trace] student_graph.adjacency_matrix.requires_grad = {student_graph.adjacency_matrix.requires_grad}")
 
     student_prune_result = None
     if config.graph_prune:
@@ -333,7 +334,8 @@ def compute_prompt_graph_loss(
             edge_threshold=config.graph_edge_threshold,
         )
         student_graph = student_graph.apply_prune_result(student_prune_result)
-        print(f"  [grad-trace] post-prune adjacency.requires_grad = {student_graph.adjacency_matrix.requires_grad}")
+        if config.align_diagnostic:
+            print(f"  [grad-trace] post-prune adjacency.requires_grad = {student_graph.adjacency_matrix.requires_grad}")
 
     supergraph_start = time.perf_counter()
     with torch.no_grad():
@@ -350,7 +352,8 @@ def compute_prompt_graph_loss(
         student_graph,
         student_supergraph_structure.supernodes,
     )
-    print(f"  [grad-trace] student_supergraph.adjacency.requires_grad = {student_supergraph.supernode_adjacency_matrix.requires_grad}")
+    if config.align_diagnostic:
+        print(f"  [grad-trace] student_supergraph.adjacency.requires_grad = {student_supergraph.supernode_adjacency_matrix.requires_grad}")
     # ----------------------------------------------------------------------
     # Choose the student supernode alignment signal.
     #
@@ -482,7 +485,8 @@ def compute_prompt_graph_loss(
                     full_vec = base.scatter(0, logit_token_ids_dev, sn_logit_inf[sid])
                     alignment.student_dla[sid] = full_vec
 
-    print(f"  [grad-trace] mapping size: {sum(len(v) for v in alignment.mapping.values())} edges, teacher_supernodes={len(teacher_ids)}, student_supernodes={len(student_ids)}")
+    if config.align_diagnostic:
+        print(f"  [grad-trace] mapping size: {sum(len(v) for v in alignment.mapping.values())} edges, teacher_supernodes={len(teacher_ids)}, student_supernodes={len(student_ids)}")
     graph_loss, loss_breakdown = compute_graph_loss(
         teacher_supergraph.supernode_adjacency_matrix.detach().to(
             device=student_supergraph.supernode_adjacency_matrix.device,
@@ -497,7 +501,8 @@ def compute_prompt_graph_loss(
         edge_weight=config.graph_edge_weight,
         node_weight=config.graph_node_weight,
     )
-    print(f"  [grad-trace] graph_loss.requires_grad = {graph_loss.requires_grad}, value = {graph_loss.item():.6f}")
+    if config.align_diagnostic:
+        print(f"  [grad-trace] graph_loss.requires_grad = {graph_loss.requires_grad}, value = {graph_loss.item():.6f}")
 
     # ------------------------------------------------------------------
     # Phase 3: logit-focus distribution loss (no alignment required)
@@ -520,11 +525,12 @@ def compute_prompt_graph_loss(
             )
             focus_loss = compute_logit_focus_loss(t_focus, student_focus)
             focus_loss_value = float(focus_loss.item())
-            print(
-                f"  [focus] teacher_focus_sum={float(t_focus.sum()):.4f} "
-                f"student_focus_sum={float(student_focus.sum().item()):.4f} "
-                f"focus_loss={focus_loss_value:.6f} grad={focus_loss.requires_grad}"
-            )
+            if config.align_diagnostic:
+                print(
+                    f"  [focus] teacher_focus_sum={float(t_focus.sum()):.4f} "
+                    f"student_focus_sum={float(student_focus.sum().item()):.4f} "
+                    f"focus_loss={focus_loss_value:.6f} grad={focus_loss.requires_grad}"
+                )
             graph_loss = graph_loss + config.graph_focus_weight * focus_loss
 
     metrics = {
