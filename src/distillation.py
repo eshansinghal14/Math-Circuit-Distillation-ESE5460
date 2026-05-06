@@ -47,6 +47,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--graph-top-k-logits", type=int, default=20)
     parser.add_argument("--graph-prop-neurons-per-layer", type=float, default=0.1)
     parser.add_argument("--graph-batch-size", type=int, default=None)
+    parser.add_argument(
+        "--graph-gen-batch-size",
+        type=int,
+        default=1,
+        help=(
+            "Number of prompt graphs to generate and retain before backpropagating "
+            "graph loss. Higher is faster but uses more memory."
+        ),
+    )
     parser.add_argument("--teacher-graph-batch-size", type=int, default=512)
     parser.add_argument("--student-graph-batch-size", type=int, default=1)
     parser.add_argument(
@@ -169,6 +178,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--graph-prop-neurons-per-layer must be in (0, 1]")
     if args.graph_batch_size is not None and args.graph_batch_size < 1:
         raise SystemExit("--graph-batch-size must be >= 1")
+    if args.graph_gen_batch_size < 1:
+        raise SystemExit("--graph-gen-batch-size must be >= 1")
     if args.teacher_graph_batch_size < 1:
         raise SystemExit("--teacher-graph-batch-size must be >= 1")
     if args.student_graph_batch_size < 1:
@@ -263,6 +274,7 @@ def main() -> None:
             graph_dtype=resolve_torch_dtype(args.dtype),
             graph_top_k_logits=args.graph_top_k_logits,
             graph_prop_neurons_per_layer=args.graph_prop_neurons_per_layer,
+            graph_gen_batch_size=args.graph_gen_batch_size,
             teacher_graph_batch_size=args.teacher_graph_batch_size,
             student_graph_batch_size=args.student_graph_batch_size,
             graph_verbose=args.verbose,

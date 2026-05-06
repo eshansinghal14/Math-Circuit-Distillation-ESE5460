@@ -45,6 +45,7 @@ class GraphAuxConfig:
     graph_dtype: torch.dtype | None = None
     top_k_logits: int | None = 20
     prop_neurons_per_layer: float = 0.1
+    graph_gen_batch_size: int = 1
     teacher_graph_batch_size: int = 512
     student_graph_batch_size: int = 1
     verbose: bool = False
@@ -1036,6 +1037,25 @@ def backward_batch_graph_loss(
     detached_losses = []
     denom = float(len(prompts))
     graph_backward_prompts = 0
+    gen_batch_size = max(1, int(config.graph_gen_batch_size))
+    pending_losses: list[torch.Tensor] = []
+
+    def flush_pending_losses() -> None:
+        nonlocal graph_backward_prompts, pending_losses
+        if not pending_losses:
+            return
+        scaled_loss = (loss_scale / denom) * torch.stack(pending_losses).sum()
+        if scaled_loss.requires_grad:
+            scaled_loss.backward()
+            graph_backward_prompts += len(pending_losses)
+        else:
+            print("  [graph] WARN: generated graph losses have no grad; skipping backward")
+        del scaled_loss
+        pending_losses = []
+        gc.collect()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
     for i, prompt in enumerate(prompts):
         cached = (
             _load_cached_teacher(teacher_cache, prompt, answers[i], device)
@@ -1060,20 +1080,21 @@ def backward_batch_graph_loss(
         if config.graph_grad_mode == "true":
             # Backward already done inside compute_prompt_graph_loss.
             graph_backward_prompts += 1
+            del prompt_loss
+            gc.collect()
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
         else:
-            scaled_prompt_loss = (loss_scale / denom) * prompt_loss
-            if scaled_prompt_loss.requires_grad:
-                scaled_prompt_loss.backward()
-                graph_backward_prompts += 1
-            else:
-                print(f"  [graph] WARN: prompt_loss has no grad; skipping backward")
-            del scaled_prompt_loss
+            pending_losses.append(prompt_loss)
+            if len(pending_losses) >= gen_batch_size:
+                flush_pending_losses()
         for key, value in prompt_metrics.items():
             metric_sums[key] = metric_sums.get(key, 0.0) + float(value)
-        del prompt_loss
-        gc.collect()
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
+
+    flush_pending_losses()
+
+    if not detached_losses:
+        return torch.tensor(0.0, device=device), {}
 
     loss = torch.stack(detached_losses).mean()
     metrics = {key: value / denom for key, value in metric_sums.items()}
