@@ -895,17 +895,22 @@ def _load_cached_teacher(
     prompt: str,
     answer: int,
     device: torch.device,
-) -> CachedTeacherPromptData | None:
+) -> CachedTeacherPromptData:
     """Load one prompt's teacher artifacts from disk and reconstruct a SuperGraph.
 
-    Returns None on a cache miss so callers can fall back to KL-only loss.
+    Cache-backed distillation should be all-or-nothing: a missing prompt or
+    artifact means the pregenerated cache does not match this training run.
     """
     from graph_loss.graph import SuperGraph  # local import to avoid circular
 
     try:
         sg_data = cache.load_teacher_supergraph(prompt, answer)
-    except KeyError:
-        return None
+    except (KeyError, FileNotFoundError) as e:
+        raise RuntimeError(
+            "Teacher data cache is enabled but required graph data is missing for "
+            f"prompt={prompt!r}, answer={answer!r}. Regenerate the cache for this "
+            "dataset/tokenizer or remove --teacher-data-cache."
+        ) from e
     logit_token_ids: torch.Tensor | None = sg_data.get("logit_token_ids")
     supergraph = SuperGraph(
         supernode_adjacency_matrix=sg_data["supernode_adjacency_matrix"].to(device),
@@ -928,7 +933,14 @@ def _load_cached_teacher(
         n_vocab = cache.teacher_vocab_size
     else:
         # Fallback for caches generated without prob-deltas (fast-mode / legacy).
-        dla_data = cache.load_teacher_supernode_dla(prompt, answer)
+        try:
+            dla_data = cache.load_teacher_supernode_dla(prompt, answer)
+        except (KeyError, FileNotFoundError) as e:
+            raise RuntimeError(
+                "Teacher data cache is enabled but required teacher DLA data is missing for "
+                f"prompt={prompt!r}, answer={answer!r}. Regenerate the cache for this "
+                "dataset/tokenizer or remove --teacher-data-cache."
+            ) from e
         dla_dict = {
             int(cid): vec.to(device)
             for cid, vec in zip(dla_data["cluster_ids"], dla_data["dla"])
@@ -954,6 +966,11 @@ def compute_batch_graph_loss(
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     losses = []
     metric_sums: dict[str, float] = {}
+    if teacher_cache is not None and answers is None:
+        raise RuntimeError(
+            "Teacher data cache is enabled but batch answers were not provided. "
+            "Cannot safely load cached teacher graph data."
+        )
     for i, prompt in enumerate(prompts):
         cached = (
             _load_cached_teacher(teacher_cache, prompt, answers[i], device)
@@ -961,7 +978,7 @@ def compute_batch_graph_loss(
             else None
         )
         if cached is None and teacher_graph_model is None:
-            # Cache miss and no live teacher — skip graph loss for this prompt.
+            # No cache configured and no live teacher; skip graph loss for this prompt.
             continue
         prompt_loss, prompt_metrics = compute_prompt_graph_loss(
             prompt=prompt,
@@ -1009,6 +1026,12 @@ def backward_batch_graph_loss(
 
     import gc
 
+    if teacher_cache is not None and answers is None:
+        raise RuntimeError(
+            "Teacher data cache is enabled but batch answers were not provided. "
+            "Cannot safely load cached teacher graph data."
+        )
+
     metric_sums: dict[str, float] = {}
     detached_losses = []
     denom = float(len(prompts))
@@ -1020,7 +1043,7 @@ def backward_batch_graph_loss(
             else None
         )
         if cached is None and teacher_graph_model is None:
-            # Cache miss and no live teacher — skip graph loss for this prompt.
+            # No cache configured and no live teacher; skip graph loss for this prompt.
             continue
         # In true-grad mode, compute_prompt_graph_loss does its own backwards
         # internally (chunked, memory-bounded) and returns a detached scalar.

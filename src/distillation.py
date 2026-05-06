@@ -128,7 +128,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--align-diagnostic",
         action="store_true",
         help=(
-            "Log per-prompt teacher\u2194student supernode cosine-matrix stats "
+            "Log per-prompt teacher/student supernode cosine-matrix stats "
             "(mean/median/max, fraction of teacher SNs with any match >= 0.3) "
             "to verify alignment quality before/after a fix."
         ),
