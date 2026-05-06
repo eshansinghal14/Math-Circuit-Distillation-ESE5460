@@ -116,6 +116,7 @@ class DistillationTrainer:
                 graph_dtype=config.graph_dtype,
                 top_k_logits=config.graph_top_k_logits,
                 prop_neurons_per_layer=config.graph_prop_neurons_per_layer,
+                graph_gen_batch_size=config.graph_gen_batch_size,
                 teacher_graph_batch_size=config.teacher_graph_batch_size,
                 student_graph_batch_size=config.student_graph_batch_size,
                 verbose=config.graph_verbose,
@@ -195,12 +196,19 @@ class DistillationTrainer:
         attention_mask: torch.Tensor,
     ) -> torch.Tensor:
         if self.teacher_data_cache is not None:
-            return self.teacher_data_cache.get_batch_logits(
-                prompts=batch["prompts"],
-                answers=batch["answers"],
-                input_ids=input_ids,
-                device=self.device,
-            )
+            try:
+                return self.teacher_data_cache.get_batch_logits(
+                    prompts=batch["prompts"],
+                    answers=batch["answers"],
+                    input_ids=input_ids,
+                    device=self.device,
+                )
+            except (KeyError, FileNotFoundError, ValueError) as e:
+                raise RuntimeError(
+                    "Teacher data cache is enabled but required cached logits could not "
+                    "be loaded for this batch. Regenerate the cache for this "
+                    "dataset/tokenizer or remove --teacher-data-cache."
+                ) from e
         if self.teacher_graph_model is not None:
             with torch.no_grad():
                 out = self.teacher_graph_model(input_ids)

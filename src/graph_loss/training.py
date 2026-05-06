@@ -45,6 +45,7 @@ class GraphAuxConfig:
     graph_dtype: torch.dtype | None = None
     top_k_logits: int | None = 20
     prop_neurons_per_layer: float = 0.1
+    graph_gen_batch_size: int = 1
     teacher_graph_batch_size: int = 512
     student_graph_batch_size: int = 1
     verbose: bool = False
@@ -936,17 +937,22 @@ def _load_cached_teacher(
     prompt: str,
     answer: int,
     device: torch.device,
-) -> CachedTeacherPromptData | None:
+) -> CachedTeacherPromptData:
     """Load one prompt's teacher artifacts from disk and reconstruct a SuperGraph.
 
-    Returns None on a cache miss so callers can fall back to KL-only loss.
+    Cache-backed distillation should be all-or-nothing: a missing prompt or
+    artifact means the pregenerated cache does not match this training run.
     """
     from graph_loss.graph import SuperGraph  # local import to avoid circular
 
     try:
         sg_data = cache.load_teacher_supergraph(prompt, answer)
-    except KeyError:
-        return None
+    except (KeyError, FileNotFoundError) as e:
+        raise RuntimeError(
+            "Teacher data cache is enabled but required graph data is missing for "
+            f"prompt={prompt!r}, answer={answer!r}. Regenerate the cache for this "
+            "dataset/tokenizer or remove --teacher-data-cache."
+        ) from e
     logit_token_ids: torch.Tensor | None = sg_data.get("logit_token_ids")
     supergraph = SuperGraph(
         supernode_adjacency_matrix=sg_data["supernode_adjacency_matrix"].to(device),
@@ -969,7 +975,14 @@ def _load_cached_teacher(
         n_vocab = cache.teacher_vocab_size
     else:
         # Fallback for caches generated without prob-deltas (fast-mode / legacy).
-        dla_data = cache.load_teacher_supernode_dla(prompt, answer)
+        try:
+            dla_data = cache.load_teacher_supernode_dla(prompt, answer)
+        except (KeyError, FileNotFoundError) as e:
+            raise RuntimeError(
+                "Teacher data cache is enabled but required teacher DLA data is missing for "
+                f"prompt={prompt!r}, answer={answer!r}. Regenerate the cache for this "
+                "dataset/tokenizer or remove --teacher-data-cache."
+            ) from e
         dla_dict = {
             int(cid): vec.to(device)
             for cid, vec in zip(dla_data["cluster_ids"], dla_data["dla"])
@@ -995,6 +1008,11 @@ def compute_batch_graph_loss(
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     losses = []
     metric_sums: dict[str, float] = {}
+    if teacher_cache is not None and answers is None:
+        raise RuntimeError(
+            "Teacher data cache is enabled but batch answers were not provided. "
+            "Cannot safely load cached teacher graph data."
+        )
     for i, prompt in enumerate(prompts):
         cached = (
             _load_cached_teacher(teacher_cache, prompt, answers[i], device)
@@ -1002,7 +1020,7 @@ def compute_batch_graph_loss(
             else None
         )
         if cached is None and teacher_graph_model is None:
-            # Cache miss and no live teacher — skip graph loss for this prompt.
+            # No cache configured and no live teacher; skip graph loss for this prompt.
             continue
         prompt_loss, prompt_metrics = compute_prompt_graph_loss(
             prompt=prompt,
@@ -1050,10 +1068,35 @@ def backward_batch_graph_loss(
 
     import gc
 
+    if teacher_cache is not None and answers is None:
+        raise RuntimeError(
+            "Teacher data cache is enabled but batch answers were not provided. "
+            "Cannot safely load cached teacher graph data."
+        )
+
     metric_sums: dict[str, float] = {}
     detached_losses = []
     denom = float(len(prompts))
     graph_backward_prompts = 0
+    gen_batch_size = max(1, int(config.graph_gen_batch_size))
+    pending_losses: list[torch.Tensor] = []
+
+    def flush_pending_losses() -> None:
+        nonlocal graph_backward_prompts, pending_losses
+        if not pending_losses:
+            return
+        scaled_loss = (loss_scale / denom) * torch.stack(pending_losses).sum()
+        if scaled_loss.requires_grad:
+            scaled_loss.backward()
+            graph_backward_prompts += len(pending_losses)
+        else:
+            print("  [graph] WARN: generated graph losses have no grad; skipping backward")
+        del scaled_loss
+        pending_losses = []
+        gc.collect()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
     for i, prompt in enumerate(prompts):
         cached = (
             _load_cached_teacher(teacher_cache, prompt, answers[i], device)
@@ -1061,7 +1104,7 @@ def backward_batch_graph_loss(
             else None
         )
         if cached is None and teacher_graph_model is None:
-            # Cache miss and no live teacher — skip graph loss for this prompt.
+            # No cache configured and no live teacher; skip graph loss for this prompt.
             continue
         # In true-grad mode, compute_prompt_graph_loss does its own backwards
         # internally (chunked, memory-bounded) and returns a detached scalar.
@@ -1078,20 +1121,21 @@ def backward_batch_graph_loss(
         if config.graph_grad_mode == "true":
             # Backward already done inside compute_prompt_graph_loss.
             graph_backward_prompts += 1
+            del prompt_loss
+            gc.collect()
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
         else:
-            scaled_prompt_loss = (loss_scale / denom) * prompt_loss
-            if scaled_prompt_loss.requires_grad:
-                scaled_prompt_loss.backward()
-                graph_backward_prompts += 1
-            else:
-                print(f"  [graph] WARN: prompt_loss has no grad; skipping backward")
-            del scaled_prompt_loss
+            pending_losses.append(prompt_loss)
+            if len(pending_losses) >= gen_batch_size:
+                flush_pending_losses()
         for key, value in prompt_metrics.items():
             metric_sums[key] = metric_sums.get(key, 0.0) + float(value)
-        del prompt_loss
-        gc.collect()
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
+
+    flush_pending_losses()
+
+    if not detached_losses:
+        return torch.tensor(0.0, device=device), {}
 
     loss = torch.stack(detached_losses).mean()
     metrics = {key: value / denom for key, value in metric_sums.items()}

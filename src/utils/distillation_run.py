@@ -28,6 +28,7 @@ class DistillationConfig:
     graph_dtype: Optional[torch.dtype] = None
     graph_top_k_logits: Optional[int] = 20
     graph_prop_neurons_per_layer: float = 0.1
+    graph_gen_batch_size: int = 1
     teacher_graph_batch_size: int = 512
     student_graph_batch_size: int = 1
     graph_verbose: bool = False
