@@ -189,6 +189,7 @@ def compute_prompt_graph_loss(
         # to cut peak memory roughly in half.
         skip_logit_attribution=True,
     )
+    print(f"  [grad-trace] student_graph.adjacency_matrix.requires_grad = {student_graph.adjacency_matrix.requires_grad}")
 
     student_prune_result = None
     if config.graph_prune:
@@ -200,6 +201,7 @@ def compute_prompt_graph_loss(
             edge_threshold=config.graph_edge_threshold,
         )
         student_graph = student_graph.apply_prune_result(student_prune_result)
+        print(f"  [grad-trace] post-prune adjacency.requires_grad = {student_graph.adjacency_matrix.requires_grad}")
 
     supergraph_start = time.perf_counter()
     with torch.no_grad():
@@ -216,6 +218,7 @@ def compute_prompt_graph_loss(
         student_graph,
         student_supergraph_structure.supernodes,
     )
+    print(f"  [grad-trace] student_supergraph.adjacency.requires_grad = {student_supergraph.supernode_adjacency_matrix.requires_grad}")
     # Preserve prob_deltas so alignment gets non-zero cosine similarities.
     student_supergraph = student_supergraph._replace(
         supernode_prob_deltas=student_supergraph_structure.supernode_prob_deltas
@@ -273,6 +276,7 @@ def compute_prompt_graph_loss(
         for sid, dla_tensor in student_dla_with_grad_dict.items():
             alignment.student_dla[sid] = dla_tensor
 
+    print(f"  [grad-trace] mapping size: {sum(len(v) for v in alignment.mapping.values())} edges, teacher_supernodes={len(teacher_ids)}, student_supernodes={len(student_ids)}")
     graph_loss, loss_breakdown = compute_graph_loss(
         teacher_supergraph.supernode_adjacency_matrix.detach().to(
             device=student_supergraph.supernode_adjacency_matrix.device,
@@ -287,6 +291,7 @@ def compute_prompt_graph_loss(
         edge_weight=config.graph_edge_weight,
         node_weight=config.graph_node_weight,
     )
+    print(f"  [grad-trace] graph_loss.requires_grad = {graph_loss.requires_grad}, value = {graph_loss.item():.6f}")
 
     metrics = {
         "teacher_supernodes": len(teacher_ids),
