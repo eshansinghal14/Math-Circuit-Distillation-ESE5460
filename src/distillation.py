@@ -76,6 +76,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--graph-similarity-threshold", type=float, default=0.7)
     parser.add_argument("--graph-max-fan-out", type=int, default=4)
     parser.add_argument("--fast-teacher-graph", action="store_true")
+    parser.add_argument(
+        "--student-skip-logit-attribution",
+        action="store_true",
+        help=(
+            "If set, the student attribution graph keeps the legacy "
+            "skip_logit_attribution=True (saves memory but the student supernode "
+            "alignment signal is sum-of-DLAs, which lives in a different functional "
+            "space than the teacher's cached prob-deltas).  Default is to populate "
+            "real Jacobian logit-influence rows and use those for alignment."
+        ),
+    )
+    parser.add_argument(
+        "--align-diagnostic",
+        action="store_true",
+        help=(
+            "Log per-prompt teacher\u2194student supernode cosine-matrix stats "
+            "(mean/median/max, fraction of teacher SNs with any match >= 0.3) "
+            "to verify alignment quality before/after a fix."
+        ),
+    )
     parser.add_argument("--eval-max-new-tokens", type=int, default=None)
     parser.add_argument("--eval-batch-size", type=int, default=50)
     parser.add_argument("--eval-datasets", nargs="*", default=None, metavar="DATASET")
@@ -214,6 +234,8 @@ def main() -> None:
             student_computation_eps=args.student_computation_eps,
             student_embedding_eps=args.student_embedding_eps,
             student_activation_forward_batch_size=args.student_activation_forward_batch_size,
+            student_skip_logit_attribution=args.student_skip_logit_attribution,
+            align_diagnostic=args.align_diagnostic,
             save_best=args.save_best,
             eval_max_new_tokens=(
                 args.eval_max_new_tokens

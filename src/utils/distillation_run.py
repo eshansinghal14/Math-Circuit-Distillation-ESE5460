@@ -42,6 +42,8 @@ class DistillationConfig:
     student_computation_eps: float = 0.1
     student_embedding_eps: float = 0.1
     student_activation_forward_batch_size: int = 32
+    student_skip_logit_attribution: bool = False
+    align_diagnostic: bool = False
     eval_batch_size: int = 50
     step_log_interval: int = 50
     save_best: bool = False

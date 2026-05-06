@@ -132,6 +132,8 @@ class DistillationTrainer:
                 student_activation_forward_batch_size=(
                     config.student_activation_forward_batch_size
                 ),
+                student_skip_logit_attribution=config.student_skip_logit_attribution,
+                align_diagnostic=config.align_diagnostic,
             )
             self.student_graph_adapter = HFLlamaGraphAdapter(
                 self.student,

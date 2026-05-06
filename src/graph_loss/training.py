@@ -8,11 +8,16 @@ from typing import Any
 
 import torch
 
-from graph_loss.align import align_supernodes_prob_delta, compute_supernode_dla
+from graph_loss.align import (
+    _build_full_vocab_prob_deltas,
+    align_supernodes_prob_delta,
+    compute_supernode_dla,
+)
 from graph_loss.attribution.attribute import attribute
 from graph_loss.graph import (
     SuperGraph,
     build_super_graph,
+    compute_neuron_logit_influence,
     extract_supernode_members,
     normalize_matrix,
     prune_graph,
@@ -58,6 +63,109 @@ class GraphAuxConfig:
     student_computation_eps: float = 0.1
     student_embedding_eps: float = 0.1
     student_activation_forward_batch_size: int = 32
+    # When True, student build_graph skips populating the [logits, neurons] block
+    # of B (saves ~top_k_logits backward passes, halves peak memory).  In that
+    # case the alignment falls back to the legacy DLA-sum signal for the student,
+    # which lives in a different functional space than the teacher's real
+    # ablation prob-deltas, producing noisy / mostly-wrong matches.  Set to
+    # False to populate real Jacobian-mediated logit influence rows and use them
+    # as the student's "supernode_prob_delta" alignment signal — these capture
+    # cross-layer + attention-mediated paths and are sign-comparable to the
+    # cached teacher prob-deltas.
+    student_skip_logit_attribution: bool = False
+    # Optional: log per-prompt cosine-matrix stats for the supernode alignment.
+    align_diagnostic: bool = False
+
+
+def _aggregate_supernode_logit_influence(
+    graph,
+    supernodes: list[list[int]],
+) -> torch.Tensor:
+    """Sum per-neuron logit-influence rows of B over each supernode's members.
+
+    Returns ``[n_supernodes, n_logits]`` in logit-attribution space.  This
+    requires ``graph`` to have been built with ``skip_logit_attribution=False``;
+    otherwise the [logits, neurons] block of B is zero and this returns a
+    zero tensor (caller should detect and fall back to the DLA-based signal).
+
+    The returned tensor is differentiable through B → ``source_vectors_t`` →
+    student model parameters (down_proj.weight etc.), so when the alignment
+    similarity passes through these vectors the resulting cosine gradients
+    flow back into the student.
+    """
+    logit_inf = compute_neuron_logit_influence(graph)  # [n_neurons, n_logits]
+    rows: list[torch.Tensor] = []
+    zero_row = torch.zeros(
+        graph.n_logits,
+        dtype=logit_inf.dtype,
+        device=logit_inf.device,
+    )
+    for members in supernodes:
+        if not members:
+            rows.append(zero_row)
+            continue
+        idx = torch.tensor(members, dtype=torch.long, device=logit_inf.device)
+        rows.append(logit_inf.index_select(0, idx).sum(dim=0))
+    if not rows:
+        return torch.empty(
+            (0, graph.n_logits),
+            dtype=logit_inf.dtype,
+            device=logit_inf.device,
+        )
+    return torch.stack(rows, dim=0)
+
+
+def _log_alignment_diagnostic(
+    teacher_supergraph: SuperGraph,
+    student_supergraph: SuperGraph,
+    teacher_graph,
+    student_graph,
+    *,
+    n_vocab: int,
+    similarity_threshold: float,
+) -> None:
+    """Log per-prompt teacher\u2194student supernode cosine-matrix stats.
+
+    Cheap (one cosine matmul) and side-effect-free.  Prints:
+      mean / median / max cosine over the teacher\u2192student matrix,
+      fraction of teacher supernodes with at least one match >= threshold,
+      and the same for >= 0.3 (a reasonable practical floor).
+    """
+    import torch.nn.functional as F
+
+    t_full = _build_full_vocab_prob_deltas(teacher_supergraph, teacher_graph, n_vocab)
+    s_full = _build_full_vocab_prob_deltas(student_supergraph, student_graph, n_vocab)
+    if t_full.numel() == 0 or s_full.numel() == 0:
+        print("  [align-diag] empty teacher or student supergraph; skipping")
+        return
+    if t_full.shape[1] != s_full.shape[1]:
+        max_w = max(t_full.shape[1], s_full.shape[1])
+        if t_full.shape[1] < max_w:
+            t_full = F.pad(t_full, (0, max_w - t_full.shape[1]))
+        if s_full.shape[1] < max_w:
+            s_full = F.pad(s_full, (0, max_w - s_full.shape[1]))
+    t_norm = F.normalize(t_full, dim=1)
+    s_norm = F.normalize(s_full, dim=1)
+    sim = t_norm @ s_norm.T  # [n_teacher, n_student]
+    if sim.numel() == 0:
+        print("  [align-diag] zero-size similarity matrix")
+        return
+    best_per_teacher = sim.max(dim=1).values
+    n_teacher = sim.shape[0]
+    n_student = sim.shape[1]
+    frac_at_thr = (best_per_teacher >= similarity_threshold).float().mean().item()
+    frac_at_03 = (best_per_teacher >= 0.3).float().mean().item()
+    print(
+        "  [align-diag] "
+        f"teacher_sn={n_teacher} student_sn={n_student} "
+        f"sim mean={sim.mean().item():.3f} median={sim.median().item():.3f} "
+        f"max={sim.max().item():.3f} | best-per-teacher "
+        f"mean={best_per_teacher.mean().item():.3f} "
+        f"median={best_per_teacher.median().item():.3f} "
+        f"max={best_per_teacher.max().item():.3f} | "
+        f"frac>=thr({similarity_threshold:.2f})={frac_at_thr:.2f} "
+        f"frac>=0.30={frac_at_03:.2f}"
+    )
 
 
 def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
@@ -183,11 +291,13 @@ def compute_prompt_graph_loss(
         create_graph=False,
         detach_result=False,
         fast=False,
-        # The student adjacency [logits, neurons] block is only used for
-        # supergraph clustering, which the DLA pre-population path covers
-        # using neuron_write_vectors. Skip the ~1000 logit backward passes
-        # to cut peak memory roughly in half.
-        skip_logit_attribution=True,
+        # When skip_logit_attribution=True we save ~top_k_logits backward passes
+        # but the student loses real Jacobian logit-influence rows, leaving the
+        # supernode alignment signal in a different functional space than the
+        # cached teacher prob-deltas (sum-of-DLAs vs real ablation prob-deltas).
+        # Default is False so the student supernode alignment can use real
+        # logit influence aggregated per supernode (see below).
+        skip_logit_attribution=config.student_skip_logit_attribution,
     )
     print(f"  [grad-trace] student_graph.adjacency_matrix.requires_grad = {student_graph.adjacency_matrix.requires_grad}")
 
@@ -219,9 +329,37 @@ def compute_prompt_graph_loss(
         student_supergraph_structure.supernodes,
     )
     print(f"  [grad-trace] student_supergraph.adjacency.requires_grad = {student_supergraph.supernode_adjacency_matrix.requires_grad}")
-    # Preserve prob_deltas so alignment gets non-zero cosine similarities.
+    # ----------------------------------------------------------------------
+    # Choose the student supernode alignment signal.
+    #
+    # The cached teacher `supernode_prob_deltas` are real ablation prob-deltas
+    # in [-1, 1] over the selected logit token ids.  For cosine similarity
+    # alignment to be meaningful, the student vector must live in a
+    # sign-comparable space.
+    #
+    # - When `skip_logit_attribution=False`, the student adjacency carries
+    #   real Jacobian-mediated logit-influence rows (Anthropic's exact
+    #   attribution-graph edge weight from each neuron to each selected
+    #   logit).  Summing these per supernode gives a "supernode logit
+    #   influence" vector that captures cross-layer + attention-mediated
+    #   paths through the frozen-attention/LN replacement model — sign-
+    #   comparable to the teacher's prob-delta and far better than
+    #   sum-of-DLAs (which only sees the residual-direct path).
+    #
+    # - When `skip_logit_attribution=True`, the [logits, neurons] block of
+    #   B is zero, so we fall back to the legacy DLA-based signal that the
+    #   structure pass produced (kept here only for backward compat).
+    if not config.student_skip_logit_attribution and student_graph.n_logits > 0:
+        student_supernode_prob_deltas = _aggregate_supernode_logit_influence(
+            student_graph,
+            student_supergraph_structure.supernodes,
+        )
+    else:
+        student_supernode_prob_deltas = student_supergraph_structure.supernode_prob_deltas
+
     student_supergraph = student_supergraph._replace(
-        supernode_prob_deltas=student_supergraph_structure.supernode_prob_deltas
+        supernode_prob_deltas=student_supernode_prob_deltas,
+        logit_token_ids=student_graph.logit_token_ids,
     )
     if config.verbose:
         print(
@@ -233,6 +371,16 @@ def compute_prompt_graph_loss(
     # ------------------------------------------------------------------
     # Alignment
     # ------------------------------------------------------------------
+    if config.align_diagnostic:
+        _log_alignment_diagnostic(
+            teacher_supergraph,
+            student_supergraph,
+            teacher_graph,
+            student_graph,
+            n_vocab=n_vocab,
+            similarity_threshold=config.graph_similarity_threshold,
+        )
+
     if config.verbose:
         print("  [graph] aligning supernodes via prob-delta and computing graph loss")
     alignment = align_supernodes_prob_delta(
@@ -266,15 +414,51 @@ def compute_prompt_graph_loss(
                     alignment.teacher_dla[sn["cluster_id"]] = dla.detach()
 
     if config.graph_node_weight > 0.0:
-        student_dla_with_grad_dict = student_adapter.compute_supernode_dlas_with_grad(
-            prompt=prompt,
-            supernodes=student_supergraph.supernodes,
-            neuron_locations_t=student_graph.neuron_locations,
-            n_vocab=n_vocab,
-            dtype=config.graph_dtype,
-        )
-        for sid, dla_tensor in student_dla_with_grad_dict.items():
-            alignment.student_dla[sid] = dla_tensor
+        # `align_supernodes_prob_delta` stores DETACHED student vectors in
+        # alignment.student_dla (it scatters via `.detach().float().cpu()`
+        # in `_build_full_vocab_prob_deltas`).  For node-loss backprop we
+        # need to overwrite those entries with a differentiable equivalent.
+        if config.student_skip_logit_attribution or student_graph.n_logits == 0:
+            # Legacy path: differentiable DLA via the adapter (independent
+            # forward pass that re-derives source vectors from down_proj).
+            student_dla_with_grad_dict = student_adapter.compute_supernode_dlas_with_grad(
+                prompt=prompt,
+                supernodes=student_supergraph.supernodes,
+                neuron_locations_t=student_graph.neuron_locations,
+                n_vocab=n_vocab,
+                dtype=config.graph_dtype,
+            )
+            for sid, dla_tensor in student_dla_with_grad_dict.items():
+                alignment.student_dla[sid] = dla_tensor
+        else:
+            # New path: scatter the differentiable supernode logit-influence
+            # vectors (already on `student_supergraph.supernode_prob_deltas`)
+            # from the [n_logits] compact basis to a full-vocab basis.  This
+            # preserves the autograd graph through B \u2192 source_vectors_t
+            # \u2192 student parameters.
+            sn_logit_inf = student_supergraph.supernode_prob_deltas
+            if sn_logit_inf is not None and sn_logit_inf.numel() > 0:
+                logit_token_ids_dev = student_graph.logit_token_ids.to(
+                    device=sn_logit_inf.device,
+                    dtype=torch.long,
+                )
+                actual_vocab = max(
+                    int(n_vocab),
+                    int(logit_token_ids_dev.max().item()) + 1,
+                )
+                # Use out-of-place scatter so the autograd chain through
+                # sn_logit_inf survives.  Building a leaf zeros tensor and
+                # then setitem'ing with [logit_token_ids_dev] silently breaks
+                # the grad chain (same bug pattern already documented in
+                # hf_adapter.build_graph and _aggregate_supergraph_adjacency).
+                for sid in range(sn_logit_inf.shape[0]):
+                    base = torch.zeros(
+                        actual_vocab,
+                        dtype=sn_logit_inf.dtype,
+                        device=sn_logit_inf.device,
+                    )
+                    full_vec = base.scatter(0, logit_token_ids_dev, sn_logit_inf[sid])
+                    alignment.student_dla[sid] = full_vec
 
     print(f"  [grad-trace] mapping size: {sum(len(v) for v in alignment.mapping.values())} edges, teacher_supernodes={len(teacher_ids)}, student_supernodes={len(student_ids)}")
     graph_loss, loss_breakdown = compute_graph_loss(
