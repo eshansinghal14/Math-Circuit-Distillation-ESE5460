@@ -450,6 +450,8 @@ def backward_batch_graph_loss(
         if scaled_prompt_loss.requires_grad:
             scaled_prompt_loss.backward()
             graph_backward_prompts += 1
+        else:
+            print(f"  [graph] WARN: prompt_loss has no grad; skipping backward")
         for key, value in prompt_metrics.items():
             metric_sums[key] = metric_sums.get(key, 0.0) + float(value)
         del prompt_loss, scaled_prompt_loss
