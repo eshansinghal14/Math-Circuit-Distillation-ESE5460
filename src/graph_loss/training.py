@@ -1047,7 +1047,7 @@ def backward_batch_graph_loss(
             del scaled_prompt_loss
         for key, value in prompt_metrics.items():
             metric_sums[key] = metric_sums.get(key, 0.0) + float(value)
-        del prompt_loss, scaled_prompt_loss
+        del prompt_loss
         gc.collect()
         if device.type == "cuda":
             torch.cuda.empty_cache()
