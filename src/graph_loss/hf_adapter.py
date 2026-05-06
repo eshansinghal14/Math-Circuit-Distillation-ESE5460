@@ -545,6 +545,148 @@ class HFLlamaGraphAdapter:
             graph = detach_graph(graph)
         return graph
 
+    def compute_supernode_ablation_prob_deltas_with_grad(
+        self,
+        prompt: str | torch.Tensor | list[int],
+        supernodes: list[list[int]],
+        neuron_locations_t: torch.Tensor,
+        logit_token_ids: torch.Tensor,
+        dtype: torch.dtype | None = None,
+        ablation_batch_size: int = 8,
+    ) -> torch.Tensor:
+        """Differentiable supernode ablation prob-deltas via real forward-pass hooks.
+
+        For each supernode S_i, performs a TRUE causal ablation:
+            1. Identify the (layer_idx, neuron_id) tuples for every member of S_i.
+            2. Register forward pre-hooks on the affected layers' ``down_proj``
+               that mask the corresponding neuron activations to zero.
+               The mask is applied via element-wise multiplication
+               (``x * mask``), which preserves the autograd graph through the
+               ablated forward (unlike in-place ``setitem``).
+            3. Run a full forward pass through the student.  Because the mask is
+               applied at the input to ``down_proj``, the *cross-layer* effects
+               of the ablation propagate naturally through subsequent layers /
+               attention heads / LN — same operational space as the teacher's
+               TransformerLens hook-based ablation.
+            4. ``prob_delta = baseline_probs - ablated_probs`` over
+               ``logit_token_ids``.
+
+        To amortise the per-supernode forward cost, supernodes are processed in
+        chunks of ``ablation_batch_size``: ``input_ids`` is replicated ``B``
+        times along the batch dim, and a batch-aware mask is constructed so
+        that supernode ``j`` is only ablated in batch element ``j``.  This is
+        the same strategy used by ``HookedTransformer.run_with_hooks`` on the
+        teacher side.
+
+        Returns a ``[n_supernodes, n_logits]`` tensor differentiable through
+        every model parameter that affects ``baseline_probs`` or
+        ``ablated_probs`` (gate/up/down_proj weights, attention weights,
+        layer-norm weights, embedding, lm_head).
+        """
+        input_ids = self.ensure_tokenized(prompt)
+        device = self.device
+        logit_ids = logit_token_ids.to(device=device, dtype=torch.long)
+        n_logits = int(logit_ids.numel())
+        n_sn = len(supernodes)
+
+        if n_sn == 0:
+            return torch.empty((0, n_logits), device=device, dtype=torch.float32)
+
+        input_ids_2d = input_ids.unsqueeze(0)  # [1, S]
+        S = input_ids.shape[0]
+
+        # Baseline forward (no hooks).  Differentiable through model params.
+        with self.autocast_context(dtype):
+            baseline_logits = self.model(
+                input_ids=input_ids_2d,
+                attention_mask=torch.ones_like(input_ids_2d),
+                use_cache=False,
+            ).logits  # [1, S, V]
+        baseline_probs = torch.softmax(baseline_logits[0, -1].float(), dim=-1)[logit_ids]
+        # baseline_probs: [n_logits], differentiable
+
+        # Group every supernode's members by layer once up front.
+        # supernode_layer_neurons[i] = {layer_idx: [neuron_ids,...]}
+        supernode_layer_neurons: list[dict[int, list[int]]] = []
+        for members in supernodes:
+            layer_groups: dict[int, list[int]] = {}
+            for m in members:
+                layer_idx = int(neuron_locations_t[m, 0].item())
+                neuron_id = int(neuron_locations_t[m, 2].item())
+                layer_groups.setdefault(layer_idx, []).append(neuron_id)
+            supernode_layer_neurons.append(layer_groups)
+
+        delta_chunks: list[torch.Tensor] = []
+        d_mlp = self.d_mlp
+
+        # Process supernodes in chunks; replicate input across batch dim, mask
+        # per-batch-element so each supernode is ablated independently.
+        for chunk_start in range(0, n_sn, ablation_batch_size):
+            chunk_end = min(chunk_start + ablation_batch_size, n_sn)
+            chunk = supernode_layer_neurons[chunk_start:chunk_end]
+            B = len(chunk)
+
+            # For each layer that any supernode in the chunk touches, build a
+            # [B, d_mlp] mask: row b has zeros at the neurons supernode b
+            # ablates, ones elsewhere.  Layers not touched by any supernode in
+            # the chunk receive no hook (no extra cost).
+            layer_to_mask: dict[int, torch.Tensor] = {}
+            for b, layer_groups in enumerate(chunk):
+                for layer_idx, neuron_ids in layer_groups.items():
+                    if layer_idx not in layer_to_mask:
+                        layer_to_mask[layer_idx] = torch.ones(
+                            B, d_mlp, device=device, dtype=baseline_logits.dtype
+                        )
+                    if neuron_ids:
+                        idx = torch.tensor(
+                            neuron_ids, device=device, dtype=torch.long
+                        )
+                        # Out-of-place scatter: preserves autograd of any
+                        # downstream multiplications even though mask itself
+                        # has no grad (it's a constant tensor).
+                        layer_to_mask[layer_idx][b] = layer_to_mask[layer_idx][b].scatter(
+                            0, idx, 0.0
+                        )
+
+            # Register pre-hooks that multiply down_proj input by per-batch mask.
+            handles = []
+            for layer_idx, mask in layer_to_mask.items():
+                # Capture mask via default arg to avoid late-binding.
+                def make_hook(_mask):
+                    def _hook(_module, args):
+                        x = args[0]  # [B', S, d_mlp] in some autocast dtype
+                        # Reshape mask [B, d_mlp] to [B, 1, d_mlp] for broadcast.
+                        m = _mask.to(x.dtype).unsqueeze(1)
+                        return (x * m,)
+                    return _hook
+                handle = self.layers[layer_idx].mlp.down_proj.register_forward_pre_hook(
+                    make_hook(mask)
+                )
+                handles.append(handle)
+
+            try:
+                # Run forward with batch=B; each batch element gets a different
+                # ablation pattern via the per-row mask.
+                input_ids_b = input_ids_2d.expand(B, S)
+                attn_b = torch.ones_like(input_ids_b)
+                with self.autocast_context(dtype):
+                    ablated_logits = self.model(
+                        input_ids=input_ids_b,
+                        attention_mask=attn_b,
+                        use_cache=False,
+                    ).logits  # [B, S, V]
+                ablated_probs = torch.softmax(
+                    ablated_logits[:, -1].float(), dim=-1
+                )[:, logit_ids]  # [B, n_logits]
+                # baseline_probs broadcasts to [B, n_logits].
+                delta = baseline_probs.unsqueeze(0) - ablated_probs  # [B, n_logits]
+                delta_chunks.append(delta)
+            finally:
+                for h in handles:
+                    h.remove()
+
+        return torch.cat(delta_chunks, dim=0).to(torch.float32)  # [n_sn, n_logits]
+
     def compute_logit_focus_vector_with_grad(
         self,
         prompt: str | torch.Tensor | list[int],

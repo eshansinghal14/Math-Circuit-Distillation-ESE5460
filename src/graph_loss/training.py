@@ -17,13 +17,12 @@ from graph_loss.attribution.attribute import attribute
 from graph_loss.graph import (
     SuperGraph,
     build_super_graph,
-    compute_neuron_logit_influence,
     extract_supernode_members,
     normalize_matrix,
     prune_graph,
 )
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
-from graph_loss.loss import compute_graph_loss, compute_logit_focus_loss
+from graph_loss.loss import compute_graph_loss
 from graph_loss.teacher_data_cache import TeacherDataCache
 
 
@@ -63,63 +62,22 @@ class GraphAuxConfig:
     student_computation_eps: float = 0.1
     student_embedding_eps: float = 0.1
     student_activation_forward_batch_size: int = 32
-    # When True, student build_graph skips populating the [logits, neurons] block
-    # of B (saves ~top_k_logits backward passes, halves peak memory).  In that
-    # case the alignment falls back to the legacy DLA-sum signal for the student,
-    # which lives in a different functional space than the teacher's real
-    # ablation prob-deltas, producing noisy / mostly-wrong matches.  Set to
-    # False to populate real Jacobian-mediated logit influence rows and use them
-    # as the student's "supernode_prob_delta" alignment signal — these capture
-    # cross-layer + attention-mediated paths and are sign-comparable to the
-    # cached teacher prob-deltas.
-    # For the logit-focus loss (Phase 3), skip_logit_attribution=True is correct:
-    # focus is computed via a separate cheap forward pass, not from B's logit rows.
+    # When True, student build_graph skips populating the [logits, neurons]
+    # block of B (saves ~top_k_logits backward passes, halves peak memory).
+    # The current alignment + focus signal comes from
+    # compute_supernode_ablation_prob_deltas_with_grad (real hook-based ablation
+    # on the student), so this block is no longer needed for the auxiliary
+    # loss — keep True for memory.  Setting to False is only useful for
+    # historical experiments that consume the [logits, neurons] block of B.
     student_skip_logit_attribution: bool = True
-    # Optional: log per-prompt cosine-matrix stats for the supernode alignment.
+    # Optional: log per-prompt cosine-matrix stats for the supernode alignment
+    # plus signed teacher/student focus diagnostics.
     align_diagnostic: bool = False
-    # Phase 3 loss weight: KL divergence between teacher and student logit-focus
-    # distributions (sum of |DLA_neuron| across all selected neurons, normalized
-    # to a probability distribution over the top-K logit targets).  Requires no
-    # cross-model alignment or supernode matching.
+    # Logit-focus loss weight (signed MSE between teacher and student
+    # supernode_prob_deltas summed across supernodes).  Sign-preserving —
+    # avoids the |DLA| collapse failure mode at high lambda_graph.  Requires
+    # no cross-model alignment.
     graph_focus_weight: float = 0.0
-
-
-def _aggregate_supernode_logit_influence(
-    graph,
-    supernodes: list[list[int]],
-) -> torch.Tensor:
-    """Sum per-neuron logit-influence rows of B over each supernode's members.
-
-    Returns ``[n_supernodes, n_logits]`` in logit-attribution space.  This
-    requires ``graph`` to have been built with ``skip_logit_attribution=False``;
-    otherwise the [logits, neurons] block of B is zero and this returns a
-    zero tensor (caller should detect and fall back to the DLA-based signal).
-
-    The returned tensor is differentiable through B → ``source_vectors_t`` →
-    student model parameters (down_proj.weight etc.), so when the alignment
-    similarity passes through these vectors the resulting cosine gradients
-    flow back into the student.
-    """
-    logit_inf = compute_neuron_logit_influence(graph)  # [n_neurons, n_logits]
-    rows: list[torch.Tensor] = []
-    zero_row = torch.zeros(
-        graph.n_logits,
-        dtype=logit_inf.dtype,
-        device=logit_inf.device,
-    )
-    for members in supernodes:
-        if not members:
-            rows.append(zero_row)
-            continue
-        idx = torch.tensor(members, dtype=torch.long, device=logit_inf.device)
-        rows.append(logit_inf.index_select(0, idx).sum(dim=0))
-    if not rows:
-        return torch.empty(
-            (0, graph.n_logits),
-            dtype=logit_inf.dtype,
-            device=logit_inf.device,
-        )
-    return torch.stack(rows, dim=0)
 
 
 def _log_alignment_diagnostic(
@@ -173,21 +131,6 @@ def _log_alignment_diagnostic(
         f"frac>=thr({similarity_threshold:.2f})={frac_at_thr:.2f} "
         f"frac>=0.30={frac_at_03:.2f}"
     )
-
-
-def _compute_teacher_logit_focus(teacher_supergraph: SuperGraph) -> torch.Tensor | None:
-    """Return a [n_logits] teacher logit-focus vector from cached prob-deltas.
-
-    Specifically: ``|supernode_prob_deltas|.sum(0)`` — for each of the top-K
-    cached logit targets, the total magnitude of ablation-based causal influence
-    across all teacher supernodes.  This is always computed without grad.
-
-    Returns ``None`` if the supergraph has no cached prob-deltas.
-    """
-    pd = teacher_supergraph.supernode_prob_deltas  # [n_teacher_sn, n_logits] or None
-    if pd is None or pd.numel() == 0:
-        return None
-    return pd.detach().float().abs().sum(0)  # [n_logits]
 
 
 def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
@@ -357,27 +300,52 @@ def compute_prompt_graph_loss(
     # ----------------------------------------------------------------------
     # Choose the student supernode alignment signal.
     #
-    # The cached teacher `supernode_prob_deltas` are real ablation prob-deltas
-    # in [-1, 1] over the selected logit token ids.  For cosine similarity
-    # alignment to be meaningful, the student vector must live in a
-    # sign-comparable space.
+    # The cached teacher `supernode_prob_deltas` are real hook-based ablation
+    # prob-deltas in [-1, 1] over the selected logit token ids — full causal
+    # ablation: zero out supernode activations, let the rest of the network
+    # flow forward, measure softmax probability change.  For cross-model
+    # alignment to be meaningful, the student vector must live in the same
+    # operational space.
     #
-    # - When `skip_logit_attribution=False`, the student adjacency carries
-    #   real Jacobian-mediated logit-influence rows (Anthropic's exact
-    #   attribution-graph edge weight from each neuron to each selected
-    #   logit).  Summing these per supernode gives a "supernode logit
-    #   influence" vector that captures cross-layer + attention-mediated
-    #   paths through the frozen-attention/LN replacement model — sign-
-    #   comparable to the teacher's prob-delta and far better than
-    #   sum-of-DLAs (which only sees the residual-direct path).
+    # Three options that produce candidate student supernode signals:
     #
-    # - When `skip_logit_attribution=True`, the [logits, neurons] block of
-    #   B is zero, so we fall back to the legacy DLA-based signal that the
-    #   structure pass produced (kept here only for backward compat).
-    if not config.student_skip_logit_attribution and student_graph.n_logits > 0:
-        student_supernode_prob_deltas = _aggregate_supernode_logit_influence(
-            student_graph,
-            student_supergraph_structure.supernodes,
+    #   A. ``_aggregate_supernode_logit_influence`` — sums Jacobian rows of B.
+    #      Pre-softmax LINEAR signal.  Different operational space than
+    #      teacher's ablation prob-delta; cosine similarity is empirically
+    #      orthogonal (frac>=0.30 = 0.0).  Was the Phase-2 fallback.
+    #
+    #   B. ``student_supergraph_structure.supernode_prob_deltas`` — comes from
+    #      ``compute_supernode_ablation_prob_deltas`` in graph.py.  For HF
+    #      models this uses a SINGLE-PASS approximation: subtract the
+    #      supernode's direct residual contribution from final_resid, re-apply
+    #      lm_head + softmax.  Captures softmax nonlinearity but MISSES
+    #      cross-layer effects (downstream neurons firing differently,
+    #      attention rerouting).  Better than (A) but still different space
+    #      from teacher's full ablation.
+    #
+    #   C. ``compute_supernode_ablation_prob_deltas_with_grad`` (NEW, used
+    #      below) — TRUE causal ablation via batched forward pre-hooks on
+    #      down_proj that mask member neuron activations to zero.  The masked
+    #      forward propagates through all subsequent layers, so cross-layer
+    #      effects are captured exactly.  Same operational space as teacher's
+    #      cached prob-deltas.  Differentiable through model parameters via
+    #      ``x * mask`` instead of in-place setitem.
+    #
+    # Cost: option (C) requires ~ceil(n_supernodes / ablation_batch_size)
+    # extra forward passes through the student model per prompt.  With
+    # ablation_batch_size=8 and ~40 supernodes, this is ~5 extra forwards.
+    # Compared to the existing student build_graph + supergraph clustering
+    # that already does ~8-16 forwards per prompt, this is a modest increase
+    # for a fundamentally better alignment signal.
+    if student_graph.n_logits > 0 and len(student_supergraph_structure.supernodes) > 0:
+        student_supernode_prob_deltas = (
+            student_adapter.compute_supernode_ablation_prob_deltas_with_grad(
+                prompt=prompt,
+                supernodes=student_supergraph_structure.supernodes,
+                neuron_locations_t=student_graph.neuron_locations,
+                logit_token_ids=student_graph.logit_token_ids,
+                dtype=config.graph_dtype,
+            )
         )
     else:
         student_supernode_prob_deltas = student_supergraph_structure.supernode_prob_deltas
@@ -440,50 +408,32 @@ def compute_prompt_graph_loss(
 
     if config.graph_node_weight > 0.0:
         # `align_supernodes_prob_delta` stores DETACHED student vectors in
-        # alignment.student_dla (it scatters via `.detach().float().cpu()`
-        # in `_build_full_vocab_prob_deltas`).  For node-loss backprop we
-        # need to overwrite those entries with a differentiable equivalent.
-        if config.student_skip_logit_attribution or student_graph.n_logits == 0:
-            # Legacy path: differentiable DLA via the adapter (independent
-            # forward pass that re-derives source vectors from down_proj).
-            student_dla_with_grad_dict = student_adapter.compute_supernode_dlas_with_grad(
-                prompt=prompt,
-                supernodes=student_supergraph.supernodes,
-                neuron_locations_t=student_graph.neuron_locations,
-                n_vocab=n_vocab,
-                dtype=config.graph_dtype,
+        # alignment.student_dla.  For node-loss backprop we overwrite each
+        # entry with a differentiable full-vocab version derived from the
+        # NEW ablation prob_deltas (which carry grad through model params
+        # via x * mask in the ablated forward pass).
+        sn_prob_deltas = student_supergraph.supernode_prob_deltas
+        if sn_prob_deltas is not None and sn_prob_deltas.numel() > 0:
+            logit_token_ids_dev = student_graph.logit_token_ids.to(
+                device=sn_prob_deltas.device,
+                dtype=torch.long,
             )
-            for sid, dla_tensor in student_dla_with_grad_dict.items():
-                alignment.student_dla[sid] = dla_tensor
-        else:
-            # New path: scatter the differentiable supernode logit-influence
-            # vectors (already on `student_supergraph.supernode_prob_deltas`)
-            # from the [n_logits] compact basis to a full-vocab basis.  This
-            # preserves the autograd graph through B \u2192 source_vectors_t
-            # \u2192 student parameters.
-            sn_logit_inf = student_supergraph.supernode_prob_deltas
-            if sn_logit_inf is not None and sn_logit_inf.numel() > 0:
-                logit_token_ids_dev = student_graph.logit_token_ids.to(
-                    device=sn_logit_inf.device,
-                    dtype=torch.long,
+            actual_vocab = max(
+                int(n_vocab),
+                int(logit_token_ids_dev.max().item()) + 1,
+            )
+            # Out-of-place scatter preserves autograd through sn_prob_deltas
+            # (in-place setitem on a torch.zeros leaf would silently break
+            # the grad chain — same pattern documented in build_graph and
+            # _aggregate_supergraph_adjacency).
+            for sid in range(sn_prob_deltas.shape[0]):
+                base = torch.zeros(
+                    actual_vocab,
+                    dtype=sn_prob_deltas.dtype,
+                    device=sn_prob_deltas.device,
                 )
-                actual_vocab = max(
-                    int(n_vocab),
-                    int(logit_token_ids_dev.max().item()) + 1,
-                )
-                # Use out-of-place scatter so the autograd chain through
-                # sn_logit_inf survives.  Building a leaf zeros tensor and
-                # then setitem'ing with [logit_token_ids_dev] silently breaks
-                # the grad chain (same bug pattern already documented in
-                # hf_adapter.build_graph and _aggregate_supergraph_adjacency).
-                for sid in range(sn_logit_inf.shape[0]):
-                    base = torch.zeros(
-                        actual_vocab,
-                        dtype=sn_logit_inf.dtype,
-                        device=sn_logit_inf.device,
-                    )
-                    full_vec = base.scatter(0, logit_token_ids_dev, sn_logit_inf[sid])
-                    alignment.student_dla[sid] = full_vec
+                full_vec = base.scatter(0, logit_token_ids_dev, sn_prob_deltas[sid])
+                alignment.student_dla[sid] = full_vec
 
     if config.align_diagnostic:
         print(f"  [grad-trace] mapping size: {sum(len(v) for v in alignment.mapping.values())} edges, teacher_supernodes={len(teacher_ids)}, student_supernodes={len(student_ids)}")
@@ -505,30 +455,46 @@ def compute_prompt_graph_loss(
         print(f"  [grad-trace] graph_loss.requires_grad = {graph_loss.requires_grad}, value = {graph_loss.item():.6f}")
 
     # ------------------------------------------------------------------
-    # Phase 3: logit-focus distribution loss (no alignment required)
-    # ------------------------------------------------------------------
+    # Logit-focus loss (no alignment required) — SIGNED version.
+    #
+    # Both teacher and student now produce supernode prob-deltas in the same
+    # operational space (full hook-based ablation on teacher; batched
+    # forward-pre-hook ablation on student, see
+    # ``compute_supernode_ablation_prob_deltas_with_grad``).  We sum across
+    # supernodes to get a signed per-logit "net causal pressure" vector and
+    # match those vectors directly via MSE.
+    #
+    # This is the sign-preserving fix for the |DLA| collapse seen at high
+    # lambda_graph: with absolute-value focus, the gradient was sign-blind,
+    # so the optimizer could satisfy the loss by pushing tokens DOWN that
+    # the teacher pushes UP.  Signed sum preserves direction, so MSE pulls
+    # the student in the right direction along each logit.
     focus_loss_value = 0.0
     if config.graph_focus_weight > 0.0 and logit_token_ids is not None:
-        teacher_focus = _compute_teacher_logit_focus(teacher_supergraph)
-        if teacher_focus is not None and teacher_focus.numel() > 0:
-            student_focus = student_adapter.compute_logit_focus_vector_with_grad(
-                prompt=prompt,
-                neuron_locations_t=student_graph.neuron_locations,
-                logit_token_ids=logit_token_ids,
-                dtype=config.graph_dtype,
+        teacher_pd = teacher_supergraph.supernode_prob_deltas
+        student_pd = student_supergraph.supernode_prob_deltas
+        if (
+            teacher_pd is not None
+            and student_pd is not None
+            and teacher_pd.numel() > 0
+            and student_pd.numel() > 0
+        ):
+            teacher_focus_signed = teacher_pd.detach().float().sum(0)  # [n_logits_t]
+            student_focus_signed = student_pd.float().sum(0)            # [n_logits_s]
+            n_l = min(teacher_focus_signed.shape[0], student_focus_signed.shape[0])
+            t_focus = teacher_focus_signed[:n_l].to(
+                device=student_focus_signed.device,
+                dtype=student_focus_signed.dtype,
             )
-            # Restrict teacher_focus to the same n_logits as student_focus in case
-            # the cached teacher used a different top_k (or a different subset).
-            n_l = student_focus.shape[0]
-            t_focus = teacher_focus[:n_l].to(
-                device=student_focus.device, dtype=student_focus.dtype
-            )
-            focus_loss = compute_logit_focus_loss(t_focus, student_focus)
+            s_focus = student_focus_signed[:n_l]
+            focus_loss = torch.nn.functional.mse_loss(s_focus, t_focus)
             focus_loss_value = float(focus_loss.item())
             if config.align_diagnostic:
                 print(
-                    f"  [focus] teacher_focus_sum={float(t_focus.sum()):.4f} "
-                    f"student_focus_sum={float(student_focus.sum().item()):.4f} "
+                    f"  [focus] teacher_signed_sum={float(t_focus.sum()):.4f} "
+                    f"student_signed_sum={float(s_focus.sum().item()):.4f} "
+                    f"|t|_inf={float(t_focus.abs().max()):.4f} "
+                    f"|s|_inf={float(s_focus.abs().max().item()):.4f} "
                     f"focus_loss={focus_loss_value:.6f} grad={focus_loss.requires_grad}"
                 )
             graph_loss = graph_loss + config.graph_focus_weight * focus_loss
