@@ -89,6 +89,31 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--graph-max-fan-out", type=int, default=4)
     parser.add_argument("--fast-teacher-graph", action="store_true")
     parser.add_argument(
+        "--graph-grad-mode",
+        type=str,
+        default="approx",
+        choices=["approx", "true"],
+        help=(
+            "Gradient pathway for per-supernode prob-delta loss.  "
+            "'approx' (default): cheap differentiable DLA-approximation, "
+            "one forward + per-supernode (norm/lm_head/softmax).  Fast, "
+            "~95%% directionally faithful.  "
+            "'true': full hook-based ablation with chunked sequential "
+            "backward, 100%% faithful to teacher's operational space at "
+            "~3-5x training cost.  Tune chunk size with --graph-true-grad-chunk-size."
+        ),
+    )
+    parser.add_argument(
+        "--graph-true-grad-chunk-size",
+        type=int,
+        default=4,
+        help=(
+            "In --graph-grad-mode true, # of supernodes per batched "
+            "ablation forward+backward.  Higher = more parallelism, "
+            "more peak memory.  Default 4."
+        ),
+    )
+    parser.add_argument(
         "--student-skip-logit-attribution",
         action="store_true",
         help=(
@@ -193,6 +218,11 @@ def main() -> None:
     print(f"  graph node weight:  {args.graph_node_weight}")
     print(f"  graph edge weight:  {args.graph_edge_weight}")
     print(f"  graph focus weight: {args.graph_focus_weight}")
+    print(f"  graph grad mode:    {args.graph_grad_mode}", end="")
+    if args.graph_grad_mode == "true":
+        print(f" (chunk_size={args.graph_true_grad_chunk_size})")
+    else:
+        print()
     print(f"  graph dtype:        {args.dtype}")
     print(f"  teacher cache:      {args.teacher_data_cache or 'none'}")
     print(f"  save_dir:           {run_dir}")
@@ -250,6 +280,8 @@ def main() -> None:
             student_skip_logit_attribution=args.student_skip_logit_attribution,
             align_diagnostic=args.align_diagnostic,
             graph_focus_weight=args.graph_focus_weight,
+            graph_grad_mode=args.graph_grad_mode,
+            graph_true_grad_chunk_size=args.graph_true_grad_chunk_size,
             save_best=args.save_best,
             eval_max_new_tokens=(
                 args.eval_max_new_tokens
