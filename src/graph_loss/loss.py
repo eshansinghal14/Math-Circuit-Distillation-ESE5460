@@ -10,12 +10,19 @@ def _compute_edge_loss(
     student_ids: list[int],
     epsilon: float = 1e-4,
 ) -> torch.Tensor:
-    """Edge-level structural loss: penalize student edges that under-cover teacher edges."""
+    """Edge-level structural loss: penalize student edges that under-cover teacher edges.
+
+    Accumulates per-edge loss terms in a list and stacks at the end so the
+    returned scalar carries the autograd graph through W_S.  Initializing
+    ``loss = torch.tensor(0.0)`` and using ``loss += ...`` silently drops
+    gradient because the leaf zero scalar has ``requires_grad=False`` and
+    in-place adds on it do not promote it to a grad-tracking tensor.
+    """
     t_id2idx = {cid: i for i, cid in enumerate(teacher_ids)}
     s_id2idx = {cid: i for i, cid in enumerate(student_ids)}
     device = W_T.device
 
-    loss = torch.tensor(0.0, device=device, dtype=W_T.dtype)
+    loss_terms: list[torch.Tensor] = []
     total_weight = torch.tensor(0.0, device=device, dtype=W_T.dtype)
 
     for t_src in teacher_ids:
@@ -25,7 +32,7 @@ def _compute_edge_loss(
             if w_teacher.abs() < epsilon:
                 continue
 
-            total_weight += w_teacher.abs()
+            total_weight = total_weight + w_teacher.abs()
 
             src_students = mapping.get(t_src, set())
             tgt_students = mapping.get(t_tgt, set())
@@ -49,7 +56,12 @@ def _compute_edge_loss(
                 coverage = torch.tensor(0.0, device=device, dtype=W_T.dtype)
 
             gap = w_teacher - coverage
-            loss += F.relu(w_teacher.sign() * gap) ** 2
+            loss_terms.append(F.relu(w_teacher.sign() * gap) ** 2)
+
+    if loss_terms:
+        loss = torch.stack(loss_terms).sum()
+    else:
+        loss = torch.tensor(0.0, device=device, dtype=W_T.dtype)
 
     if total_weight > epsilon:
         loss = loss / total_weight
@@ -73,8 +85,7 @@ def _compute_node_loss(
     """
     device = next(iter(teacher_dla.values())).device if teacher_dla else torch.device("cpu")
 
-    loss = torch.tensor(0.0, device=device, dtype=torch.float32)
-    count = 0
+    loss_terms: list[torch.Tensor] = []
 
     for t_id, s_ids in mapping.items():
         if not s_ids or t_id not in teacher_dla:
@@ -93,11 +104,12 @@ def _compute_node_loss(
                 min_dist_sq = dist_sq
 
         if min_dist_sq is not None:
-            loss = loss + min_dist_sq
-            count += 1
+            loss_terms.append(min_dist_sq)
 
-    if count > 0:
-        loss = loss / count
+    if loss_terms:
+        loss = torch.stack(loss_terms).sum() / len(loss_terms)
+    else:
+        loss = torch.tensor(0.0, device=device, dtype=torch.float32)
 
     return loss
 
