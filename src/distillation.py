@@ -158,6 +158,8 @@ def main() -> None:
     print(f"  train_path:         {train_path}")
     print(f"  test_path:          {test_path}")
     print(f"  lambda_graph:       {args.lambda_graph}")
+    print(f"  graph node weight:  {args.graph_node_weight}")
+    print(f"  graph edge weight:  {args.graph_edge_weight}")
     print(f"  graph dtype:        {args.dtype}")
     print(f"  teacher cache:      {args.teacher_data_cache or 'none'}")
     print(f"  save_dir:           {run_dir}")
