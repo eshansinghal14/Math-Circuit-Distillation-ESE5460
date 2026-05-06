@@ -1089,7 +1089,7 @@ def backward_batch_graph_loss(
         if scaled_loss.requires_grad:
             scaled_loss.backward()
             graph_backward_prompts += len(pending_losses)
-        else:
+        elif config.verbose:
             print("  [graph] WARN: generated graph losses have no grad; skipping backward")
         del scaled_loss
         pending_losses = []
