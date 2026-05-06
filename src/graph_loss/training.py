@@ -101,6 +101,13 @@ class GraphAuxConfig:
     # without a real Jacobian is meaningless).  Roughly 2-3x faster student
     # graph construction.
     fast_student_graph: bool = False
+    # Number of supernodes ablated in a single batched forward when computing
+    # the no-grad student supernode prob_delta matching signal.  Each unit of
+    # batch costs ~1 student forward worth of activation memory; raising this
+    # gives ~linear wall-clock speedup until you OOM.  Default 32 is safe on
+    # any GPU with ≥40GB; bump higher (64–128) on A100 80GB or H100 if RAM
+    # headroom allows.
+    ablation_batch_size: int = 32
 
 
 def _log_alignment_diagnostic(
@@ -397,6 +404,7 @@ def compute_prompt_graph_loss(
                 neuron_locations_t=student_graph.neuron_locations,
                 logit_token_ids=student_graph.logit_token_ids,
                 dtype=config.graph_dtype,
+                ablation_batch_size=config.ablation_batch_size,
             )
         )
     else:

@@ -134,6 +134,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--ablation-batch-size",
+        type=int,
+        default=32,
+        help=(
+            "Supernodes ablated per batched forward when computing the "
+            "no-grad student matching signal.  Raise on big GPUs to "
+            "speed up per-prompt processing (≈linear).  Default 32."
+        ),
+    )
+    parser.add_argument(
         "--student-skip-logit-attribution",
         action="store_true",
         help=(
@@ -308,6 +318,7 @@ def main() -> None:
             graph_grad_mode=args.graph_grad_mode,
             graph_true_grad_chunk_size=args.graph_true_grad_chunk_size,
             fast_student_graph=args.fast_student_graph,
+            ablation_batch_size=args.ablation_batch_size,
             save_best=args.save_best,
             eval_max_new_tokens=(
                 args.eval_max_new_tokens

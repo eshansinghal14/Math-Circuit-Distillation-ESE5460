@@ -49,6 +49,7 @@ class DistillationConfig:
     graph_grad_mode: str = "approx"
     graph_true_grad_chunk_size: int = 4
     fast_student_graph: bool = False
+    ablation_batch_size: int = 32
     eval_batch_size: int = 50
     step_log_interval: int = 50
     save_best: bool = False
