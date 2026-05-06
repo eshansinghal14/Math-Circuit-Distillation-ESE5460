@@ -114,6 +114,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--fast-student-graph",
+        action="store_true",
+        help=(
+            "Skip the [neurons, neurons] Jacobian backward passes when "
+            "building the student graph.  Selects neurons + builds a "
+            "DLA-only adjacency, then clusters via real ablation.  "
+            "Required when running node-loss-only (much faster).  "
+            "Must be combined with --graph-edge-weight 0."
+        ),
+    )
+    parser.add_argument(
         "--student-skip-logit-attribution",
         action="store_true",
         help=(
@@ -223,6 +234,8 @@ def main() -> None:
         print(f" (chunk_size={args.graph_true_grad_chunk_size})")
     else:
         print()
+    if args.fast_student_graph:
+        print(f"  fast student graph: True (node-loss-only fast path)")
     print(f"  graph dtype:        {args.dtype}")
     print(f"  teacher cache:      {args.teacher_data_cache or 'none'}")
     print(f"  save_dir:           {run_dir}")
@@ -282,6 +295,7 @@ def main() -> None:
             graph_focus_weight=args.graph_focus_weight,
             graph_grad_mode=args.graph_grad_mode,
             graph_true_grad_chunk_size=args.graph_true_grad_chunk_size,
+            fast_student_graph=args.fast_student_graph,
             save_best=args.save_best,
             eval_max_new_tokens=(
                 args.eval_max_new_tokens

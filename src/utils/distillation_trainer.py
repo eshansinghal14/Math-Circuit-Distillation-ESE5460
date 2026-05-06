@@ -137,6 +137,7 @@ class DistillationTrainer:
                 graph_focus_weight=config.graph_focus_weight,
                 graph_grad_mode=config.graph_grad_mode,
                 graph_true_grad_chunk_size=config.graph_true_grad_chunk_size,
+                fast_student_graph=config.fast_student_graph,
             )
             self.student_graph_adapter = HFLlamaGraphAdapter(
                 self.student,
