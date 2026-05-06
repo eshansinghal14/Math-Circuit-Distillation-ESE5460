@@ -309,13 +309,6 @@ class HFLlamaGraphAdapter:
                 graph = detach_graph(graph)
             return graph
 
-        adjacency = torch.zeros(
-            total_nodes,
-            total_nodes,
-            dtype=source_vectors_t.dtype,
-            device=self.device,
-        )
-
         def _source_scores_from_grads(grads, batch_len: int) -> torch.Tensor:
             # Build rows differentiably via scatter_add (out-of-place) so the
             # gradient through source_vectors_t / embed_out propagates back to
@@ -453,18 +446,82 @@ class HFLlamaGraphAdapter:
             )
             return _source_scores_from_grads(grads, batch_len)
 
+        # Build adjacency via cat (out-of-place) so gradients from
+        # source_scores_*_chunk → source_vectors_t → down_proj.weight propagate
+        # back to model parameters.  In-place setitem on a torch.zeros leaf
+        # tensor silently breaks the autograd chain, which is what made the
+        # edge loss gradient identically zero in earlier runs.
+        neuron_row_chunks = []
         for start in range(0, n_neurons, max(1, batch_size)):
             end = min(start + max(1, batch_size), n_neurons)
             if verbose:
                 print(f"    [graph] neuron rows {start}:{end} / {n_neurons}")
-            adjacency[start:end, :source_count] = source_scores_neuron_chunk(start, end)
+            neuron_row_chunks.append(source_scores_neuron_chunk(start, end))
+        if neuron_row_chunks:
+            neuron_rows = torch.cat(neuron_row_chunks, dim=0)
+        else:
+            neuron_rows = torch.zeros(
+                0, source_count, dtype=source_vectors_t.dtype, device=self.device,
+            )
 
         if not skip_logit_attribution:
+            logit_row_chunks = []
             for start in range(0, n_logits, max(1, batch_size)):
                 end = min(start + max(1, batch_size), n_logits)
                 if verbose:
                     print(f"    [graph] logit rows {start}:{end} / {n_logits}")
-                adjacency[logit_start + start:logit_start + end, :source_count] = source_scores_logit_chunk(start, end)
+                logit_row_chunks.append(source_scores_logit_chunk(start, end))
+            if logit_row_chunks:
+                logit_rows_partial = torch.cat(logit_row_chunks, dim=0)
+            else:
+                logit_rows_partial = torch.zeros(
+                    0, source_count, dtype=source_vectors_t.dtype, device=self.device,
+                )
+        else:
+            logit_rows_partial = torch.zeros(
+                n_logits, source_count, dtype=source_vectors_t.dtype, device=self.device,
+            )
+
+        # Pad neuron and logit row blocks (which span source_count cols) out to
+        # total_nodes cols by concatenating zero columns for the logit-target columns.
+        n_logit_cols = total_nodes - source_count
+        if n_logit_cols > 0:
+            neuron_rows = torch.cat(
+                [
+                    neuron_rows,
+                    torch.zeros(
+                        n_neurons,
+                        n_logit_cols,
+                        dtype=neuron_rows.dtype,
+                        device=self.device,
+                    ),
+                ],
+                dim=1,
+            )
+            logit_rows = torch.cat(
+                [
+                    logit_rows_partial,
+                    torch.zeros(
+                        n_logits,
+                        n_logit_cols,
+                        dtype=logit_rows_partial.dtype,
+                        device=self.device,
+                    ),
+                ],
+                dim=1,
+            )
+        else:
+            logit_rows = logit_rows_partial
+
+        # Token rows have no outgoing-from-tokens entries in this adjacency layout.
+        token_rows = torch.zeros(
+            n_tokens,
+            total_nodes,
+            dtype=neuron_rows.dtype,
+            device=self.device,
+        )
+
+        adjacency = torch.cat([neuron_rows, token_rows, logit_rows], dim=0)
 
         # Always populate neuron_write_vectors in full mode: this lets the
         # supergraph clustering pre-populate prob_delta_by_neuron via DLA
