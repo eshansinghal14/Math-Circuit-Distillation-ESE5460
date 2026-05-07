@@ -412,7 +412,6 @@ def build_super_graph(
     model_name: str | None = None,
     cluster_method: str = "full_search",
     supernode_heatmap_output_dir: str | None = None,
-    anova_range_radius: int = 10,
 ) -> SuperGraph:
     """Cluster kept neurons into numeric-token embedding and final-token computation supernodes."""
 
@@ -429,8 +428,6 @@ def build_super_graph(
         raise ValueError("embedding_sigma and computation_sigma must be non-negative")
     if cluster_method not in {"full_search", "ablation"}:
         raise ValueError("cluster_method must be one of: full_search, ablation")
-    if anova_range_radius < 0:
-        raise ValueError("anova_range_radius must be non-negative")
 
     n_neurons = graph.n_neurons
     logger = logging.getLogger(__name__)
@@ -1138,7 +1135,6 @@ def build_super_graph(
             activation_write_result.activations,
             activation_write_result.arg_values,
             target_args=target_args,
-            range_radius=anova_range_radius,
         )
         selected_member_ids: set[int] = set()
         supernodes = []
@@ -1164,6 +1160,7 @@ def build_super_graph(
             members = [int(kept_neuron_indices[row_idx].item()) for row_idx, _score in top_rows]
             cluster_heatmaps = activation_write_result.activations[row_indices].detach().float()
             member_plot_labels: dict[int, list[str]] = {}
+            member_specificity: dict[int, float] = {}
             for member in members:
                 row_idx = int(torch.where(kept_neuron_indices == member)[0][0].item())
                 label = label_results[row_idx].categories[category]
@@ -1176,6 +1173,7 @@ def build_super_graph(
                 if label not in node_labels[member]:
                     node_labels[member].append(label)
                 selected_member_ids.add(member)
+                member_specificity[member] = float(specificity_score)
             member_number_unembed = (
                 number_token_unembed_values(members)
                 if category in {"sum range", "sum units"}
@@ -1192,6 +1190,7 @@ def build_super_graph(
                     category,
                     member_plot_labels,
                     member_number_unembed,
+                    member_specificity,
                 )
             )
             logger.info(
@@ -1243,6 +1242,7 @@ def build_super_graph(
                 title,
                 member_plot_labels,
                 member_number_unembed,
+                member_specificity,
             ) in enumerate(supernode_heatmaps):
                 saved_path = save_supernode_activation_heatmap_pdf(
                     activation_grid,
@@ -1256,6 +1256,7 @@ def build_super_graph(
                     title=f"supernode {supernode_idx}: {title}",
                     member_labels=member_plot_labels,
                     member_number_unembed=member_number_unembed,
+                    member_specificity=member_specificity,
                 )
                 logger.info("  Saved supernode heatmap PDF: %s", saved_path)
     else:

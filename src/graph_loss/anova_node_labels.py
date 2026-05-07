@@ -77,18 +77,14 @@ def build_anova_basis_rules(
     arg_values: list[list[int]],
     *,
     target_args: tuple[int, ...] | None = None,
-    range_radius: int = 10,
 ) -> list[BasisRule]:
     """Build binary basis masks for argument and sum rules.
 
-    Range labels are scored with all basis radii from exact through
-    ``range_radius``. The final range text is chosen per heatmap from the
-    high-activation band.
+    Range labels are scored with the exact target value. The final range text
+    is chosen per heatmap from the high-activation band.
     """
     if not arg_values:
         return []
-    if range_radius < 0:
-        raise ValueError("range_radius must be non-negative")
 
     grids = [_axis_values_grid(arg_values, dim) for dim in range(len(arg_values))]
     rules: list[BasisRule] = []
@@ -107,18 +103,17 @@ def build_anova_basis_rules(
             else list(range(10))
         )
         for center in centers:
-            for radius in range(range_radius + 1):
-                mask = (values >= center - radius) & (values <= center + radius)
-                rules.append(
-                    BasisRule(
-                        _format_interval_label(arg_name, center, center),
-                        mask,
+            mask = values == center
+            rules.append(
+                BasisRule(
+                    _format_interval_label(arg_name, center, center),
+                    mask,
                     category=f"{arg_name} range",
-                        range_values=values,
-                        range_center=center,
-                        range_prefix=arg_name,
-                    )
+                    range_values=values,
+                    range_center=center,
+                    range_prefix=arg_name,
                 )
+            )
         for unit_digit in unit_digits:
             mask = torch.remainder(values, 10) == unit_digit
             if bool(mask.any().item()):
@@ -138,18 +133,17 @@ def build_anova_basis_rules(
             else sorted({int(value) for value in sums.flatten().tolist()})
         )
         for center in sum_centers:
-            for radius in range(range_radius + 1):
-                mask = (sums >= center - radius) & (sums <= center + radius)
-                rules.append(
-                    BasisRule(
-                        _format_interval_label("sum", center, center),
-                        mask,
+            mask = sums == center
+            rules.append(
+                BasisRule(
+                    _format_interval_label("sum", center, center),
+                    mask,
                     category="sum range",
-                        range_values=sums,
-                        range_center=center,
-                        range_prefix="sum",
-                    )
+                    range_values=sums,
+                    range_center=center,
+                    range_prefix="sum",
                 )
+            )
         sum_unit_digits = (
             [int(target_args[0] + target_args[1]) % 10]
             if target_args is not None and len(target_args) >= 2
@@ -263,7 +257,6 @@ def label_activation_heatmaps(
     arg_values: list[list[int]],
     *,
     target_args: tuple[int, ...] | None = None,
-    range_radius: int = 10,
 ) -> list[NodeLabel]:
     """Score ANOVA label categories for each activation heatmap."""
     if activations.ndim != len(arg_values) + 1:
@@ -275,7 +268,6 @@ def label_activation_heatmaps(
     rules = build_anova_basis_rules(
         arg_values,
         target_args=target_args,
-        range_radius=range_radius,
     )
     out: list[NodeLabel] = []
     for activation_grid in activations.detach().float().cpu():

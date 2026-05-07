@@ -614,6 +614,7 @@ def save_supernode_activation_heatmap_pdf(
     title: str,
     member_labels: dict[int, list[str]] | None = None,
     member_number_unembed: dict[int, tuple[list[int], torch.Tensor]] | None = None,
+    member_specificity: dict[int, float] | None = None,
 ) -> str:
     """Save one activation heatmap page per neuron in a supernode."""
     output_dir = os.path.dirname(output_path)
@@ -746,6 +747,30 @@ def save_supernode_activation_heatmap_pdf(
             fig.tight_layout()
             pdf.savefig(fig)
             plt.close(fig)
+
+        if member_specificity:
+            specificity_values = [
+                float(member_specificity[int(member)])
+                for member in members
+                if int(member) in member_specificity
+            ]
+            specificity_members = [
+                int(member)
+                for member in members
+                if int(member) in member_specificity
+            ]
+            if specificity_values:
+                fig, ax = plt.subplots(figsize=(10, 4))
+                xs = list(range(len(specificity_values)))
+                ax.bar(xs, specificity_values)
+                ax.set_xticks(xs)
+                ax.set_xticklabels([str(member) for member in specificity_members], rotation=90)
+                ax.set_xlabel("graph neuron index")
+                ax.set_ylabel("specificity")
+                ax.set_title(f"{title}\nSorted ANOVA specificity")
+                fig.tight_layout()
+                pdf.savefig(fig)
+                plt.close(fig)
 
     return output_path
 
