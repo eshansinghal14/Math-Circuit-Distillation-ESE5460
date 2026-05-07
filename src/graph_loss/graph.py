@@ -11,6 +11,7 @@ from typing import NamedTuple
 import torch
 import torch.nn.functional as F
 
+from graph_loss.anova_node_labels import label_activation_heatmaps
 from graph_loss.attribution.targets import LogitTarget
 from graph_loss.neuron_activation_heatmap import (
     build_neuron_activation_write_result,
@@ -389,6 +390,8 @@ class SuperGraph(NamedTuple):
     prob_delta_elbow_index: int | None = None
     logit_token_ids: torch.Tensor | None = None
     delta_node_indices: torch.Tensor | None = None
+    node_labels: dict[int, list[str]] | None = None
+    supernode_labels: list[list[str]] | None = None
 
 
 def build_super_graph(
@@ -406,6 +409,7 @@ def build_super_graph(
     model_name: str | None = None,
     cluster_method: str = "full_search",
     supernode_heatmap_output_dir: str | None = None,
+    anova_label_threshold: float = 0.6,
 ) -> SuperGraph:
     """Cluster kept neurons into numeric-token embedding and final-token computation supernodes."""
 
@@ -422,6 +426,8 @@ def build_super_graph(
         raise ValueError("embedding_sigma and computation_sigma must be non-negative")
     if cluster_method not in {"full_search", "ablation"}:
         raise ValueError("cluster_method must be one of: full_search, ablation")
+    if not (0.0 <= anova_label_threshold <= 1.0):
+        raise ValueError("anova_label_threshold must be in [0, 1]")
 
     n_neurons = graph.n_neurons
     logger = logging.getLogger(__name__)
@@ -953,6 +959,8 @@ def build_super_graph(
     all_supernode_prob_delta_norms = torch.empty(0, dtype=torch.float32)
     prob_delta_elbow_index = None
     activation_write_result_for_kept: ActivationWriteResult | None = None
+    node_labels: dict[int, list[str]] = {}
+    supernode_labels: list[list[str]] | None = None
 
     def get_activation_write_result_for_kept() -> ActivationWriteResult:
         nonlocal activation_write_result_for_kept
@@ -1080,67 +1088,53 @@ def build_super_graph(
                     )
                     logger.info("  Saved supernode heatmap PDF: %s", saved_path)
     elif dataset and kept_neuron_indices.numel():
-        kept_neuron_locations = graph.neuron_locations[kept_neuron_indices_device].detach().cpu()
         activation_write_result = get_activation_write_result_for_kept()
-        prompt_tokens = decoded_prompt_tokens()
-        kept_token_positions = kept_neuron_locations[:, 1]
-        supernodes: list[list[int]] = []
-        supernode_heatmaps: list[tuple[torch.Tensor, list[list[int]], list[int], str]] = []
+        label_results = label_activation_heatmaps(
+            activation_write_result.activations,
+            activation_write_result.arg_values,
+            threshold=anova_label_threshold,
+        )
+        labeled_rows = [
+            row_idx
+            for row_idx, label_result in enumerate(label_results)
+            if label_result.labels
+        ]
+        node_labels = {
+            int(kept_neuron_indices[row_idx].item()): label_results[row_idx].labels
+            for row_idx in labeled_rows
+        }
+        logger.info(
+            "  ANOVA labeling: threshold=%.6g labeled_neurons=%d/%d",
+            float(anova_label_threshold),
+            len(labeled_rows),
+            int(kept_neuron_indices.numel()),
+        )
 
-        for token_pos in sorted(int(pos.item()) for pos in torch.unique(kept_token_positions)):
-            phase_rows = torch.where(kept_token_positions == int(token_pos))[0]
-            if phase_rows.numel() == 0:
-                logger.info(
-                    "  Full-grid clustering for token_pos=%d: no neurons",
-                    int(token_pos),
-                )
-                continue
-
-            phase_maps = activation_write_result.activations[phase_rows].detach().float()
-            assignments = cluster_phase(
-                phase_name=f"token_pos={int(token_pos)}",
-                phase_rows=phase_rows,
-                activation_maps=phase_maps,
-                w_down_vectors=activation_write_result.w_down_vectors[phase_rows],
-                sigma=computation_sigma,
-                eps=computation_eps,
-            )
-            for cluster_id in torch.unique(assignments).tolist():
-                cluster_rows = torch.where(assignments == int(cluster_id))[0]
-                result_rows = phase_rows[cluster_rows]
-                members = kept_neuron_indices[result_rows].tolist()
-                cluster_heatmaps = activation_write_result.activations[
-                    result_rows
-                ].detach().float()
-                members, cluster_heatmaps = sort_cluster_by_abs_influence(
-                    [int(member) for member in members],
-                    cluster_heatmaps,
-                )
-                supernodes.append(members)
-                token_text = (
-                    prompt_tokens[int(token_pos)]
-                    if int(token_pos) < len(prompt_tokens)
-                    else "<out-of-range>"
-                ).replace("\n", "\\n").replace("\r", "\\r")
-                supernode_heatmaps.append((
+        if labeled_rows:
+            row_indices = torch.tensor(labeled_rows, dtype=torch.long)
+            members = [int(kept_neuron_indices[row_idx].item()) for row_idx in labeled_rows]
+            cluster_heatmaps = activation_write_result.activations[row_indices].detach().float()
+            members, cluster_heatmaps = sort_cluster_by_abs_influence(members, cluster_heatmaps)
+            supernodes = [members]
+            supernode_labels = [
+                sorted({label for member in members for label in node_labels.get(member, [])})
+            ]
+            supernode_heatmaps = [
+                (
                     cluster_heatmaps,
                     activation_write_result.arg_values,
                     members,
-                    f"token {int(token_pos)} {token_text!r}",
-                ))
+                    "ANOVA-labeled neurons",
+                )
+            ]
+        else:
+            supernodes = []
+            supernode_labels = []
+            supernode_heatmaps = []
 
         supernode_deltas = compute_supernode_node_deltas(supernodes)
         supernode_prob_delta_norms = supernode_deltas.norm(dim=1).tolist()
-        supernode_order = sorted(
-            range(len(supernodes)),
-            key=lambda idx: supernode_prob_delta_norms[idx],
-            reverse=True,
-        )
-        supernode_order_tensor = torch.tensor(supernode_order, dtype=torch.long)
-        supernodes = [supernodes[idx] for idx in supernode_order]
-        supernode_heatmaps = [supernode_heatmaps[idx] for idx in supernode_order]
-        supernode_prob_deltas = supernode_deltas[supernode_order_tensor]
-        supernode_prob_delta_norms = [float(supernode_prob_delta_norms[idx]) for idx in supernode_order]
+        supernode_prob_deltas = supernode_deltas
         all_supernode_prob_delta_norms = torch.tensor(
             supernode_prob_delta_norms,
             dtype=torch.float32,
@@ -1156,13 +1150,21 @@ def build_super_graph(
         supernode_heatmaps = supernode_heatmaps[:keep_count]
         supernode_prob_deltas = supernode_prob_deltas[:keep_count]
         supernode_prob_delta_norms = supernode_prob_delta_norms[:keep_count]
+        if supernode_labels is not None:
+            supernode_labels = supernode_labels[:keep_count]
 
         for supernode_idx, (members, prob_delta_norm) in enumerate(
             zip(supernodes, supernode_prob_delta_norms, strict=True)
         ):
+            labels = (
+                ", ".join(supernode_labels[supernode_idx])
+                if supernode_labels is not None and supernode_idx < len(supernode_labels)
+                else "none"
+            )
             logger.info(
-                "  supernode %d prob_delta_norm=%.6g influence=%.6g neuron locations: %s",
+                "  supernode %d labels=%s prob_delta_norm=%.6g influence=%.6g neuron locations: %s",
                 supernode_idx,
+                labels,
                 prob_delta_norm,
                 supernode_influence(members),
                 format_member_locations(members),
@@ -1228,6 +1230,8 @@ def build_super_graph(
         all_supernode_prob_delta_norms=all_supernode_prob_delta_norms,
         prob_delta_elbow_index=prob_delta_elbow_index,
         delta_node_indices=kept_node_indices.detach().cpu(),
+        node_labels=node_labels,
+        supernode_labels=supernode_labels,
     )
 
 

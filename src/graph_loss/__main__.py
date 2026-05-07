@@ -353,6 +353,8 @@ def _save_supergraph(path: str, supergraph: SuperGraph) -> None:
             "all_supernode_prob_delta_norms": supergraph.all_supernode_prob_delta_norms,
             "prob_delta_elbow_index": supergraph.prob_delta_elbow_index,
             "delta_node_indices": supergraph.delta_node_indices,
+            "node_labels": supergraph.node_labels,
+            "supernode_labels": supergraph.supernode_labels,
         },
         path,
     )
@@ -654,6 +656,17 @@ def main():
         ),
     )
     parser.add_argument(
+        "--anova-label-threshold",
+        "--anova_label_threshold",
+        dest="anova_label_threshold",
+        type=float,
+        default=0.6,
+        help=(
+            "Explained-variance threshold for ANOVA-style node labels when "
+            "--cluster-method=full_search and --dataset is provided"
+        ),
+    )
+    parser.add_argument(
         "--dataset",
         help=(
             "Optional dataset prefix, filename, or path for activation-write "
@@ -694,6 +707,8 @@ def main():
     )
 
     args = parser.parse_args()
+    if not (0.0 <= args.anova_label_threshold <= 1.0):
+        parser.error("--anova-label-threshold must be in [0, 1]")
     if args.supernode_heatmap_output_dir:
         args.supernode_heatmap_output_dir = os.path.abspath(args.supernode_heatmap_output_dir)
 
@@ -778,6 +793,7 @@ def main():
         model_name=args.model,
         cluster_method=args.cluster_method,
         supernode_heatmap_output_dir=args.supernode_heatmap_output_dir,
+        anova_label_threshold=args.anova_label_threshold,
     )
     _log_supergraph_summary(
         graph,
