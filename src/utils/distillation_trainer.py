@@ -140,6 +140,7 @@ class DistillationTrainer:
                 graph_true_grad_chunk_size=config.graph_true_grad_chunk_size,
                 fast_student_graph=config.fast_student_graph,
                 ablation_batch_size=config.ablation_batch_size,
+                lambda_kl=config.lambda_kl,
             )
             self.student_graph_adapter = HFLlamaGraphAdapter(
                 self.student,
@@ -234,6 +235,11 @@ class DistillationTrainer:
         )
         metrics: Dict[str, float] = {"kl_loss": float(kl_loss.item())}
         metrics["total_loss"] = float(kl_loss.item())
+        if self.config.lambda_kl == 0.0:
+            # Zero out KL contribution so graph loss is the only gradient signal.
+            kl_loss = kl_loss.detach() * 0.0
+        elif self.config.lambda_kl != 1.0:
+            kl_loss = self.config.lambda_kl * kl_loss
         return kl_loss, metrics
 
     def _backward_graph_loss(

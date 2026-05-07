@@ -134,6 +134,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--lambda-kl",
+        type=float,
+        default=1.0,
+        help=(
+            "Scale factor for the KL distillation loss.  Set to 0 to run "
+            "graph-loss-only (diagnostic: tests whether graph signal alone "
+            "carries useful gradient).  Default 1.0."
+        ),
+    )
+    parser.add_argument(
         "--ablation-batch-size",
         type=int,
         default=32,
@@ -319,6 +329,7 @@ def main() -> None:
             graph_true_grad_chunk_size=args.graph_true_grad_chunk_size,
             fast_student_graph=args.fast_student_graph,
             ablation_batch_size=args.ablation_batch_size,
+            lambda_kl=args.lambda_kl,
             save_best=args.save_best,
             eval_max_new_tokens=(
                 args.eval_max_new_tokens
