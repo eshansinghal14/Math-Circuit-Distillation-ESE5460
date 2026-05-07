@@ -613,6 +613,7 @@ def save_supernode_activation_heatmap_pdf(
     output_path: str,
     title: str,
     member_labels: dict[int, list[str]] | None = None,
+    member_number_unembed: dict[int, tuple[list[int], torch.Tensor]] | None = None,
 ) -> str:
     """Save one activation heatmap page per neuron in a supernode."""
     output_dir = os.path.dirname(output_path)
@@ -643,8 +644,23 @@ def save_supernode_activation_heatmap_pdf(
             labels = member_labels.get(graph_neuron_idx, []) if member_labels is not None else []
             label_text = f"\nANOVA labels: {', '.join(labels)}" if labels else ""
             page_title = f"{title}{label_text}\nNeuron {neuron_id} ({location_text})"
+            number_unembed = (
+                member_number_unembed.get(graph_neuron_idx)
+                if member_number_unembed is not None
+                else None
+            )
+            side_ax = None
             if torch.isnan(activation_grid).all():
-                fig, ax = plt.subplots(figsize=(8, 4))
+                if number_unembed is None:
+                    fig, ax = plt.subplots(figsize=(8, 4))
+                else:
+                    fig, axes = plt.subplots(
+                        1,
+                        2,
+                        figsize=(14, 4),
+                        gridspec_kw={"width_ratios": [2.0, 1.0]},
+                    )
+                    ax, side_ax = axes
                 ax.text(0.5, 0.5, "No valid activations", ha="center", va="center")
                 ax.set_axis_off()
             else:
@@ -652,7 +668,16 @@ def save_supernode_activation_heatmap_pdf(
                 if n_args == 1:
                     xs = arg_values[0]
                     heatmap = activation_grid.unsqueeze(0)
-                    fig, ax = plt.subplots(figsize=(8, 2.5))
+                    if number_unembed is None:
+                        fig, ax = plt.subplots(figsize=(8, 2.5))
+                    else:
+                        fig, axes = plt.subplots(
+                            1,
+                            2,
+                            figsize=(14, 2.5),
+                            gridspec_kw={"width_ratios": [2.0, 1.0]},
+                        )
+                        ax, side_ax = axes
                     image = ax.imshow(
                         heatmap.numpy(),
                         origin="lower",
@@ -666,7 +691,16 @@ def save_supernode_activation_heatmap_pdf(
                     xs = arg_values[0]
                     ys = arg_values[1]
                     heatmap = activation_grid.T.contiguous()
-                    fig, ax = plt.subplots(figsize=(8, 6))
+                    if number_unembed is None:
+                        fig, ax = plt.subplots(figsize=(8, 6))
+                    else:
+                        fig, axes = plt.subplots(
+                            1,
+                            2,
+                            figsize=(14, 6),
+                            gridspec_kw={"width_ratios": [2.0, 1.0]},
+                        )
+                        ax, side_ax = axes
                     image = ax.imshow(
                         heatmap.numpy(),
                         origin="lower",
@@ -696,6 +730,19 @@ def save_supernode_activation_heatmap_pdf(
                     ax.set_zlabel("arg 3")
 
             ax.set_title(page_title)
+            if side_ax is not None and number_unembed is not None:
+                number_values, unembed_values = number_unembed
+                unembed_heatmap = unembed_values.detach().float().cpu().unsqueeze(0)
+                image = side_ax.imshow(
+                    unembed_heatmap.numpy(),
+                    origin="lower",
+                    aspect="auto",
+                    extent=[min(number_values), max(number_values), 0, 1],
+                )
+                fig.colorbar(image, ax=side_ax, label="W_out @ W_U")
+                side_ax.set_xlabel("number token")
+                side_ax.set_yticks([])
+                side_ax.set_title("number-token unembed")
             fig.tight_layout()
             pdf.savefig(fig)
             plt.close(fig)

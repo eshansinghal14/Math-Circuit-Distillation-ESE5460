@@ -936,6 +936,59 @@ def build_super_graph(
             w_down_vectors[location_idx] = w_out_cache[layer][neuron_id].detach().float().cpu()
         return w_down_vectors
 
+    def number_token_unembed_values(
+        members: list[int],
+        *,
+        min_value: int = 0,
+        max_value: int = 200,
+    ) -> dict[int, tuple[list[int], torch.Tensor]]:
+        number_values = list(range(int(min_value), int(max_value) + 1))
+        token_ids: list[int | None] = []
+        for value in number_values:
+            encoded = model.tokenizer(
+                str(value),
+                add_special_tokens=False,
+                return_tensors=None,
+            )
+            input_ids = encoded["input_ids"] if isinstance(encoded, dict) else encoded.input_ids
+            if input_ids and isinstance(input_ids[0], list):
+                input_ids = input_ids[0]
+            token_ids.append(int(input_ids[0]) if len(input_ids) == 1 else None)
+
+        valid_positions = [idx for idx, token_id in enumerate(token_ids) if token_id is not None]
+        if not valid_positions:
+            return {
+                int(member): (
+                    number_values,
+                    torch.full((len(number_values),), float("nan"), dtype=torch.float32),
+                )
+                for member in members
+            }
+
+        valid_token_ids = torch.tensor(
+            [int(token_ids[idx]) for idx in valid_positions],
+            dtype=torch.long,
+            device=model.cfg.device,
+        )
+        W_U = model.unembed.W_U.detach().to(device=model.cfg.device)
+        W_U_numbers = W_U[:, valid_token_ids]
+        locations = graph.neuron_locations.detach().cpu().to(dtype=torch.long)
+        out: dict[int, tuple[list[int], torch.Tensor]] = {}
+        w_out_cache: dict[int, torch.Tensor] = {}
+        for member in members:
+            layer = int(locations[member, 0].item())
+            neuron_id = int(locations[member, 2].item())
+            if layer not in w_out_cache:
+                old_mlp = model.blocks[layer].mlp.old_mlp
+                w_out_cache[layer] = model._row_oriented_weight(
+                    old_mlp.W_out.to(device=model.cfg.device, dtype=W_U.dtype)
+                )
+            values = torch.full((len(number_values),), float("nan"), dtype=torch.float32)
+            projected = (w_out_cache[layer][neuron_id] @ W_U_numbers).detach().float().cpu()
+            values[torch.tensor(valid_positions, dtype=torch.long)] = projected
+            out[int(member)] = (number_values, values)
+        return out
+
     kept_neuron_indices_device = torch.where(kept_neuron_mask)[0]
     kept_neuron_indices = kept_neuron_indices_device.detach().cpu()
     kept_node_mask = torch.ones(graph.n_nodes, dtype=torch.bool, device=graph.adjacency_device)
@@ -1121,6 +1174,11 @@ def build_super_graph(
                 if label not in node_labels[member]:
                     node_labels[member].append(label)
                 selected_member_ids.add(member)
+            member_number_unembed = (
+                number_token_unembed_values(members)
+                if category in {"sum range", "sum units"}
+                else None
+            )
 
             supernodes.append(members)
             supernode_labels.append([category])
@@ -1131,6 +1189,7 @@ def build_super_graph(
                     members,
                     category,
                     member_plot_labels,
+                    member_number_unembed,
                 )
             )
             logger.info(
@@ -1180,6 +1239,7 @@ def build_super_graph(
                 members,
                 title,
                 member_plot_labels,
+                member_number_unembed,
             ) in enumerate(supernode_heatmaps):
                 saved_path = save_supernode_activation_heatmap_pdf(
                     activation_grid,
@@ -1192,6 +1252,7 @@ def build_super_graph(
                     ),
                     title=f"supernode {supernode_idx}: {title}",
                     member_labels=member_plot_labels,
+                    member_number_unembed=member_number_unembed,
                 )
                 logger.info("  Saved supernode heatmap PDF: %s", saved_path)
     else:
