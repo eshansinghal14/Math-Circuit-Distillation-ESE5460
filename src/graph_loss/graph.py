@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import importlib
 import logging
 import math
@@ -20,8 +19,11 @@ from graph_loss.neuron_activation_heatmap import (
 from graph_loss.utils import (
     ActivationWriteResult,
     UnifiedConfig,
+    activation_arg_values_from_shape,
+    activation_write_cache_file,
     convert_nnsight_config_to_transformerlens,
-    safe_cache_segment,
+    load_activation_write_cache,
+    save_activation_write_cache,
 )
 
 
@@ -386,6 +388,7 @@ class SuperGraph(NamedTuple):
     all_supernode_prob_delta_norms: torch.Tensor | None = None
     prob_delta_elbow_index: int | None = None
     logit_token_ids: torch.Tensor | None = None
+    delta_node_indices: torch.Tensor | None = None
 
 
 def build_super_graph(
@@ -778,7 +781,8 @@ def build_super_graph(
             return []
         sim_device = graph.adjacency_device
         neuron_indices_device = neuron_indices.to(device=sim_device, dtype=torch.long)
-        deltas = graph.adjacency_matrix[:, neuron_indices_device].transpose(0, 1).detach()
+        rows = kept_node_indices.to(device=sim_device, dtype=torch.long)
+        deltas = graph.adjacency_matrix[rows][:, neuron_indices_device].transpose(0, 1).detach()
         normalized_deltas = F.normalize(deltas.to(sim_device), p=2, dim=1, eps=1e-12)
         similarity = (normalized_deltas @ normalized_deltas.T).clamp(min=-1.0, max=1.0)
         # Connected-components uses Python loops → must be on CPU
@@ -786,10 +790,10 @@ def build_super_graph(
         assignments = angular_distance_connected_components(distance_matrix, computation_eps)
         unique_assignments, cluster_sizes = torch.unique(assignments, return_counts=True)
         logger.info(
-            "  graph-node delta clustering: eps=%.6g neurons=%d graph_nodes=%d clusters=%d min_size=%d max_size=%d",
+            "  graph-node delta clustering: eps=%.6g neurons=%d kept_nodes=%d clusters=%d min_size=%d max_size=%d",
             float(computation_eps),
             int(neuron_indices.numel()),
-            int(graph.n_nodes),
+            int(kept_node_indices.numel()),
             int(unique_assignments.numel()),
             int(cluster_sizes.min().item()),
             int(cluster_sizes.max().item()),
@@ -832,28 +836,47 @@ def build_super_graph(
         if not missing:
             return
         missing_indices = torch.tensor(missing, dtype=torch.long)
-        deltas = compute_ablation_prob_deltas(missing_indices)
+        deltas = compute_neuron_node_deltas(missing_indices)
         norms = deltas.norm(dim=1)
         for member, delta, norm in zip(missing, deltas, norms, strict=True):
             prob_delta_by_neuron[int(member)] = delta.detach().float().cpu()
             prob_delta_norm_by_neuron[int(member)] = float(norm.item())
 
+    def compute_neuron_node_deltas(neuron_indices: torch.Tensor) -> torch.Tensor:
+        if neuron_indices.numel() == 0:
+            return torch.empty((0, int(kept_node_indices.numel())), dtype=torch.float32)
+        rows = kept_node_indices.to(device=graph.adjacency_device, dtype=torch.long)
+        cols = neuron_indices.to(device=graph.adjacency_device, dtype=torch.long)
+        return graph.adjacency_matrix[rows][:, cols].transpose(0, 1).detach().float().cpu()
+
+    def compute_supernode_node_deltas(supernode_members: list[list[int]]) -> torch.Tensor:
+        width = int(kept_node_indices.numel())
+        if not supernode_members:
+            return torch.empty((0, width), dtype=torch.float32)
+        rows = kept_node_indices.to(device=graph.adjacency_device, dtype=torch.long)
+        deltas = []
+        for members in supernode_members:
+            if members:
+                cols = torch.tensor(members, device=graph.adjacency_device, dtype=torch.long)
+                delta = graph.adjacency_matrix[rows][:, cols].sum(dim=1)
+                deltas.append(delta.detach().float().cpu())
+            else:
+                deltas.append(torch.zeros(width, dtype=torch.float32))
+        return torch.stack(deltas, dim=0)
+
     def supernode_prob_delta_norm(members: list[int]) -> float:
         if not members:
             return 0.0
-        ensure_prob_deltas(torch.tensor(members, dtype=torch.long))
-        if graph.n_logits == 0:
-            return 0.0
-        total_delta = torch.stack([prob_delta_by_neuron[member] for member in members]).sum(dim=0)
+        total_delta = compute_supernode_node_deltas([members])[0]
         return float(total_delta.norm().item())
 
     def sort_supernodes_by_output_prob_delta(
         supernodes_to_sort: list[list[int]],
     ) -> tuple[list[list[int]], torch.Tensor, list[float]]:
         if not supernodes_to_sort:
-            empty_deltas = torch.empty((0, graph.n_logits), dtype=torch.float32)
+            empty_deltas = torch.empty((0, int(kept_node_indices.numel())), dtype=torch.float32)
             return supernodes_to_sort, empty_deltas, []
-        deltas = compute_supernode_ablation_prob_deltas(supernodes_to_sort)
+        deltas = compute_supernode_node_deltas(supernodes_to_sort)
         scores = deltas.norm(dim=1).tolist()
         order = sorted(range(len(supernodes_to_sort)), key=lambda idx: scores[idx], reverse=True)
         order_tensor = torch.tensor(order, dtype=torch.long)
@@ -885,34 +908,20 @@ def build_super_graph(
         order_tensor = torch.tensor(order, dtype=torch.long)
         return [int(members[idx]) for idx in order], activation_maps[order_tensor]
 
-    def problem_activation_write_cache_file(neuron_locations: torch.Tensor) -> str:
-        if activation_write_cache_path is None:
-            raise ValueError("activation_write_cache_path is not configured")
+    def all_model_neuron_locations() -> torch.Tensor:
+        n_layers = int(model.cfg.n_layers)
+        n_pos = int(graph.n_pos)
+        d_mlp = int(model.cfg.d_mlp)
+        layers = torch.arange(n_layers, dtype=torch.long).repeat_interleave(n_pos * d_mlp)
+        token_positions = torch.arange(n_pos, dtype=torch.long).repeat_interleave(d_mlp).repeat(n_layers)
+        neuron_ids = torch.arange(d_mlp, dtype=torch.long).repeat(n_layers * n_pos)
+        return torch.stack([layers, token_positions, neuron_ids], dim=1)
 
-        resolved_model_name = model_name or getattr(model.cfg, "model_name", "model")
-        model_cache_dir = os.path.join(
-            activation_write_cache_path,
-            safe_cache_segment(str(resolved_model_name)),
-        )
-        os.makedirs(model_cache_dir, exist_ok=True)
-
-        locations = neuron_locations.detach().cpu().to(dtype=torch.long).contiguous()
-        key = hashlib.sha256()
-        key.update(b"problem-local-activation-write-cache-v1")
-        key.update(str(dataset).encode("utf-8"))
-        key.update(graph.input_string.encode("utf-8"))
-        key.update(
-            (
-                f"n_pos={int(graph.n_pos)};"
-                f"n_locations={int(locations.shape[0])};"
-                f"d_model={int(model.cfg.d_model)}"
-            ).encode("utf-8"),
-        )
-        key.update(locations.numpy().tobytes())
-        return os.path.join(
-            model_cache_dir,
-            f"activation_write_problem_{key.hexdigest()[:16]}.pt",
-        )
+    def full_model_location_indices(neuron_locations: torch.Tensor) -> torch.Tensor:
+        locations = neuron_locations.detach().cpu().to(dtype=torch.long)
+        n_pos = int(graph.n_pos)
+        d_mlp = int(model.cfg.d_mlp)
+        return (locations[:, 0] * n_pos + locations[:, 1]) * d_mlp + locations[:, 2]
 
     def w_down_vectors_for_locations(neuron_locations: torch.Tensor) -> torch.Tensor:
         locations = neuron_locations.detach().cpu().to(dtype=torch.long)
@@ -932,7 +941,15 @@ def build_super_graph(
 
     kept_neuron_indices_device = torch.where(kept_neuron_mask)[0]
     kept_neuron_indices = kept_neuron_indices_device.detach().cpu()
+    kept_node_mask = torch.ones(graph.n_nodes, dtype=torch.bool, device=graph.adjacency_device)
+    if prune_result is not None:
+        kept_node_mask = prune_result.node_mask.to(
+            device=graph.adjacency_device,
+            dtype=torch.bool,
+        )
+    kept_node_indices = torch.where(kept_node_mask)[0].detach().cpu()
     logger.info("  Kept neurons for supergraph: %d", int(kept_neuron_indices.numel()))
+    logger.info("  Delta nodes for supergraph: %d", int(kept_node_indices.numel()))
     all_supernode_prob_delta_norms = torch.empty(0, dtype=torch.float32)
     prob_delta_elbow_index = None
     activation_write_result_for_kept: ActivationWriteResult | None = None
@@ -946,106 +963,69 @@ def build_super_graph(
 
         kept_neuron_locations = graph.neuron_locations[kept_neuron_indices_device].detach().cpu()
         if activation_write_cache_path:
-            cache_file = problem_activation_write_cache_file(kept_neuron_locations)
+            resolved_model_name = model_name or getattr(model.cfg, "model_name", "model")
+            all_neuron_locations = all_model_neuron_locations()
+            kept_cache_indices = full_model_location_indices(kept_neuron_locations)
+            cache_file = activation_write_cache_file(
+                activation_write_cache_path,
+                str(resolved_model_name),
+                dataset,
+                n_layers=int(model.cfg.n_layers),
+                n_pos=int(graph.n_pos),
+                d_mlp=int(model.cfg.d_mlp),
+            )
+
             if os.path.isfile(cache_file):
                 logger.info(
-                    "  Loading problem-local activation-write cache: %s",
+                    "  Loading cached full activation-write grids: %s",
                     cache_file,
                 )
-                data = torch.load(cache_file, weights_only=False, map_location="cpu")
-                cached_locations = data.get("neuron_locations")
-                if (
-                    cached_locations is not None
-                    and torch.equal(
-                        cached_locations.detach().cpu().to(dtype=torch.long),
-                        kept_neuron_locations.to(dtype=torch.long),
-                    )
-                ):
-                    activation_write_result_for_kept = ActivationWriteResult(
-                        activations=data["activations"].detach().float().cpu(),
-                        w_down_vectors=w_down_vectors_for_locations(kept_neuron_locations),
-                        arg_values=data["arg_values"],
-                    )
-                    return activation_write_result_for_kept
+                full_activations = load_activation_write_cache(
+                    cache_file,
+                    expected_neuron_count=int(all_neuron_locations.shape[0]),
+                )
+            else:
                 logger.info(
-                    "  Ignoring stale activation-write cache with mismatched neuron locations: %s",
-                    cache_file,
+                    "  Building full activation-write cache for %d model neurons from dataset: %s",
+                    int(all_neuron_locations.shape[0]),
+                    dataset,
                 )
+                full_activation_write_result = build_neuron_activation_write_result(
+                    model,
+                    dataset,
+                    all_neuron_locations,
+                    forward_batch_size=activation_forward_batch_size,
+                    include_w_down_vectors=False,
+                )
+                full_activations = full_activation_write_result.activations
+                logger.info("  Saving full activation-write cache: %s", cache_file)
+                save_activation_write_cache(cache_file, full_activation_write_result)
 
-        logger.info(
-            "  Building activation-write matrices for %d kept graph neurons from dataset: %s",
-            int(kept_neuron_locations.shape[0]),
-            dataset,
-        )
-        activation_write_result_for_kept = build_neuron_activation_write_result(
-            model,
-            dataset,
-            kept_neuron_locations,
-            forward_batch_size=activation_forward_batch_size,
-        )
-        if activation_write_cache_path:
-            logger.info("  Saving problem-local activation-write cache: %s", cache_file)
-            torch.save(
-                {
-                    "activations": activation_write_result_for_kept.activations.detach()
-                    .to(dtype=torch.float16)
-                    .cpu(),
-                    "arg_values": activation_write_result_for_kept.arg_values,
-                    "neuron_locations": kept_neuron_locations.to(dtype=torch.long),
-                },
-                cache_file,
+            activation_write_result_for_kept = ActivationWriteResult(
+                activations=full_activations[kept_cache_indices],
+                w_down_vectors=w_down_vectors_for_locations(kept_neuron_locations),
+                arg_values=activation_arg_values_from_shape(full_activations),
+            )
+        else:
+            logger.info(
+                "  Building activation-write matrices for %d kept graph neurons from dataset: %s",
+                int(kept_neuron_locations.shape[0]),
+                dataset,
+            )
+            activation_write_result_for_kept = build_neuron_activation_write_result(
+                model,
+                dataset,
+                kept_neuron_locations,
+                forward_batch_size=activation_forward_batch_size,
             )
         return activation_write_result_for_kept
 
-    # For fast-mode graphs, pre-populate prob_delta_by_neuron with DLA vectors
-    # (activation × W_out × W_U_logits) so supernode probability-delta ranking
-    # can skip extra ablation forward passes.
-    _fast_dla_populated = False
-    if (
-        cluster_method == "ablation"
-        and graph.neuron_write_vectors is not None
-        and kept_neuron_indices.numel() > 0
-        and graph.n_logits > 0
-    ):
-        _wU = model.unembed.W_U if hasattr(model, "unembed") else model.W_U
-        _logit_ids = graph.logit_token_ids.to(_wU.device)
-        with torch.no_grad():
-            _W_U_logits = _wU.detach()[:, _logit_ids].float()  # [d_model, n_logits]
-            _kept_wv = (
-                graph.neuron_write_vectors[kept_neuron_indices_device]
-                .float()
-                .to(_W_U_logits.device)
-            )
-            _neuron_dla = _kept_wv @ _W_U_logits  # [K, n_logits], kept on GPU
-        for _k, _member in enumerate(kept_neuron_indices.tolist()):
-            _dla = _neuron_dla[_k]
-            prob_delta_by_neuron[_member] = _dla  # GPU tensor; clustering matmul stays on GPU
-            prob_delta_norm_by_neuron[_member] = float(_dla.norm().item())
-        del _wU, _W_U_logits, _kept_wv, _neuron_dla
-        _fast_dla_populated = True
-        logger.info("  Fast DLA pre-population: %d neurons", int(kept_neuron_indices.numel()))
     if cluster_method == "ablation" and kept_neuron_indices.numel():
         logger.info("  Building supernodes with graph-node delta clustering")
         supernodes = cluster_by_graph_node_deltas(kept_neuron_indices)
-
-        if _fast_dla_populated:
-            # Fast path: compute supernode DLAs by summing pre-computed member DLAs.
-            # No extra forward passes.
-            _sn_dla_list = []
-            for _sn in supernodes:
-                _sn_dla = torch.stack([prob_delta_by_neuron[_m] for _m in _sn]).sum(dim=0) if _sn else torch.zeros(graph.n_logits, dtype=torch.float32)
-                _sn_dla_list.append(_sn_dla)
-            supernode_prob_deltas = torch.stack(_sn_dla_list) if _sn_dla_list else torch.empty((0, graph.n_logits), dtype=torch.float32)
-            supernode_prob_delta_norms = supernode_prob_deltas.norm(dim=1).tolist()
-            _order = sorted(range(len(supernodes)), key=lambda _i: supernode_prob_delta_norms[_i], reverse=True)
-            supernodes = [supernodes[_i] for _i in _order]
-            if _order:
-                supernode_prob_deltas = supernode_prob_deltas[torch.tensor(_order, dtype=torch.long)]
-            supernode_prob_delta_norms = [supernode_prob_delta_norms[_i] for _i in _order]
-        else:
-            supernodes, supernode_prob_deltas, supernode_prob_delta_norms = (
-                sort_supernodes_by_output_prob_delta(supernodes)
-            )
+        supernodes, supernode_prob_deltas, supernode_prob_delta_norms = (
+            sort_supernodes_by_output_prob_delta(supernodes)
+        )
 
         all_supernode_prob_delta_norms = torch.tensor(
             supernode_prob_delta_norms,
@@ -1149,7 +1129,7 @@ def build_super_graph(
                     f"token {int(token_pos)} {token_text!r}",
                 ))
 
-        supernode_deltas = compute_supernode_ablation_prob_deltas(supernodes)
+        supernode_deltas = compute_supernode_node_deltas(supernodes)
         supernode_prob_delta_norms = supernode_deltas.norm(dim=1).tolist()
         supernode_order = sorted(
             range(len(supernodes)),
@@ -1215,7 +1195,7 @@ def build_super_graph(
         fallback_members = [int(member) for member in kept_neuron_indices.tolist()]
         fallback_members.sort(key=lambda member: abs(float(node_influence[member].item())), reverse=True)
         supernodes = [fallback_members] if fallback_members else []
-        supernode_prob_deltas = compute_supernode_ablation_prob_deltas(supernodes)
+        supernode_prob_deltas = compute_supernode_node_deltas(supernodes)
         all_supernode_prob_delta_norms = supernode_prob_deltas.norm(dim=1).detach().float().cpu()
         keep_count, prob_delta_elbow_index = elbow_keep_count(all_supernode_prob_delta_norms.tolist())
         supernodes = supernodes[:keep_count]
@@ -1247,6 +1227,7 @@ def build_super_graph(
         supernode_prob_deltas=supernode_prob_deltas,
         all_supernode_prob_delta_norms=all_supernode_prob_delta_norms,
         prob_delta_elbow_index=prob_delta_elbow_index,
+        delta_node_indices=kept_node_indices.detach().cpu(),
     )
 
 

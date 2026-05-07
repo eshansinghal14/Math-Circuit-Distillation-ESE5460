@@ -55,24 +55,47 @@ def _log_supernode_top_prob_deltas(
     logger: logging.Logger,
     top_k: int = 10,
 ) -> None:
-    logger.info("Supernode top probability deltas")
+    logger.info("Supernode top kept-node deltas")
     if not supergraph.supernodes:
         logger.info("  no supernodes")
         return
     if supergraph.supernode_prob_deltas is None:
-        logger.info("  no stored supernode probability deltas")
+        logger.info("  no stored supernode kept-node deltas")
         return
-    if graph.n_logits == 0 or supergraph.supernode_prob_deltas.shape[1] == 0:
-        logger.info("  no logit targets")
+    if supergraph.supernode_prob_deltas.shape[1] == 0:
+        logger.info("  no delta targets")
         return
 
     deltas = supergraph.supernode_prob_deltas.detach().float().cpu()
+    delta_node_indices = (
+        supergraph.delta_node_indices.detach().cpu()
+        if supergraph.delta_node_indices is not None
+        else torch.arange(deltas.shape[1], dtype=torch.long)
+    )
+
+    def format_node_label(node_idx: int) -> str:
+        if node_idx < graph.n_neurons:
+            layer = int(graph.neuron_locations[node_idx, 0].item())
+            token_pos = int(graph.neuron_locations[node_idx, 1].item())
+            neuron_id = int(graph.neuron_locations[node_idx, 2].item())
+            return f"neuron[{node_idx}] layer={layer} token={token_pos} id={neuron_id}"
+        token_start = graph.n_neurons
+        logit_start = graph.n_neurons + graph.n_tokens
+        if node_idx < logit_start:
+            token_pos = node_idx - token_start
+            token_id = int(graph.input_tokens[token_pos].item())
+            return f"token[{token_pos}] id={token_id}"
+        logit_idx = node_idx - logit_start
+        if 0 <= logit_idx < graph.n_logits:
+            return f"logit[{logit_idx}] {graph.logit_targets[logit_idx].token_str!r}"
+        return f"node[{node_idx}]"
+
     for supernode_idx, members in enumerate(supergraph.supernodes):
         delta = deltas[supernode_idx]
         k = min(top_k, int(delta.numel()))
         values, indices = torch.topk(delta.abs(), k=k)
         formatted = ", ".join(
-            f"{graph.logit_targets[int(idx.item())].token_str!r}:{float(delta[int(idx.item())].item()):.6g}"
+            f"{format_node_label(int(delta_node_indices[int(idx.item())].item()))}:{float(delta[int(idx.item())].item()):.6g}"
             for _value, idx in zip(values, indices, strict=True)
         )
         logger.info(
@@ -112,8 +135,8 @@ def _plot_supernode_prob_delta_norms(
         ax.scatter([elbow_idx], [float(norms[elbow_idx].item())], color="red", zorder=3)
         ax.legend()
     ax.set_xlabel("supernode")
-    ax.set_ylabel("||probability delta||")
-    ax.set_title("Supernode Probability Delta Norms")
+    ax.set_ylabel("||kept-node delta||")
+    ax.set_title("Supernode Kept-Node Delta Norms")
     fig.tight_layout()
     fig.savefig(output_path)
     plt.close(fig)
@@ -329,6 +352,7 @@ def _save_supergraph(path: str, supergraph: SuperGraph) -> None:
             "supernode_prob_deltas": supergraph.supernode_prob_deltas,
             "all_supernode_prob_delta_norms": supergraph.all_supernode_prob_delta_norms,
             "prob_delta_elbow_index": supergraph.prob_delta_elbow_index,
+            "delta_node_indices": supergraph.delta_node_indices,
         },
         path,
     )

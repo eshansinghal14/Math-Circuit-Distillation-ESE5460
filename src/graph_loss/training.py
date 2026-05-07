@@ -194,6 +194,28 @@ def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> Super
     )
 
 
+def _compute_supernode_node_deltas_from_adjacency(
+    graph,
+    supernodes: list[list[int]],
+    delta_node_indices: torch.Tensor | None,
+) -> torch.Tensor:
+    if delta_node_indices is None:
+        delta_node_indices = torch.arange(
+            graph.n_nodes,
+            dtype=torch.long,
+            device=graph.adjacency_device,
+        )
+    rows = delta_node_indices.to(device=graph.adjacency_device, dtype=torch.long)
+    deltas = []
+    for members in supernodes:
+        if members:
+            cols = torch.tensor(members, device=graph.adjacency_device, dtype=torch.long)
+            deltas.append(graph.adjacency_matrix[rows][:, cols].sum(dim=1))
+        else:
+            deltas.append(torch.zeros(rows.numel(), device=graph.adjacency_device))
+    return torch.stack(deltas, dim=0) if deltas else torch.empty((0, rows.numel()), device=graph.adjacency_device)
+
+
 def compute_prompt_graph_loss(
     *,
     prompt: str,
@@ -381,38 +403,17 @@ def compute_prompt_graph_loss(
     # measure softmax probability change).  For cross-model alignment to be
     # meaningful the student vector must live in the same operational space.
     #
-    # MATCHING SIGNAL (no grad): ``compute_supernode_ablation_prob_deltas``
-    # runs the same TRUE hook-based ablation on the student.  No backward
-    # pass is needed — this signal exists purely to compute cosine similarity
-    # against the teacher's cached prob-deltas and produce a supernode
-    # mapping.  Wrapped in ``torch.no_grad()`` so the ~5–6 chunked ablated
-    # forwards don't accumulate activation memory.
+    # MATCHING SIGNAL (no grad): build_super_graph stores graph-node delta
+    # vectors over its kept node rows.  Alignment compares these vectors
+    # directly (with padding when teacher/student widths differ).
     #
-    # GRADIENT SIGNAL (with grad): ``compute_supernode_dla_approx_prob_deltas_with_grad``
-    # is computed AFTER alignment, only when ``graph_node_weight > 0``.  It
-    # captures the direct-residual-path component of each supernode's effect
-    # via one grad-enabled forward + per-supernode (norm + lm_head + softmax),
-    # which has tiny memory footprint compared to backproping through 40+
-    # ablated forwards.  The faithfulness gap is the cross-layer corrections,
-    # which are second-order — once supernodes are correctly matched, the
-    # gradient just needs to point roughly toward the right direction.
-    if student_graph.n_logits > 0 and len(student_supergraph_structure.supernodes) > 0:
-        student_supernode_prob_deltas = (
-            student_adapter.compute_supernode_ablation_prob_deltas(
-                prompt=prompt,
-                supernodes=student_supergraph_structure.supernodes,
-                neuron_locations_t=student_graph.neuron_locations,
-                logit_token_ids=student_graph.logit_token_ids,
-                dtype=config.graph_dtype,
-                ablation_batch_size=config.ablation_batch_size,
-            )
-        )
-    else:
-        student_supernode_prob_deltas = student_supergraph_structure.supernode_prob_deltas
-
+    # GRADIENT SIGNAL (with grad): for node loss, recompute the student
+    # graph-node deltas from the differentiable adjacency matrix after
+    # alignment so gradients still flow through graph construction.
     student_supergraph = student_supergraph._replace(
-        supernode_prob_deltas=student_supernode_prob_deltas,
+        supernode_prob_deltas=student_supergraph_structure.supernode_prob_deltas,
         logit_token_ids=student_graph.logit_token_ids,
+        delta_node_indices=student_supergraph_structure.delta_node_indices,
     )
     if config.verbose:
         print(
@@ -459,7 +460,7 @@ def compute_prompt_graph_loss(
     #   "true":   chunked sequential true-ablation backward (this function
     #             does its own backwards and returns a detached scalar).
     # ----------------------------------------------------------------------
-    if config.graph_grad_mode == "true":
+    if config.graph_grad_mode == "true" and teacher_supergraph.delta_node_indices is None:
         if config.align_diagnostic:
             print(
                 f"  [grad-trace] mapping size: {sum(len(v) for v in alignment.mapping.values())} edges, "
@@ -546,78 +547,34 @@ def compute_prompt_graph_loss(
         }
         return graph_loss, metrics
 
-    # ---- Node-loss target vectors (teacher side) -------------------------
-    #
-    # Use teacher's cached supernode_prob_deltas (real hook-based ablation
-    # over the top-K logit_token_ids) scattered into full vocab.  This puts
-    # teacher's node-loss target in the SAME operational space as the
-    # student's DLA-approx prob_deltas computed below (both signed
-    # post-softmax probability deltas).  Previously this used cached
-    # ``dla_dict`` (linear DLA vectors), which lived in a different
-    # functional space than the student's signal we now use, so MSE was
-    # comparing apples to oranges.
-    if config.graph_node_weight > 0.0:
-        teacher_pd = teacher_supergraph.supernode_prob_deltas
-        if teacher_pd is not None and teacher_pd.numel() > 0:
-            logit_token_ids_t = (
-                teacher_supergraph.logit_token_ids
-                if teacher_supergraph.logit_token_ids is not None
-                else logit_token_ids
-            )
-            if logit_token_ids_t is not None:
-                lti = logit_token_ids_t.to(device=teacher_pd.device, dtype=torch.long)
-                actual_vocab_t = max(
-                    int(n_vocab),
-                    int(lti.max().item()) + 1,
-                )
-                for cid in range(teacher_pd.shape[0]):
-                    base = torch.zeros(
-                        actual_vocab_t,
-                        dtype=teacher_pd.dtype,
-                        device=teacher_pd.device,
-                    )
-                    alignment.teacher_dla[cid] = base.scatter(
-                        0, lti, teacher_pd[cid]
-                    ).detach()
-
     # ---- Node-loss differentiable signal (student side) -----------------
     #
-    # Compute student supernode prob-deltas via the cheap DLA-approximation
-    # (one grad-enabled forward + per-supernode norm/lm_head/softmax).  This
-    # is differentiable through gate/up/down_proj weights and all upstream
-    # layers, with negligible activation memory beyond the single forward.
-    #
-    # Faithfulness gap: misses cross-layer corrections that the no-grad
-    # true ablation (used for matching) captures.  But since matching is
-    # done with the principled signal, the gradient just needs to point
-    # roughly toward the matched teacher supernodes' prob-deltas.
+    # Supernode deltas now live over the kept graph-node rows, not selected
+    # logit targets.  Recompute the student vectors from the differentiable
+    # adjacency so node loss can still backprop through the graph build.
     if config.graph_node_weight > 0.0 and len(student_supergraph.supernodes) > 0:
-        student_pd_grad = (
-            student_adapter.compute_supernode_dla_approx_prob_deltas_with_grad(
-                prompt=prompt,
-                supernodes=student_supergraph.supernodes,
-                neuron_locations_t=student_graph.neuron_locations,
-                logit_token_ids=student_graph.logit_token_ids,
-                dtype=config.graph_dtype,
+        student_node_delta_grad = _compute_supernode_node_deltas_from_adjacency(
+            student_graph,
+            student_supergraph.supernodes,
+            student_supergraph.delta_node_indices,
+        )
+        if student_node_delta_grad.numel() > 0:
+            target_width = (
+                next(iter(alignment.teacher_dla.values())).shape[0]
+                if alignment.teacher_dla
+                else student_node_delta_grad.shape[1]
             )
-        )  # [n_sn, n_logits], differentiable
-        if student_pd_grad.numel() > 0:
-            logit_token_ids_dev = student_graph.logit_token_ids.to(
-                device=student_pd_grad.device,
-                dtype=torch.long,
-            )
-            actual_vocab = max(
-                int(n_vocab),
-                int(logit_token_ids_dev.max().item()) + 1,
-            )
-            for sid in range(student_pd_grad.shape[0]):
-                base = torch.zeros(
-                    actual_vocab,
-                    dtype=student_pd_grad.dtype,
-                    device=student_pd_grad.device,
+            if student_node_delta_grad.shape[1] < target_width:
+                import torch.nn.functional as F
+
+                student_node_delta_grad = F.pad(
+                    student_node_delta_grad,
+                    (0, target_width - student_node_delta_grad.shape[1]),
                 )
-                full_vec = base.scatter(0, logit_token_ids_dev, student_pd_grad[sid])
-                alignment.student_dla[sid] = full_vec
+            elif student_node_delta_grad.shape[1] > target_width:
+                student_node_delta_grad = student_node_delta_grad[:, :target_width]
+            for sid in range(student_node_delta_grad.shape[0]):
+                alignment.student_dla[sid] = student_node_delta_grad[sid]
 
     if config.align_diagnostic:
         print(f"  [grad-trace] mapping size: {sum(len(v) for v in alignment.mapping.values())} edges, teacher_supernodes={len(teacher_ids)}, student_supernodes={len(student_ids)}")
@@ -646,7 +603,11 @@ def compute_prompt_graph_loss(
     # prob-deltas computed for node loss when available, otherwise compute
     # them on demand (kept independent so focus can run with node_weight=0).
     focus_loss_value = 0.0
-    if config.graph_focus_weight > 0.0 and logit_token_ids is not None:
+    if (
+        config.graph_focus_weight > 0.0
+        and logit_token_ids is not None
+        and teacher_supergraph.delta_node_indices is None
+    ):
         teacher_pd = teacher_supergraph.supernode_prob_deltas
         if teacher_pd is not None and teacher_pd.numel() > 0:
             # Reuse the differentiable per-supernode prob-deltas computed
@@ -970,15 +931,13 @@ def _load_cached_teacher(
         prob_delta_elbow_index=sg_data.get("prob_delta_elbow_index"),
         # Embed logit_token_ids so _build_full_vocab_prob_deltas works without graph
         logit_token_ids=logit_token_ids,
+        delta_node_indices=sg_data.get("delta_node_indices"),
     )
     prob_deltas = sg_data.get("supernode_prob_deltas")
     if prob_deltas is not None and prob_deltas.numel() > 0:
-        # Prefer ablation prob-deltas over DLA as the teacher node-loss target.
-        # The alignment step (`align_supernodes_prob_delta`) already scatters
-        # these 1000-dim vectors into full vocab space via logit_token_ids and
-        # stores them in `alignment.teacher_dla`.  Returning an empty dla_dict
-        # prevents the subsequent override loop in `compute_prompt_graph_loss`
-        # from replacing those prob-delta targets with the cheaper DLA vectors.
+        # Prefer stored supernode deltas over DLA as the teacher node-loss target.
+        # New caches store kept-node graph deltas; legacy caches store compact
+        # logit prob-deltas and are expanded by the alignment helper.
         dla_dict: dict[int, torch.Tensor] = {}
         n_vocab = cache.teacher_vocab_size
     else:
