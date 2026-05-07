@@ -412,7 +412,6 @@ def build_super_graph(
     model_name: str | None = None,
     cluster_method: str = "full_search",
     supernode_heatmap_output_dir: str | None = None,
-    anova_nodes_per_label: int = 10,
     anova_range_radius: int = 10,
 ) -> SuperGraph:
     """Cluster kept neurons into numeric-token embedding and final-token computation supernodes."""
@@ -430,8 +429,6 @@ def build_super_graph(
         raise ValueError("embedding_sigma and computation_sigma must be non-negative")
     if cluster_method not in {"full_search", "ablation"}:
         raise ValueError("cluster_method must be one of: full_search, ablation")
-    if anova_nodes_per_label <= 0:
-        raise ValueError("anova_nodes_per_label must be positive")
     if anova_range_radius < 0:
         raise ValueError("anova_range_radius must be non-negative")
 
@@ -1150,26 +1147,31 @@ def build_super_graph(
 
         for category in ANOVA_LABEL_CATEGORIES:
             scored_rows = [
-                (row_idx, label_result.category_scores[category])
+                (row_idx, label_result.category_specificity[category])
                 for row_idx, label_result in enumerate(label_results)
-                if category in label_result.category_scores
+                if category in label_result.category_specificity
+                and label_result.category_specificity[category] > 0.0
             ]
             if not scored_rows:
-                logger.info("  ANOVA label %s: no candidate nodes", category)
+                logger.info("  ANOVA label %s: no positive-specificity nodes", category)
                 continue
-            top_rows = sorted(scored_rows, key=lambda item: item[1], reverse=True)[
-                :anova_nodes_per_label
-            ]
+            sorted_rows = sorted(scored_rows, key=lambda item: item[1], reverse=True)
+            keep_count, specificity_elbow_index = elbow_keep_count(
+                [float(score) for _row_idx, score in sorted_rows]
+            )
+            top_rows = sorted_rows[:keep_count]
             row_indices = torch.tensor([row_idx for row_idx, _score in top_rows], dtype=torch.long)
             members = [int(kept_neuron_indices[row_idx].item()) for row_idx, _score in top_rows]
             cluster_heatmaps = activation_write_result.activations[row_indices].detach().float()
-            members, cluster_heatmaps = sort_cluster_by_abs_influence(members, cluster_heatmaps)
             member_plot_labels: dict[int, list[str]] = {}
             for member in members:
                 row_idx = int(torch.where(kept_neuron_indices == member)[0][0].item())
                 label = label_results[row_idx].categories[category]
-                score = label_results[row_idx].category_scores[category]
-                member_plot_labels[member] = [f"{label} ({score:.3f})"]
+                variance_score = label_results[row_idx].category_scores[category]
+                specificity_score = label_results[row_idx].category_specificity[category]
+                member_plot_labels[member] = [
+                    f"{label} (var={variance_score:.3f}, spec={specificity_score:.3f})"
+                ]
                 node_labels.setdefault(member, [])
                 if label not in node_labels[member]:
                     node_labels[member].append(label)
@@ -1193,15 +1195,16 @@ def build_super_graph(
                 )
             )
             logger.info(
-                "  ANOVA label %s: selected_top_nodes=%d best_variance=%.6g",
+                "  ANOVA label %s: specificity_elbow=%s selected_nodes=%d/%d best_specificity=%.6g",
                 category,
+                specificity_elbow_index,
                 len(members),
+                len(sorted_rows),
                 float(top_rows[0][1]),
             )
 
         logger.info(
-            "  ANOVA labeling: nodes_per_label=%d selected_unique_neurons=%d/%d",
-            int(anova_nodes_per_label),
+            "  ANOVA labeling: selected_unique_neurons=%d/%d",
             len(selected_member_ids),
             int(kept_neuron_indices.numel()),
         )

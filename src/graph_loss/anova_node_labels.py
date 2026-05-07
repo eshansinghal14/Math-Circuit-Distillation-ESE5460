@@ -24,6 +24,7 @@ class NodeLabel:
     scores: dict[str, float]
     categories: dict[str, str] = field(default_factory=dict)
     category_scores: dict[str, float] = field(default_factory=dict)
+    category_specificity: dict[str, float] = field(default_factory=dict)
 
 
 ANOVA_LABEL_CATEGORIES = [
@@ -36,6 +37,20 @@ ANOVA_LABEL_CATEGORIES = [
     "sum range",
     "sum units",
 ]
+
+BASE_ANOVA_LABEL_CATEGORIES = [
+    "arg1 range",
+    "arg1 units",
+    "arg2 range",
+    "arg2 units",
+    "sum range",
+    "sum units",
+]
+
+CATEGORY_COMPONENTS = {
+    "arg1 units and arg2 units": {"arg1 units", "arg2 units"},
+    "arg1 range and arg2 range": {"arg1 range", "arg2 range"},
+}
 
 
 def _axis_values_grid(arg_values: list[list[int]], dim: int) -> torch.Tensor:
@@ -295,6 +310,17 @@ def label_activation_heatmaps(
                 f"{category_labels['arg1 range']} and {category_labels['arg2 range']}"
             )
 
+        category_specificity: dict[str, float] = {}
+        for category, target_score in category_scores.items():
+            excluded_categories = {category} | CATEGORY_COMPONENTS.get(category, set())
+            competitor_scores = [
+                category_scores[competitor]
+                for competitor in BASE_ANOVA_LABEL_CATEGORIES
+                if competitor not in excluded_categories and competitor in category_scores
+            ]
+            max_competitor_score = max(competitor_scores) if competitor_scores else 0.0
+            category_specificity[category] = target_score - max_competitor_score
+
         labels = [
             category_labels[category]
             for category in ANOVA_LABEL_CATEGORIES
@@ -311,6 +337,7 @@ def label_activation_heatmaps(
                 scores=scores,
                 categories=category_labels,
                 category_scores=category_scores,
+                category_specificity=category_specificity,
             )
         )
     return out

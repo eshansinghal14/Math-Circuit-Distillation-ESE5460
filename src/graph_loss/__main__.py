@@ -656,17 +656,6 @@ def main():
         ),
     )
     parser.add_argument(
-        "--anova-nodes-per-label",
-        "--anova_nodes_per_label",
-        dest="anova_nodes_per_label",
-        type=int,
-        default=10,
-        help=(
-            "Number of top-variance nodes to place in each ANOVA label supernode "
-            "when --cluster-method=full_search and --dataset is provided"
-        ),
-    )
-    parser.add_argument(
         "--anova-range-radius",
         "--anova_range_radius",
         dest="anova_range_radius",
@@ -718,8 +707,6 @@ def main():
     )
 
     args = parser.parse_args()
-    if args.anova_nodes_per_label <= 0:
-        parser.error("--anova-nodes-per-label must be positive")
     if args.anova_range_radius < 0:
         parser.error("--anova-range-radius must be non-negative")
     if args.supernode_heatmap_output_dir:
@@ -806,7 +793,6 @@ def main():
         model_name=args.model,
         cluster_method=args.cluster_method,
         supernode_heatmap_output_dir=args.supernode_heatmap_output_dir,
-        anova_nodes_per_label=args.anova_nodes_per_label,
         anova_range_radius=args.anova_range_radius,
     )
     _log_supergraph_summary(
