@@ -7,7 +7,6 @@ import importlib
 import logging
 import math
 import os
-import re
 from typing import NamedTuple
 
 import torch
@@ -450,9 +449,6 @@ def build_super_graph(
         token_ids = graph.input_tokens.detach().cpu().flatten().tolist()
         return [model.tokenizer.decode([int(token_id)]) for token_id in token_ids]
 
-    def token_contains_number(token_text: str) -> bool:
-        return re.search(r"\d", token_text) is not None
-
     def spatial_activation_similarity(activation_maps: torch.Tensor, sigma: float) -> torch.Tensor:
         if len(activation_maps) == 0:
             raise ValueError("spatial_activation_similarity requires at least one activation map")
@@ -814,19 +810,6 @@ def build_super_graph(
             clustered.append(members)
         return clustered
 
-    def aggregate_nanmean(values: torch.Tensor, dim: int) -> torch.Tensor:
-        if values.shape[dim] == 1:
-            return values.squeeze(dim)
-        if hasattr(torch, "nanmean"):
-            return torch.nanmean(values, dim=dim)
-
-        valid = ~torch.isnan(values)
-        safe_values = torch.nan_to_num(values)
-        counts = valid.sum(dim=dim).clamp(min=1)
-        means = safe_values.sum(dim=dim) / counts
-        means[valid.sum(dim=dim) == 0] = float("nan")
-        return means
-
     def format_member_locations(members: list[int]) -> str:
         locations = graph.neuron_locations.detach().cpu()
         formatted = []
@@ -1128,50 +1111,27 @@ def build_super_graph(
         kept_neuron_locations = graph.neuron_locations[kept_neuron_indices_device].detach().cpu()
         activation_write_result = get_activation_write_result_for_kept()
         prompt_tokens = decoded_prompt_tokens()
-        numeric_token_positions = [
-            token_pos
-            for token_pos, token_text in enumerate(prompt_tokens)
-            if token_contains_number(token_text)
-        ]
-        non_numeric_token_positions = [
-            token_pos
-            for token_pos, token_text in enumerate(prompt_tokens)
-            if not token_contains_number(token_text)
-        ]
-        computation_token_pos = non_numeric_token_positions[-1] if non_numeric_token_positions else None
-        if len(numeric_token_positions) > len(activation_write_result.arg_values):
-            logger.warning(
-                "  Found %d numeric prompt tokens but activation grid has %d argument dims; extra numeric tokens will be skipped",
-                len(numeric_token_positions),
-                len(activation_write_result.arg_values),
-            )
-
         kept_token_positions = kept_neuron_locations[:, 1]
         supernodes: list[list[int]] = []
         supernode_heatmaps: list[tuple[torch.Tensor, list[list[int]], list[int], str]] = []
 
-        for arg_dim, token_pos in enumerate(numeric_token_positions[:len(activation_write_result.arg_values)]):
+        for token_pos in sorted(int(pos.item()) for pos in torch.unique(kept_token_positions)):
             phase_rows = torch.where(kept_token_positions == int(token_pos))[0]
             if phase_rows.numel() == 0:
                 logger.info(
-                    "  Embedding clustering for token_pos=%d arg_dim=%d: no neurons",
+                    "  Full-grid clustering for token_pos=%d: no neurons",
                     int(token_pos),
-                    int(arg_dim),
                 )
                 continue
 
-            embedding_maps = activation_write_result.activations[phase_rows].detach().float()
-            for reduce_dim in range(len(activation_write_result.arg_values) - 1, -1, -1):
-                if reduce_dim != arg_dim:
-                    embedding_maps = aggregate_nanmean(embedding_maps, dim=reduce_dim + 1)
-
+            phase_maps = activation_write_result.activations[phase_rows].detach().float()
             assignments = cluster_phase(
-                phase_name=f"embedding token_pos={int(token_pos)} arg_dim={int(arg_dim)}",
+                phase_name=f"token_pos={int(token_pos)}",
                 phase_rows=phase_rows,
-                activation_maps=embedding_maps,
+                activation_maps=phase_maps,
                 w_down_vectors=activation_write_result.w_down_vectors[phase_rows],
-                sigma=embedding_sigma,
-                eps=embedding_eps,
+                sigma=computation_sigma,
+                eps=computation_eps,
             )
             for cluster_id in torch.unique(assignments).tolist():
                 cluster_rows = torch.where(assignments == int(cluster_id))[0]
@@ -1185,50 +1145,17 @@ def build_super_graph(
                     cluster_heatmaps,
                 )
                 supernodes.append(members)
-                token_text = prompt_tokens[int(token_pos)].replace("\n", "\\n").replace("\r", "\\r")
+                token_text = (
+                    prompt_tokens[int(token_pos)]
+                    if int(token_pos) < len(prompt_tokens)
+                    else "<out-of-range>"
+                ).replace("\n", "\\n").replace("\r", "\\r")
                 supernode_heatmaps.append((
                     cluster_heatmaps,
                     activation_write_result.arg_values,
                     members,
-                    f"embedding token {int(token_pos)} {token_text!r}",
+                    f"token {int(token_pos)} {token_text!r}",
                 ))
-
-        if computation_token_pos is None:
-            logger.info("  No non-numeric token found for computation clustering")
-        else:
-            phase_rows = torch.where(kept_token_positions == int(computation_token_pos))[0]
-            if phase_rows.numel() == 0:
-                logger.info(
-                    "  Computation clustering for token_pos=%d: no neurons",
-                    int(computation_token_pos),
-                )
-            else:
-                computation_maps = activation_write_result.activations[phase_rows].detach().float()
-                assignments = cluster_phase(
-                    phase_name=f"computation token_pos={int(computation_token_pos)}",
-                    phase_rows=phase_rows,
-                    activation_maps=computation_maps,
-                    w_down_vectors=activation_write_result.w_down_vectors[phase_rows],
-                    sigma=computation_sigma,
-                    eps=computation_eps,
-                )
-                for cluster_id in torch.unique(assignments).tolist():
-                    cluster_rows = torch.where(assignments == int(cluster_id))[0]
-                    result_rows = phase_rows[cluster_rows]
-                    members = kept_neuron_indices[result_rows].tolist()
-                    cluster_maps = computation_maps[cluster_rows]
-                    members, cluster_maps = sort_cluster_by_abs_influence(
-                        [int(member) for member in members],
-                        cluster_maps,
-                    )
-                    supernodes.append(members)
-                    token_text = prompt_tokens[int(computation_token_pos)].replace("\n", "\\n").replace("\r", "\\r")
-                    supernode_heatmaps.append((
-                        cluster_maps,
-                        activation_write_result.arg_values,
-                        members,
-                        f"computation token {int(computation_token_pos)} {token_text!r}",
-                    ))
 
         supernode_deltas = compute_supernode_ablation_prob_deltas(supernodes)
         supernode_prob_delta_norms = supernode_deltas.norm(dim=1).tolist()
