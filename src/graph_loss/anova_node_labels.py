@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 
@@ -12,6 +12,7 @@ import torch
 class BasisRule:
     label: str
     mask: torch.Tensor
+    category: str
     range_values: torch.Tensor | None = None
     range_center: int | None = None
     range_prefix: str | None = None
@@ -21,6 +22,20 @@ class BasisRule:
 class NodeLabel:
     labels: list[str]
     scores: dict[str, float]
+    categories: dict[str, str] = field(default_factory=dict)
+    category_scores: dict[str, float] = field(default_factory=dict)
+
+
+ANOVA_LABEL_CATEGORIES = [
+    "arg1 range",
+    "arg1 units",
+    "arg2 range",
+    "arg2 units",
+    "arg1 units and arg2 units",
+    "arg1 range and arg2 range",
+    "sum range",
+    "sum units",
+]
 
 
 def _axis_values_grid(arg_values: list[list[int]], dim: int) -> torch.Tensor:
@@ -83,6 +98,7 @@ def build_anova_basis_rules(
                     BasisRule(
                         _format_interval_label(arg_name, center, center),
                         mask,
+                    category=f"{arg_name} range",
                         range_values=values,
                         range_center=center,
                         range_prefix=arg_name,
@@ -91,7 +107,13 @@ def build_anova_basis_rules(
         for unit_digit in unit_digits:
             mask = torch.remainder(values, 10) == unit_digit
             if bool(mask.any().item()):
-                rules.append(BasisRule(f"{arg_name} units {unit_digit}", mask))
+                rules.append(
+                    BasisRule(
+                        f"{arg_name} units {unit_digit}",
+                        mask,
+                        category=f"{arg_name} units",
+                    )
+                )
 
     if len(arg_values) >= 2:
         sums = grids[0] + grids[1]
@@ -107,6 +129,7 @@ def build_anova_basis_rules(
                     BasisRule(
                         _format_interval_label("sum", center, center),
                         mask,
+                    category="sum range",
                         range_values=sums,
                         range_center=center,
                         range_prefix="sum",
@@ -120,7 +143,7 @@ def build_anova_basis_rules(
         for unit_digit in sum_unit_digits:
             mask = torch.remainder(sums, 10) == unit_digit
             if bool(mask.any().item()):
-                rules.append(BasisRule(f"sum units {unit_digit}", mask))
+                rules.append(BasisRule(f"sum units {unit_digit}", mask, category="sum units"))
 
     return rules
 
@@ -224,13 +247,10 @@ def label_activation_heatmaps(
     activations: torch.Tensor,
     arg_values: list[list[int]],
     *,
-    threshold: float,
     target_args: tuple[int, ...] | None = None,
     range_radius: int = 10,
 ) -> list[NodeLabel]:
-    """Assign all basis labels whose explained-variance score reaches threshold."""
-    if not (0.0 <= threshold <= 1.0):
-        raise ValueError("threshold must be in [0, 1]")
+    """Score ANOVA label categories for each activation heatmap."""
     if activations.ndim != len(arg_values) + 1:
         raise ValueError(
             f"Expected activations with {len(arg_values) + 1} dims for arg_values, "
@@ -244,23 +264,53 @@ def label_activation_heatmaps(
     )
     out: list[NodeLabel] = []
     for activation_grid in activations.detach().float().cpu():
-        kept_scores: dict[str, float] = {}
+        category_labels: dict[str, str] = {}
+        category_scores: dict[str, float] = {}
         for rule in rules:
             score = explained_variance_score(activation_grid, rule.mask)
-            if score < threshold:
-                continue
             label = _high_activation_range_label(
                 activation_grid,
                 rule,
             )
-            kept_scores[label] = max(score, kept_scores.get(label, float("-inf")))
-        labels = [
-            label
-            for label, _score in sorted(
-                kept_scores.items(),
-                key=lambda item: item[1],
-                reverse=True,
+            if score > category_scores.get(rule.category, float("-inf")):
+                category_scores[rule.category] = score
+                category_labels[rule.category] = label
+
+        if "arg1 units" in category_scores and "arg2 units" in category_scores:
+            category = "arg1 units and arg2 units"
+            category_scores[category] = min(
+                category_scores["arg1 units"],
+                category_scores["arg2 units"],
             )
+            category_labels[category] = (
+                f"{category_labels['arg1 units']} and {category_labels['arg2 units']}"
+            )
+        if "arg1 range" in category_scores and "arg2 range" in category_scores:
+            category = "arg1 range and arg2 range"
+            category_scores[category] = min(
+                category_scores["arg1 range"],
+                category_scores["arg2 range"],
+            )
+            category_labels[category] = (
+                f"{category_labels['arg1 range']} and {category_labels['arg2 range']}"
+            )
+
+        labels = [
+            category_labels[category]
+            for category in ANOVA_LABEL_CATEGORIES
+            if category in category_labels
         ]
-        out.append(NodeLabel(labels=labels, scores={label: kept_scores[label] for label in labels}))
+        scores = {
+            category_labels[category]: category_scores[category]
+            for category in ANOVA_LABEL_CATEGORIES
+            if category in category_labels
+        }
+        out.append(
+            NodeLabel(
+                labels=labels,
+                scores=scores,
+                categories=category_labels,
+                category_scores=category_scores,
+            )
+        )
     return out
