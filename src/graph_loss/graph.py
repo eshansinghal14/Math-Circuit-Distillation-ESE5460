@@ -773,30 +773,23 @@ def build_super_graph(
 
         return deltas
 
-    def cluster_by_ablation_prob_deltas(neuron_indices: torch.Tensor) -> list[list[int]]:
+    def cluster_by_graph_node_deltas(neuron_indices: torch.Tensor) -> list[list[int]]:
         if neuron_indices.numel() == 0:
             return []
-        if graph.n_logits == 0:
-            logger.info("  Ablation clustering: no logit targets")
-            return [[int(member)] for member in neuron_indices.tolist()]
-
-        ensure_prob_deltas(neuron_indices)
-        deltas = torch.stack(
-            [prob_delta_by_neuron[int(member)] for member in neuron_indices.detach().cpu().tolist()]
-        )
-        # Run the expensive [K, n_logits] @ [n_logits, K] similarity matmul on GPU
-        # (fast-DLA path stores GPU tensors; fallback stores CPU — move accordingly).
-        _sim_device = graph.adjacency_device
-        normalized_deltas = F.normalize(deltas.to(_sim_device), p=2, dim=1, eps=1e-12)
+        sim_device = graph.adjacency_device
+        neuron_indices_device = neuron_indices.to(device=sim_device, dtype=torch.long)
+        deltas = graph.adjacency_matrix[:, neuron_indices_device].transpose(0, 1).detach()
+        normalized_deltas = F.normalize(deltas.to(sim_device), p=2, dim=1, eps=1e-12)
         similarity = (normalized_deltas @ normalized_deltas.T).clamp(min=-1.0, max=1.0)
         # Connected-components uses Python loops → must be on CPU
         distance_matrix = (torch.arccos(similarity) / math.pi).cpu()
         assignments = angular_distance_connected_components(distance_matrix, computation_eps)
         unique_assignments, cluster_sizes = torch.unique(assignments, return_counts=True)
         logger.info(
-            "  ablation clustering: eps=%.6g neurons=%d clusters=%d min_size=%d max_size=%d",
+            "  graph-node delta clustering: eps=%.6g neurons=%d graph_nodes=%d clusters=%d min_size=%d max_size=%d",
             float(computation_eps),
             int(neuron_indices.numel()),
+            int(graph.n_nodes),
             int(unique_assignments.numel()),
             int(cluster_sizes.min().item()),
             int(cluster_sizes.max().item()),
@@ -1005,9 +998,8 @@ def build_super_graph(
         return activation_write_result_for_kept
 
     # For fast-mode graphs, pre-populate prob_delta_by_neuron with DLA vectors
-    # (activation × W_out × W_U_logits) so that ensure_prob_deltas() skips ablation
-    # forward passes entirely.  This makes ablation clustering O(n_neurons × d_model)
-    # instead of O(n_neurons × forward_pass_cost).
+    # (activation × W_out × W_U_logits) so supernode probability-delta ranking
+    # can skip extra ablation forward passes.
     _fast_dla_populated = False
     if (
         cluster_method == "ablation"
@@ -1033,8 +1025,8 @@ def build_super_graph(
         _fast_dla_populated = True
         logger.info("  Fast DLA pre-population: %d neurons", int(kept_neuron_indices.numel()))
     if cluster_method == "ablation" and kept_neuron_indices.numel():
-        logger.info("  Building supernodes with ablation probability-delta clustering")
-        supernodes = cluster_by_ablation_prob_deltas(kept_neuron_indices)
+        logger.info("  Building supernodes with graph-node delta clustering")
+        supernodes = cluster_by_graph_node_deltas(kept_neuron_indices)
 
         if _fast_dla_populated:
             # Fast path: compute supernode DLAs by summing pre-computed member DLAs.
