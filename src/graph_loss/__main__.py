@@ -667,6 +667,17 @@ def main():
         ),
     )
     parser.add_argument(
+        "--anova-range-radius",
+        "--anova_range_radius",
+        dest="anova_range_radius",
+        type=int,
+        default=10,
+        help=(
+            "Radius for the ANOVA range basis around the prompt arg or sum; "
+            "labels still use the detected high-activation band"
+        ),
+    )
+    parser.add_argument(
         "--dataset",
         help=(
             "Optional dataset prefix, filename, or path for activation-write "
@@ -709,6 +720,8 @@ def main():
     args = parser.parse_args()
     if not (0.0 <= args.anova_label_threshold <= 1.0):
         parser.error("--anova-label-threshold must be in [0, 1]")
+    if args.anova_range_radius < 0:
+        parser.error("--anova-range-radius must be non-negative")
     if args.supernode_heatmap_output_dir:
         args.supernode_heatmap_output_dir = os.path.abspath(args.supernode_heatmap_output_dir)
 
@@ -794,6 +807,7 @@ def main():
         cluster_method=args.cluster_method,
         supernode_heatmap_output_dir=args.supernode_heatmap_output_dir,
         anova_label_threshold=args.anova_label_threshold,
+        anova_range_radius=args.anova_range_radius,
     )
     _log_supergraph_summary(
         graph,

@@ -409,6 +409,7 @@ def build_super_graph(
     cluster_method: str = "full_search",
     supernode_heatmap_output_dir: str | None = None,
     anova_label_threshold: float = 0.6,
+    anova_range_radius: int = 10,
 ) -> SuperGraph:
     """Cluster kept neurons into numeric-token embedding and final-token computation supernodes."""
 
@@ -427,6 +428,8 @@ def build_super_graph(
         raise ValueError("cluster_method must be one of: full_search, ablation")
     if not (0.0 <= anova_label_threshold <= 1.0):
         raise ValueError("anova_label_threshold must be in [0, 1]")
+    if anova_range_radius < 0:
+        raise ValueError("anova_range_radius must be non-negative")
 
     n_neurons = graph.n_neurons
     logger = logging.getLogger(__name__)
@@ -1082,6 +1085,7 @@ def build_super_graph(
             activation_write_result.arg_values,
             threshold=anova_label_threshold,
             target_args=target_args,
+            range_radius=anova_range_radius,
         )
         labeled_rows = [
             row_idx
