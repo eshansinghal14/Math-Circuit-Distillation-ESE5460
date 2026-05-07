@@ -486,7 +486,7 @@ def _abs_standard_deviation_grid(activation_grid: torch.Tensor) -> torch.Tensor:
     return (grid - mean).abs() / std.clamp(min=1e-6)
 
 
-HEATMAP_VALUE_LABEL = "|activation z-score|"
+HEATMAP_VALUE_LABEL = "activation"
 
 
 def save_cluster_activation_heatmap_pdfs(
@@ -525,7 +525,6 @@ def save_cluster_activation_heatmap_pdfs(
             plt.close(fig)
             return
 
-        activation_grid = _abs_standard_deviation_grid(activation_grid)
         n_args = len(arg_values)
         if n_args == 1:
             xs = arg_values[0]
@@ -649,7 +648,6 @@ def save_supernode_activation_heatmap_pdf(
                 ax.text(0.5, 0.5, "No valid activations", ha="center", va="center")
                 ax.set_axis_off()
             else:
-                activation_grid = _abs_standard_deviation_grid(activation_grid)
                 n_args = len(arg_values)
                 if n_args == 1:
                     xs = arg_values[0]
@@ -713,7 +711,6 @@ def _plot_1d(
 ) -> None:
     xs = sorted(arg[0] for arg in values_by_arg)
     heatmap = torch.tensor([[values_by_arg[(x,)].mean for x in xs]], dtype=torch.float32)
-    heatmap = _abs_standard_deviation_grid(heatmap)
     fig, ax = plt.subplots(figsize=(8, 2.5))
     image = ax.imshow(
         heatmap.numpy(),
@@ -745,7 +742,6 @@ def _plot_2d(
     for (x, y), stats in values_by_arg.items():
         if stats.count:
             heatmap[y_to_idx[y], x_to_idx[x]] = stats.mean
-    heatmap = _abs_standard_deviation_grid(heatmap)
 
     plt.figure(figsize=(8, 6))
     plt.imshow(
@@ -777,9 +773,7 @@ def _plot_3d(
         raise ValueError("No valid 3D points to plot.")
 
     xs, ys, zs, activations = zip(*points, strict=True)
-    activation_colors = _abs_standard_deviation_grid(
-        torch.tensor(activations, dtype=torch.float32),
-    ).tolist()
+    activation_colors = torch.tensor(activations, dtype=torch.float32).tolist()
     fig = plt.figure(figsize=(8, 6))
     ax = fig.add_subplot(111, projection="3d")
     scatter = ax.scatter(xs, ys, zs, c=activation_colors, cmap="viridis")
