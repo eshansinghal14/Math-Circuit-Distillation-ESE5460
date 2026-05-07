@@ -470,6 +470,25 @@ def build_neuron_activation_write_matrix(
     return flat_activations[:, :, None] * result.w_down_vectors[:, None, :]
 
 
+def _abs_standard_deviation_grid(activation_grid: torch.Tensor) -> torch.Tensor:
+    """Return abs z-score values over valid cells, preserving NaNs."""
+    grid = activation_grid.detach().float().clone()
+    valid_values = grid[~torch.isnan(grid)]
+    if valid_values.numel() == 0:
+        return grid
+
+    std = valid_values.std(unbiased=False)
+    if float(std.item()) == 0.0:
+        grid[~torch.isnan(grid)] = 0.0
+        return grid
+
+    mean = valid_values.mean()
+    return (grid - mean).abs() / std.clamp(min=1e-6)
+
+
+HEATMAP_VALUE_LABEL = "|activation z-score|"
+
+
 def save_cluster_activation_heatmap_pdfs(
     activations: torch.Tensor,
     arg_values: list[list[int]],
@@ -506,6 +525,7 @@ def save_cluster_activation_heatmap_pdfs(
             plt.close(fig)
             return
 
+        activation_grid = _abs_standard_deviation_grid(activation_grid)
         n_args = len(arg_values)
         if n_args == 1:
             xs = arg_values[0]
@@ -517,7 +537,7 @@ def save_cluster_activation_heatmap_pdfs(
                 aspect="auto",
                 extent=[min(xs), max(xs), 0, 1],
             )
-            fig.colorbar(image, ax=ax, label="activation")
+            fig.colorbar(image, ax=ax, label=HEATMAP_VALUE_LABEL)
             ax.set_xlabel("arg 1")
             ax.set_yticks([])
             ax.set_title(title)
@@ -532,7 +552,7 @@ def save_cluster_activation_heatmap_pdfs(
                 aspect="auto",
                 extent=[min(xs), max(xs), min(ys), max(ys)],
             )
-            fig.colorbar(image, ax=ax, label="activation")
+            fig.colorbar(image, ax=ax, label=HEATMAP_VALUE_LABEL)
             ax.set_xlabel("arg 1")
             ax.set_ylabel("arg 2")
             ax.set_title(title)
@@ -550,7 +570,7 @@ def save_cluster_activation_heatmap_pdfs(
             if points:
                 xs, ys, zs, activation_colors = zip(*points, strict=True)
                 scatter = ax.scatter(xs, ys, zs, c=activation_colors, cmap="viridis")
-                fig.colorbar(scatter, ax=ax, label="activation")
+                fig.colorbar(scatter, ax=ax, label=HEATMAP_VALUE_LABEL)
             ax.set_xlabel("arg 1")
             ax.set_ylabel("arg 2")
             ax.set_zlabel("arg 3")
@@ -625,6 +645,7 @@ def save_supernode_activation_heatmap_pdf(
                 ax.text(0.5, 0.5, "No valid activations", ha="center", va="center")
                 ax.set_axis_off()
             else:
+                activation_grid = _abs_standard_deviation_grid(activation_grid)
                 n_args = len(arg_values)
                 if n_args == 1:
                     xs = arg_values[0]
@@ -636,7 +657,7 @@ def save_supernode_activation_heatmap_pdf(
                         aspect="auto",
                         extent=[min(xs), max(xs), 0, 1],
                     )
-                    fig.colorbar(image, ax=ax, label="activation")
+                    fig.colorbar(image, ax=ax, label=HEATMAP_VALUE_LABEL)
                     ax.set_xlabel("arg 1")
                     ax.set_yticks([])
                 elif n_args == 2:
@@ -650,7 +671,7 @@ def save_supernode_activation_heatmap_pdf(
                         aspect="auto",
                         extent=[min(xs), max(xs), min(ys), max(ys)],
                     )
-                    fig.colorbar(image, ax=ax, label="activation")
+                    fig.colorbar(image, ax=ax, label=HEATMAP_VALUE_LABEL)
                     ax.set_xlabel("arg 1")
                     ax.set_ylabel("arg 2")
                 else:
@@ -667,7 +688,7 @@ def save_supernode_activation_heatmap_pdf(
                     if points:
                         xs, ys, zs, activation_colors = zip(*points, strict=True)
                         scatter = ax.scatter(xs, ys, zs, c=activation_colors, cmap="viridis")
-                        fig.colorbar(scatter, ax=ax, label="activation")
+                        fig.colorbar(scatter, ax=ax, label=HEATMAP_VALUE_LABEL)
                     ax.set_xlabel("arg 1")
                     ax.set_ylabel("arg 2")
                     ax.set_zlabel("arg 3")
@@ -688,6 +709,7 @@ def _plot_1d(
 ) -> None:
     xs = sorted(arg[0] for arg in values_by_arg)
     heatmap = torch.tensor([[values_by_arg[(x,)].mean for x in xs]], dtype=torch.float32)
+    heatmap = _abs_standard_deviation_grid(heatmap)
     fig, ax = plt.subplots(figsize=(8, 2.5))
     image = ax.imshow(
         heatmap.numpy(),
@@ -695,7 +717,7 @@ def _plot_1d(
         aspect="auto",
         extent=[min(xs), max(xs), 0, 1],
     )
-    fig.colorbar(image, ax=ax, label="activation")
+    fig.colorbar(image, ax=ax, label=HEATMAP_VALUE_LABEL)
     ax.set_xlabel("arg 1")
     ax.set_yticks([])
     ax.set_title(title)
@@ -719,6 +741,7 @@ def _plot_2d(
     for (x, y), stats in values_by_arg.items():
         if stats.count:
             heatmap[y_to_idx[y], x_to_idx[x]] = stats.mean
+    heatmap = _abs_standard_deviation_grid(heatmap)
 
     plt.figure(figsize=(8, 6))
     plt.imshow(
@@ -727,7 +750,7 @@ def _plot_2d(
         aspect="auto",
         extent=[min(xs), max(xs), min(ys), max(ys)],
     )
-    plt.colorbar(label="activation")
+    plt.colorbar(label=HEATMAP_VALUE_LABEL)
     plt.xlabel("arg 1")
     plt.ylabel("arg 2")
     plt.title(title)
@@ -750,10 +773,13 @@ def _plot_3d(
         raise ValueError("No valid 3D points to plot.")
 
     xs, ys, zs, activations = zip(*points, strict=True)
+    activation_colors = _abs_standard_deviation_grid(
+        torch.tensor(activations, dtype=torch.float32),
+    ).tolist()
     fig = plt.figure(figsize=(8, 6))
     ax = fig.add_subplot(111, projection="3d")
-    scatter = ax.scatter(xs, ys, zs, c=activations, cmap="viridis")
-    fig.colorbar(scatter, ax=ax, label="activation")
+    scatter = ax.scatter(xs, ys, zs, c=activation_colors, cmap="viridis")
+    fig.colorbar(scatter, ax=ax, label=HEATMAP_VALUE_LABEL)
     ax.set_xlabel("arg 1")
     ax.set_ylabel("arg 2")
     ax.set_zlabel("arg 3")
