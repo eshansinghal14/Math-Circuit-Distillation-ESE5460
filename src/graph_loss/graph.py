@@ -11,7 +11,7 @@ from typing import NamedTuple
 import torch
 import torch.nn.functional as F
 
-from graph_loss.anova_node_labels import label_activation_heatmaps
+from graph_loss.anova_node_labels import label_activation_heatmaps, parse_numeric_args
 from graph_loss.attribution.targets import LogitTarget
 from graph_loss.neuron_activation_heatmap import (
     build_neuron_activation_write_result,
@@ -409,6 +409,7 @@ def build_super_graph(
     cluster_method: str = "full_search",
     supernode_heatmap_output_dir: str | None = None,
     anova_label_threshold: float = 0.6,
+    anova_range_radius: int = 10,
 ) -> SuperGraph:
     """Cluster kept neurons into numeric-token embedding and final-token computation supernodes."""
 
@@ -427,6 +428,8 @@ def build_super_graph(
         raise ValueError("cluster_method must be one of: full_search, ablation")
     if not (0.0 <= anova_label_threshold <= 1.0):
         raise ValueError("anova_label_threshold must be in [0, 1]")
+    if anova_range_radius < 0:
+        raise ValueError("anova_range_radius must be non-negative")
 
     n_neurons = graph.n_neurons
     logger = logging.getLogger(__name__)
@@ -1076,10 +1079,13 @@ def build_super_graph(
                     logger.info("  Saved supernode heatmap PDF: %s", saved_path)
     elif dataset and kept_neuron_indices.numel():
         activation_write_result = get_activation_write_result_for_kept()
+        target_args = parse_numeric_args(graph.input_string)
         label_results = label_activation_heatmaps(
             activation_write_result.activations,
             activation_write_result.arg_values,
             threshold=anova_label_threshold,
+            target_args=target_args,
+            range_radius=anova_range_radius,
         )
         labeled_rows = [
             row_idx

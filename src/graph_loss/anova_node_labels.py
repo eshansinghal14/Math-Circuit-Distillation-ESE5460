@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 import torch
@@ -30,9 +31,19 @@ def _format_range_label(prefix: str, center: int, radius: int) -> str:
     return f"{prefix} {center - radius}-{center + radius}"
 
 
+def parse_numeric_args(prompt: str) -> tuple[int, ...]:
+    """Parse numeric arguments from the left side of an arithmetic prompt."""
+    left = prompt.split("=", 1)[0]
+    values = re.findall(r"-?\d+", left)
+    if not values:
+        raise ValueError(f"No numeric arguments found in prompt {prompt!r}")
+    return tuple(int(value) for value in values)
+
+
 def build_anova_basis_rules(
     arg_values: list[list[int]],
     *,
+    target_args: tuple[int, ...] | None = None,
     range_radius: int = 10,
 ) -> list[BasisRule]:
     """Build binary basis masks for argument and sum rules."""
@@ -47,21 +58,40 @@ def build_anova_basis_rules(
     for dim in range(min(2, len(arg_values))):
         arg_name = f"arg{dim + 1}"
         values = grids[dim]
-        for center in arg_values[dim]:
+        centers = (
+            [int(target_args[dim])]
+            if target_args is not None and dim < len(target_args)
+            else [int(value) for value in arg_values[dim]]
+        )
+        unit_digits = (
+            [int(target_args[dim]) % 10]
+            if target_args is not None and dim < len(target_args)
+            else list(range(10))
+        )
+        for center in centers:
             mask = (values >= center - range_radius) & (values <= center + range_radius)
-            rules.append(BasisRule(_format_range_label(arg_name, int(center), range_radius), mask))
-        for unit_digit in range(10):
+            rules.append(BasisRule(_format_range_label(arg_name, center, range_radius), mask))
+        for unit_digit in unit_digits:
             mask = torch.remainder(values, 10) == unit_digit
             if bool(mask.any().item()):
                 rules.append(BasisRule(f"{arg_name} units {unit_digit}", mask))
 
     if len(arg_values) >= 2:
         sums = grids[0] + grids[1]
-        sum_centers = sorted({int(value) for value in sums.flatten().tolist()})
+        sum_centers = (
+            [int(target_args[0] + target_args[1])]
+            if target_args is not None and len(target_args) >= 2
+            else sorted({int(value) for value in sums.flatten().tolist()})
+        )
         for center in sum_centers:
             mask = (sums >= center - range_radius) & (sums <= center + range_radius)
             rules.append(BasisRule(_format_range_label("sum", center, range_radius), mask))
-        for unit_digit in range(10):
+        sum_unit_digits = (
+            [int(target_args[0] + target_args[1]) % 10]
+            if target_args is not None and len(target_args) >= 2
+            else list(range(10))
+        )
+        for unit_digit in sum_unit_digits:
             mask = torch.remainder(sums, 10) == unit_digit
             if bool(mask.any().item()):
                 rules.append(BasisRule(f"sum units {unit_digit}", mask))
@@ -102,6 +132,7 @@ def label_activation_heatmaps(
     arg_values: list[list[int]],
     *,
     threshold: float,
+    target_args: tuple[int, ...] | None = None,
     range_radius: int = 10,
 ) -> list[NodeLabel]:
     """Assign all basis labels whose explained-variance score reaches threshold."""
@@ -113,7 +144,11 @@ def label_activation_heatmaps(
             f"got shape {tuple(activations.shape)}"
         )
 
-    rules = build_anova_basis_rules(arg_values, range_radius=range_radius)
+    rules = build_anova_basis_rules(
+        arg_values,
+        target_args=target_args,
+        range_radius=range_radius,
+    )
     out: list[NodeLabel] = []
     for activation_grid in activations.detach().float().cpu():
         scores = {
