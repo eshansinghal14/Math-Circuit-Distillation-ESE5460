@@ -52,6 +52,7 @@ class DistillationConfig:
     step_log_interval: int = 50
     save_best: bool = False
     eval_max_new_tokens: int = EVAL_MAX_NEW_TOKENS
+    track_loss_grads: bool = False
     save_dir: str = "results/distillation"
     teacher_data_cache: Optional[str] = None
     seed: int = 42

@@ -145,6 +145,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eval-max-new-tokens", type=int, default=None)
     parser.add_argument("--eval-batch-size", type=int, default=50)
     parser.add_argument("--eval-datasets", nargs="*", default=None, metavar="DATASET")
+    parser.add_argument(
+        "--track-loss-grads",
+        action="store_true",
+        help="Log KL and graph gradient norms plus their cosine similarity.",
+    )
     parser.add_argument("--teacher-data-cache", type=str, default=None, metavar="PATH")
     parser.add_argument(
         "--save-dir",
@@ -301,6 +306,7 @@ def main() -> None:
                 else EVAL_MAX_NEW_TOKENS
             ),
             eval_batch_size=args.eval_batch_size,
+            track_loss_grads=args.track_loss_grads,
             save_dir=run_dir,
             teacher_data_cache=args.teacher_data_cache,
             step_log_interval=args.step_log_interval,

@@ -1,6 +1,7 @@
 import gc
 import importlib
 import json
+import math
 import os
 from collections import defaultdict
 from functools import partial
@@ -318,6 +319,53 @@ class DistillationTrainer:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+    def _clone_student_grads(self) -> List[Optional[torch.Tensor]]:
+        return [
+            param.grad.detach().clone() if param.grad is not None else None
+            for param in self.student.parameters()
+        ]
+
+    def _record_kl_only_grad_metrics(self, metrics: Dict[str, float]) -> None:
+        kl_norm_sq = 0.0
+        for param in self.student.parameters():
+            if param.grad is not None:
+                grad = param.grad.detach().float()
+                kl_norm_sq += float((grad * grad).sum().item())
+        metrics["kl_loss_grad"] = math.sqrt(kl_norm_sq)
+        metrics["graph_loss_grad"] = 0.0
+        metrics["loss_cossim"] = 0.0
+
+    def _record_loss_grad_metrics(
+        self,
+        metrics: Dict[str, float],
+        kl_grads: List[Optional[torch.Tensor]],
+    ) -> None:
+        kl_norm_sq = 0.0
+        graph_norm_sq = 0.0
+        dot = 0.0
+        for param, kl_grad in zip(self.student.parameters(), kl_grads, strict=True):
+            if kl_grad is not None:
+                kl_grad_f = kl_grad.float()
+                kl_norm_sq += float((kl_grad_f * kl_grad_f).sum().item())
+            if param.grad is None:
+                continue
+            graph_grad = param.grad.detach()
+            if kl_grad is not None:
+                graph_grad = graph_grad - kl_grad.to(device=graph_grad.device)
+                dot += float((kl_grad.to(device=graph_grad.device).float() * graph_grad.float()).sum().item())
+            graph_grad_f = graph_grad.float()
+            graph_norm_sq += float((graph_grad_f * graph_grad_f).sum().item())
+
+        kl_norm = math.sqrt(kl_norm_sq)
+        graph_norm = math.sqrt(graph_norm_sq)
+        metrics["kl_loss_grad"] = kl_norm
+        metrics["graph_loss_grad"] = graph_norm
+        metrics["loss_cossim"] = (
+            dot / (kl_norm * graph_norm)
+            if kl_norm > 0.0 and graph_norm > 0.0
+            else 0.0
+        )
+
     def train_epoch(self, epoch: int) -> Dict[str, float]:
         self.student.train()
         agg = defaultdict(float)
@@ -331,10 +379,19 @@ class DistillationTrainer:
             self.optimizer.zero_grad(set_to_none=self._use_graph)
             if self._use_graph:
                 loss.backward()
+                kl_grads = (
+                    self._clone_student_grads()
+                    if self.config.track_loss_grads
+                    else None
+                )
                 self._clear_cuda_cache()
                 loss = self._backward_graph_loss(batch, metrics, loss)
+                if kl_grads is not None:
+                    self._record_loss_grad_metrics(metrics, kl_grads)
             else:
                 loss.backward()
+                if self.config.track_loss_grads:
+                    self._record_kl_only_grad_metrics(metrics)
             torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.config.grad_clip)
             self.optimizer.step()
             if self._use_graph:
@@ -362,10 +419,17 @@ class DistillationTrainer:
                         f" | Graph {metrics.get('graph_loss', 0.0):.4f}"
                         f" | lambdaGraph {metrics.get('graph_loss_weighted', 0.0):.4f}"
                     )
+                grad_s = ""
+                if self.config.track_loss_grads:
+                    grad_s = (
+                        f" | grad KL {metrics.get('kl_loss_grad', 0.0):.3e}"
+                        f" Graph {metrics.get('graph_loss_grad', 0.0):.3e}"
+                        f" cos {metrics.get('loss_cossim', 0.0):.4f}"
+                    )
                 print(
                     f"  step {step:04d} | KL {metrics['kl_loss']:.4f}"
                     f"{graph_s} | Acc {self._step_log_eval_accuracy:.4f}"
-                    f"{extra_eval_s}",
+                    f"{extra_eval_s}{grad_s}",
                 )
 
         if n_steps == 0:
