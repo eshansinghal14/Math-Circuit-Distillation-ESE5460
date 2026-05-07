@@ -247,6 +247,7 @@ class DistillationTrainer:
         batch: Dict[str, Any],
         metrics: Dict[str, float],
         non_graph_loss: torch.Tensor,
+        kl_grad_norm: Optional[float] = None,
     ) -> torch.Tensor:
         if not self._use_graph:
             return non_graph_loss
@@ -259,16 +260,59 @@ class DistillationTrainer:
         self._clear_cuda_cache()
         from graph_loss.training import backward_batch_graph_loss
 
+        use_grad_norm_scale = (
+            self.config.graph_grad_norm_scale
+            and kl_grad_norm is not None
+            and kl_grad_norm > 1e-8
+        )
+
+        # When grad-norm scaling is on we snapshot KL grads, run graph backward
+        # with loss_scale=1 (no lambda yet), then re-scale the graph-only delta.
+        if use_grad_norm_scale:
+            kl_grad_snap: Dict[str, Optional[torch.Tensor]] = {
+                n: (p.grad.clone() if p.grad is not None else None)
+                for n, p in self.student.named_parameters()
+            }
+
         graph_loss, graph_metrics = backward_batch_graph_loss(
             prompts=batch["prompts"],
             teacher_graph_model=self.teacher_graph_model,
             student_adapter=self.student_graph_adapter,
             config=self.graph_loss_config,
             device=self.device,
-            loss_scale=self.config.lambda_graph,
+            loss_scale=1.0 if use_grad_norm_scale else self.config.lambda_graph,
             teacher_cache=self.teacher_data_cache,
             answers=batch.get("answers"),
         )
+
+        if use_grad_norm_scale:
+            # Compute graph-only grad norm from the delta, then rescale.
+            graph_grad_sq = 0.0
+            for n, p in self.student.named_parameters():
+                if p.grad is None:
+                    continue
+                kl_g = kl_grad_snap[n]
+                graph_only = p.grad if kl_g is None else (p.grad - kl_g)
+                graph_grad_sq += graph_only.float().norm().item() ** 2
+            graph_grad_norm = graph_grad_sq ** 0.5
+
+            if graph_grad_norm > 1e-8:
+                effective_scale = self.config.lambda_graph * kl_grad_norm / graph_grad_norm
+                for n, p in self.student.named_parameters():
+                    if p.grad is None:
+                        continue
+                    kl_g = kl_grad_snap[n]
+                    graph_only = p.grad if kl_g is None else (p.grad - kl_g)
+                    p.grad = (kl_g if kl_g is not None else torch.zeros_like(p.grad)) + effective_scale * graph_only
+            else:
+                # Graph backward produced no signal; restore KL-only grads.
+                for n, p in self.student.named_parameters():
+                    p.grad = kl_grad_snap[n]
+
+            metrics["graph_grad_norm_scale_effective_lambda"] = float(
+                self.config.lambda_graph * kl_grad_norm / max(graph_grad_norm, 1e-8)
+            )
+
         graph_weighted = self.config.lambda_graph * graph_loss
         total = non_graph_loss.detach() + graph_weighted
         metrics["graph_loss"] = float(graph_loss.item())
@@ -373,6 +417,13 @@ class DistillationTrainer:
             else 0.0
         )
 
+    def _get_grad_norm(self) -> float:
+        total_sq = 0.0
+        for p in self.student.parameters():
+            if p.grad is not None:
+                total_sq += p.grad.detach().float().norm().item() ** 2
+        return total_sq ** 0.5
+
     def train_epoch(self, epoch: int) -> Dict[str, float]:
         self.student.train()
         agg = defaultdict(float)
@@ -400,7 +451,8 @@ class DistillationTrainer:
                     else None
                 )
                 self._clear_cuda_cache()
-                loss = self._backward_graph_loss(batch, metrics, loss)
+                kl_grad_norm = self._get_grad_norm() if self.config.graph_grad_norm_scale else None
+                loss = self._backward_graph_loss(batch, metrics, loss, kl_grad_norm=kl_grad_norm)
                 if kl_grads is not None:
                     self._record_loss_grad_metrics(metrics, kl_grads)
             else:
@@ -444,6 +496,10 @@ class DistillationTrainer:
                         f" | lambdaGraph {weighted_avg:.4f}"
                         f" | GraphActive {active_pct:.0f}%"
                     )
+                    if self.config.graph_grad_norm_scale:
+                        eff_lam_key = "graph_grad_norm_scale_effective_lambda"
+                        eff_lam_avg = interval.get(eff_lam_key, 0.0) / denom
+                        graph_s += f" | effLambda {eff_lam_avg:.4f}"
                 grad_s = ""
                 if self.config.track_loss_grads:
                     grad_s = (

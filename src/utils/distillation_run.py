@@ -51,6 +51,7 @@ class DistillationConfig:
     fast_student_graph: bool = False
     ablation_batch_size: int = 32
     lambda_kl: float = 1.0
+    graph_grad_norm_scale: bool = False
     eval_batch_size: int = 50
     step_log_interval: int = 50
     save_best: bool = False
