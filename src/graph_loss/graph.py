@@ -20,11 +20,7 @@ from graph_loss.neuron_activation_heatmap import (
 from graph_loss.utils import (
     ActivationWriteResult,
     UnifiedConfig,
-    activation_arg_values_from_shape,
-    activation_write_cache_file,
     convert_nnsight_config_to_transformerlens,
-    load_activation_write_cache,
-    save_activation_write_cache,
 )
 
 
@@ -911,37 +907,6 @@ def build_super_graph(
         order_tensor = torch.tensor(order, dtype=torch.long)
         return [int(members[idx]) for idx in order], activation_maps[order_tensor]
 
-    def all_model_neuron_locations() -> torch.Tensor:
-        n_layers = int(model.cfg.n_layers)
-        n_pos = int(graph.n_pos)
-        d_mlp = int(model.cfg.d_mlp)
-        layers = torch.arange(n_layers, dtype=torch.long).repeat_interleave(n_pos * d_mlp)
-        token_positions = torch.arange(n_pos, dtype=torch.long).repeat_interleave(d_mlp).repeat(n_layers)
-        neuron_ids = torch.arange(d_mlp, dtype=torch.long).repeat(n_layers * n_pos)
-        return torch.stack([layers, token_positions, neuron_ids], dim=1)
-
-    def full_model_location_indices(neuron_locations: torch.Tensor) -> torch.Tensor:
-        locations = neuron_locations.detach().cpu().to(dtype=torch.long)
-        n_pos = int(graph.n_pos)
-        d_mlp = int(model.cfg.d_mlp)
-        return (locations[:, 0] * n_pos + locations[:, 1]) * d_mlp + locations[:, 2]
-
-    def w_down_vectors_for_locations(neuron_locations: torch.Tensor) -> torch.Tensor:
-        locations = neuron_locations.detach().cpu().to(dtype=torch.long)
-        d_model = int(model.cfg.d_model)
-        w_down_vectors = torch.empty((locations.shape[0], d_model), dtype=torch.float32)
-        w_out_cache: dict[int, torch.Tensor] = {}
-        for location_idx, (layer_t, _token_pos_t, neuron_id_t) in enumerate(locations):
-            layer = int(layer_t.item())
-            neuron_id = int(neuron_id_t.item())
-            if layer not in w_out_cache:
-                old_mlp = model.blocks[layer].mlp.old_mlp
-                w_out_cache[layer] = model._row_oriented_weight(
-                    old_mlp.W_out.to(device=model.cfg.device)
-                )
-            w_down_vectors[location_idx] = w_out_cache[layer][neuron_id].detach().float().cpu()
-        return w_down_vectors
-
     kept_neuron_indices_device = torch.where(kept_neuron_mask)[0]
     kept_neuron_indices = kept_neuron_indices_device.detach().cpu()
     logger.info("  Kept neurons for supergraph: %d", int(kept_neuron_indices.numel()))
@@ -956,50 +921,22 @@ def build_super_graph(
         if dataset is None:
             raise ValueError("A dataset is required to build supernode activation heatmaps")
 
-        logger.info("  Building activation-write matrices from dataset: %s", dataset)
         kept_neuron_locations = graph.neuron_locations[kept_neuron_indices_device].detach().cpu()
+        logger.info(
+            "  Building activation-write matrices for %d kept graph neurons from dataset: %s",
+            int(kept_neuron_locations.shape[0]),
+            dataset,
+        )
         if activation_write_cache_path:
-            resolved_model_name = model_name or getattr(model.cfg, "model_name", "model")
-            all_neuron_locations = all_model_neuron_locations()
-            kept_cache_indices = full_model_location_indices(kept_neuron_locations)
-            cache_file = activation_write_cache_file(
-                activation_write_cache_path,
-                str(resolved_model_name),
-                dataset,
-                n_layers=int(model.cfg.n_layers),
-                n_pos=int(graph.n_pos),
-                d_mlp=int(model.cfg.d_mlp),
+            logger.info(
+                "  Ignoring activation-write cache path for problem-local heatmaps",
             )
-
-            if os.path.isfile(cache_file):
-                logger.info("  Loading cached activation grids: %s", cache_file)
-                full_activations = load_activation_write_cache(
-                    cache_file,
-                    expected_neuron_count=int(all_neuron_locations.shape[0]),
-                )
-            else:
-                full_activation_write_result = build_neuron_activation_write_result(
-                    model,
-                    dataset,
-                    all_neuron_locations,
-                    forward_batch_size=activation_forward_batch_size,
-                    include_w_down_vectors=False,
-                )
-                full_activations = full_activation_write_result.activations
-                logger.info("  Saving activation grid cache: %s", cache_file)
-                save_activation_write_cache(cache_file, full_activation_write_result)
-            activation_write_result_for_kept = ActivationWriteResult(
-                activations=full_activations[kept_cache_indices],
-                w_down_vectors=w_down_vectors_for_locations(kept_neuron_locations),
-                arg_values=activation_arg_values_from_shape(full_activations),
-            )
-        else:
-            activation_write_result_for_kept = build_neuron_activation_write_result(
-                model,
-                dataset,
-                kept_neuron_locations,
-                forward_batch_size=activation_forward_batch_size,
-            )
+        activation_write_result_for_kept = build_neuron_activation_write_result(
+            model,
+            dataset,
+            kept_neuron_locations,
+            forward_batch_size=activation_forward_batch_size,
+        )
         return activation_write_result_for_kept
 
     # For fast-mode graphs, pre-populate prob_delta_by_neuron with DLA vectors
