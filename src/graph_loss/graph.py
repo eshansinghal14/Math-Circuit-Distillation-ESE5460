@@ -1104,12 +1104,13 @@ def build_super_graph(
             supernode_labels = [
                 sorted({label for member in members for label in node_labels.get(member, [])})
             ]
+            label_title = ", ".join(supernode_labels[0]) if supernode_labels[0] else "none"
             supernode_heatmaps = [
                 (
                     cluster_heatmaps,
                     activation_write_result.arg_values,
                     members,
-                    "ANOVA-labeled neurons",
+                    f"ANOVA labels: {label_title}",
                 )
             ]
         else:
