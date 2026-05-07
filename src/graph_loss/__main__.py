@@ -1,6 +1,7 @@
 import argparse
 import logging
 import math
+import os
 import warnings
 
 import torch
@@ -669,6 +670,8 @@ def main():
     )
 
     args = parser.parse_args()
+    if args.supernode_heatmap_output_dir:
+        args.supernode_heatmap_output_dir = os.path.abspath(args.supernode_heatmap_output_dir)
 
     dtype = resolve_torch_dtype(args.dtype)
 
@@ -732,6 +735,10 @@ def main():
         return
 
     logger.info("Running build_super_graph")
+    logger.info(
+        "Supernode heatmap output directory: %s",
+        args.supernode_heatmap_output_dir,
+    )
     supergraph = build_super_graph(
         graph,
         model,

@@ -947,6 +947,60 @@ def build_super_graph(
     logger.info("  Kept neurons for supergraph: %d", int(kept_neuron_indices.numel()))
     all_supernode_prob_delta_norms = torch.empty(0, dtype=torch.float32)
     prob_delta_elbow_index = None
+    activation_write_result_for_kept: ActivationWriteResult | None = None
+
+    def get_activation_write_result_for_kept() -> ActivationWriteResult:
+        nonlocal activation_write_result_for_kept
+        if activation_write_result_for_kept is not None:
+            return activation_write_result_for_kept
+        if dataset is None:
+            raise ValueError("A dataset is required to build supernode activation heatmaps")
+
+        logger.info("  Building activation-write matrices from dataset: %s", dataset)
+        kept_neuron_locations = graph.neuron_locations[kept_neuron_indices_device].detach().cpu()
+        if activation_write_cache_path:
+            resolved_model_name = model_name or getattr(model.cfg, "model_name", "model")
+            all_neuron_locations = all_model_neuron_locations()
+            kept_cache_indices = full_model_location_indices(kept_neuron_locations)
+            cache_file = activation_write_cache_file(
+                activation_write_cache_path,
+                str(resolved_model_name),
+                dataset,
+                n_layers=int(model.cfg.n_layers),
+                n_pos=int(graph.n_pos),
+                d_mlp=int(model.cfg.d_mlp),
+            )
+
+            if os.path.isfile(cache_file):
+                logger.info("  Loading cached activation grids: %s", cache_file)
+                full_activations = load_activation_write_cache(
+                    cache_file,
+                    expected_neuron_count=int(all_neuron_locations.shape[0]),
+                )
+            else:
+                full_activation_write_result = build_neuron_activation_write_result(
+                    model,
+                    dataset,
+                    all_neuron_locations,
+                    forward_batch_size=activation_forward_batch_size,
+                    include_w_down_vectors=False,
+                )
+                full_activations = full_activation_write_result.activations
+                logger.info("  Saving activation grid cache: %s", cache_file)
+                save_activation_write_cache(cache_file, full_activation_write_result)
+            activation_write_result_for_kept = ActivationWriteResult(
+                activations=full_activations[kept_cache_indices],
+                w_down_vectors=w_down_vectors_for_locations(kept_neuron_locations),
+                arg_values=activation_arg_values_from_shape(full_activations),
+            )
+        else:
+            activation_write_result_for_kept = build_neuron_activation_write_result(
+                model,
+                dataset,
+                kept_neuron_locations,
+                forward_batch_size=activation_forward_batch_size,
+            )
+        return activation_write_result_for_kept
 
     # For fast-mode graphs, pre-populate prob_delta_by_neuron with DLA vectors
     # (activation × W_out × W_U_logits) so that ensure_prob_deltas() skips ablation
@@ -1023,51 +1077,37 @@ def build_super_graph(
                 supernode_influence(members),
                 format_member_locations(members),
             )
-    elif dataset and kept_neuron_indices.numel():
-        logger.info("  Building activation-write matrices from dataset: %s", dataset)
-        kept_neuron_locations = graph.neuron_locations[kept_neuron_indices_device].detach().cpu()
-        if activation_write_cache_path:
-            resolved_model_name = model_name or getattr(model.cfg, "model_name", "model")
-            all_neuron_locations = all_model_neuron_locations()
-            kept_cache_indices = full_model_location_indices(kept_neuron_locations)
-            cache_file = activation_write_cache_file(
-                activation_write_cache_path,
-                str(resolved_model_name),
-                dataset,
-                n_layers=int(model.cfg.n_layers),
-                n_pos=int(graph.n_pos),
-                d_mlp=int(model.cfg.d_mlp),
-            )
-
-            if os.path.isfile(cache_file):
-                logger.info("  Loading cached activation grids: %s", cache_file)
-                full_activations = load_activation_write_cache(
-                    cache_file,
-                    expected_neuron_count=int(all_neuron_locations.shape[0]),
+        if supernode_heatmap_output_dir is not None:
+            if dataset is None:
+                logger.info(
+                    "  Skipping supernode heatmap PDFs: no dataset was provided",
                 )
             else:
-                full_activation_write_result = build_neuron_activation_write_result(
-                    model,
-                    dataset,
-                    all_neuron_locations,
-                    forward_batch_size=activation_forward_batch_size,
-                    include_w_down_vectors=False,
-                )
-                full_activations = full_activation_write_result.activations
-                logger.info("  Saving activation grid cache: %s", cache_file)
-                save_activation_write_cache(cache_file, full_activation_write_result)
-            activation_write_result = ActivationWriteResult(
-                activations=full_activations[kept_cache_indices],
-                w_down_vectors=w_down_vectors_for_locations(kept_neuron_locations),
-                arg_values=activation_arg_values_from_shape(full_activations),
-            )
-        else:
-            activation_write_result = build_neuron_activation_write_result(
-                model,
-                dataset,
-                kept_neuron_locations,
-                forward_batch_size=activation_forward_batch_size,
-            )
+                activation_write_result = get_activation_write_result_for_kept()
+                kept_row_by_member = {
+                    int(member): row_idx
+                    for row_idx, member in enumerate(kept_neuron_indices.tolist())
+                }
+                for supernode_idx, members in enumerate(supernodes):
+                    row_indices = torch.tensor(
+                        [kept_row_by_member[int(member)] for member in members],
+                        dtype=torch.long,
+                    )
+                    saved_path = save_supernode_activation_heatmap_pdf(
+                        activation_write_result.activations[row_indices],
+                        activation_write_result.arg_values,
+                        members,
+                        graph.neuron_locations.detach().cpu(),
+                        output_path=os.path.join(
+                            supernode_heatmap_output_dir,
+                            f"supernode_{supernode_idx}.pdf",
+                        ),
+                        title=f"supernode {supernode_idx}: ablation clustering",
+                    )
+                    logger.info("  Saved supernode heatmap PDF: %s", saved_path)
+    elif dataset and kept_neuron_indices.numel():
+        kept_neuron_locations = graph.neuron_locations[kept_neuron_indices_device].detach().cpu()
+        activation_write_result = get_activation_write_result_for_kept()
         prompt_tokens = decoded_prompt_tokens()
         numeric_token_positions = [
             token_pos
