@@ -139,6 +139,9 @@ class DistillationTrainer:
                 graph_focus_weight=config.graph_focus_weight,
                 graph_grad_mode=config.graph_grad_mode,
                 graph_true_grad_chunk_size=config.graph_true_grad_chunk_size,
+                fast_student_graph=config.fast_student_graph,
+                ablation_batch_size=config.ablation_batch_size,
+                lambda_kl=config.lambda_kl,
             )
             self.student_graph_adapter = HFLlamaGraphAdapter(
                 self.student,
@@ -233,6 +236,11 @@ class DistillationTrainer:
         )
         metrics: Dict[str, float] = {"kl_loss": float(kl_loss.item())}
         metrics["total_loss"] = float(kl_loss.item())
+        if self.config.lambda_kl == 0.0:
+            # Zero out KL contribution so graph loss is the only gradient signal.
+            kl_loss = kl_loss.detach() * 0.0
+        elif self.config.lambda_kl != 1.0:
+            kl_loss = self.config.lambda_kl * kl_loss
         return kl_loss, metrics
 
     def _backward_graph_loss(
@@ -371,6 +379,14 @@ class DistillationTrainer:
         agg = defaultdict(float)
         n_steps = 0
         skipped_nonfinite = 0
+        # Per-interval running sums for diagnostic step prints.  We want the
+        # printed Graph/lambdaGraph/active-rate values to reflect *all* batches
+        # since the last print, not just the latest batch (whose graph loss is
+        # often 0 because that single batch happened to have no matched
+        # supernodes — misleading when many earlier batches in the interval
+        # did backprop graph gradients).
+        interval = defaultdict(float)
+        interval_steps = 0
         for step, batch in enumerate(self.loader):
             loss, metrics = self._forward_kl(batch)
             if not torch.isfinite(loss).item():
@@ -403,7 +419,9 @@ class DistillationTrainer:
             self._record_step_metrics(epoch, step, metrics)
             for key, value in metrics.items():
                 agg[key] += float(value)
+                interval[key] += float(value)
             n_steps += 1
+            interval_steps += 1
 
             if step % max(1, self.config.step_log_interval) == 0:
                 self._run_training_eval(epoch, step)
@@ -413,11 +431,19 @@ class DistillationTrainer:
                         f"{p}={self._step_log_extra_eval_acc[p]:.4f}"
                         for p in sorted(self._step_log_extra_eval_acc.keys())
                     )
+                denom = max(interval_steps, 1)
+                kl_avg = interval.get("kl_loss", 0.0) / denom
                 graph_s = ""
                 if self._use_graph:
+                    graph_avg = interval.get("graph_loss", 0.0) / denom
+                    weighted_avg = interval.get("graph_loss_weighted", 0.0) / denom
+                    n_prompts = interval.get("graph_graph_prompts", 0.0)
+                    n_back = interval.get("graph_graph_backward_prompts", 0.0)
+                    active_pct = (100.0 * n_back / n_prompts) if n_prompts > 0 else 0.0
                     graph_s = (
-                        f" | Graph {metrics.get('graph_loss', 0.0):.4f}"
-                        f" | lambdaGraph {metrics.get('graph_loss_weighted', 0.0):.4f}"
+                        f" | Graph {graph_avg:.4f}"
+                        f" | lambdaGraph {weighted_avg:.4f}"
+                        f" | GraphActive {active_pct:.0f}%"
                     )
                 grad_s = ""
                 if self.config.track_loss_grads:
@@ -427,10 +453,12 @@ class DistillationTrainer:
                         f" cos {metrics.get('loss_cossim', 0.0):.4f}"
                     )
                 print(
-                    f"  step {step:04d} | KL {metrics['kl_loss']:.4f}"
+                    f"  step {step:04d} | KL {kl_avg:.4f}"
                     f"{graph_s} | Acc {self._step_log_eval_accuracy:.4f}"
                     f"{extra_eval_s}{grad_s}",
                 )
+                interval.clear()
+                interval_steps = 0
 
         if n_steps == 0:
             print(

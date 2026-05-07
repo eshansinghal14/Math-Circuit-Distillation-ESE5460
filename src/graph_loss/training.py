@@ -94,6 +94,20 @@ class GraphAuxConfig:
     # 1 = pure serial (lowest memory), higher = more parallelism per chunk.
     # 4 keeps activation memory ~4×baseline forward, well under 80 GB on A100.
     graph_true_grad_chunk_size: int = 4
+    # Skip the expensive student [neurons, neurons] Jacobian backward passes
+    # entirely.  Builds a minimal graph with neuron selection + DLA-only
+    # adjacency, then runs ablation clustering directly on the model.  Valid
+    # ONLY when graph_edge_weight == 0 (the supernode adjacency aggregated
+    # without a real Jacobian is meaningless).  Roughly 2-3x faster student
+    # graph construction.
+    fast_student_graph: bool = False
+    # Number of supernodes ablated in a single batched forward when computing
+    # the no-grad student supernode prob_delta matching signal.  Each unit of
+    # batch costs ~1 student forward worth of activation memory; raising this
+    # gives ~linear wall-clock speedup until you OOM.  Default 32 is safe on
+    # any GPU with ≥40GB; bump higher (64–128) on A100 80GB or H100 if RAM
+    # headroom allows.
+    ablation_batch_size: int = 32
 
 
 def _log_alignment_diagnostic(
@@ -269,10 +283,24 @@ def compute_prompt_graph_loss(
         print(f"  [graph] building student graph for prompt: {prompt!r}")
     # Force student to attribute over the same logit tokens as the teacher so that
     # prob-delta vectors occupy the same vocabulary positions in both models.
-    # The student uses full Jacobian attribution (fast=False) to populate real
-    # neuron-to-neuron edges, so the supernode adjacency aggregated by
-    # _aggregate_supergraph_adjacency carries genuine causal structure rather than
-    # the all-zero block produced by fast/DLA-only attribution.
+    #
+    # ``fast_student_graph=True`` skips the [neurons, neurons] Jacobian
+    # backward passes entirely (huge speedup), producing a graph with only
+    # the [logits, neurons] DLA block.  This is sufficient for node-loss-only
+    # mode because:
+    #   - Neuron selection still happens (top-K residual-norm contributors).
+    #   - Ablation clustering in build_super_graph runs forwards directly on
+    #     the model, ignoring the adjacency block.
+    #   - The supernode prob_deltas (used for matching + node loss) come from
+    #     true ablation, also bypassing the adjacency.
+    #   - Only the edge loss truly needs the Jacobian, so this path requires
+    #     graph_edge_weight == 0.  We assert that here.
+    if config.fast_student_graph and config.graph_edge_weight > 0.0:
+        raise ValueError(
+            "fast_student_graph=True is incompatible with graph_edge_weight > 0 "
+            "(edge loss requires the [neurons, neurons] Jacobian block). "
+            "Set --graph-edge-weight 0 or --fast-student-graph false."
+        )
     student_graph = student_adapter.build_graph(
         prompt,
         attribution_targets=logit_token_ids.cpu() if logit_token_ids is not None else None,
@@ -282,20 +310,21 @@ def compute_prompt_graph_loss(
         verbose=config.verbose,
         create_graph=False,
         detach_result=False,
-        fast=False,
-        # When skip_logit_attribution=True we save ~top_k_logits backward passes
-        # but the student loses real Jacobian logit-influence rows, leaving the
-        # supernode alignment signal in a different functional space than the
-        # cached teacher prob-deltas (sum-of-DLAs vs real ablation prob-deltas).
-        # Default is False so the student supernode alignment can use real
-        # logit influence aggregated per supernode (see below).
+        fast=config.fast_student_graph,
+        # In fast mode, ``skip_logit_attribution`` is moot — the fast path
+        # builds [logits, neurons] linearly (not via backward) anyway.  In
+        # full mode, True saves the ~top_k_logits backward passes for the
+        # logit rows; default True since current alignment uses real
+        # ablation prob_deltas (not the Jacobian rows).
         skip_logit_attribution=config.student_skip_logit_attribution,
     )
     if config.align_diagnostic:
         print(f"  [grad-trace] student_graph.adjacency_matrix.requires_grad = {student_graph.adjacency_matrix.requires_grad}")
 
     student_prune_result = None
-    if config.graph_prune:
+    # In fast mode the adjacency is DLA-only; prune_graph would prune almost
+    # everything because neuron→neuron influence is uniformly zero.  Skip it.
+    if config.graph_prune and not config.fast_student_graph:
         if config.verbose:
             print("  [graph] pruning student graph")
         student_prune_result = prune_graph(
@@ -318,10 +347,29 @@ def compute_prompt_graph_loss(
             embedding_eps=config.student_embedding_eps,
             cluster_method="ablation",
         )
-    student_supergraph = _aggregate_supergraph_adjacency(
-        student_graph,
-        student_supergraph_structure.supernodes,
-    )
+    # Skip the (expensive, dense) supernode adjacency aggregation when no
+    # edge term consumes it.  In fast_student_graph mode the underlying
+    # neuron→neuron block is zero anyway; in any mode with edge_weight==0
+    # the aggregated matrix is purely overhead.  Build a placeholder
+    # SuperGraph with a 0×0 adjacency so downstream code that reads
+    # ``.supernodes`` keeps working.
+    if config.fast_student_graph or config.graph_edge_weight == 0.0:
+        student_supergraph = SuperGraph(
+            supernode_adjacency_matrix=torch.zeros(
+                (
+                    len(student_supergraph_structure.supernodes),
+                    len(student_supergraph_structure.supernodes),
+                ),
+                device=student_graph.adjacency_device,
+                dtype=student_graph.adjacency_matrix.dtype,
+            ),
+            supernodes=student_supergraph_structure.supernodes,
+        )
+    else:
+        student_supergraph = _aggregate_supergraph_adjacency(
+            student_graph,
+            student_supergraph_structure.supernodes,
+        )
     if config.align_diagnostic:
         print(f"  [grad-trace] student_supergraph.adjacency.requires_grad = {student_supergraph.supernode_adjacency_matrix.requires_grad}")
     # ----------------------------------------------------------------------
@@ -356,6 +404,7 @@ def compute_prompt_graph_loss(
                 neuron_locations_t=student_graph.neuron_locations,
                 logit_token_ids=student_graph.logit_token_ids,
                 dtype=config.graph_dtype,
+                ablation_batch_size=config.ablation_batch_size,
             )
         )
     else:
@@ -1048,7 +1097,7 @@ def backward_batch_graph_loss(
         if scaled_loss.requires_grad:
             scaled_loss.backward()
             graph_backward_prompts += len(pending_losses)
-        else:
+        elif config.verbose:
             print("  [graph] WARN: generated graph losses have no grad; skipping backward")
         del scaled_loss
         pending_losses = []
