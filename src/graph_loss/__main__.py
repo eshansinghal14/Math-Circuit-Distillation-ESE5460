@@ -673,7 +673,7 @@ def main():
         type=int,
         default=10,
         help=(
-            "Radius for the ANOVA range basis around the prompt arg or sum; "
+            "Maximum radius for ANOVA range bases around the prompt arg or sum; "
             "labels still use the detected high-activation band"
         ),
     )

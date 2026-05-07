@@ -1096,6 +1096,13 @@ def build_super_graph(
             int(kept_neuron_indices[row_idx].item()): label_results[row_idx].labels
             for row_idx in labeled_rows
         }
+        node_plot_labels = {
+            int(kept_neuron_indices[row_idx].item()): [
+                f"{label} ({label_results[row_idx].scores[label]:.3f})"
+                for label in label_results[row_idx].labels
+            ]
+            for row_idx in labeled_rows
+        }
         logger.info(
             "  ANOVA labeling: threshold=%.6g labeled_neurons=%d/%d",
             float(anova_label_threshold),
@@ -1180,7 +1187,7 @@ def build_super_graph(
                         f"supernode_{supernode_idx}.pdf",
                     ),
                     title=f"supernode {supernode_idx}: {title}",
-                    member_labels=node_labels,
+                    member_labels=node_plot_labels,
                 )
                 logger.info("  Saved supernode heatmap PDF: %s", saved_path)
     else:

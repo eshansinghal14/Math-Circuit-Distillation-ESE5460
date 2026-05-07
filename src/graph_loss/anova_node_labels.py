@@ -51,8 +51,9 @@ def build_anova_basis_rules(
 ) -> list[BasisRule]:
     """Build binary basis masks for argument and sum rules.
 
-    Range labels are scored with a fixed basis around the target value. The
-    final range text is chosen per heatmap from the high-activation band.
+    Range labels are scored with all basis radii from exact through
+    ``range_radius``. The final range text is chosen per heatmap from the
+    high-activation band.
     """
     if not arg_values:
         return []
@@ -76,16 +77,17 @@ def build_anova_basis_rules(
             else list(range(10))
         )
         for center in centers:
-            mask = (values >= center - range_radius) & (values <= center + range_radius)
-            rules.append(
-                BasisRule(
-                    _format_interval_label(arg_name, center, center),
-                    mask,
-                    range_values=values,
-                    range_center=center,
-                    range_prefix=arg_name,
+            for radius in range(range_radius + 1):
+                mask = (values >= center - radius) & (values <= center + radius)
+                rules.append(
+                    BasisRule(
+                        _format_interval_label(arg_name, center, center),
+                        mask,
+                        range_values=values,
+                        range_center=center,
+                        range_prefix=arg_name,
+                    )
                 )
-            )
         for unit_digit in unit_digits:
             mask = torch.remainder(values, 10) == unit_digit
             if bool(mask.any().item()):
@@ -99,16 +101,17 @@ def build_anova_basis_rules(
             else sorted({int(value) for value in sums.flatten().tolist()})
         )
         for center in sum_centers:
-            mask = (sums >= center - range_radius) & (sums <= center + range_radius)
-            rules.append(
-                BasisRule(
-                    _format_interval_label("sum", center, center),
-                    mask,
-                    range_values=sums,
-                    range_center=center,
-                    range_prefix="sum",
+            for radius in range(range_radius + 1):
+                mask = (sums >= center - radius) & (sums <= center + radius)
+                rules.append(
+                    BasisRule(
+                        _format_interval_label("sum", center, center),
+                        mask,
+                        range_values=sums,
+                        range_center=center,
+                        range_prefix="sum",
+                    )
                 )
-            )
         sum_unit_digits = (
             [int(target_args[0] + target_args[1]) % 10]
             if target_args is not None and len(target_args) >= 2
