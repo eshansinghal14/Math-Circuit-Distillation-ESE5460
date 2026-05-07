@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import logging
 import math
@@ -21,6 +22,7 @@ from graph_loss.utils import (
     ActivationWriteResult,
     UnifiedConfig,
     convert_nnsight_config_to_transformerlens,
+    safe_cache_segment,
 )
 
 
@@ -907,6 +909,51 @@ def build_super_graph(
         order_tensor = torch.tensor(order, dtype=torch.long)
         return [int(members[idx]) for idx in order], activation_maps[order_tensor]
 
+    def problem_activation_write_cache_file(neuron_locations: torch.Tensor) -> str:
+        if activation_write_cache_path is None:
+            raise ValueError("activation_write_cache_path is not configured")
+
+        resolved_model_name = model_name or getattr(model.cfg, "model_name", "model")
+        model_cache_dir = os.path.join(
+            activation_write_cache_path,
+            safe_cache_segment(str(resolved_model_name)),
+        )
+        os.makedirs(model_cache_dir, exist_ok=True)
+
+        locations = neuron_locations.detach().cpu().to(dtype=torch.long).contiguous()
+        key = hashlib.sha256()
+        key.update(b"problem-local-activation-write-cache-v1")
+        key.update(str(dataset).encode("utf-8"))
+        key.update(graph.input_string.encode("utf-8"))
+        key.update(
+            (
+                f"n_pos={int(graph.n_pos)};"
+                f"n_locations={int(locations.shape[0])};"
+                f"d_model={int(model.cfg.d_model)}"
+            ).encode("utf-8"),
+        )
+        key.update(locations.numpy().tobytes())
+        return os.path.join(
+            model_cache_dir,
+            f"activation_write_problem_{key.hexdigest()[:16]}.pt",
+        )
+
+    def w_down_vectors_for_locations(neuron_locations: torch.Tensor) -> torch.Tensor:
+        locations = neuron_locations.detach().cpu().to(dtype=torch.long)
+        d_model = int(model.cfg.d_model)
+        w_down_vectors = torch.empty((locations.shape[0], d_model), dtype=torch.float32)
+        w_out_cache: dict[int, torch.Tensor] = {}
+        for location_idx, (layer_t, _token_pos_t, neuron_id_t) in enumerate(locations):
+            layer = int(layer_t.item())
+            neuron_id = int(neuron_id_t.item())
+            if layer not in w_out_cache:
+                old_mlp = model.blocks[layer].mlp.old_mlp
+                w_out_cache[layer] = model._row_oriented_weight(
+                    old_mlp.W_out.to(device=model.cfg.device)
+                )
+            w_down_vectors[location_idx] = w_out_cache[layer][neuron_id].detach().float().cpu()
+        return w_down_vectors
+
     kept_neuron_indices_device = torch.where(kept_neuron_mask)[0]
     kept_neuron_indices = kept_neuron_indices_device.detach().cpu()
     logger.info("  Kept neurons for supergraph: %d", int(kept_neuron_indices.numel()))
@@ -922,21 +969,56 @@ def build_super_graph(
             raise ValueError("A dataset is required to build supernode activation heatmaps")
 
         kept_neuron_locations = graph.neuron_locations[kept_neuron_indices_device].detach().cpu()
+        if activation_write_cache_path:
+            cache_file = problem_activation_write_cache_file(kept_neuron_locations)
+            if os.path.isfile(cache_file):
+                logger.info(
+                    "  Loading problem-local activation-write cache: %s",
+                    cache_file,
+                )
+                data = torch.load(cache_file, weights_only=False, map_location="cpu")
+                cached_locations = data.get("neuron_locations")
+                if (
+                    cached_locations is not None
+                    and torch.equal(
+                        cached_locations.detach().cpu().to(dtype=torch.long),
+                        kept_neuron_locations.to(dtype=torch.long),
+                    )
+                ):
+                    activation_write_result_for_kept = ActivationWriteResult(
+                        activations=data["activations"].detach().float().cpu(),
+                        w_down_vectors=w_down_vectors_for_locations(kept_neuron_locations),
+                        arg_values=data["arg_values"],
+                    )
+                    return activation_write_result_for_kept
+                logger.info(
+                    "  Ignoring stale activation-write cache with mismatched neuron locations: %s",
+                    cache_file,
+                )
+
         logger.info(
             "  Building activation-write matrices for %d kept graph neurons from dataset: %s",
             int(kept_neuron_locations.shape[0]),
             dataset,
         )
-        if activation_write_cache_path:
-            logger.info(
-                "  Ignoring activation-write cache path for problem-local heatmaps",
-            )
         activation_write_result_for_kept = build_neuron_activation_write_result(
             model,
             dataset,
             kept_neuron_locations,
             forward_batch_size=activation_forward_batch_size,
         )
+        if activation_write_cache_path:
+            logger.info("  Saving problem-local activation-write cache: %s", cache_file)
+            torch.save(
+                {
+                    "activations": activation_write_result_for_kept.activations.detach()
+                    .to(dtype=torch.float16)
+                    .cpu(),
+                    "arg_values": activation_write_result_for_kept.arg_values,
+                    "neuron_locations": kept_neuron_locations.to(dtype=torch.long),
+                },
+                cache_file,
+            )
         return activation_write_result_for_kept
 
     # For fast-mode graphs, pre-populate prob_delta_by_neuron with DLA vectors
