@@ -405,6 +405,7 @@ def build_super_graph(
     activation_write_cache_path: str | None = None,
     model_name: str | None = None,
     cluster_method: str = "full_search",
+    supernode_heatmap_output_dir: str | None = None,
 ) -> SuperGraph:
     """Cluster kept neurons into numeric-token embedding and final-token computation supernodes."""
 
@@ -1207,16 +1208,25 @@ def build_super_graph(
                 format_member_locations(members),
             )
 
-        for supernode_idx, (activation_grid, heatmap_arg_values, members, title) in enumerate(supernode_heatmaps):
-            saved_path = save_supernode_activation_heatmap_pdf(
+        if supernode_heatmap_output_dir is not None:
+            for supernode_idx, (
                 activation_grid,
                 heatmap_arg_values,
                 members,
-                graph.neuron_locations.detach().cpu(),
-                output_path=f"supernode_{supernode_idx}.pdf",
-                title=f"supernode {supernode_idx}: {title}",
-            )
-            logger.info("  Saved supernode heatmap PDF: %s", saved_path)
+                title,
+            ) in enumerate(supernode_heatmaps):
+                saved_path = save_supernode_activation_heatmap_pdf(
+                    activation_grid,
+                    heatmap_arg_values,
+                    members,
+                    graph.neuron_locations.detach().cpu(),
+                    output_path=os.path.join(
+                        supernode_heatmap_output_dir,
+                        f"supernode_{supernode_idx}.pdf",
+                    ),
+                    title=f"supernode {supernode_idx}: {title}",
+                )
+                logger.info("  Saved supernode heatmap PDF: %s", saved_path)
     else:
         if dataset:
             logger.info("  No kept neurons for dataset activation clustering")

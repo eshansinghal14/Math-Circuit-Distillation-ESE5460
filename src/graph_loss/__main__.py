@@ -657,6 +657,16 @@ def main():
         default="supernode_prob_delta_norms.png",
         help="Path for the post-supergraph supernode probability-delta norm plot",
     )
+    parser.add_argument(
+        "--supernode-heatmap-output-dir",
+        "--supernode_heatmap_output_dir",
+        dest="supernode_heatmap_output_dir",
+        default="supernode_heatmaps",
+        help=(
+            "Directory for per-supernode activation heatmap PDFs when dataset "
+            "activation clustering is used"
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -736,6 +746,7 @@ def main():
         activation_write_cache_path=args.activation_write_cache_path,
         model_name=args.model,
         cluster_method=args.cluster_method,
+        supernode_heatmap_output_dir=args.supernode_heatmap_output_dir,
     )
     _log_supergraph_summary(
         graph,
