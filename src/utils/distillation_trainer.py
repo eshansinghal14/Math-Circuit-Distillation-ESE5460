@@ -141,7 +141,6 @@ class DistillationTrainer:
                 graph_true_grad_chunk_size=config.graph_true_grad_chunk_size,
                 fast_student_graph=config.fast_student_graph,
                 ablation_batch_size=config.ablation_batch_size,
-                lambda_kl=config.lambda_kl,
             )
             self.student_graph_adapter = HFLlamaGraphAdapter(
                 self.student,
