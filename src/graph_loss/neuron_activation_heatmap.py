@@ -613,6 +613,7 @@ def save_supernode_activation_heatmap_pdf(
     *,
     output_path: str,
     title: str,
+    member_labels: dict[int, list[str]] | None = None,
 ) -> str:
     """Save one activation heatmap page per neuron in a supernode."""
     output_dir = os.path.dirname(output_path)
@@ -639,7 +640,10 @@ def save_supernode_activation_heatmap_pdf(
     with PdfPages(output_path) as pdf:
         for member_idx, activation_grid in enumerate(activation_grids):
             location_text, neuron_id = member_locations[member_idx]
-            page_title = f"{title}\nNeuron {neuron_id} ({location_text})"
+            graph_neuron_idx = int(members[member_idx])
+            labels = member_labels.get(graph_neuron_idx, []) if member_labels is not None else []
+            label_text = f"\nANOVA labels: {', '.join(labels)}" if labels else ""
+            page_title = f"{title}{label_text}\nNeuron {neuron_id} ({location_text})"
             if torch.isnan(activation_grid).all():
                 fig, ax = plt.subplots(figsize=(8, 4))
                 ax.text(0.5, 0.5, "No valid activations", ha="center", va="center")
