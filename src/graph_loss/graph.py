@@ -1037,7 +1037,9 @@ def build_super_graph(
                 w_out_cache[layer] = model._row_oriented_weight(
                     old_mlp.W_out.to(device=model.cfg.device, dtype=W_U.dtype)
                 )
-            dla = activations[member] * (w_out_cache[layer][neuron_id] @ W_U_numbers)
+            neuron_activation = activations[member]
+            unembed_projection = w_out_cache[layer][neuron_id] @ W_U_numbers
+            dla = neuron_activation * unembed_projection
             score = F.cosine_similarity(dla.unsqueeze(0), basis.unsqueeze(0), dim=1).item()
             scores[int(member)] = float(score)
         return scores
