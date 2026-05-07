@@ -749,17 +749,13 @@ def save_supernode_activation_heatmap_pdf(
             plt.close(fig)
 
         if member_specificity:
-            specificity_values = [
-                float(member_specificity[int(member)])
-                for member in members
-                if int(member) in member_specificity
+            specificity_items = [
+                (int(member), float(value))
+                for member, value in member_specificity.items()
             ]
-            specificity_members = [
-                int(member)
-                for member in members
-                if int(member) in member_specificity
-            ]
-            if specificity_values:
+            if specificity_items:
+                specificity_members = [member for member, _value in specificity_items]
+                specificity_values = [value for _member, value in specificity_items]
                 fig, ax = plt.subplots(figsize=(10, 4))
                 xs = list(range(len(specificity_values)))
                 ax.bar(xs, specificity_values)

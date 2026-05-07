@@ -1142,25 +1142,32 @@ def build_super_graph(
         supernode_heatmaps = []
 
         for category in ANOVA_LABEL_CATEGORIES:
-            scored_rows = [
+            all_scored_rows = [
                 (row_idx, label_result.category_specificity[category])
                 for row_idx, label_result in enumerate(label_results)
                 if category in label_result.category_specificity
-                and label_result.category_specificity[category] > 0.0
+            ]
+            sorted_all_rows = sorted(all_scored_rows, key=lambda item: item[1], reverse=True)
+            scored_rows = [
+                (row_idx, score)
+                for row_idx, score in sorted_all_rows
+                if score > 0.0
             ]
             if not scored_rows:
                 logger.info("  ANOVA label %s: no positive-specificity nodes", category)
                 continue
-            sorted_rows = sorted(scored_rows, key=lambda item: item[1], reverse=True)
             keep_count, specificity_elbow_index = elbow_keep_count(
-                [float(score) for _row_idx, score in sorted_rows]
+                [float(score) for _row_idx, score in scored_rows]
             )
-            top_rows = sorted_rows[:keep_count]
+            top_rows = scored_rows[:keep_count]
             row_indices = torch.tensor([row_idx for row_idx, _score in top_rows], dtype=torch.long)
             members = [int(kept_neuron_indices[row_idx].item()) for row_idx, _score in top_rows]
             cluster_heatmaps = activation_write_result.activations[row_indices].detach().float()
             member_plot_labels: dict[int, list[str]] = {}
-            member_specificity: dict[int, float] = {}
+            member_specificity = {
+                int(kept_neuron_indices[row_idx].item()): float(score)
+                for row_idx, score in sorted_all_rows
+            }
             for member in members:
                 row_idx = int(torch.where(kept_neuron_indices == member)[0][0].item())
                 label = label_results[row_idx].categories[category]
@@ -1173,7 +1180,6 @@ def build_super_graph(
                 if label not in node_labels[member]:
                     node_labels[member].append(label)
                 selected_member_ids.add(member)
-                member_specificity[member] = float(specificity_score)
             member_number_unembed = (
                 number_token_unembed_values(members)
                 if category in {"sum range", "sum units"}
@@ -1198,7 +1204,7 @@ def build_super_graph(
                 category,
                 specificity_elbow_index,
                 len(members),
-                len(sorted_rows),
+                len(scored_rows),
                 float(top_rows[0][1]),
             )
 
