@@ -1095,16 +1095,18 @@ def build_super_graph(
                 cluster_rows = torch.where(assignments == int(cluster_id))[0]
                 result_rows = phase_rows[cluster_rows]
                 members = kept_neuron_indices[result_rows].tolist()
-                cluster_maps = embedding_maps[cluster_rows]
-                members, cluster_maps = sort_cluster_by_abs_influence(
+                cluster_heatmaps = activation_write_result.activations[
+                    result_rows
+                ].detach().float()
+                members, cluster_heatmaps = sort_cluster_by_abs_influence(
                     [int(member) for member in members],
-                    cluster_maps,
+                    cluster_heatmaps,
                 )
                 supernodes.append(members)
                 token_text = prompt_tokens[int(token_pos)].replace("\n", "\\n").replace("\r", "\\r")
                 supernode_heatmaps.append((
-                    cluster_maps,
-                    [activation_write_result.arg_values[arg_dim]],
+                    cluster_heatmaps,
+                    activation_write_result.arg_values,
                     members,
                     f"embedding token {int(token_pos)} {token_text!r}",
                 ))
