@@ -175,7 +175,7 @@ def activation_write_cache_file(
     os.makedirs(model_cache_dir, exist_ok=True)
 
     key = hashlib.sha256()
-    key.update(b"activation-write-cache-v3")
+    key.update(b"activation-write-cache-v4")
     key.update(dataset.encode("utf-8"))
     key.update(f"n_layers={int(n_layers)};n_pos={int(n_pos)};d_mlp={int(d_mlp)}".encode("utf-8"))
     if neuron_locations is not None:
@@ -188,7 +188,7 @@ def activation_write_cache_file(
 def load_activation_write_cache(
     path: str,
     expected_neuron_count: int,
-) -> torch.Tensor:
+) -> ActivationWriteResult:
     data = torch.load(path, weights_only=False, map_location="cpu")
     activations = data["activations"].detach().cpu()
     if activations.shape[0] != expected_neuron_count:
@@ -196,13 +196,21 @@ def load_activation_write_cache(
             f"Cached activations contain {activations.shape[0]} neurons, "
             f"expected {expected_neuron_count}: {path}"
         )
-    return activations
+    arg_values = data.get("arg_values")
+    if arg_values is None:
+        raise ValueError(f"Cached activations are missing arg_values: {path}")
+    return ActivationWriteResult(
+        activations=activations,
+        w_down_vectors=torch.empty((expected_neuron_count, 0), dtype=torch.float32),
+        arg_values=[[int(value) for value in values] for values in arg_values],
+    )
 
 
 def save_activation_write_cache(path: str, result: ActivationWriteResult) -> None:
     torch.save(
         {
             "activations": result.activations.detach().to(dtype=torch.float16).cpu(),
+            "arg_values": result.arg_values,
         },
         path,
     )

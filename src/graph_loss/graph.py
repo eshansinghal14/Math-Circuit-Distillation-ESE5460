@@ -20,7 +20,6 @@ from graph_loss.neuron_activation_heatmap import (
 from graph_loss.utils import (
     ActivationWriteResult,
     UnifiedConfig,
-    activation_arg_values_from_shape,
     activation_write_cache_file,
     convert_nnsight_config_to_transformerlens,
     load_activation_write_cache,
@@ -973,10 +972,12 @@ def build_super_graph(
                     int(kept_neuron_locations.shape[0]),
                     cache_file,
                 )
-                kept_activations = load_activation_write_cache(
+                kept_activation_write_result = load_activation_write_cache(
                     cache_file,
                     expected_neuron_count=int(kept_neuron_locations.shape[0]),
                 )
+                kept_activations = kept_activation_write_result.activations
+                kept_arg_values = kept_activation_write_result.arg_values
             else:
                 logger.info(
                     "  Building activation-write cache for %d kept neurons from dataset: %s",
@@ -991,13 +992,14 @@ def build_super_graph(
                     include_w_down_vectors=False,
                 )
                 kept_activations = kept_activation_write_result.activations
+                kept_arg_values = kept_activation_write_result.arg_values
                 logger.info("  Saving kept-neuron activation-write cache: %s", cache_file)
                 save_activation_write_cache(cache_file, kept_activation_write_result)
 
             activation_write_result_for_kept = ActivationWriteResult(
                 activations=kept_activations,
                 w_down_vectors=w_down_vectors_for_locations(kept_neuron_locations),
-                arg_values=activation_arg_values_from_shape(kept_activations),
+                arg_values=kept_arg_values,
             )
         else:
             logger.info(
