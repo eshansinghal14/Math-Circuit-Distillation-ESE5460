@@ -983,6 +983,65 @@ def build_super_graph(
             out[int(member)] = (number_values, values)
         return out
 
+    def number_token_dla_cosine_scores(
+        members: list[int],
+        *,
+        target_value: int,
+        units: bool,
+        min_value: int = 0,
+        max_value: int = 200,
+    ) -> dict[int, float]:
+        number_values = list(range(int(min_value), int(max_value) + 1))
+        token_ids: list[int | None] = []
+        for value in number_values:
+            encoded = model.tokenizer(
+                str(value),
+                add_special_tokens=False,
+                return_tensors=None,
+            )
+            input_ids = encoded["input_ids"] if isinstance(encoded, dict) else encoded.input_ids
+            if input_ids and isinstance(input_ids[0], list):
+                input_ids = input_ids[0]
+            token_ids.append(int(input_ids[0]) if len(input_ids) == 1 else None)
+
+        valid_positions = [idx for idx, token_id in enumerate(token_ids) if token_id is not None]
+        if not valid_positions:
+            return {int(member): 0.0 for member in members}
+
+        basis = torch.zeros(len(valid_positions), dtype=torch.float32)
+        target_unit = int(target_value) % 10
+        for basis_idx, number_idx in enumerate(valid_positions):
+            number_value = number_values[number_idx]
+            if (number_value % 10 == target_unit) if units else (number_value == int(target_value)):
+                basis[basis_idx] = 1.0
+        if float(basis.norm().item()) == 0.0:
+            return {int(member): 0.0 for member in members}
+
+        valid_token_ids = torch.tensor(
+            [int(token_ids[idx]) for idx in valid_positions],
+            dtype=torch.long,
+            device=model.cfg.device,
+        )
+        W_U = model.unembed.W_U.detach().to(device=model.cfg.device)
+        W_U_numbers = W_U[:, valid_token_ids]
+        basis = basis.to(device=model.cfg.device, dtype=W_U.dtype)
+        locations = graph.neuron_locations.detach().cpu().to(dtype=torch.long)
+        activations = graph.neuron_activations.detach().to(device=model.cfg.device, dtype=W_U.dtype)
+        scores: dict[int, float] = {}
+        w_out_cache: dict[int, torch.Tensor] = {}
+        for member in members:
+            layer = int(locations[member, 0].item())
+            neuron_id = int(locations[member, 2].item())
+            if layer not in w_out_cache:
+                old_mlp = model.blocks[layer].mlp.old_mlp
+                w_out_cache[layer] = model._row_oriented_weight(
+                    old_mlp.W_out.to(device=model.cfg.device, dtype=W_U.dtype)
+                )
+            dla = activations[member] * (w_out_cache[layer][neuron_id] @ W_U_numbers)
+            score = F.cosine_similarity(dla.unsqueeze(0), basis.unsqueeze(0), dim=1).item()
+            scores[int(member)] = float(score)
+        return scores
+
     kept_neuron_indices_device = torch.where(kept_neuron_mask)[0]
     kept_neuron_indices = kept_neuron_indices_device.detach().cpu()
     kept_node_mask = torch.ones(graph.n_nodes, dtype=torch.bool, device=graph.adjacency_device)
@@ -1140,13 +1199,30 @@ def build_super_graph(
         supernodes = []
         supernode_labels = []
         supernode_heatmaps = []
+        target_sum = int(target_args[0] + target_args[1]) if len(target_args) >= 2 else 0
+        kept_member_list = [int(member) for member in kept_neuron_indices.tolist()]
 
         for category in ANOVA_LABEL_CATEGORIES:
-            all_scored_rows = [
-                (row_idx, label_result.category_specificity[category])
-                for row_idx, label_result in enumerate(label_results)
-                if category in label_result.category_specificity
-            ]
+            if category in {"sum range", "sum units"}:
+                sum_cosine_scores = number_token_dla_cosine_scores(
+                    kept_member_list,
+                    target_value=target_sum,
+                    units=category == "sum units",
+                )
+                all_scored_rows = [
+                    (
+                        row_idx,
+                        sum_cosine_scores[int(kept_neuron_indices[row_idx].item())],
+                    )
+                    for row_idx, label_result in enumerate(label_results)
+                    if category in label_result.category_scores
+                ]
+            else:
+                all_scored_rows = [
+                    (row_idx, label_result.category_specificity[category])
+                    for row_idx, label_result in enumerate(label_results)
+                    if category in label_result.category_specificity
+                ]
             sorted_all_rows = sorted(all_scored_rows, key=lambda item: item[1], reverse=True)
             scored_rows = [
                 (row_idx, score)
@@ -1172,10 +1248,9 @@ def build_super_graph(
                 row_idx = int(torch.where(kept_neuron_indices == member)[0][0].item())
                 label = label_results[row_idx].categories[category]
                 variance_score = label_results[row_idx].category_scores[category]
-                specificity_score = label_results[row_idx].category_specificity[category]
-                member_plot_labels[member] = [
-                    f"{label} (var={variance_score:.3f}, spec={specificity_score:.3f})"
-                ]
+                ranking_score = member_specificity[member]
+                score_name = "cos" if category in {"sum range", "sum units"} else "spec"
+                member_plot_labels[member] = [f"{label} (var={variance_score:.3f}, {score_name}={ranking_score:.3f})"]
                 node_labels.setdefault(member, [])
                 if label not in node_labels[member]:
                     node_labels[member].append(label)
