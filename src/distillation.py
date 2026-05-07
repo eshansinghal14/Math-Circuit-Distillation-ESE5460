@@ -144,6 +144,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--graph-grad-norm-scale",
+        action="store_true",
+        default=False,
+        help=(
+            "Dynamically scale the graph loss contribution so its gradient norm "
+            "equals the KL gradient norm before applying lambda_graph.  Prevents "
+            "graph gradients from dominating when GraphActive spikes.  "
+            "Adds ~1 GB memory overhead to store the KL gradient snapshot."
+        ),
+    )
+    parser.add_argument(
         "--ablation-batch-size",
         type=int,
         default=32,
@@ -335,6 +346,7 @@ def main() -> None:
             fast_student_graph=args.fast_student_graph,
             ablation_batch_size=args.ablation_batch_size,
             lambda_kl=args.lambda_kl,
+            graph_grad_norm_scale=args.graph_grad_norm_scale,
             save_best=args.save_best,
             eval_max_new_tokens=(
                 args.eval_max_new_tokens
