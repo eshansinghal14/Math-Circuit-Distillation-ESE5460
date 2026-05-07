@@ -914,21 +914,6 @@ def build_super_graph(
         order_tensor = torch.tensor(order, dtype=torch.long)
         return [int(members[idx]) for idx in order], activation_maps[order_tensor]
 
-    def all_model_neuron_locations() -> torch.Tensor:
-        n_layers = int(model.cfg.n_layers)
-        n_pos = int(graph.n_pos)
-        d_mlp = int(model.cfg.d_mlp)
-        layers = torch.arange(n_layers, dtype=torch.long).repeat_interleave(n_pos * d_mlp)
-        token_positions = torch.arange(n_pos, dtype=torch.long).repeat_interleave(d_mlp).repeat(n_layers)
-        neuron_ids = torch.arange(d_mlp, dtype=torch.long).repeat(n_layers * n_pos)
-        return torch.stack([layers, token_positions, neuron_ids], dim=1)
-
-    def full_model_location_indices(neuron_locations: torch.Tensor) -> torch.Tensor:
-        locations = neuron_locations.detach().cpu().to(dtype=torch.long)
-        n_pos = int(graph.n_pos)
-        d_mlp = int(model.cfg.d_mlp)
-        return (locations[:, 0] * n_pos + locations[:, 1]) * d_mlp + locations[:, 2]
-
     def w_down_vectors_for_locations(neuron_locations: torch.Tensor) -> torch.Tensor:
         locations = neuron_locations.detach().cpu().to(dtype=torch.long)
         d_model = int(model.cfg.d_model)
@@ -972,8 +957,6 @@ def build_super_graph(
         kept_neuron_locations = graph.neuron_locations[kept_neuron_indices_device].detach().cpu()
         if activation_write_cache_path:
             resolved_model_name = model_name or getattr(model.cfg, "model_name", "model")
-            all_neuron_locations = all_model_neuron_locations()
-            kept_cache_indices = full_model_location_indices(kept_neuron_locations)
             cache_file = activation_write_cache_file(
                 activation_write_cache_path,
                 str(resolved_model_name),
@@ -981,38 +964,40 @@ def build_super_graph(
                 n_layers=int(model.cfg.n_layers),
                 n_pos=int(graph.n_pos),
                 d_mlp=int(model.cfg.d_mlp),
+                neuron_locations=kept_neuron_locations,
             )
 
             if os.path.isfile(cache_file):
                 logger.info(
-                    "  Loading cached full activation-write grids: %s",
+                    "  Loading cached activation-write grids for %d kept neurons: %s",
+                    int(kept_neuron_locations.shape[0]),
                     cache_file,
                 )
-                full_activations = load_activation_write_cache(
+                kept_activations = load_activation_write_cache(
                     cache_file,
-                    expected_neuron_count=int(all_neuron_locations.shape[0]),
+                    expected_neuron_count=int(kept_neuron_locations.shape[0]),
                 )
             else:
                 logger.info(
-                    "  Building full activation-write cache for %d model neurons from dataset: %s",
-                    int(all_neuron_locations.shape[0]),
+                    "  Building activation-write cache for %d kept neurons from dataset: %s",
+                    int(kept_neuron_locations.shape[0]),
                     dataset,
                 )
-                full_activation_write_result = build_neuron_activation_write_result(
+                kept_activation_write_result = build_neuron_activation_write_result(
                     model,
                     dataset,
-                    all_neuron_locations,
+                    kept_neuron_locations,
                     forward_batch_size=activation_forward_batch_size,
                     include_w_down_vectors=False,
                 )
-                full_activations = full_activation_write_result.activations
-                logger.info("  Saving full activation-write cache: %s", cache_file)
-                save_activation_write_cache(cache_file, full_activation_write_result)
+                kept_activations = kept_activation_write_result.activations
+                logger.info("  Saving kept-neuron activation-write cache: %s", cache_file)
+                save_activation_write_cache(cache_file, kept_activation_write_result)
 
             activation_write_result_for_kept = ActivationWriteResult(
-                activations=full_activations[kept_cache_indices],
+                activations=kept_activations,
                 w_down_vectors=w_down_vectors_for_locations(kept_neuron_locations),
-                arg_values=activation_arg_values_from_shape(full_activations),
+                arg_values=activation_arg_values_from_shape(kept_activations),
             )
         else:
             logger.info(

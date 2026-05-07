@@ -169,14 +169,19 @@ def activation_write_cache_file(
     n_layers: int,
     n_pos: int,
     d_mlp: int,
+    neuron_locations: torch.Tensor | None = None,
 ) -> str:
     model_cache_dir = os.path.join(cache_root, safe_cache_segment(model_name))
     os.makedirs(model_cache_dir, exist_ok=True)
 
     key = hashlib.sha256()
-    key.update(b"activation-write-cache-v2")
+    key.update(b"activation-write-cache-v3")
     key.update(dataset.encode("utf-8"))
     key.update(f"n_layers={int(n_layers)};n_pos={int(n_pos)};d_mlp={int(d_mlp)}".encode("utf-8"))
+    if neuron_locations is not None:
+        locations = neuron_locations.detach().cpu().to(dtype=torch.long).contiguous()
+        key.update(f";kept_neurons={int(locations.shape[0])}".encode("utf-8"))
+        key.update(locations.numpy().tobytes())
     return os.path.join(model_cache_dir, f"activation_write_{key.hexdigest()[:16]}.pt")
 
 
