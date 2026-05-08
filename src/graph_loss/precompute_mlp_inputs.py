@@ -175,8 +175,8 @@ def precompute_mlp_inputs(
     for i, (mmap, mmap_path) in enumerate(zip(mmaps, mmap_paths)):
         mmap.flush()
         del mmap
-        arr = np.load(mmap_path, mmap_mode="r")
-        buf = torch.from_numpy(arr.copy()).to(torch.bfloat16)
+        arr = np.memmap(mmap_path, dtype="float16", mode="r", shape=(n_prompts, n_positions, d_model))
+        buf = torch.from_numpy(np.array(arr)).to(torch.bfloat16)
         torch.save(buf, os.path.join(cache_dir, f"layer_{i}.pt"))
         del buf
         os.remove(mmap_path)
