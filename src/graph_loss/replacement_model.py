@@ -353,6 +353,7 @@ class TransformerLensReplacementModel(HookedTransformer):
             target_encoders=torch.cat(target_encoders, dim=0),
             source_vectors=torch.cat(source_vectors, dim=0),
             layer_capture_stats=layer_capture_stats,
+            n_layers=self.cfg.n_layers,
         )
 
     def __del__(self):

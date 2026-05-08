@@ -27,6 +27,7 @@ class AttributionContext:
         target_encoders: torch.Tensor,
         source_vectors: torch.Tensor,
         layer_capture_stats: list[dict[str, float | int]],
+        n_layers: int,
     ) -> None:
         self.logits = logits
         self.token_vectors = token_vectors
@@ -36,7 +37,7 @@ class AttributionContext:
         self.source_vectors = source_vectors
         self.layer_capture_stats = layer_capture_stats
 
-        self.n_layers = int(neuron_locations[:, 0].max().item()) + 1 if len(neuron_locations) else 0
+        self.n_layers = int(n_layers)
         self.n_pos = token_vectors.shape[0]
 
         self._resid_activations: list[torch.Tensor | None] = [None] * (self.n_layers + 1)

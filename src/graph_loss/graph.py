@@ -412,6 +412,8 @@ def build_super_graph(
     model_name: str | None = None,
     cluster_method: str = "full_search",
     supernode_heatmap_output_dir: str | None = None,
+    anova_nodes_per_label: int = 10,
+    sum_min_specificity: float = 0.0,
 ) -> SuperGraph:
     """Cluster kept neurons into numeric-token embedding and final-token computation supernodes."""
 
@@ -428,6 +430,8 @@ def build_super_graph(
         raise ValueError("embedding_sigma and computation_sigma must be non-negative")
     if cluster_method not in {"full_search", "ablation"}:
         raise ValueError("cluster_method must be one of: full_search, ablation")
+    if anova_nodes_per_label <= 0:
+        raise ValueError("anova_nodes_per_label must be positive")
 
     n_neurons = graph.n_neurons
     logger = logging.getLogger(__name__)
@@ -1218,25 +1222,30 @@ def build_super_graph(
                     )
                     for row_idx, label_result in enumerate(label_results)
                     if category in label_result.category_scores
+                    and label_result.category_scores[category] > 0.0
+                    and label_result.category_specificity.get(category, float("-inf"))
+                    > sum_min_specificity
                 ]
             else:
                 all_scored_rows = [
                     (row_idx, label_result.category_specificity[category])
                     for row_idx, label_result in enumerate(label_results)
                     if category in label_result.category_specificity
+                    and label_result.category_scores.get(category, 0.0) > 0.0
                 ]
             sorted_all_rows = sorted(all_scored_rows, key=lambda item: item[1], reverse=True)
-            scored_rows = [
-                (row_idx, score)
-                for row_idx, score in sorted_all_rows
-                if score > 0.0
-            ]
+            scored_rows = sorted_all_rows
             if not scored_rows:
-                logger.info("  ANOVA label %s: no positive-specificity nodes", category)
+                if category in {"sum range", "sum units"}:
+                    logger.info(
+                        "  ANOVA label %s: no positive-variance nodes above sum_min_specificity=%.6g",
+                        category,
+                        sum_min_specificity,
+                    )
+                else:
+                    logger.info("  ANOVA label %s: no positive-variance nodes", category)
                 continue
-            keep_count, specificity_elbow_index = elbow_keep_count(
-                [float(score) for _row_idx, score in scored_rows]
-            )
+            keep_count = min(int(anova_nodes_per_label), len(scored_rows))
             top_rows = scored_rows[:keep_count]
             row_indices = torch.tensor([row_idx for row_idx, _score in top_rows], dtype=torch.long)
             members = [int(kept_neuron_indices[row_idx].item()) for row_idx, _score in top_rows]
@@ -1277,11 +1286,12 @@ def build_super_graph(
                 )
             )
             logger.info(
-                "  ANOVA label %s: specificity_elbow=%s selected_nodes=%d/%d best_specificity=%.6g",
+                "  ANOVA label %s: selected_nodes=%d/%d cap=%d best_%s=%.6g",
                 category,
-                specificity_elbow_index,
                 len(members),
                 len(scored_rows),
+                anova_nodes_per_label,
+                "cos" if category in {"sum range", "sum units"} else "specificity",
                 float(top_rows[0][1]),
             )
 

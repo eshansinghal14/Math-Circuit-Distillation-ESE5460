@@ -68,6 +68,8 @@ class TeacherDataConfig:
     dataset: str | None = None
     activation_forward_batch_size: int = 32
     activation_write_cache_path: str | None = None
+    anova_nodes_per_label: int = 10
+    sum_min_specificity: float = 0.0
 
 
 def _resolve_dataset_file(dataset_file: str) -> str:
@@ -298,16 +300,18 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
                 graph_for_supergraph,
                 model,
                 prune_result=prune_result,
-            cossim_eps=config.cossim_eps,
-            embedding_sigma=config.embedding_sigma,
-            embedding_eps=config.embedding_eps,
-            computation_sigma=config.computation_sigma,
-            computation_eps=config.computation_eps,
-            dataset=config.dataset,
-            activation_forward_batch_size=config.activation_forward_batch_size,
-            activation_write_cache_path=config.activation_write_cache_path,
-            model_name=config.teacher_model,
+                cossim_eps=config.cossim_eps,
+                embedding_sigma=config.embedding_sigma,
+                embedding_eps=config.embedding_eps,
+                computation_sigma=config.computation_sigma,
+                computation_eps=config.computation_eps,
+                dataset=config.dataset,
+                activation_forward_batch_size=config.activation_forward_batch_size,
+                activation_write_cache_path=config.activation_write_cache_path,
+                model_name=config.teacher_model,
                 cluster_method=config.cluster_method,
+                anova_nodes_per_label=config.anova_nodes_per_label,
+                sum_min_specificity=config.sum_min_specificity,
             )
         _log_supergraph_summary(
             graph_for_supergraph,
@@ -537,6 +541,22 @@ def build_parser() -> argparse.ArgumentParser:
         dest="skip_graph_save",
         help="Save the full graph.pt file for each sample.",
     )
+    parser.add_argument(
+        "--anova-nodes-per-label",
+        "--anova_nodes_per_label",
+        dest="anova_nodes_per_label",
+        type=int,
+        default=10,
+        help="Maximum positive-variance ANOVA nodes to include per label supernode",
+    )
+    parser.add_argument(
+        "--sum-min-specificity",
+        "--sum_min_specificity",
+        dest="sum_min_specificity",
+        type=float,
+        default=0.0,
+        help="Minimum ANOVA specificity required for sum-label supernodes ranked by DLA cosine",
+    )
     add_graph_build_args(parser)
     add_graph_prune_args(parser)
     parser.add_argument(
@@ -588,6 +608,8 @@ def main() -> None:
         dataset=args.dataset,
         activation_forward_batch_size=args.activation_forward_batch_size,
         activation_write_cache_path=args.activation_write_cache_path,
+        anova_nodes_per_label=args.anova_nodes_per_label,
+        sum_min_specificity=args.sum_min_specificity,
     )
     generate_teacher_data(config)
 

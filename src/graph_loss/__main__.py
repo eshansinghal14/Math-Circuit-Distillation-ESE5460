@@ -694,6 +694,22 @@ def main():
             "activation clustering is used"
         ),
     )
+    parser.add_argument(
+        "--anova-nodes-per-label",
+        "--anova_nodes_per_label",
+        dest="anova_nodes_per_label",
+        type=int,
+        default=10,
+        help="Maximum positive-variance ANOVA nodes to include per label supernode",
+    )
+    parser.add_argument(
+        "--sum-min-specificity",
+        "--sum_min_specificity",
+        dest="sum_min_specificity",
+        type=float,
+        default=0.0,
+        help="Minimum ANOVA specificity required for sum-label supernodes ranked by DLA cosine",
+    )
 
     args = parser.parse_args()
     if args.supernode_heatmap_output_dir:
@@ -780,6 +796,8 @@ def main():
         model_name=args.model,
         cluster_method=args.cluster_method,
         supernode_heatmap_output_dir=args.supernode_heatmap_output_dir,
+        anova_nodes_per_label=args.anova_nodes_per_label,
+        sum_min_specificity=args.sum_min_specificity,
     )
     _log_supergraph_summary(
         graph,
