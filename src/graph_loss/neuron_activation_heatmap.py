@@ -109,6 +109,30 @@ def _select_mlp_neuron_weight(
     return row.to(device=device, dtype=dtype)
 
 
+def _select_mlp_neuron_weights(
+    model,
+    weight: torch.Tensor,
+    neuron_ids: torch.Tensor,
+    *,
+    device: torch.device | str,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    d_model = model.cfg.d_model
+    d_mlp = model.cfg.d_mlp
+    neuron_ids = neuron_ids.to(device=weight.device, dtype=torch.long)
+
+    if weight.shape == (d_mlp, d_model):
+        rows = weight.index_select(0, neuron_ids)
+    elif weight.shape == (d_model, d_mlp):
+        rows = weight.index_select(1, neuron_ids).T
+    else:
+        raise ValueError(
+            f"Unsupported MLP weight shape {tuple(weight.shape)} for model dims "
+            f"(d_model={d_model}, d_mlp={d_mlp})",
+        )
+    return rows.to(device=device, dtype=dtype)
+
+
 def _select_mlp_neuron_bias(
     module,
     name: str,
@@ -121,6 +145,22 @@ def _select_mlp_neuron_bias(
     if bias is None:
         return torch.zeros((), device=device, dtype=dtype)
     return bias[neuron_id].to(device=device, dtype=dtype)
+
+
+def _select_mlp_neuron_biases(
+    module,
+    name: str,
+    neuron_ids: torch.Tensor,
+    *,
+    device: torch.device | str,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    bias = getattr(module, name, None)
+    if bias is None:
+        return torch.zeros((int(neuron_ids.numel()),), device=device, dtype=dtype)
+    neuron_ids = neuron_ids.to(device=bias.device, dtype=torch.long)
+    return bias.index_select(0, neuron_ids).to(device=device, dtype=dtype)
+
 
 
 def _tokenize_prompt_batch(model, prompts: list[str]) -> tuple[torch.Tensor, list[int]]:
@@ -361,22 +401,32 @@ def build_neuron_activation_write_result(
             # [n_cache_prompts, d_model]
             mlp_input_at_pos = cache_layer_inputs[layer][:, token_pos, :].float()
             old_mlp = model.blocks[layer].mlp.old_mlp
-            for location_idx, neuron_id in group_members:
-                gate_weight = _select_mlp_neuron_weight(
-                    model, old_mlp.W_gate, neuron_id, device="cpu", dtype=torch.float32
-                )
-                up_weight = _select_mlp_neuron_weight(
-                    model, old_mlp.W_in, neuron_id, device="cpu", dtype=torch.float32
-                )
-                gate_bias = _select_mlp_neuron_bias(old_mlp, "b_gate", neuron_id, device="cpu", dtype=torch.float32)
-                up_bias = _select_mlp_neuron_bias(old_mlp, "b_in", neuron_id, device="cpu", dtype=torch.float32)
-                gate_pre = mlp_input_at_pos @ gate_weight + gate_bias  # [n_cache_prompts]
-                up_pre = mlp_input_at_pos @ up_weight + up_bias
-                acts = F.silu(gate_pre) * up_pre  # [n_cache_prompts]
-                if token_pos == 0:
-                    acts = torch.zeros_like(acts)
+            location_indices = [location_idx for location_idx, _neuron_id in group_members]
+            neuron_ids = torch.tensor(
+                [neuron_id for _location_idx, neuron_id in group_members],
+                dtype=torch.long,
+            )
+            gate_weights = _select_mlp_neuron_weights(
+                model, old_mlp.W_gate, neuron_ids, device="cpu", dtype=torch.float32
+            )
+            up_weights = _select_mlp_neuron_weights(
+                model, old_mlp.W_in, neuron_ids, device="cpu", dtype=torch.float32
+            )
+            gate_biases = _select_mlp_neuron_biases(
+                old_mlp, "b_gate", neuron_ids, device="cpu", dtype=torch.float32
+            )
+            up_biases = _select_mlp_neuron_biases(
+                old_mlp, "b_in", neuron_ids, device="cpu", dtype=torch.float32
+            )
+            gate_pre = mlp_input_at_pos @ gate_weights.T + gate_biases
+            up_pre = mlp_input_at_pos @ up_weights.T + up_biases
+            acts_by_prompt = F.silu(gate_pre) * up_pre
+            if token_pos == 0:
+                acts_by_prompt.zero_()
 
-                for numeric_args, activation in zip(cache_args, acts.detach().float()):
+            acts_cpu = acts_by_prompt.detach().float().cpu()
+            for group_idx, location_idx in enumerate(location_indices):
+                for numeric_args, activation in zip(cache_args, acts_cpu[:, group_idx], strict=True):
                     if len(numeric_args) != len(arg_to_idx):
                         continue
                     try:
@@ -435,45 +485,53 @@ def build_neuron_activation_write_result(
                     dtype=torch.bool,
                     device=mlp_input_at_pos.device,
                 )
-                for location_idx, neuron_id in group_members:
-                    gate_weight = _select_mlp_neuron_weight(
-                        model,
-                        old_mlp.W_gate,
-                        neuron_id,
-                        device=mlp_input_at_pos.device,
-                        dtype=mlp_input_at_pos.dtype,
-                    )
-                    up_weight = _select_mlp_neuron_weight(
-                        model,
-                        old_mlp.W_in,
-                        neuron_id,
-                        device=mlp_input_at_pos.device,
-                        dtype=mlp_input_at_pos.dtype,
-                    )
-                    gate_bias = _select_mlp_neuron_bias(
-                        old_mlp,
-                        "b_gate",
-                        neuron_id,
-                        device=mlp_input_at_pos.device,
-                        dtype=mlp_input_at_pos.dtype,
-                    )
-                    up_bias = _select_mlp_neuron_bias(
-                        old_mlp,
-                        "b_in",
-                        neuron_id,
-                        device=mlp_input_at_pos.device,
-                        dtype=mlp_input_at_pos.dtype,
-                    )
-                    gate_pre = mlp_input_at_pos @ gate_weight + gate_bias
-                    up_pre = mlp_input_at_pos @ up_weight + up_bias
-                    activations = F.silu(gate_pre) * up_pre
-                    if token_pos == 0:
-                        activations.zero_()
+                location_indices = [location_idx for location_idx, _neuron_id in group_members]
+                neuron_ids = torch.tensor(
+                    [neuron_id for _location_idx, neuron_id in group_members],
+                    dtype=torch.long,
+                )
+                gate_weights = _select_mlp_neuron_weights(
+                    model,
+                    old_mlp.W_gate,
+                    neuron_ids,
+                    device=mlp_input_at_pos.device,
+                    dtype=mlp_input_at_pos.dtype,
+                )
+                up_weights = _select_mlp_neuron_weights(
+                    model,
+                    old_mlp.W_in,
+                    neuron_ids,
+                    device=mlp_input_at_pos.device,
+                    dtype=mlp_input_at_pos.dtype,
+                )
+                gate_biases = _select_mlp_neuron_biases(
+                    old_mlp,
+                    "b_gate",
+                    neuron_ids,
+                    device=mlp_input_at_pos.device,
+                    dtype=mlp_input_at_pos.dtype,
+                )
+                up_biases = _select_mlp_neuron_biases(
+                    old_mlp,
+                    "b_in",
+                    neuron_ids,
+                    device=mlp_input_at_pos.device,
+                    dtype=mlp_input_at_pos.dtype,
+                )
+                activations_by_prompt = (
+                    F.silu(mlp_input_at_pos @ gate_weights.T + gate_biases)
+                    * (mlp_input_at_pos @ up_weights.T + up_biases)
+                )
+                if token_pos == 0:
+                    activations_by_prompt.zero_()
 
+                activations_cpu = activations_by_prompt.detach().float().cpu()
+                valid_cpu = valid_at_pos.detach().cpu()
+                for group_idx, location_idx in enumerate(location_indices):
                     for numeric_args, activation, is_valid in zip(
                         batch_numeric_args,
-                        activations.detach().float().cpu(),
-                        valid_at_pos.detach().cpu(),
+                        activations_cpu[:, group_idx],
+                        valid_cpu,
                         strict=True,
                     ):
                         if not bool(is_valid.item()):
