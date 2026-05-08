@@ -424,7 +424,7 @@ class DistillationTrainer:
                 total_sq += p.grad.detach().float().norm().item() ** 2
         return total_sq ** 0.5
 
-    def train_epoch(self, epoch: int) -> Dict[str, float]:
+    def train_epoch(self, epoch: int, *, max_steps: Optional[int] = None) -> Dict[str, float]:
         self.student.train()
         agg = defaultdict(float)
         n_steps = 0
@@ -474,7 +474,7 @@ class DistillationTrainer:
             n_steps += 1
             interval_steps += 1
 
-            if step % max(1, self.config.step_log_interval) == 0:
+            if self._train_step == 1 or self._train_step % max(1, self.config.step_log_interval) == 0:
                 self._run_training_eval(epoch, step)
                 extra_eval_s = ""
                 if self._step_log_extra_eval_acc:
@@ -508,16 +508,19 @@ class DistillationTrainer:
                         f" cos {metrics.get('loss_cossim', 0.0):.4f}"
                     )
                 print(
-                    f"  step {step:04d} | KL {kl_avg:.4f}"
+                    f"  step {self._train_step:04d} | KL {kl_avg:.4f}"
                     f"{graph_s} | Acc {self._step_log_eval_accuracy:.4f}"
                     f"{extra_eval_s}{grad_s}",
                 )
                 interval.clear()
                 interval_steps = 0
 
+            if max_steps is not None and n_steps >= max_steps:
+                break
+
         if n_steps == 0:
             print(
-                f"  WARNING: no valid optimizer steps this epoch "
+                f"  WARNING: no valid optimizer steps this pass "
                 f"({skipped_nonfinite} non-finite batch(es)).",
             )
         return {key: value / max(n_steps, 1) for key, value in agg.items()}
@@ -542,7 +545,7 @@ class DistillationTrainer:
                 if self.history.get("accuracy")
                 else 0.0
             )
-            print(f"Warm-starting from epoch {start_epoch + 1}.")
+            print(f"Warm-starting from step {self._train_step + 1}.")
         else:
             print("Evaluating baselines...")
             student_base = evaluate_prompt_answer_dict(
@@ -571,12 +574,12 @@ class DistillationTrainer:
             else:
                 print("  Teacher baseline accuracy: skipped")
 
-        end_epoch = start_epoch + cfg.epochs
+        target_step = int(cfg.steps)
         print("=" * 60)
         title = "KL + Graph Distillation" if self._use_graph else "KL Distillation"
         print(title)
         print(f"  Run dir:          {cfg.save_dir}")
-        print(f"  Epochs:           {start_epoch + 1}..{end_epoch}")
+        print(f"  Steps:            {self._train_step + 1}..{target_step}")
         print(f"  Batch size:       {cfg.batch_size}")
         print(f"  LR:               {cfg.learning_rate}")
         print(f"  Temperature:      {cfg.temperature}")
@@ -587,8 +590,12 @@ class DistillationTrainer:
         print(f"  Eval every:       {cfg.step_log_interval} training batches")
         print("=" * 60)
 
-        for epoch in range(start_epoch, end_epoch):
-            epoch_metrics = self.train_epoch(epoch)
+        epoch = start_epoch
+        while self._train_step < target_step:
+            remaining_steps = target_step - self._train_step
+            epoch_metrics = self.train_epoch(epoch, max_steps=remaining_steps)
+            if not epoch_metrics and remaining_steps > 0:
+                break
             self.history["epoch"].append(epoch + 1)
             for key, value in epoch_metrics.items():
                 self.history[key].append(value)
@@ -600,10 +607,11 @@ class DistillationTrainer:
                     f", lambdaGraph={epoch_metrics.get('graph_loss_weighted', float('nan')):.4f}"
                 )
             print(
-                f"Epoch {epoch + 1}/{end_epoch}: "
+                f"Pass {epoch + 1}: "
                 f"KL={epoch_metrics.get('kl_loss', float('nan')):.4f}"
-                f"{graph_s}, Acc={acc_s}",
+                f"{graph_s}, Acc={acc_s}, Step={self._train_step}/{target_step}",
             )
+            epoch += 1
 
         self._save_history()
         self._save_curves()

@@ -36,7 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Dataset prefix, e.g. 2d_add for datasets/2d_add_train.json + _test.json.",
     )
     parser.add_argument("--datasets-dir", type=str, default=None)
-    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--steps", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--train-limit", type=int, default=None)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -209,8 +209,8 @@ def build_parser() -> argparse.ArgumentParser:
 def validate_args(args: argparse.Namespace) -> None:
     if args.dataset is None:
         raise SystemExit("--dataset is required.")
-    if args.epochs < 0:
-        raise SystemExit("--epochs must be >= 0")
+    if args.steps < 0:
+        raise SystemExit("--steps must be >= 0")
     if args.batch_size < 1:
         raise SystemExit("--batch-size must be >= 1")
     if args.eval_batch_size < 1:
@@ -314,7 +314,7 @@ def main() -> None:
         config=DistillationConfig(
             teacher_model=args.teacher_model,
             student_model=args.student_model,
-            epochs=args.epochs,
+            steps=args.steps,
             batch_size=args.batch_size,
             learning_rate=args.lr,
             temperature=args.temperature,

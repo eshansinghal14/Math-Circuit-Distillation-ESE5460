@@ -19,7 +19,7 @@ from .fs import most_recent_subdirectory
 class DistillationConfig:
     teacher_model: str = LLAMA_8B_MODEL_NAME
     student_model: str = LLAMA_1B_MODEL_NAME
-    epochs: int = 50
+    steps: int = 50
     batch_size: int = 32
     learning_rate: float = 1e-4
     temperature: float = 2.0
