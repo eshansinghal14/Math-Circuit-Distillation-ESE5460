@@ -395,6 +395,36 @@ def build_neuron_activation_write_result(
             n_cache_positions,
         )
 
+        # Precompute linear grid index for every cached prompt — done once, reused per group.
+        n_grid_dims = len(arg_to_idx)
+        n_flat = 1
+        for s in grid_shape:
+            n_flat *= s
+        prompt_valid = torch.ones(n_cache_prompts, dtype=torch.bool)
+        prompt_linear_idx = torch.zeros(n_cache_prompts, dtype=torch.long)
+        for prompt_idx, numeric_args in enumerate(cache_args):
+            if len(numeric_args) != n_grid_dims:
+                prompt_valid[prompt_idx] = False
+                continue
+            linear = 0
+            stride = 1
+            ok = True
+            for dim in range(n_grid_dims - 1, -1, -1):
+                val = numeric_args[dim]
+                if val not in arg_to_idx[dim]:
+                    ok = False
+                    break
+                linear += arg_to_idx[dim][val] * stride
+                stride *= grid_shape[dim]
+            if not ok:
+                prompt_valid[prompt_idx] = False
+            else:
+                prompt_linear_idx[prompt_idx] = linear
+
+        valid_linear = prompt_linear_idx[prompt_valid]  # [n_valid]
+        flat_counts_row = torch.zeros(n_flat, dtype=torch.float32)
+        flat_counts_row.scatter_add_(0, valid_linear, torch.ones(int(prompt_valid.sum()), dtype=torch.float32))
+
         for (layer, token_pos), group_members in location_groups.items():
             if token_pos >= n_cache_positions:
                 continue
@@ -424,20 +454,20 @@ def build_neuron_activation_write_result(
             if token_pos == 0:
                 acts_by_prompt.zero_()
 
-            acts_cpu = acts_by_prompt.detach().float().cpu()
+            # acts_valid: [n_valid, n_group_neurons]
+            acts_valid = acts_by_prompt[prompt_valid].detach().float()
+            n_group = len(location_indices)
+            n_valid = acts_valid.shape[0]
+            # scatter_add all neurons at once: [n_group, n_flat]
+            flat_sums = torch.zeros(n_group, n_flat, dtype=torch.float32)
+            flat_sums.scatter_add_(
+                1,
+                valid_linear.unsqueeze(0).expand(n_group, -1),
+                acts_valid.T,
+            )
             for group_idx, location_idx in enumerate(location_indices):
-                for numeric_args, activation in zip(cache_args, acts_cpu[:, group_idx], strict=True):
-                    if len(numeric_args) != len(arg_to_idx):
-                        continue
-                    try:
-                        grid_idx = tuple(
-                            arg_to_idx[dim][numeric_args[dim]]
-                            for dim in range(len(numeric_args))
-                        )
-                    except KeyError:
-                        continue
-                    activation_sums[(location_idx, *grid_idx)] += float(activation.item())
-                    activation_counts[(location_idx, *grid_idx)] += 1.0
+                activation_sums[location_idx] += flat_sums[group_idx].reshape(grid_shape)
+                activation_counts[location_idx] += flat_counts_row.reshape(grid_shape)
     else:
         # ── Standard path: run forward passes per batch ──
         for batch_start in range(0, len(prompts), forward_batch_size):
