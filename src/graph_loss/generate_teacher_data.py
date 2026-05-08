@@ -236,7 +236,10 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
 
     mlp_input_cache: dict | None = None
     if config.mlp_input_cache_path:
-        dataset_path_for_cache = _resolve_dataset_file(config.dataset_file)
+        # The MLP input cache is keyed on the activation dataset (--dataset), not the
+        # training dataset (--dataset-file), since it's built from the activation dataset.
+        activation_dataset = config.dataset or config.dataset_file
+        dataset_path_for_cache = _resolve_dataset_file(activation_dataset)
         if mlp_input_cache_exists(config.mlp_input_cache_path, config.teacher_model, dataset_path_for_cache):
             logger.info("Loading pre-computed MLP input cache from %s", config.mlp_input_cache_path)
             mlp_input_cache = load_mlp_input_cache(
