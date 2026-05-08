@@ -7,6 +7,8 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from tqdm import tqdm
+
 import torch
 from huggingface_hub import login
 from transformers import AutoTokenizer
@@ -260,7 +262,7 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
         "samples": [],
     }
 
-    for local_idx, (prompt, answer) in enumerate(samples):
+    for local_idx, (prompt, answer) in enumerate(tqdm(samples, desc="Generating teacher data", unit="sample")):
         sample_idx = config.start_index + local_idx
         folder_name = _safe_prompt_folder(prompt, sample_idx)
         sample_dir = os.path.join(store_path, folder_name)
