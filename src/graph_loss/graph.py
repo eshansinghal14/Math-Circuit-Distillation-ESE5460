@@ -409,6 +409,7 @@ def build_super_graph(
     dataset: str | None = None,
     activation_forward_batch_size: int = 32,
     activation_write_cache_path: str | None = None,
+    mlp_input_cache: dict | None = None,
     model_name: str | None = None,
     cluster_method: str = "full_search",
     supernode_heatmap_output_dir: str | None = None,
@@ -1109,6 +1110,7 @@ def build_super_graph(
                     kept_neuron_locations,
                     forward_batch_size=activation_forward_batch_size,
                     include_w_down_vectors=False,
+                    mlp_input_cache=mlp_input_cache,
                 )
                 kept_activations = kept_activation_write_result.activations
                 kept_arg_values = kept_activation_write_result.arg_values
@@ -1131,6 +1133,7 @@ def build_super_graph(
                 dataset,
                 kept_neuron_locations,
                 forward_batch_size=activation_forward_batch_size,
+                mlp_input_cache=mlp_input_cache,
             )
         return activation_write_result_for_kept
 
