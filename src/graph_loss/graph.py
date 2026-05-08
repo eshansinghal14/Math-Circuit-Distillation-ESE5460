@@ -27,6 +27,7 @@ from graph_loss.utils import (
     activation_write_cache_file,
     convert_nnsight_config_to_transformerlens,
     load_activation_write_cache,
+    safe_cache_segment,
     save_activation_write_cache,
 )
 
@@ -1070,23 +1071,42 @@ def build_super_graph(
         nonlocal activation_write_result_for_kept
         if activation_write_result_for_kept is not None:
             return activation_write_result_for_kept
-        if dataset is None:
-            raise ValueError("A dataset is required to build supernode activation heatmaps")
 
         kept_neuron_locations = graph.neuron_locations[kept_neuron_indices_device].detach().cpu()
+        resolved_model_name = model_name or getattr(model.cfg, "model_name", "model")
         if activation_write_cache_path:
-            resolved_model_name = model_name or getattr(model.cfg, "model_name", "model")
-            cache_file = activation_write_cache_file(
-                activation_write_cache_path,
-                str(resolved_model_name),
-                dataset,
-                n_layers=int(model.cfg.n_layers),
-                n_pos=int(graph.n_pos),
-                d_mlp=int(model.cfg.d_mlp),
-                neuron_locations=kept_neuron_locations,
-            )
+            if dataset is not None:
+                cache_file = activation_write_cache_file(
+                    activation_write_cache_path,
+                    str(resolved_model_name),
+                    dataset,
+                    n_layers=int(model.cfg.n_layers),
+                    n_pos=int(graph.n_pos),
+                    d_mlp=int(model.cfg.d_mlp),
+                    neuron_locations=kept_neuron_locations,
+                )
+            else:
+                cache_file = None
+                model_cache_dir = os.path.join(
+                    activation_write_cache_path,
+                    safe_cache_segment(str(resolved_model_name)),
+                )
+                if os.path.isdir(model_cache_dir):
+                    for filename in sorted(os.listdir(model_cache_dir)):
+                        if not filename.startswith("activation_write_") or not filename.endswith(".pt"):
+                            continue
+                        candidate = os.path.join(model_cache_dir, filename)
+                        try:
+                            load_activation_write_cache(
+                                candidate,
+                                expected_neuron_count=int(kept_neuron_locations.shape[0]),
+                            )
+                        except (KeyError, ValueError, RuntimeError):
+                            continue
+                        cache_file = candidate
+                        break
 
-            if os.path.isfile(cache_file):
+            if cache_file is not None and os.path.isfile(cache_file):
                 logger.info(
                     "  Loading cached activation-write grids for %d kept neurons: %s",
                     int(kept_neuron_locations.shape[0]),
@@ -1099,6 +1119,12 @@ def build_super_graph(
                 kept_activations = kept_activation_write_result.activations
                 kept_arg_values = kept_activation_write_result.arg_values
             else:
+                if dataset is None:
+                    raise ValueError(
+                        "A dataset is required to build activation-write grids when no matching "
+                        "cache file is found. Pass --dataset or provide --activation-write-cache-path "
+                        "containing a compatible activation_write_*.pt file."
+                    )
                 logger.info(
                     "  Building activation-write cache for %d kept neurons from dataset: %s",
                     int(kept_neuron_locations.shape[0]),
@@ -1123,6 +1149,11 @@ def build_super_graph(
                 arg_values=kept_arg_values,
             )
         else:
+            if dataset is None:
+                raise ValueError(
+                    "A dataset is required to build activation-write matrices. "
+                    "Pass --dataset or --activation-write-cache-path."
+                )
             logger.info(
                 "  Building activation-write matrices for %d kept graph neurons from dataset: %s",
                 int(kept_neuron_locations.shape[0]),
@@ -1196,7 +1227,7 @@ def build_super_graph(
                         title=f"supernode {supernode_idx}: ablation clustering",
                     )
                     logger.info("  Saved supernode heatmap PDF: %s", saved_path)
-    elif dataset and kept_neuron_indices.numel():
+    elif cluster_method == "full_search" and kept_neuron_indices.numel():
         activation_write_result = get_activation_write_result_for_kept()
         target_args = parse_numeric_args(graph.input_string)
         label_results = label_activation_heatmaps(

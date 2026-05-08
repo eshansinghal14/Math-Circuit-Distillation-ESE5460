@@ -313,7 +313,12 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
             logger.info("Applying prune masks to graph")
             graph_for_supergraph = graph.apply_prune_result(prune_result)
 
-        logger.info("Running build_super_graph (cluster_method=%s)", config.cluster_method)
+        activation_dataset = config.dataset or config.dataset_file
+        logger.info(
+            "Running build_super_graph (cluster_method=%s, activation_dataset=%s)",
+            config.cluster_method,
+            activation_dataset,
+        )
         with torch.no_grad():
             supergraph = build_super_graph(
                 graph_for_supergraph,
@@ -324,7 +329,7 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
                 embedding_eps=config.embedding_eps,
                 computation_sigma=config.computation_sigma,
                 computation_eps=config.computation_eps,
-                dataset=config.dataset,
+                dataset=activation_dataset,
                 activation_forward_batch_size=config.activation_forward_batch_size,
                 activation_write_cache_path=config.activation_write_cache_path,
                 mlp_input_cache=mlp_input_cache,
