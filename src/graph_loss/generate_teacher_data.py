@@ -121,6 +121,7 @@ def _save_supergraph(
         "all_supernode_prob_delta_norms": supergraph.all_supernode_prob_delta_norms,
         "prob_delta_elbow_index": supergraph.prob_delta_elbow_index,
         "delta_node_indices": supergraph.delta_node_indices,
+        "supernode_labels": supergraph.supernode_labels,
     }
     if logit_token_ids is not None:
         data["logit_token_ids"] = logit_token_ids.cpu()

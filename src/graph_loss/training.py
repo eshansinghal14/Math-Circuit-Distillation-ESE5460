@@ -10,6 +10,7 @@ import torch
 
 from graph_loss.align import (
     _build_full_vocab_prob_deltas,
+    align_supernodes_by_label,
     align_supernodes_prob_delta,
 )
 from graph_loss.attribution.attribute import attribute
@@ -108,6 +109,26 @@ class GraphAuxConfig:
     # any GPU with ≥40GB; bump higher (64–128) on A100 80GB or H100 if RAM
     # headroom allows.
     ablation_batch_size: int = 32
+    # When True, align teacher↔student supernodes by ANOVA label string instead
+    # of cosine similarity of prob-delta vectors.  Requires both teacher and
+    # student supergraphs to have supernode_labels populated (teacher: full_search
+    # cache; student: full_search cluster_method).  Falls back to positional
+    # index matching when labels are missing.
+    align_by_label: bool = False
+    # Student supergraph clustering method.  "ablation" (default) is fast and
+    # requires no dataset.  "full_search" builds activation heatmaps across the
+    # dataset (requires student_dataset) and assigns ANOVA labels — needed for
+    # label-based alignment.
+    student_cluster_method: str = "ablation"
+    # Dataset path for student full_search clustering (required when
+    # student_cluster_method == "full_search").
+    student_dataset: str | None = None
+    # Optional mlp_input_cache for the student model (speeds up full_search
+    # heatmap computation the same way it does for teacher data generation).
+    student_mlp_input_cache_path: str | None = None
+    # Local path for caching student activation-write grids between steps.
+    # Defaults to a temp dir; set to a persistent path to reuse across restarts.
+    student_activation_write_cache_path: str | None = None
 
 
 def _log_alignment_diagnostic(
@@ -359,6 +380,16 @@ def compute_prompt_graph_loss(
             print(f"  [grad-trace] post-prune adjacency.requires_grad = {student_graph.adjacency_matrix.requires_grad}")
 
     supergraph_start = time.perf_counter()
+    student_mlp_input_cache = None
+    if config.student_cluster_method == "full_search" and config.student_mlp_input_cache_path:
+        from graph_loss.precompute_mlp_inputs import load_mlp_input_cache, mlp_input_cache_exists
+        from graph_loss.generate_teacher_data import _resolve_dataset_path
+        if config.student_dataset:
+            dataset_path = _resolve_dataset_path(config.student_dataset)
+            if mlp_input_cache_exists(config.student_mlp_input_cache_path, student_adapter.model.cfg.model_name, dataset_path):
+                student_mlp_input_cache = load_mlp_input_cache(
+                    config.student_mlp_input_cache_path, student_adapter.model.cfg.model_name, dataset_path
+                )
     with torch.no_grad():
         student_supergraph_structure = build_super_graph(
             student_graph,
@@ -367,7 +398,10 @@ def compute_prompt_graph_loss(
             activation_forward_batch_size=config.student_activation_forward_batch_size,
             computation_eps=config.student_computation_eps,
             embedding_eps=config.student_embedding_eps,
-            cluster_method="ablation",
+            cluster_method=config.student_cluster_method,
+            dataset=config.student_dataset,
+            activation_write_cache_path=config.student_activation_write_cache_path,
+            mlp_input_cache=student_mlp_input_cache,
         )
     # Skip the (expensive, dense) supernode adjacency aggregation when no
     # edge term consumes it.  In fast_student_graph mode the underlying
@@ -435,17 +469,22 @@ def compute_prompt_graph_loss(
             similarity_threshold=config.graph_similarity_threshold,
         )
 
-    if config.verbose:
-        print("  [graph] aligning supernodes via prob-delta and computing graph loss")
-    alignment = align_supernodes_prob_delta(
-        teacher_supergraph,
-        student_supergraph,
-        teacher_graph,  # may be None when using cache
-        student_graph,
-        similarity_threshold=config.graph_similarity_threshold,
-        max_fan_out=config.graph_max_fan_out,
-        n_vocab=n_vocab,
-    )
+    if config.align_by_label:
+        if config.verbose:
+            print("  [graph] aligning supernodes by ANOVA label")
+        alignment = align_supernodes_by_label(teacher_supergraph, student_supergraph)
+    else:
+        if config.verbose:
+            print("  [graph] aligning supernodes via prob-delta cosine similarity")
+        alignment = align_supernodes_prob_delta(
+            teacher_supergraph,
+            student_supergraph,
+            teacher_graph,  # may be None when using cache
+            student_graph,
+            similarity_threshold=config.graph_similarity_threshold,
+            max_fan_out=config.graph_max_fan_out,
+            n_vocab=n_vocab,
+        )
 
     teacher_ids = list(range(len(teacher_supergraph.supernodes)))
     student_ids = list(range(len(student_supergraph.supernodes)))
@@ -929,9 +968,9 @@ def _load_cached_teacher(
         supernode_prob_deltas=sg_data.get("supernode_prob_deltas"),
         all_supernode_prob_delta_norms=sg_data.get("all_supernode_prob_delta_norms"),
         prob_delta_elbow_index=sg_data.get("prob_delta_elbow_index"),
-        # Embed logit_token_ids so _build_full_vocab_prob_deltas works without graph
         logit_token_ids=logit_token_ids,
         delta_node_indices=sg_data.get("delta_node_indices"),
+        supernode_labels=sg_data.get("supernode_labels"),
     )
     prob_deltas = sg_data.get("supernode_prob_deltas")
     if prob_deltas is not None and prob_deltas.numel() > 0:
