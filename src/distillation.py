@@ -194,6 +194,44 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--teacher-data-cache", type=str, default=None, metavar="PATH")
     parser.add_argument(
+        "--graph-align-by-label",
+        action="store_true",
+        help=(
+            "Align teacher↔student supernodes by ANOVA label string instead of "
+            "cosine similarity of prob-delta vectors.  Requires teacher cache built "
+            "with full_search (labels saved) and --student-cluster-method full_search."
+        ),
+    )
+    parser.add_argument(
+        "--student-cluster-method",
+        type=str,
+        default="ablation",
+        choices=["ablation", "full_search"],
+        help="Supergraph clustering method for the student.  full_search builds "
+             "activation heatmaps (requires --student-dataset).",
+    )
+    parser.add_argument(
+        "--student-dataset",
+        type=str,
+        default=None,
+        metavar="DATASET",
+        help="Activation dataset for student full_search clustering (e.g. 22_add_tight_all.json).",
+    )
+    parser.add_argument(
+        "--student-mlp-input-cache",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Path to pre-computed student MLP input cache (speeds up full_search heatmaps).",
+    )
+    parser.add_argument(
+        "--student-activation-write-cache",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Local path for caching student activation-write grids between steps.",
+    )
+    parser.add_argument(
         "--save-dir",
         type=str,
         default=os.path.join(os.path.dirname(__file__), "..", "results", "distillation"),
@@ -357,6 +395,11 @@ def main() -> None:
             track_loss_grads=args.track_loss_grads,
             save_dir=run_dir,
             teacher_data_cache=args.teacher_data_cache,
+            align_by_label=args.graph_align_by_label,
+            student_cluster_method=args.student_cluster_method,
+            student_dataset=args.student_dataset,
+            student_mlp_input_cache_path=args.student_mlp_input_cache,
+            student_activation_write_cache_path=args.student_activation_write_cache,
             step_log_interval=args.step_log_interval,
             seed=args.seed,
             device=device,

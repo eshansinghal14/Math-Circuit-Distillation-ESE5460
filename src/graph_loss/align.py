@@ -139,6 +139,59 @@ def align_supernodes_prob_delta(
     return result
 
 
+def align_supernodes_by_label(
+    teacher_supergraph,
+    student_supergraph,
+) -> AlignmentResult:
+    """Align supernodes directly by ANOVA label strings.
+
+    Both teacher and student must have been clustered with ``full_search`` so
+    that ``supernode_labels`` is populated.  Teacher supernode i is matched to
+    the student supernode whose first label string matches teacher supernode i's
+    first label string.  Unmatched teacher supernodes get an empty mapping.
+
+    Falls back to index-based 1-to-1 matching when either supergraph has no
+    labels (e.g. legacy caches or ablation-clustered student).
+    """
+    result = AlignmentResult()
+
+    t_labels: list[list[str]] | None = teacher_supergraph.supernode_labels
+    s_labels: list[list[str]] | None = student_supergraph.supernode_labels
+    n_teacher = len(teacher_supergraph.supernodes)
+    n_student = len(student_supergraph.supernodes)
+
+    t_deltas = _build_full_vocab_prob_deltas(teacher_supergraph, None, 1)
+    s_deltas = _build_full_vocab_prob_deltas(student_supergraph, None, 1)
+    for tid in range(t_deltas.shape[0]):
+        result.teacher_dla[tid] = t_deltas[tid]
+    for sid in range(s_deltas.shape[0]):
+        result.student_dla[sid] = s_deltas[sid]
+
+    if t_labels is None or s_labels is None:
+        # Fallback: positional 1-to-1 (index alignment)
+        for tid in range(min(n_teacher, n_student)):
+            result.mapping[tid] = {tid}
+            result.best_sim[tid] = 1.0
+        return result
+
+    # Build label → student supernode index lookup (first label of each SN)
+    student_label_to_sid: dict[str, int] = {}
+    for sid, slabels in enumerate(s_labels):
+        if slabels:
+            student_label_to_sid.setdefault(slabels[0], sid)
+
+    for tid, tlabels in enumerate(t_labels):
+        if not tlabels:
+            continue
+        key = tlabels[0]
+        if key in student_label_to_sid:
+            sid = student_label_to_sid[key]
+            result.mapping[tid] = {sid}
+            result.best_sim[tid] = 1.0
+
+    return result
+
+
 # Legacy DLA-based alignment (kept for reference/comparison)
 def align_supernodes(
     teacher_supernodes: list[dict],

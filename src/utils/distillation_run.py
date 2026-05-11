@@ -50,6 +50,11 @@ class DistillationConfig:
     graph_true_grad_chunk_size: int = 4
     fast_student_graph: bool = False
     ablation_batch_size: int = 32
+    align_by_label: bool = False
+    student_cluster_method: str = "ablation"
+    student_dataset: Optional[str] = None
+    student_mlp_input_cache_path: Optional[str] = None
+    student_activation_write_cache_path: Optional[str] = None
     lambda_kl: float = 1.0
     graph_grad_norm_scale: bool = False
     eval_batch_size: int = 50

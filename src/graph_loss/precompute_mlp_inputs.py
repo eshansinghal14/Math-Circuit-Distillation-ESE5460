@@ -127,15 +127,18 @@ def precompute_mlp_inputs(
     n_prompts = len(prompts)
     logger.info("Pre-computing MLP inputs for %d prompts, %d layers, d_model=%d", n_prompts, n_layers, d_model)
 
+    import numpy as np
+
     # Determine sequence length from first batch.
     first_ids, _ = _tokenize_prompt_batch(model, prompts[:1])
     n_positions = first_ids.shape[1]
 
-    # Allocate storage [n_layers, n_prompts, n_positions, d_model] — too large for one tensor,
-    # so we accumulate per-layer lists and save each layer separately.
-    layer_buffers: list[torch.Tensor] = [
-        torch.zeros(n_prompts, n_positions, d_model, dtype=torch.bfloat16)
-        for _ in range(n_layers)
+    # Use numpy memmaps so each layer is written directly to disk per batch —
+    # no large in-RAM buffers (32 layers × 10k × 4096 × bf16 ≈ 78 GB would OOM).
+    mmap_paths = [os.path.join(cache_dir, f"layer_{i}.npy") for i in range(n_layers)]
+    mmaps: list[np.memmap] = [
+        np.memmap(p, dtype="float16", mode="w+", shape=(n_prompts, n_positions, d_model))
+        for p in mmap_paths
     ]
 
     prompt_idx = 0
@@ -147,24 +150,37 @@ def precompute_mlp_inputs(
         cached: dict[int, torch.Tensor] = {}
 
         def make_hook(layer_idx: int):
-            def hook(acts: torch.Tensor, hook_obj) -> torch.Tensor:
-                cached[layer_idx] = acts.detach().float().cpu()
+            def hook(acts: torch.Tensor, hook=None) -> torch.Tensor:
+                cached[layer_idx] = acts.detach().cpu().to(torch.float16)
                 return acts
             return hook
 
         hooks = [(f"blocks.{i}.{model.feature_input_hook}", make_hook(i)) for i in range(n_layers)]
         model.run_with_hooks(input_ids, fwd_hooks=hooks)
 
-        for b_idx in range(len(batch_prompts)):
-            global_idx = batch_start + b_idx
-            for layer_idx in range(n_layers):
-                acts = cached[layer_idx][b_idx]  # [batch_n_pos, d_model]
-                store_len = min(batch_n_pos, n_positions)
-                layer_buffers[layer_idx][global_idx, :store_len, :] = acts[:store_len].bfloat16()
+        store_len = min(batch_n_pos, n_positions)
+        bs = len(batch_prompts)
+        for layer_idx in range(n_layers):
+            acts = cached[layer_idx]  # [bs, batch_n_pos, d_model]
+            mmaps[layer_idx][batch_start:batch_start + bs, :store_len, :] = (
+                acts[:, :store_len, :].numpy()
+            )
 
-        prompt_idx += len(batch_prompts)
+        prompt_idx += bs
         if prompt_idx % max(batch_size * 10, 50) == 0 or prompt_idx == n_prompts:
             logger.info("  Cached %d / %d prompts", prompt_idx, n_prompts)
+
+    # Flush memmaps to disk, then convert to .pt (bfloat16) for load_mlp_input_cache.
+    logger.info("Flushing memmaps and converting to .pt ...")
+    for i, (mmap, mmap_path) in enumerate(zip(mmaps, mmap_paths)):
+        mmap.flush()
+        del mmap
+        arr = np.memmap(mmap_path, dtype="float16", mode="r", shape=(n_prompts, n_positions, d_model))
+        buf = torch.from_numpy(np.array(arr)).to(torch.bfloat16)
+        torch.save(buf, os.path.join(cache_dir, f"layer_{i}.pt"))
+        del buf
+        os.remove(mmap_path)
+        logger.info("  Saved layer_%d.pt  shape=(%d, %d, %d)", i, n_prompts, n_positions, d_model)
 
     arg_values = [
         sorted({args[dim] for args in numeric_args_by_prompt})
@@ -182,9 +198,6 @@ def precompute_mlp_inputs(
         "dataset_path": dataset_path,
     }
     torch.save(meta, meta_path)
-    for i, buf in enumerate(layer_buffers):
-        torch.save(buf, os.path.join(cache_dir, f"layer_{i}.pt"))
-        logger.info("  Saved layer_%d.pt  shape=%s", i, tuple(buf.shape))
 
     logger.info("MLP input cache written to %s", cache_dir)
     return cache_dir

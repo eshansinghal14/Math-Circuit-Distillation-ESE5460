@@ -7,6 +7,8 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from tqdm import tqdm
+
 import torch
 from huggingface_hub import login
 from transformers import AutoTokenizer
@@ -119,6 +121,7 @@ def _save_supergraph(
         "all_supernode_prob_delta_norms": supergraph.all_supernode_prob_delta_norms,
         "prob_delta_elbow_index": supergraph.prob_delta_elbow_index,
         "delta_node_indices": supergraph.delta_node_indices,
+        "supernode_labels": supergraph.supernode_labels,
     }
     if logit_token_ids is not None:
         data["logit_token_ids"] = logit_token_ids.cpu()
@@ -234,7 +237,10 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
 
     mlp_input_cache: dict | None = None
     if config.mlp_input_cache_path:
-        dataset_path_for_cache = _resolve_dataset_file(config.dataset_file)
+        # The MLP input cache is keyed on the activation dataset (--dataset), not the
+        # training dataset (--dataset-file), since it's built from the activation dataset.
+        activation_dataset = config.dataset or config.dataset_file
+        dataset_path_for_cache = _resolve_dataset_file(activation_dataset)
         if mlp_input_cache_exists(config.mlp_input_cache_path, config.teacher_model, dataset_path_for_cache):
             logger.info("Loading pre-computed MLP input cache from %s", config.mlp_input_cache_path)
             mlp_input_cache = load_mlp_input_cache(
@@ -260,7 +266,7 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
         "samples": [],
     }
 
-    for local_idx, (prompt, answer) in enumerate(samples):
+    for local_idx, (prompt, answer) in enumerate(tqdm(samples, desc="Generating teacher data", unit="sample")):
         sample_idx = config.start_index + local_idx
         folder_name = _safe_prompt_folder(prompt, sample_idx)
         sample_dir = os.path.join(store_path, folder_name)
