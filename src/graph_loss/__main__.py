@@ -8,6 +8,10 @@ import torch
 from huggingface_hub import login
 
 from graph_loss.attribution.attribute import attribute
+from graph_loss.frontend_export import (
+    default_frontend_output_dir,
+    export_supergraph_frontend,
+)
 from graph_loss.graph import (
     Graph,
     PruneResult,
@@ -598,6 +602,29 @@ def main():
         help="Optional path to save the supergraph (.pt)",
     )
     parser.add_argument(
+        "--frontend-output-dir",
+        "--frontend_output_dir",
+        dest="frontend_output_dir",
+        default=str(default_frontend_output_dir()),
+        help=(
+            "Directory for the static frontend assets and generated supergraph JSON. "
+            "Defaults to graph_loss/frontend_assets."
+        ),
+    )
+    parser.add_argument(
+        "--frontend-slug",
+        "--frontend_slug",
+        dest="frontend_slug",
+        help="Optional slug for the generated frontend graph_data/<slug>.json file",
+    )
+    parser.add_argument(
+        "--no-frontend",
+        dest="export_frontend",
+        action="store_false",
+        help="Skip exporting static frontend JSON for the generated supergraph",
+    )
+    parser.set_defaults(export_frontend=True)
+    parser.add_argument(
         "--test-influence-calibration",
         dest="test_influence_calibration",
         action="store_true",
@@ -813,6 +840,19 @@ def main():
     if args.supergraph_output_path:
         logger.info("Saving supergraph to %s", args.supergraph_output_path)
         _save_supergraph(args.supergraph_output_path, supergraph)
+
+    if args.export_frontend:
+        logger.info("Exporting supergraph frontend to %s", args.frontend_output_dir)
+        graph_data_path = export_supergraph_frontend(
+            graph,
+            supergraph,
+            output_dir=args.frontend_output_dir,
+            slug=args.frontend_slug,
+            model_name=args.model,
+            tokenizer=getattr(model, "tokenizer", None),
+        )
+        logger.info("Saved frontend graph data: %s", graph_data_path)
+        logger.info("Open %s to view the visualization", os.path.join(args.frontend_output_dir, "index.html"))
 
     _log_pipeline_comparison(graph, supergraph, logger=logger, prune_result=prune_result)
     logger.info("Done")
