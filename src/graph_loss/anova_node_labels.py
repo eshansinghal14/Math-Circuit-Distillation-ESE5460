@@ -50,7 +50,6 @@ BASE_ANOVA_LABEL_CATEGORIES = [
 
 CATEGORY_COMPONENTS = {
     "arg1 units and arg2 units": {"arg1 units", "arg2 units"},
-    "arg1 range and arg2 range": {"arg1 range", "arg2 range"},
 }
 
 
