@@ -53,16 +53,16 @@ def export_supergraph_frontend(
     data_dir.mkdir(parents=True, exist_ok=True)
     graph_data_dir.mkdir(parents=True, exist_ok=True)
 
-    # Copy supernode PNG heatmaps into the frontend assets so the web server can serve them.
-    heatmap_url_by_supernode: dict[int, str] = {}
-    if supergraph.supernode_heatmap_png_paths:
+    # Copy supernode PDF heatmaps into the frontend assets so the web server can serve them.
+    heatmap_pdf_url_by_supernode: dict[int, str] = {}
+    if supergraph.supernode_heatmap_pdf_paths:
         heatmap_dir = output_path / "heatmaps" / graph_slug
         heatmap_dir.mkdir(parents=True, exist_ok=True)
-        for supernode_idx, src_png in enumerate(supergraph.supernode_heatmap_png_paths):
-            if src_png and os.path.isfile(src_png):
-                dst_png = heatmap_dir / f"supernode_{supernode_idx}.png"
-                shutil.copy2(src_png, dst_png)
-                heatmap_url_by_supernode[supernode_idx] = f"heatmaps/{graph_slug}/supernode_{supernode_idx}.png"
+        for supernode_idx, src_pdf in enumerate(supergraph.supernode_heatmap_pdf_paths):
+            if src_pdf and os.path.isfile(src_pdf):
+                dst_pdf = heatmap_dir / f"supernode_{supernode_idx}.pdf"
+                shutil.copy2(src_pdf, dst_pdf)
+                heatmap_pdf_url_by_supernode[supernode_idx] = f"heatmaps/{graph_slug}/supernode_{supernode_idx}.pdf"
 
     graph_data = _build_graph_data(
         graph,
@@ -70,7 +70,7 @@ def export_supergraph_frontend(
         slug=graph_slug,
         model_name=model_name,
         tokenizer=tokenizer,
-        heatmap_url_by_supernode=heatmap_url_by_supernode,
+        heatmap_pdf_url_by_supernode=heatmap_pdf_url_by_supernode,
     )
     graph_data_path = graph_data_dir / f"{graph_slug}.json"
     _write_json(graph_data_path, graph_data)
@@ -92,10 +92,14 @@ def _build_graph_data(
     slug: str,
     model_name: str | None,
     tokenizer: Any | None,
-    heatmap_url_by_supernode: dict[int, str] | None = None,
+    heatmap_pdf_url_by_supernode: dict[int, str] | None = None,
 ) -> dict[str, Any]:
     prompt_tokens = _prompt_tokens(graph, tokenizer)
-    nodes = _supergraph_nodes(graph, supergraph, heatmap_url_by_supernode=heatmap_url_by_supernode)
+    nodes = _supergraph_nodes(
+        graph,
+        supergraph,
+        heatmap_pdf_url_by_supernode=heatmap_pdf_url_by_supernode,
+    )
     links = _supergraph_links(supergraph, nodes)
     metadata = {
         "schema_version": 1,
@@ -151,7 +155,7 @@ def _supergraph_nodes(
     graph: Graph,
     supergraph: SuperGraph,
     *,
-    heatmap_url_by_supernode: dict[int, str] | None = None,
+    heatmap_pdf_url_by_supernode: dict[int, str] | None = None,
 ) -> list[dict[str, Any]]:
     locations = graph.neuron_locations.detach().cpu()
     activations = graph.neuron_activations.detach().float().cpu()
@@ -192,8 +196,8 @@ def _supergraph_nodes(
             "member_count": len(member_ids),
             "is_supergraph_node": True,
         }
-        if heatmap_url_by_supernode and supernode_idx in heatmap_url_by_supernode:
-            node_dict["heatmap_url"] = heatmap_url_by_supernode[supernode_idx]
+        if heatmap_pdf_url_by_supernode and supernode_idx in heatmap_pdf_url_by_supernode:
+            node_dict["heatmap_pdf_url"] = heatmap_pdf_url_by_supernode[supernode_idx]
         nodes.append(node_dict)
     return nodes
 

@@ -359,6 +359,7 @@ def _save_supergraph(path: str, supergraph: SuperGraph) -> None:
             "delta_node_indices": supergraph.delta_node_indices,
             "node_labels": supergraph.node_labels,
             "supernode_labels": supergraph.supernode_labels,
+            "supernode_heatmap_pdf_paths": supergraph.supernode_heatmap_pdf_paths,
         },
         path,
     )

@@ -46,17 +46,18 @@ window.initCgFeatureDetail = async function({visState, renderAll, data, cgSel}){
       var detailSel = logitsSel.html('').append('div.effects')
       detailSel.append('div.row')
         .text(`Mean activation: ${typeof d.activation == 'number' ? d.activation.toFixed(4) : 'N/A'}`)
-      if (d.heatmap_url) {
+      if (d.heatmap_pdf_url) {
         detailSel.append('div.row').st({marginTop: '8px'})
-          .append('img')
-          .attr('src', d.heatmap_url)
+          .append('iframe')
+          .attr('src', d.heatmap_pdf_url)
           .st({
-            maxWidth: '100%',
+            width: '100%',
+            height: '520px',
             border: '1px solid #ccc',
             borderRadius: '4px',
             display: 'block',
           })
-          .attr('title', 'Activation heatmaps for each member neuron')
+          .attr('title', 'Scrollable PDF heatmaps for each member neuron')
       }
       examplesSel.st({opacity: 0})
       return
