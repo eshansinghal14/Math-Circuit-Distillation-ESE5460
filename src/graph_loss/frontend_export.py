@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -52,12 +53,24 @@ def export_supergraph_frontend(
     data_dir.mkdir(parents=True, exist_ok=True)
     graph_data_dir.mkdir(parents=True, exist_ok=True)
 
+    # Copy supernode PNG heatmaps into the frontend assets so the web server can serve them.
+    heatmap_url_by_supernode: dict[int, str] = {}
+    if supergraph.supernode_heatmap_png_paths:
+        heatmap_dir = output_path / "heatmaps" / graph_slug
+        heatmap_dir.mkdir(parents=True, exist_ok=True)
+        for supernode_idx, src_png in enumerate(supergraph.supernode_heatmap_png_paths):
+            if src_png and os.path.isfile(src_png):
+                dst_png = heatmap_dir / f"supernode_{supernode_idx}.png"
+                shutil.copy2(src_png, dst_png)
+                heatmap_url_by_supernode[supernode_idx] = f"heatmaps/{graph_slug}/supernode_{supernode_idx}.png"
+
     graph_data = _build_graph_data(
         graph,
         supergraph,
         slug=graph_slug,
         model_name=model_name,
         tokenizer=tokenizer,
+        heatmap_url_by_supernode=heatmap_url_by_supernode,
     )
     graph_data_path = graph_data_dir / f"{graph_slug}.json"
     _write_json(graph_data_path, graph_data)
@@ -79,9 +92,10 @@ def _build_graph_data(
     slug: str,
     model_name: str | None,
     tokenizer: Any | None,
+    heatmap_url_by_supernode: dict[int, str] | None = None,
 ) -> dict[str, Any]:
     prompt_tokens = _prompt_tokens(graph, tokenizer)
-    nodes = _supergraph_nodes(graph, supergraph)
+    nodes = _supergraph_nodes(graph, supergraph, heatmap_url_by_supernode=heatmap_url_by_supernode)
     links = _supergraph_links(supergraph, nodes)
     metadata = {
         "schema_version": 1,
@@ -133,7 +147,12 @@ def _prompt_tokens(graph: Graph, tokenizer: Any | None) -> list[str]:
     return decoded
 
 
-def _supergraph_nodes(graph: Graph, supergraph: SuperGraph) -> list[dict[str, Any]]:
+def _supergraph_nodes(
+    graph: Graph,
+    supergraph: SuperGraph,
+    *,
+    heatmap_url_by_supernode: dict[int, str] | None = None,
+) -> list[dict[str, Any]]:
     locations = graph.neuron_locations.detach().cpu()
     activations = graph.neuron_activations.detach().float().cpu()
     delta_norms = (
@@ -154,27 +173,28 @@ def _supergraph_nodes(graph: Graph, supergraph: SuperGraph) -> list[dict[str, An
         node_id = f"sg_{supernode_idx}"
         label = _supernode_label(supergraph, supernode_idx, member_ids)
         activation_values = activations[member_ids] if member_ids else torch.empty(0)
-        nodes.append(
-            {
-                "node_id": node_id,
-                "feature": supernode_idx,
-                "feature_type": "supernode",
-                "layer": layer,
-                "ctx_idx": ctx_idx,
-                "probe_location_idx": 0,
-                "influence": float(delta_norms[supernode_idx].item())
-                if delta_norms is not None and supernode_idx < int(delta_norms.numel())
-                else 0.0,
-                "activation": float(activation_values.mean().item())
-                if activation_values.numel()
-                else 0.0,
-                "clerp": label,
-                "member_node_ids": member_ids,
-                "member_neuron_ids": [int(neuron_id) for neuron_id in neuron_ids],
-                "member_count": len(member_ids),
-                "is_supergraph_node": True,
-            }
-        )
+        node_dict: dict[str, Any] = {
+            "node_id": node_id,
+            "feature": supernode_idx,
+            "feature_type": "supernode",
+            "layer": layer,
+            "ctx_idx": ctx_idx,
+            "probe_location_idx": 0,
+            "influence": float(delta_norms[supernode_idx].item())
+            if delta_norms is not None and supernode_idx < int(delta_norms.numel())
+            else 0.0,
+            "activation": float(activation_values.mean().item())
+            if activation_values.numel()
+            else 0.0,
+            "clerp": label,
+            "member_node_ids": member_ids,
+            "member_neuron_ids": [int(neuron_id) for neuron_id in neuron_ids],
+            "member_count": len(member_ids),
+            "is_supergraph_node": True,
+        }
+        if heatmap_url_by_supernode and supernode_idx in heatmap_url_by_supernode:
+            node_dict["heatmap_url"] = heatmap_url_by_supernode[supernode_idx]
+        nodes.append(node_dict)
     return nodes
 
 

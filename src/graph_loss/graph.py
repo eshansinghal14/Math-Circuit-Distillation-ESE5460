@@ -20,6 +20,7 @@ from graph_loss.attribution.targets import LogitTarget
 from graph_loss.neuron_activation_heatmap import (
     build_neuron_activation_write_result,
     save_supernode_activation_heatmap_pdf,
+    save_supernode_activation_heatmap_png,
 )
 from graph_loss.utils import (
     ActivationWriteResult,
@@ -396,6 +397,7 @@ class SuperGraph(NamedTuple):
     delta_node_indices: torch.Tensor | None = None
     node_labels: dict[int, list[str]] | None = None
     supernode_labels: list[list[str]] | None = None
+    supernode_heatmap_png_paths: list[str] | None = None
 
 
 def build_super_graph(
@@ -1066,6 +1068,7 @@ def build_super_graph(
     activation_write_result_for_kept: ActivationWriteResult | None = None
     node_labels: dict[int, list[str]] = {}
     supernode_labels: list[list[str]] | None = None
+    supernode_heatmap_png_paths: list[str] | None = None
 
     def get_activation_write_result_for_kept() -> ActivationWriteResult:
         nonlocal activation_write_result_for_kept
@@ -1210,11 +1213,13 @@ def build_super_graph(
                     int(member): row_idx
                     for row_idx, member in enumerate(kept_neuron_indices.tolist())
                 }
+                supernode_heatmap_png_paths = []
                 for supernode_idx, members in enumerate(supernodes):
                     row_indices = torch.tensor(
                         [kept_row_by_member[int(member)] for member in members],
                         dtype=torch.long,
                     )
+                    sn_title = f"supernode {supernode_idx}: ablation clustering"
                     saved_path = save_supernode_activation_heatmap_pdf(
                         activation_write_result.activations[row_indices],
                         activation_write_result.arg_values,
@@ -1224,9 +1229,19 @@ def build_super_graph(
                             supernode_heatmap_output_dir,
                             f"supernode_{supernode_idx}.pdf",
                         ),
-                        title=f"supernode {supernode_idx}: ablation clustering",
+                        title=sn_title,
                     )
                     logger.info("  Saved supernode heatmap PDF: %s", saved_path)
+                    png_path = save_supernode_activation_heatmap_png(
+                        activation_write_result.activations[row_indices],
+                        activation_write_result.arg_values,
+                        output_path=os.path.join(
+                            supernode_heatmap_output_dir,
+                            f"supernode_{supernode_idx}.png",
+                        ),
+                        title=sn_title,
+                    )
+                    supernode_heatmap_png_paths.append(png_path)
     elif cluster_method == "full_search" and kept_neuron_indices.numel():
         activation_write_result = get_activation_write_result_for_kept()
         target_args = parse_numeric_args(graph.input_string)
@@ -1362,6 +1377,7 @@ def build_super_graph(
             )
 
         if supernode_heatmap_output_dir is not None:
+            supernode_heatmap_png_paths = []
             for supernode_idx, (
                 activation_grid,
                 heatmap_arg_values,
@@ -1371,6 +1387,7 @@ def build_super_graph(
                 member_number_unembed,
                 member_specificity,
             ) in enumerate(supernode_heatmaps):
+                sn_title = f"supernode {supernode_idx}: {title}"
                 saved_path = save_supernode_activation_heatmap_pdf(
                     activation_grid,
                     heatmap_arg_values,
@@ -1380,12 +1397,22 @@ def build_super_graph(
                         supernode_heatmap_output_dir,
                         f"supernode_{supernode_idx}.pdf",
                     ),
-                    title=f"supernode {supernode_idx}: {title}",
+                    title=sn_title,
                     member_labels=member_plot_labels,
                     member_number_unembed=member_number_unembed,
                     member_specificity=member_specificity,
                 )
                 logger.info("  Saved supernode heatmap PDF: %s", saved_path)
+                png_path = save_supernode_activation_heatmap_png(
+                    activation_grid,
+                    heatmap_arg_values,
+                    output_path=os.path.join(
+                        supernode_heatmap_output_dir,
+                        f"supernode_{supernode_idx}.png",
+                    ),
+                    title=sn_title,
+                )
+                supernode_heatmap_png_paths.append(png_path)
     else:
         if dataset:
             logger.info("  No kept neurons for dataset activation clustering")
@@ -1429,6 +1456,7 @@ def build_super_graph(
         delta_node_indices=kept_node_indices.detach().cpu(),
         node_labels=node_labels,
         supernode_labels=supernode_labels,
+        supernode_heatmap_png_paths=supernode_heatmap_png_paths,
     )
 
 

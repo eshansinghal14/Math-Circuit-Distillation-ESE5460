@@ -43,10 +43,21 @@ window.initCgFeatureDetail = async function({visState, renderAll, data, cgSel}){
         .text(d.ppClerp || d.clerp || d.nodeId)
       headerTopRowSel.append('div.pp-clerp')
         .text(`${d.member_count || 0} member neurons`)
-      logitsSel.html('')
-        .append('div.effects')
-        .append('div.row')
+      var detailSel = logitsSel.html('').append('div.effects')
+      detailSel.append('div.row')
         .text(`Mean activation: ${typeof d.activation == 'number' ? d.activation.toFixed(4) : 'N/A'}`)
+      if (d.heatmap_url) {
+        detailSel.append('div.row').st({marginTop: '8px'})
+          .append('img')
+          .attr('src', d.heatmap_url)
+          .st({
+            maxWidth: '100%',
+            border: '1px solid #ccc',
+            borderRadius: '4px',
+            display: 'block',
+          })
+          .attr('title', 'Mean activation heatmap across member neurons')
+      }
       examplesSel.st({opacity: 0})
       return
     }

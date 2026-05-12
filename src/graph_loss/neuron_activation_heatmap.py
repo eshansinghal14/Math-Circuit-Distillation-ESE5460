@@ -1114,6 +1114,77 @@ def plot_neuron_activation_heatmap(args: argparse.Namespace) -> str:
     return output_path
 
 
+def save_supernode_activation_heatmap_png(
+    activation_grids: torch.Tensor,
+    arg_values: list[list[int]],
+    *,
+    output_path: str,
+    title: str,
+) -> str:
+    """Save a single PNG summarising a supernode as the mean heatmap across members.
+
+    ``activation_grids`` has shape ``[n_members, *grid_shape]``.
+    Returns ``output_path``.
+    """
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+    grids = activation_grids.detach().float().cpu()
+    n_dims = grids.dim() - 1  # subtract member dim
+
+    if grids.shape[0] == 0:
+        fig, ax = plt.subplots(figsize=(5, 4))
+        ax.text(0.5, 0.5, "No member neurons", ha="center", va="center")
+        ax.set_axis_off()
+        fig.suptitle(title, fontsize=9)
+        fig.savefig(output_path, bbox_inches="tight", dpi=100)
+        plt.close(fig)
+        return output_path
+
+    mean_grid = grids.mean(dim=0)
+
+    if n_dims == 2:
+        arg1_vals = sorted({row[0] for row in arg_values if len(row) >= 1})
+        arg2_vals = sorted({row[1] for row in arg_values if len(row) >= 2})
+        fig, ax = plt.subplots(figsize=(5, 4))
+        vmax = float(mean_grid.abs().max().item()) or 1.0
+        im = ax.imshow(
+            mean_grid.numpy(),
+            origin="lower",
+            aspect="auto",
+            cmap="RdBu_r",
+            vmin=-vmax,
+            vmax=vmax,
+            extent=[
+                min(arg1_vals) if arg1_vals else 0,
+                max(arg1_vals) if arg1_vals else mean_grid.shape[1],
+                min(arg2_vals) if arg2_vals else 0,
+                max(arg2_vals) if arg2_vals else mean_grid.shape[0],
+            ],
+        )
+        fig.colorbar(im, ax=ax, label="mean activation")
+        ax.set_xlabel("arg1")
+        ax.set_ylabel("arg2")
+    elif n_dims == 1:
+        arg1_vals = sorted({row[0] for row in arg_values if len(row) >= 1})
+        fig, ax = plt.subplots(figsize=(5, 3))
+        xs = arg1_vals if len(arg1_vals) == mean_grid.shape[0] else list(range(mean_grid.shape[0]))
+        ax.plot(xs, mean_grid.numpy())
+        ax.set_xlabel("arg1")
+        ax.set_ylabel("mean activation")
+    else:
+        fig, ax = plt.subplots(figsize=(5, 3))
+        ax.text(0.5, 0.5, f"{n_dims}D grid (not rendered)", ha="center", va="center")
+        ax.set_axis_off()
+
+    fig.suptitle(title, fontsize=8)
+    fig.tight_layout()
+    fig.savefig(output_path, bbox_inches="tight", dpi=100)
+    plt.close(fig)
+    return output_path
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Plot a specific MLP neuron's activations over a numeric dataset.",
