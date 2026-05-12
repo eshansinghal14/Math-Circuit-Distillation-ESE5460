@@ -17,6 +17,7 @@ class BasisRule:
     range_center: int | None = None
     range_prefix: str | None = None
     dynamic_range_label: bool = True
+    interaction_main_masks: tuple[torch.Tensor, torch.Tensor] | None = None
 
 
 @dataclass(frozen=True)
@@ -179,6 +180,7 @@ def build_anova_basis_rules(
                 mask,
                 category="arg1 range and arg2 range",
                 dynamic_range_label=False,
+                interaction_main_masks=(arg1_mask, arg2_mask),
             )
         )
 
@@ -336,6 +338,49 @@ def explained_variance_score(activation_grid: torch.Tensor, mask: torch.Tensor) 
     return float(score.clamp(min=0.0, max=1.0).item())
 
 
+def interaction_explained_variance_score(
+    activation_grid: torch.Tensor,
+    arg1_mask: torch.Tensor,
+    arg2_mask: torch.Tensor,
+) -> float:
+    """Return incremental variance explained by the arg1 x arg2 interaction term."""
+    if activation_grid.shape != arg1_mask.shape or activation_grid.shape != arg2_mask.shape:
+        raise ValueError(
+            f"Activation grid shape {tuple(activation_grid.shape)} does not match "
+            f"interaction mask shapes {tuple(arg1_mask.shape)} and {tuple(arg2_mask.shape)}"
+        )
+
+    activations = activation_grid.detach().double().flatten()
+    in_arg1 = arg1_mask.detach().double().flatten()
+    in_arg2 = arg2_mask.detach().double().flatten()
+    valid = ~torch.isnan(activations)
+    if int(valid.sum().item()) < 4:
+        return 0.0
+
+    y = activations[valid]
+    a1 = in_arg1[valid]
+    a2 = in_arg2[valid]
+    y_centered = y - y.mean()
+    total_variance = y_centered.square().sum()
+    if float(total_variance.item()) <= 0.0:
+        return 0.0
+
+    ones = torch.ones_like(y)
+    interaction = a1 * a2
+    reduced_design = torch.stack((ones, a1, a2), dim=1)
+    full_design = torch.stack((ones, a1, a2, interaction), dim=1)
+
+    def residual_sum_squares(design: torch.Tensor) -> torch.Tensor:
+        coefficients = torch.linalg.lstsq(design, y.unsqueeze(1)).solution.squeeze(1)
+        residuals = y - design @ coefficients
+        return residuals.square().sum()
+
+    reduced_sse = residual_sum_squares(reduced_design)
+    full_sse = residual_sum_squares(full_design)
+    score = (reduced_sse - full_sse) / total_variance
+    return float(score.clamp(min=0.0, max=1.0).item())
+
+
 def label_activation_heatmaps(
     activations: torch.Tensor,
     arg_values: list[list[int]],
@@ -360,7 +405,13 @@ def label_activation_heatmaps(
         category_labels: dict[str, str] = {}
         category_scores: dict[str, float] = {}
         for rule in rules:
-            score = explained_variance_score(activation_grid, rule.mask)
+            if rule.interaction_main_masks is None:
+                score = explained_variance_score(activation_grid, rule.mask)
+            else:
+                score = interaction_explained_variance_score(
+                    activation_grid,
+                    *rule.interaction_main_masks,
+                )
             label = _high_activation_range_label(
                 activation_grid,
                 rule,
