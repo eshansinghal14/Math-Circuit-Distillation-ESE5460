@@ -76,6 +76,16 @@ def _mask_interval_label(prefix: str, values: torch.Tensor, mask: torch.Tensor) 
     )
 
 
+def _joint_range_label(
+    arg1_values: torch.Tensor,
+    arg2_values: torch.Tensor,
+    mask: torch.Tensor,
+) -> str:
+    arg1_label = _mask_interval_label("arg1", arg1_values, mask)
+    arg2_label = _mask_interval_label("arg2", arg2_values, mask)
+    return f"{arg1_label} and {arg2_label}"
+
+
 def parse_numeric_args(prompt: str) -> tuple[int, ...]:
     """Parse numeric arguments from the left side of an arithmetic prompt."""
     left = prompt.split("=", 1)[0]
@@ -149,6 +159,27 @@ def build_anova_basis_rules(
                         category=f"{arg_name} units",
                     )
                 )
+
+    if target_args is not None and len(target_args) >= 2 and len(arg_values) >= 2:
+        arg1_values = grids[0]
+        arg2_values = grids[1]
+        arg1_center = int(target_args[0])
+        arg2_center = int(target_args[1])
+        arg1_mask = (arg1_values >= arg1_center - anova_range_radius) & (
+            arg1_values <= arg1_center + anova_range_radius
+        )
+        arg2_mask = (arg2_values >= arg2_center - anova_range_radius) & (
+            arg2_values <= arg2_center + anova_range_radius
+        )
+        mask = arg1_mask & arg2_mask
+        rules.append(
+            BasisRule(
+                _joint_range_label(arg1_values, arg2_values, mask),
+                mask,
+                category="arg1 range and arg2 range",
+                dynamic_range_label=False,
+            )
+        )
 
     if len(arg_values) >= 2:
         sums = grids[0] + grids[1]
@@ -321,7 +352,11 @@ def label_activation_heatmaps(
             category_labels[category] = (
                 f"{category_labels['arg1 units']} and {category_labels['arg2 units']}"
             )
-        if "arg1 range" in category_scores and "arg2 range" in category_scores:
+        if (
+            "arg1 range and arg2 range" not in category_scores
+            and "arg1 range" in category_scores
+            and "arg2 range" in category_scores
+        ):
             category = "arg1 range and arg2 range"
             category_scores[category] = min(
                 category_scores["arg1 range"],
