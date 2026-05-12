@@ -122,8 +122,8 @@ def _build_metadata_entry(metadata: dict[str, Any], *, title_prefix: str) -> dic
     return {
         "slug": metadata["slug"],
         "scan": metadata["scan"],
-        "prompt": metadata["prompt"],
-        "title_prefix": title_prefix,
+        "prompt": metadata["slug"],
+        "title_prefix": "",
         "schema_version": metadata["schema_version"],
         "model": metadata["model"],
         "n_supernodes": metadata["n_supernodes"],

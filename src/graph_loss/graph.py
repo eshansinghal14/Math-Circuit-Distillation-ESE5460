@@ -1240,6 +1240,8 @@ def build_super_graph(
                             f"supernode_{supernode_idx}.png",
                         ),
                         title=sn_title,
+                        members=members,
+                        neuron_locations=graph.neuron_locations.detach().cpu(),
                     )
                     supernode_heatmap_png_paths.append(png_path)
     elif cluster_method == "full_search" and kept_neuron_indices.numel():
@@ -1411,6 +1413,8 @@ def build_super_graph(
                         f"supernode_{supernode_idx}.png",
                     ),
                     title=sn_title,
+                    members=members,
+                    neuron_locations=graph.neuron_locations.detach().cpu(),
                 )
                 supernode_heatmap_png_paths.append(png_path)
     else:

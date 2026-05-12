@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import os
 import re
 from collections import defaultdict
@@ -1120,8 +1121,10 @@ def save_supernode_activation_heatmap_png(
     *,
     output_path: str,
     title: str,
+    members: list[int] | None = None,
+    neuron_locations: torch.Tensor | None = None,
 ) -> str:
-    """Save a single PNG summarising a supernode as the mean heatmap across members.
+    """Save one composite PNG containing every member neuron's heatmap.
 
     ``activation_grids`` has shape ``[n_members, *grid_shape]``.
     Returns ``output_path``.
@@ -1142,50 +1145,101 @@ def save_supernode_activation_heatmap_png(
         plt.close(fig)
         return output_path
 
-    mean_grid = grids.mean(dim=0)
+    n_members = int(grids.shape[0])
+    n_cols = min(3, n_members)
+    n_rows = math.ceil(n_members / n_cols)
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(5 * n_cols, 4 * n_rows),
+        squeeze=False,
+        constrained_layout=True,
+    )
+    finite_values = grids[torch.isfinite(grids)]
+    vmax = float(finite_values.abs().max().item()) if finite_values.numel() else 1.0
+    vmax = vmax or 1.0
+    last_image = None
 
-    if n_dims == 2:
-        arg1_vals = sorted({row[0] for row in arg_values if len(row) >= 1})
-        arg2_vals = sorted({row[1] for row in arg_values if len(row) >= 2})
-        fig, ax = plt.subplots(figsize=(5, 4))
-        vmax = float(mean_grid.abs().max().item()) or 1.0
-        a1_min = min(arg1_vals) if arg1_vals else 0
-        a1_max = max(arg1_vals) if arg1_vals else mean_grid.shape[1]
-        a2_min = min(arg2_vals) if arg2_vals else 0
-        a2_max = max(arg2_vals) if arg2_vals else mean_grid.shape[0]
-        if a1_min == a1_max:
-            a1_min, a1_max = a1_min - 0.5, a1_max + 0.5
-        if a2_min == a2_max:
-            a2_min, a2_max = a2_min - 0.5, a2_max + 0.5
-        im = ax.imshow(
-            mean_grid.numpy(),
-            origin="lower",
-            aspect="auto",
-            cmap="RdBu_r",
-            vmin=-vmax,
-            vmax=vmax,
-            extent=[a1_min, a1_max, a2_min, a2_max],
+    for member_idx, activation_grid in enumerate(grids):
+        ax = axes[member_idx // n_cols][member_idx % n_cols]
+        member_title = _format_member_heatmap_title(
+            member_idx,
+            members=members,
+            neuron_locations=neuron_locations,
         )
-        fig.colorbar(im, ax=ax, label="mean activation")
-        ax.set_xlabel("arg1")
-        ax.set_ylabel("arg2")
-    elif n_dims == 1:
-        arg1_vals = sorted({row[0] for row in arg_values if len(row) >= 1})
-        fig, ax = plt.subplots(figsize=(5, 3))
-        xs = arg1_vals if len(arg1_vals) == mean_grid.shape[0] else list(range(mean_grid.shape[0]))
-        ax.plot(xs, mean_grid.numpy())
-        ax.set_xlabel("arg1")
-        ax.set_ylabel("mean activation")
-    else:
-        fig, ax = plt.subplots(figsize=(5, 3))
-        ax.text(0.5, 0.5, f"{n_dims}D grid (not rendered)", ha="center", va="center")
-        ax.set_axis_off()
+        if torch.isnan(activation_grid).all():
+            ax.text(0.5, 0.5, "No valid activations", ha="center", va="center")
+            ax.set_axis_off()
+            ax.set_title(member_title, fontsize=8)
+            continue
 
-    fig.suptitle(title, fontsize=8)
-    fig.tight_layout()
+        if n_dims == 2:
+            xs = arg_values[0] if len(arg_values) >= 1 else list(range(activation_grid.shape[0]))
+            ys = arg_values[1] if len(arg_values) >= 2 else list(range(activation_grid.shape[1]))
+            a1_min, a1_max = _extent_bounds(xs, activation_grid.shape[0])
+            a2_min, a2_max = _extent_bounds(ys, activation_grid.shape[1])
+            last_image = ax.imshow(
+                activation_grid.T.contiguous().numpy(),
+                origin="lower",
+                aspect="auto",
+                cmap="RdBu_r",
+                vmin=-vmax,
+                vmax=vmax,
+                extent=[a1_min, a1_max, a2_min, a2_max],
+            )
+            ax.set_xlabel("arg1")
+            ax.set_ylabel("arg2")
+        elif n_dims == 1:
+            xs = arg_values[0] if len(arg_values) >= 1 else list(range(activation_grid.shape[0]))
+            if len(xs) != activation_grid.shape[0]:
+                xs = list(range(activation_grid.shape[0]))
+            ax.plot(xs, activation_grid.numpy())
+            ax.set_xlabel("arg1")
+            ax.set_ylabel("activation")
+        else:
+            ax.text(0.5, 0.5, f"{n_dims}D grid (not rendered)", ha="center", va="center")
+            ax.set_axis_off()
+        ax.set_title(member_title, fontsize=8)
+
+    for empty_idx in range(n_members, n_rows * n_cols):
+        axes[empty_idx // n_cols][empty_idx % n_cols].set_axis_off()
+
+    if last_image is not None:
+        fig.colorbar(last_image, ax=axes.ravel().tolist(), label="activation", shrink=0.85)
+    fig.suptitle(title, fontsize=9)
     fig.savefig(output_path, bbox_inches="tight", dpi=100)
     plt.close(fig)
     return output_path
+
+
+def _extent_bounds(values: list[int], fallback_size: int) -> tuple[float, float]:
+    if values:
+        lower = min(values)
+        upper = max(values)
+    else:
+        lower = 0
+        upper = fallback_size
+    if lower == upper:
+        return lower - 0.5, upper + 0.5
+    return float(lower), float(upper)
+
+
+def _format_member_heatmap_title(
+    member_idx: int,
+    *,
+    members: list[int] | None,
+    neuron_locations: torch.Tensor | None,
+) -> str:
+    if not members or member_idx >= len(members):
+        return f"member {member_idx}"
+    graph_neuron_idx = int(members[member_idx])
+    if neuron_locations is None:
+        return f"graph neuron {graph_neuron_idx}"
+    locations_cpu = neuron_locations.detach().cpu()
+    layer = int(locations_cpu[graph_neuron_idx, 0].item())
+    token_pos = int(locations_cpu[graph_neuron_idx, 1].item())
+    neuron_id = int(locations_cpu[graph_neuron_idx, 2].item())
+    return f"idx={graph_neuron_idx} layer={layer} token={token_pos} neuron={neuron_id}"
 
 
 def build_parser() -> argparse.ArgumentParser:

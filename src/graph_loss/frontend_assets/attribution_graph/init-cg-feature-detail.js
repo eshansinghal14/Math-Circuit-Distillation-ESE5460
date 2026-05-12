@@ -56,7 +56,7 @@ window.initCgFeatureDetail = async function({visState, renderAll, data, cgSel}){
             borderRadius: '4px',
             display: 'block',
           })
-          .attr('title', 'Mean activation heatmap across member neurons')
+          .attr('title', 'Activation heatmaps for each member neuron')
       }
       examplesSel.st({opacity: 0})
       return

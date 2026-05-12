@@ -76,11 +76,7 @@ window.init = async function(){
       // Rebuild the options
       selectSel.selectAll('option').remove()
       selectSel.appendMany('option', graphs)
-        .text(d => {
-          var scanName = util.nameToPrettyPrint[d.scan] || d.scan
-          var prefix = d.title_prefix ? d.title_prefix + ' ' : ''
-          return prefix + scanName + ' — ' + d.prompt
-        })
+        .text(d => d.slug)
         .attr('value', d => d.slug)
         .property('selected', d => d.slug === visState.slug)
     })
@@ -108,11 +104,7 @@ window.init = async function(){
   var sliderContainer
 
   selectSel.appendMany('option', graphs)
-    .text(d => {
-      var scanName = util.nameToPrettyPrint[d.scan] || d.scan
-      var prefix = d.title_prefix ? d.title_prefix + ' ' : ''
-      return prefix + scanName + ' — ' + d.prompt
-    })
+    .text(d => d.slug)
     .attr('value', d => d.slug)
     .property('selected', d => d.slug === visState.slug)
 
