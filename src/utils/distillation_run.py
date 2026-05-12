@@ -55,6 +55,9 @@ class DistillationConfig:
     student_dataset: Optional[str] = None
     student_mlp_input_cache_path: Optional[str] = None
     student_activation_write_cache_path: Optional[str] = None
+    student_anova_range_radius: int = 0
+    student_anova_nodes_per_label: int = 10
+    student_sum_min_specificity: float = 0.0
     lambda_kl: float = 1.0
     graph_grad_norm_scale: bool = False
     eval_batch_size: int = 50

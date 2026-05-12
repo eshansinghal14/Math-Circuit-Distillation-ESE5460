@@ -35,6 +35,7 @@ ANOVA_LABEL_CATEGORIES = [
     "arg2 units",
     "arg1 units and arg2 units",
     "arg1 range and arg2 range",
+    "carry",
     "sum range",
     "sum units",
 ]
@@ -44,6 +45,7 @@ BASE_ANOVA_LABEL_CATEGORIES = [
     "arg1 units",
     "arg2 range",
     "arg2 units",
+    "carry",
     "sum range",
     "sum units",
 ]
@@ -189,15 +191,25 @@ def build_anova_basis_rules(
             else sorted({int(value) for value in sums.flatten().tolist()})
         )
         for center in sum_centers:
-            mask = sums == center
+            if anova_range_radius:
+                mask = (sums >= center - anova_range_radius) & (
+                    sums <= center + anova_range_radius
+                )
+                label = _mask_interval_label("sum", sums, mask)
+                dynamic_range_label = False
+            else:
+                mask = sums == center
+                label = _format_interval_label("sum", center, center)
+                dynamic_range_label = True
             rules.append(
                 BasisRule(
-                    _format_interval_label("sum", center, center),
+                    label,
                     mask,
                     category="sum range",
                     range_values=sums,
                     range_center=center,
                     range_prefix="sum",
+                    dynamic_range_label=dynamic_range_label,
                 )
             )
         sum_unit_digits = (
@@ -209,6 +221,21 @@ def build_anova_basis_rules(
             mask = torch.remainder(sums, 10) == unit_digit
             if bool(mask.any().item()):
                 rules.append(BasisRule(f"sum units {unit_digit}", mask, category="sum units"))
+
+        # Carry detection: (arg1 % 10) + (arg2 % 10) >= 10.  Distinguishes
+        # neurons that fire when the addition produces a carry from neurons
+        # that track units/decades.  Critical for addition circuit analysis.
+        arg1_units = torch.remainder(grids[0], 10)
+        arg2_units = torch.remainder(grids[1], 10)
+        carry_mask = (arg1_units + arg2_units) >= 10
+        if bool(carry_mask.any().item()) and bool((~carry_mask).any().item()):
+            rules.append(
+                BasisRule(
+                    label="carry",
+                    mask=carry_mask,
+                    category="carry",
+                )
+            )
 
     return rules
 

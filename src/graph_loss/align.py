@@ -32,6 +32,58 @@ def compute_supernode_dla(
     return write_vec @ W_U
 
 
+def extract_logit_space_deltas(
+    supergraph,
+    n_logits: int,
+    *,
+    n_neurons: int | None = None,
+    n_tokens: int | None = None,
+) -> torch.Tensor | None:
+    """Project per-supernode prob-deltas onto the shared logit basis.
+
+    The supernode prob-deltas in new-format supergraphs live over the kept
+    graph nodes (a mix of neurons, input tokens, and logit positions).  Only
+    the logit positions live in a cross-model-comparable basis: both teacher
+    and student attribute against the SAME ``logit_token_ids`` (the teacher's
+    top-K), so a logit position k in either graph corresponds to the same
+    vocab token.
+
+    This function returns a tensor of shape ``[n_supernodes, n_logits]`` in
+    the order of ``logit_token_ids`` (with zeros for logit positions that
+    were pruned out of the parent graph).
+
+    Returns ``None`` for legacy-format supergraphs where ``delta_node_indices``
+    or graph size metadata is missing.  Callers should fall back to the
+    legacy node-loss path in that case.
+    """
+    if (
+        supergraph.supernode_prob_deltas is None
+        or supergraph.delta_node_indices is None
+        or n_neurons is None
+        or n_tokens is None
+    ):
+        return None
+
+    deltas = supergraph.supernode_prob_deltas
+    delta_idx = supergraph.delta_node_indices.to(device=deltas.device, dtype=torch.long)
+    logit_start = int(n_neurons) + int(n_tokens)
+    is_logit = delta_idx >= logit_start
+    logit_positions = is_logit.nonzero(as_tuple=True)[0]
+    if logit_positions.numel() == 0:
+        return torch.zeros(
+            deltas.shape[0], n_logits, dtype=deltas.dtype, device=deltas.device
+        )
+
+    logit_indices = (delta_idx[logit_positions] - logit_start).clamp(min=0, max=n_logits - 1)
+    out = torch.zeros(
+        deltas.shape[0], n_logits, dtype=deltas.dtype, device=deltas.device
+    )
+    # Differentiable: use index_copy in the columns dim so gradient flows
+    # from the student's prob-deltas through to its adjacency matrix.
+    out = out.index_copy(1, logit_indices, deltas[:, logit_positions])
+    return out
+
+
 def _build_full_vocab_prob_deltas(
     supergraph,
     graph,
