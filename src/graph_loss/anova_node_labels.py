@@ -338,12 +338,12 @@ def explained_variance_score(activation_grid: torch.Tensor, mask: torch.Tensor) 
     return float(score.clamp(min=0.0, max=1.0).item())
 
 
-def interaction_explained_variance_score(
+def interaction_beta_score(
     activation_grid: torch.Tensor,
     arg1_mask: torch.Tensor,
     arg2_mask: torch.Tensor,
 ) -> float:
-    """Return incremental variance explained by the arg1 x arg2 interaction term."""
+    """Return the OLS coefficient for the arg1 x arg2 interaction term."""
     if activation_grid.shape != arg1_mask.shape or activation_grid.shape != arg2_mask.shape:
         raise ValueError(
             f"Activation grid shape {tuple(activation_grid.shape)} does not match "
@@ -360,25 +360,12 @@ def interaction_explained_variance_score(
     y = activations[valid]
     a1 = in_arg1[valid]
     a2 = in_arg2[valid]
-    y_centered = y - y.mean()
-    total_variance = y_centered.square().sum()
-    if float(total_variance.item()) <= 0.0:
-        return 0.0
 
     ones = torch.ones_like(y)
     interaction = a1 * a2
-    reduced_design = torch.stack((ones, a1, a2), dim=1)
     full_design = torch.stack((ones, a1, a2, interaction), dim=1)
-
-    def residual_sum_squares(design: torch.Tensor) -> torch.Tensor:
-        coefficients = torch.linalg.lstsq(design, y.unsqueeze(1)).solution.squeeze(1)
-        residuals = y - design @ coefficients
-        return residuals.square().sum()
-
-    reduced_sse = residual_sum_squares(reduced_design)
-    full_sse = residual_sum_squares(full_design)
-    score = (reduced_sse - full_sse) / total_variance
-    return float(score.clamp(min=0.0, max=1.0).item())
+    coefficients = torch.linalg.lstsq(full_design, y.unsqueeze(1)).solution.squeeze(1)
+    return float(coefficients[3].item())
 
 
 def label_activation_heatmaps(
@@ -408,7 +395,7 @@ def label_activation_heatmaps(
             if rule.interaction_main_masks is None:
                 score = explained_variance_score(activation_grid, rule.mask)
             else:
-                score = interaction_explained_variance_score(
+                score = interaction_beta_score(
                     activation_grid,
                     *rule.interaction_main_masks,
                 )
@@ -445,6 +432,9 @@ def label_activation_heatmaps(
 
         category_specificity: dict[str, float] = {}
         for category, target_score in category_scores.items():
+            if category == "arg1 range and arg2 range":
+                category_specificity[category] = target_score
+                continue
             excluded_categories = {category} | CATEGORY_COMPONENTS.get(category, set())
             competitor_scores = [
                 category_scores[competitor]
