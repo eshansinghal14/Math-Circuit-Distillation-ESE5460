@@ -1149,6 +1149,14 @@ def save_supernode_activation_heatmap_png(
         arg2_vals = sorted({row[1] for row in arg_values if len(row) >= 2})
         fig, ax = plt.subplots(figsize=(5, 4))
         vmax = float(mean_grid.abs().max().item()) or 1.0
+        a1_min = min(arg1_vals) if arg1_vals else 0
+        a1_max = max(arg1_vals) if arg1_vals else mean_grid.shape[1]
+        a2_min = min(arg2_vals) if arg2_vals else 0
+        a2_max = max(arg2_vals) if arg2_vals else mean_grid.shape[0]
+        if a1_min == a1_max:
+            a1_min, a1_max = a1_min - 0.5, a1_max + 0.5
+        if a2_min == a2_max:
+            a2_min, a2_max = a2_min - 0.5, a2_max + 0.5
         im = ax.imshow(
             mean_grid.numpy(),
             origin="lower",
@@ -1156,12 +1164,7 @@ def save_supernode_activation_heatmap_png(
             cmap="RdBu_r",
             vmin=-vmax,
             vmax=vmax,
-            extent=[
-                min(arg1_vals) if arg1_vals else 0,
-                max(arg1_vals) if arg1_vals else mean_grid.shape[1],
-                min(arg2_vals) if arg2_vals else 0,
-                max(arg2_vals) if arg2_vals else mean_grid.shape[0],
-            ],
+            extent=[a1_min, a1_max, a2_min, a2_max],
         )
         fig.colorbar(im, ax=ax, label="mean activation")
         ax.set_xlabel("arg1")
