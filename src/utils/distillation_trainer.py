@@ -146,6 +146,9 @@ class DistillationTrainer:
                 student_dataset=config.student_dataset,
                 student_mlp_input_cache_path=config.student_mlp_input_cache_path,
                 student_activation_write_cache_path=config.student_activation_write_cache_path,
+                student_anova_range_radius=config.student_anova_range_radius,
+                student_anova_nodes_per_label=config.student_anova_nodes_per_label,
+                student_sum_min_specificity=config.student_sum_min_specificity,
             )
             self.student_graph_adapter = HFLlamaGraphAdapter(
                 self.student,

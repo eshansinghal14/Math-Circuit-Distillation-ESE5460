@@ -12,6 +12,7 @@ from graph_loss.align import (
     _build_full_vocab_prob_deltas,
     align_supernodes_by_label,
     align_supernodes_prob_delta,
+    extract_logit_space_deltas,
 )
 from graph_loss.attribution.attribute import attribute
 from graph_loss.graph import (
@@ -129,6 +130,14 @@ class GraphAuxConfig:
     # Local path for caching student activation-write grids between steps.
     # Defaults to a temp dir; set to a persistent path to reuse across restarts.
     student_activation_write_cache_path: str | None = None
+    # Radius around the prompt's target arg/sum values when building the
+    # ANOVA basis masks for student full_search clustering.  Must match the
+    # teacher-cache radius for label alignment to be meaningful.  0 = exact
+    # match (old, fragile default); 5 is a sensible decade-width choice.
+    student_anova_range_radius: int = 0
+    # Cap on members per ANOVA-labelled student supernode.
+    student_anova_nodes_per_label: int = 10
+    student_sum_min_specificity: float = 0.0
 
 
 def _log_alignment_diagnostic(
@@ -402,6 +411,9 @@ def compute_prompt_graph_loss(
             dataset=config.student_dataset,
             activation_write_cache_path=config.student_activation_write_cache_path,
             mlp_input_cache=student_mlp_input_cache,
+            anova_range_radius=config.student_anova_range_radius,
+            anova_nodes_per_label=config.student_anova_nodes_per_label,
+            sum_min_specificity=config.student_sum_min_specificity,
         )
     # Skip the (expensive, dense) supernode adjacency aggregation when no
     # edge term consumes it.  In fast_student_graph mode the underlying
@@ -588,16 +600,64 @@ def compute_prompt_graph_loss(
 
     # ---- Node-loss differentiable signal (student side) -----------------
     #
-    # Supernode deltas now live over the kept graph-node rows, not selected
-    # logit targets.  Recompute the student vectors from the differentiable
-    # adjacency so node loss can still backprop through the graph build.
+    # PRINCIPLED FIX (May 2026): project both teacher and student supernode
+    # prob-deltas onto the shared LOGIT BASIS before computing cosine.  Both
+    # graphs are built against the SAME ``logit_token_ids`` (teacher's top-K),
+    # so logit positions correspond to the same vocab tokens cross-model.
+    # The previous behaviour padded different graph-node bases to a common
+    # width and computed cosine on element-wise mismatched coordinates — that
+    # quantity wasn't meaningful for cross-model comparison.
+    #
+    # Falls back to the legacy (kept-node-space) signal when the teacher
+    # cache predates this fix (no graph_n_neurons / graph_n_tokens metadata).
     if config.graph_node_weight > 0.0 and len(student_supergraph.supernodes) > 0:
+        teacher_logit_space = extract_logit_space_deltas(
+            teacher_supergraph,
+            n_logits=int(student_graph.logit_token_ids.numel()),
+            n_neurons=teacher_supergraph.graph_n_neurons,
+            n_tokens=teacher_supergraph.graph_n_tokens,
+        )
+        # Student vectors must remain differentiable so gradient can flow
+        # back through the adjacency matrix into the student weights.
         student_node_delta_grad = _compute_supernode_node_deltas_from_adjacency(
             student_graph,
             student_supergraph.supernodes,
             student_supergraph.delta_node_indices,
         )
+        student_logit_space = None
         if student_node_delta_grad.numel() > 0:
+            student_supergraph_for_extract = student_supergraph._replace(
+                supernode_prob_deltas=student_node_delta_grad,
+                delta_node_indices=student_supergraph.delta_node_indices,
+                graph_n_neurons=int(student_graph.n_neurons),
+                graph_n_tokens=int(student_graph.n_tokens),
+            )
+            student_logit_space = extract_logit_space_deltas(
+                student_supergraph_for_extract,
+                n_logits=int(student_graph.logit_token_ids.numel()),
+                n_neurons=int(student_graph.n_neurons),
+                n_tokens=int(student_graph.n_tokens),
+            )
+
+        if teacher_logit_space is not None and student_logit_space is not None:
+            # Vocab-aligned logit-space vectors — cosine is meaningful here.
+            for tid in range(teacher_logit_space.shape[0]):
+                alignment.teacher_dla[tid] = teacher_logit_space[tid]
+            for sid in range(student_logit_space.shape[0]):
+                alignment.student_dla[sid] = student_logit_space[sid]
+        elif student_node_delta_grad.numel() > 0:
+            if config.verbose and not getattr(compute_prompt_graph_loss, "_warned_legacy_node_loss", False):
+                # Print once per training run to avoid spam.
+                print(
+                    "  [graph] WARNING: falling back to legacy graph-node-space "
+                    "node loss because the teacher cache lacks graph_n_neurons / "
+                    "graph_n_tokens metadata.  Regenerate the teacher cache to "
+                    "use the principled vocab-space node loss."
+                )
+                compute_prompt_graph_loss._warned_legacy_node_loss = True  # type: ignore[attr-defined]
+            # Legacy fallback: keep old pad-to-common-width behaviour so that
+            # caches without graph size metadata still produce *some* signal,
+            # even though it's not principled.
             target_width = (
                 next(iter(alignment.teacher_dla.values())).shape[0]
                 if alignment.teacher_dla
@@ -971,6 +1031,8 @@ def _load_cached_teacher(
         logit_token_ids=logit_token_ids,
         delta_node_indices=sg_data.get("delta_node_indices"),
         supernode_labels=sg_data.get("supernode_labels"),
+        graph_n_neurons=sg_data.get("graph_n_neurons"),
+        graph_n_tokens=sg_data.get("graph_n_tokens"),
     )
     prob_deltas = sg_data.get("supernode_prob_deltas")
     if prob_deltas is not None and prob_deltas.numel() > 0:

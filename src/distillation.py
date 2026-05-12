@@ -232,6 +232,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Local path for caching student activation-write grids between steps.",
     )
     parser.add_argument(
+        "--student-anova-range-radius",
+        type=int,
+        default=0,
+        help="Radius around target arg/sum values for the student ANOVA range mask. "
+             "Must match the teacher cache value for label alignment to be meaningful. "
+             "5 is a sensible decade-width default; 0 (legacy) uses exact-value masks "
+             "which can't distinguish range vs. units neurons.",
+    )
+    parser.add_argument(
+        "--student-anova-nodes-per-label",
+        type=int,
+        default=10,
+        help="Cap on neurons per labelled student supernode (default 10).",
+    )
+    parser.add_argument(
+        "--student-sum-min-specificity",
+        type=float,
+        default=0.0,
+        help="Minimum ANOVA specificity for sum-label student supernodes.",
+    )
+    parser.add_argument(
         "--save-dir",
         type=str,
         default=os.path.join(os.path.dirname(__file__), "..", "results", "distillation"),
@@ -400,6 +421,9 @@ def main() -> None:
             student_dataset=args.student_dataset,
             student_mlp_input_cache_path=args.student_mlp_input_cache,
             student_activation_write_cache_path=args.student_activation_write_cache,
+            student_anova_range_radius=args.student_anova_range_radius,
+            student_anova_nodes_per_label=args.student_anova_nodes_per_label,
+            student_sum_min_specificity=args.student_sum_min_specificity,
             step_log_interval=args.step_log_interval,
             seed=args.seed,
             device=device,

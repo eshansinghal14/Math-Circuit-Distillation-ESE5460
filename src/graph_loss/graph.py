@@ -397,6 +397,11 @@ class SuperGraph(NamedTuple):
     node_labels: dict[int, list[str]] | None = None
     supernode_labels: list[list[str]] | None = None
     supernode_heatmap_pdf_paths: list[str] | None = None
+    # Sizes of the parent graph at the time delta_node_indices was computed.
+    # Used by the node loss to identify which delta rows are logit positions
+    # (delta_node_indices >= graph_n_neurons + graph_n_tokens).
+    graph_n_neurons: int | None = None
+    graph_n_tokens: int | None = None
 
 
 def build_super_graph(
@@ -1353,6 +1358,39 @@ def build_super_graph(
         )
         prob_delta_elbow_index = None
 
+        # Diagnostic: how much of the total prob-delta signal across all kept
+        # neurons do the selected supergraph members capture?  If this is low
+        # (e.g. <30%) the supergraph is missing most of the circuit and the
+        # distillation loss only constrains a small fraction of the model.
+        if selected_member_ids:
+            all_kept_members = [int(m) for m in kept_neuron_indices.tolist()]
+            selected_members = sorted(int(m) for m in selected_member_ids)
+            full_delta = compute_supernode_node_deltas([all_kept_members])[0]
+            sel_delta = compute_supernode_node_deltas([selected_members])[0]
+            full_norm = float(full_delta.norm().item())
+            sel_norm = float(sel_delta.norm().item())
+            coverage = (sel_norm / full_norm) if full_norm > 0.0 else 0.0
+            # Cosine alignment between selected-set signature and all-kept signature.
+            # Tells us whether the selected neurons' net effect *points in the same
+            # direction* as the full circuit (high) or is orthogonal noise (low).
+            if full_norm > 0.0 and sel_norm > 0.0:
+                cos = float(
+                    torch.dot(full_delta, sel_delta).item()
+                    / (full_norm * sel_norm)
+                )
+            else:
+                cos = 0.0
+            logger.info(
+                "  Supergraph prob-delta coverage: selected_norm/total_norm=%.4f "
+                "(selected=%.4g total=%.4g) cos=%.4f -- selected_neurons=%d/%d",
+                coverage,
+                sel_norm,
+                full_norm,
+                cos,
+                len(selected_members),
+                len(all_kept_members),
+            )
+
         for supernode_idx, (members, prob_delta_norm) in enumerate(
             zip(supernodes, supernode_prob_delta_norms, strict=True)
         ):
@@ -1442,6 +1480,8 @@ def build_super_graph(
         node_labels=node_labels,
         supernode_labels=supernode_labels,
         supernode_heatmap_pdf_paths=supernode_heatmap_pdf_paths,
+        graph_n_neurons=int(graph.n_neurons),
+        graph_n_tokens=int(graph.n_tokens),
     )
 
 

@@ -113,7 +113,11 @@ def _save_prune_result(path: str, prune_result: PruneResult) -> None:
 
 
 def _save_supergraph(
-    path: str, supergraph: SuperGraph, logit_token_ids: torch.Tensor | None = None
+    path: str,
+    supergraph: SuperGraph,
+    logit_token_ids: torch.Tensor | None = None,
+    graph_n_neurons: int | None = None,
+    graph_n_tokens: int | None = None,
 ) -> None:
     data: dict[str, Any] = {
         "supernode_adjacency_matrix": supergraph.supernode_adjacency_matrix,
@@ -126,6 +130,12 @@ def _save_supergraph(
     }
     if logit_token_ids is not None:
         data["logit_token_ids"] = logit_token_ids.cpu()
+    # Saved so the loss can identify which delta_node_indices rows are
+    # logit positions vs. neurons/tokens (needed for cross-model node loss).
+    if graph_n_neurons is not None:
+        data["graph_n_neurons"] = int(graph_n_neurons)
+    if graph_n_tokens is not None:
+        data["graph_n_tokens"] = int(graph_n_tokens)
     torch.save(data, path)
 
 
@@ -353,7 +363,13 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
         )
         supergraph_path = os.path.join(sample_dir, "supergraph.pt")
         logger.info("Saving supergraph to %s", supergraph_path)
-        _save_supergraph(supergraph_path, supergraph, logit_token_ids=graph.logit_token_ids)
+        _save_supergraph(
+            supergraph_path,
+            supergraph,
+            logit_token_ids=graph.logit_token_ids,
+            graph_n_neurons=graph.n_neurons,
+            graph_n_tokens=graph.n_tokens,
+        )
         _log_pipeline_comparison(
             graph_for_supergraph,
             supergraph,
