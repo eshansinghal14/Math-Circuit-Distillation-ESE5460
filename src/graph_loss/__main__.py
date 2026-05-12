@@ -730,6 +730,17 @@ def main():
         help="Maximum positive-variance ANOVA nodes to include per label supernode",
     )
     parser.add_argument(
+        "--anova-range-radius",
+        "--anova_range_radius",
+        dest="anova_range_radius",
+        type=int,
+        default=0,
+        help=(
+            "Radius around the target arg1/arg2 values for ANOVA range basis masks. "
+            "Use 0 for exact target-value masks."
+        ),
+    )
+    parser.add_argument(
         "--sum-min-specificity",
         "--sum_min_specificity",
         dest="sum_min_specificity",
@@ -824,6 +835,7 @@ def main():
         cluster_method=args.cluster_method,
         supernode_heatmap_output_dir=args.supernode_heatmap_output_dir,
         anova_nodes_per_label=args.anova_nodes_per_label,
+        anova_range_radius=args.anova_range_radius,
         sum_min_specificity=args.sum_min_specificity,
     )
     _log_supergraph_summary(

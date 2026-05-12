@@ -16,6 +16,7 @@ class BasisRule:
     range_values: torch.Tensor | None = None
     range_center: int | None = None
     range_prefix: str | None = None
+    dynamic_range_label: bool = True
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,17 @@ def _format_interval_label(prefix: str, lo: int, hi: int) -> str:
     return f"{prefix} {lo}-{hi}"
 
 
+def _mask_interval_label(prefix: str, values: torch.Tensor, mask: torch.Tensor) -> str:
+    selected = values[mask]
+    if selected.numel() == 0:
+        return _format_interval_label(prefix, 0, 0)
+    return _format_interval_label(
+        prefix,
+        int(selected.min().item()),
+        int(selected.max().item()),
+    )
+
+
 def parse_numeric_args(prompt: str) -> tuple[int, ...]:
     """Parse numeric arguments from the left side of an arithmetic prompt."""
     left = prompt.split("=", 1)[0]
@@ -77,12 +89,15 @@ def build_anova_basis_rules(
     arg_values: list[list[int]],
     *,
     target_args: tuple[int, ...] | None = None,
+    anova_range_radius: int = 0,
 ) -> list[BasisRule]:
     """Build binary basis masks for argument and sum rules.
 
-    Range labels are scored with the exact target value. The final range text
-    is chosen per heatmap from the high-activation band.
+    Arg range labels can be scored with a target-centered radius. Sum ranges
+    are still scored against the exact sum target.
     """
+    if anova_range_radius < 0:
+        raise ValueError("anova_range_radius must be non-negative")
     if not arg_values:
         return []
 
@@ -103,15 +118,25 @@ def build_anova_basis_rules(
             else list(range(10))
         )
         for center in centers:
-            mask = values == center
+            if anova_range_radius:
+                mask = (values >= center - anova_range_radius) & (
+                    values <= center + anova_range_radius
+                )
+                label = _mask_interval_label(arg_name, values, mask)
+                dynamic_range_label = False
+            else:
+                mask = values == center
+                label = _format_interval_label(arg_name, center, center)
+                dynamic_range_label = True
             rules.append(
                 BasisRule(
-                    _format_interval_label(arg_name, center, center),
+                    label,
                     mask,
                     category=f"{arg_name} range",
                     range_values=values,
                     range_center=center,
                     range_prefix=arg_name,
+                    dynamic_range_label=dynamic_range_label,
                 )
             )
         for unit_digit in unit_digits:
@@ -180,6 +205,8 @@ def _high_activation_range_label(
     z_threshold: float = 1.0,
 ) -> str:
     if (
+        not rule.dynamic_range_label
+        or
         rule.range_values is None
         or rule.range_center is None
         or rule.range_prefix is None
@@ -257,6 +284,7 @@ def label_activation_heatmaps(
     arg_values: list[list[int]],
     *,
     target_args: tuple[int, ...] | None = None,
+    anova_range_radius: int = 0,
 ) -> list[NodeLabel]:
     """Score ANOVA label categories for each activation heatmap."""
     if activations.ndim != len(arg_values) + 1:
@@ -268,6 +296,7 @@ def label_activation_heatmaps(
     rules = build_anova_basis_rules(
         arg_values,
         target_args=target_args,
+        anova_range_radius=anova_range_radius,
     )
     out: list[NodeLabel] = []
     for activation_grid in activations.detach().float().cpu():

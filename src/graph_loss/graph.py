@@ -417,6 +417,7 @@ def build_super_graph(
     cluster_method: str = "full_search",
     supernode_heatmap_output_dir: str | None = None,
     anova_nodes_per_label: int = 10,
+    anova_range_radius: int = 0,
     sum_min_specificity: float = 0.0,
 ) -> SuperGraph:
     """Cluster kept neurons into numeric-token embedding and final-token computation supernodes."""
@@ -436,6 +437,8 @@ def build_super_graph(
         raise ValueError("cluster_method must be one of: full_search, ablation")
     if anova_nodes_per_label <= 0:
         raise ValueError("anova_nodes_per_label must be positive")
+    if anova_range_radius < 0:
+        raise ValueError("anova_range_radius must be non-negative")
 
     n_neurons = graph.n_neurons
     logger = logging.getLogger(__name__)
@@ -1251,6 +1254,7 @@ def build_super_graph(
             activation_write_result.activations,
             activation_write_result.arg_values,
             target_args=target_args,
+            anova_range_radius=anova_range_radius,
         )
         selected_member_ids: set[int] = set()
         supernodes = []

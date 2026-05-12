@@ -73,6 +73,7 @@ class TeacherDataConfig:
     activation_write_cache_path: str | None = None
     mlp_input_cache_path: str | None = None
     anova_nodes_per_label: int = 10
+    anova_range_radius: int = 0
     sum_min_specificity: float = 0.0
 
 
@@ -342,6 +343,7 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
                 model_name=config.teacher_model,
                 cluster_method=config.cluster_method,
                 anova_nodes_per_label=config.anova_nodes_per_label,
+                anova_range_radius=config.anova_range_radius,
                 sum_min_specificity=config.sum_min_specificity,
             )
         _log_supergraph_summary(
@@ -593,6 +595,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum positive-variance ANOVA nodes to include per label supernode",
     )
     parser.add_argument(
+        "--anova-range-radius",
+        "--anova_range_radius",
+        dest="anova_range_radius",
+        type=int,
+        default=0,
+        help=(
+            "Radius around the target arg1/arg2 values for ANOVA range basis masks. "
+            "Use 0 for exact target-value masks."
+        ),
+    )
+    parser.add_argument(
         "--sum-min-specificity",
         "--sum_min_specificity",
         dest="sum_min_specificity",
@@ -653,6 +666,7 @@ def main() -> None:
         activation_write_cache_path=args.activation_write_cache_path,
         mlp_input_cache_path=args.mlp_input_cache_path,
         anova_nodes_per_label=args.anova_nodes_per_label,
+        anova_range_radius=args.anova_range_radius,
         sum_min_specificity=args.sum_min_specificity,
     )
     generate_teacher_data(config)
