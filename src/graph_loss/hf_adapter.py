@@ -57,6 +57,20 @@ class HFLlamaGraphAdapter:
     def W_U(self) -> torch.Tensor:
         return self.lm_head.weight.T
 
+    @property
+    def cfg(self) -> "_HFGraphConfig":
+        """Lazy TransformerLens-shaped config shim.
+
+        ``graph.py`` paths inherited from the TL pipeline read ``model.cfg.device``,
+        ``model.cfg.d_model``, etc.  Building one ``_HFGraphConfig`` and caching it
+        on first access lets that code work unchanged against this HF adapter.
+        """
+        cached = getattr(self, "_cfg_cache", None)
+        if cached is None:
+            cached = _HFGraphConfig(self)
+            self._cfg_cache = cached
+        return cached
+
     def autocast_context(self, dtype: torch.dtype | None):
         if dtype is None or self.device.type != "cuda":
             return contextlib.nullcontext()
@@ -1100,6 +1114,7 @@ class _HFGraphConfig:
         self.d_head = int(getattr(adapter.config, "head_dim", 0) or adapter.d_model // adapter.config.num_attention_heads)
         self.n_heads = int(adapter.config.num_attention_heads)
         self.n_key_value_heads = getattr(adapter.config, "num_key_value_heads", None)
+        self.device = adapter.device
         name = getattr(adapter.config, "_name_or_path", None) or getattr(adapter.config, "name_or_path", "llama")
         self.model_name = name
         self.tokenizer_name = name
