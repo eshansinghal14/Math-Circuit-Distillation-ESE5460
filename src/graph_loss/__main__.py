@@ -586,7 +586,12 @@ def main():
     parser = argparse.ArgumentParser(
         description="Build, prune, and summarize neuron attribution graphs."
     )
-    parser.add_argument("--model", required=True, help="HuggingFace model name")
+    parser.add_argument("--model", required=True, help="HuggingFace model name or identifier")
+    parser.add_argument(
+        "--model_path",
+        default=None,
+        help="Local path to load the model from. If provided, overrides --model for loading but --model is still used as the display name.",
+    )
     parser.add_argument("--prompt", required=True, help="Prompt to analyze")
     parser.add_argument(
         "--graph_output_path",
@@ -760,9 +765,10 @@ def main():
         logger.info("Authenticating with Hugging Face token")
         login(HF_READ_TOKEN)
 
-    logger.info("Loading model: %s", args.model)
+    model_load_path = args.model_path if args.model_path else args.model
+    logger.info("Loading model: %s", model_load_path)
     model = TransformerLensReplacementModel.from_pretrained(
-        args.model,
+        model_load_path,
         dtype=dtype,
     )
 
