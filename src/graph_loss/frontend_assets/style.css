@@ -149,14 +149,12 @@ d-article{
 
 .dual-graph-container {
     display: flex;
-    gap: 12px;
-    height: calc(100vh - 20px);
+    flex-direction: column;
+    gap: 16px;
     margin-top: 10px;
 }
 
 .graph-panel {
-    flex: 1;
-    min-width: 0;
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -188,7 +186,6 @@ d-article{
 
 
 .cg{
-    flex: 1;
-    min-height: 0;
+    height: 600px;
     overflow: hidden;
 }

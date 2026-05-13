@@ -176,24 +176,14 @@ window.initCg = async function (sel, slug, {clickedId, clickedIdCb, isModal, isG
 
   function initGridsnap() {
     var gridData = [
-      // {cur: {x: 0, y: 0,  w: 6, h: .5}, class: 'button-container'},
-      {cur: {x: 0, y: 8, w: 8, h: 8}, class: 'subgraph'},
-      {cur: {x: 8, y: 1, w: 6, h: 6}, class: 'node-connections'},
-      {cur: {x: 8, y: 6, w: 6, h: 10}, class: 'feature-detail'},
-      {cur: {x: 0, y: 0, w: 8, h: 8}, class: 'link-graph', resizeFn: makeResizeFn(initCgLinkGraph)},
-      // {cur: {x: 0, y: 18, w: 6, h: 7}, class: 'clerp-list'},
-      // {cur: {x: 6, y: 30, w: 4, h: 7}, class: 'feature-scatter'},
-      // {cur: {x: 0, y: 30, w: 3, h: 8}, class: 'metadata'},
+      {cur: {x: 0, y: 0, w: 9, h: 16}, class: 'link-graph', resizeFn: makeResizeFn(initCgLinkGraph)},
+      {cur: {x: 9, y: 0, w: 5, h: 16}, class: 'node-connections'},
      ].filter(d => d)
 
     var initFns = [
-      initCgButtonContainer,   
-      initCgSubgraph,
+      initCgButtonContainer,
       initCgLinkGraph,
-      initCgNodeConnections, 
-      initCgFeatureDetail, 
-      // initCgClerpList, 
-      // initCgFeatureScatter, 
+      initCgNodeConnections,
     ].filter(d => d)
     
     var gridsnapSel = sel.html('').append('div.gridsnap.cg')
