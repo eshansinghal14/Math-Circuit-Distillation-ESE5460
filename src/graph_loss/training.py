@@ -468,6 +468,74 @@ def compute_prompt_graph_loss(
         graph_n_neurons=int(student_graph.n_neurons),
         graph_n_tokens=int(student_graph.n_tokens),
     )
+
+    # ------------------------------------------------------------------
+    # DLA backfill of student logit columns.
+    #
+    # When ``student_skip_logit_attribution=True`` (default for memory),
+    # ``student_graph.adjacency_matrix`` has its ``[logits, neurons]``
+    # block set to all zeros.  ``supernode_prob_deltas`` is computed from
+    # that adjacency, so its columns at logit positions are *also* zero.
+    #
+    # Cross-model alignment (``align.extract_logit_space_deltas``) selects
+    # exactly those columns to compare against the teacher.  With student
+    # columns identically zero the cosine similarity is identically zero,
+    # the mapping becomes random, and graph loss teaches nothing.
+    #
+    # Fix: fill the missing logit columns with the linear DLA value
+    # ``(sum_{n in supernode} write_vec[n]) @ W_U[:, logit_token_ids[k]]``.
+    # This is the same quantity the missing adjacency block would have
+    # held (the teacher's attribute() path computes it exactly), restoring
+    # a meaningful logit-space signature for alignment.  Detached: only
+    # used for alignment cosine, no grad needed here.
+    if (
+        config.student_skip_logit_attribution
+        and student_graph.neuron_write_vectors is not None
+        and student_graph.logit_token_ids is not None
+        and student_supergraph.supernode_prob_deltas is not None
+        and student_supergraph.delta_node_indices is not None
+    ):
+        delta_idx_long = student_supergraph.delta_node_indices.long()
+        n_neurons_g = int(student_graph.n_neurons)
+        n_tokens_g = int(student_graph.n_tokens)
+        logit_start = n_neurons_g + n_tokens_g
+        is_logit_col = delta_idx_long >= logit_start
+        logit_col_positions = is_logit_col.nonzero(as_tuple=True)[0]
+        if logit_col_positions.numel() > 0:
+            pd = student_supergraph.supernode_prob_deltas
+            nw = student_graph.neuron_write_vectors.detach().to(
+                device=pd.device, dtype=pd.dtype
+            )
+            d_model = nw.shape[1]
+            supernodes_list = student_supergraph.supernodes
+            n_sn = len(supernodes_list)
+            sn_writes = torch.zeros(n_sn, d_model, device=nw.device, dtype=nw.dtype)
+            for i, members in enumerate(supernodes_list):
+                if members:
+                    members_t = torch.tensor(
+                        members, device=nw.device, dtype=torch.long
+                    )
+                    sn_writes[i] = nw.index_select(0, members_t).sum(dim=0)
+            W_U_full = student_adapter.W_U.detach().to(device=nw.device, dtype=nw.dtype)
+            lti = student_graph.logit_token_ids.to(device=nw.device, dtype=torch.long)
+            W_U_sel = W_U_full.index_select(1, lti)
+            dla_logit_full = sn_writes @ W_U_sel
+            logit_indices_in_graph = (
+                delta_idx_long[logit_col_positions].to(device=nw.device) - logit_start
+            ).clamp(min=0, max=dla_logit_full.shape[1] - 1)
+            dla_for_kept_logits = dla_logit_full.index_select(1, logit_indices_in_graph)
+            logit_col_positions_dev = logit_col_positions.to(device=nw.device)
+            new_pd = pd.clone()
+            new_pd.index_copy_(1, logit_col_positions_dev, dla_for_kept_logits)
+            student_supergraph = student_supergraph._replace(
+                supernode_prob_deltas=new_pd
+            )
+            if config.align_diagnostic:
+                print(
+                    f"  [graph] DLA backfill: filled {logit_col_positions.numel()} "
+                    f"logit cols across {n_sn} student supernodes"
+                )
+
     if config.verbose:
         print(
             "  [graph] student supergraph complete: "
