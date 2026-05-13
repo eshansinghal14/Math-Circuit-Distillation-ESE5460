@@ -392,12 +392,15 @@ def compute_prompt_graph_loss(
     student_mlp_input_cache = None
     if config.student_cluster_method == "full_search" and config.student_mlp_input_cache_path:
         from graph_loss.precompute_mlp_inputs import load_mlp_input_cache, mlp_input_cache_exists
-        from graph_loss.generate_teacher_data import _resolve_dataset_path
+        from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
         if config.student_dataset:
             dataset_path = _resolve_dataset_path(config.student_dataset)
-            if mlp_input_cache_exists(config.student_mlp_input_cache_path, student_adapter.model.cfg.model_name, dataset_path):
+            _student_model_name = getattr(
+                getattr(student_adapter.model, "config", None), "_name_or_path", "unknown_model"
+            )
+            if mlp_input_cache_exists(config.student_mlp_input_cache_path, _student_model_name, dataset_path):
                 student_mlp_input_cache = load_mlp_input_cache(
-                    config.student_mlp_input_cache_path, student_adapter.model.cfg.model_name, dataset_path
+                    config.student_mlp_input_cache_path, _student_model_name, dataset_path
                 )
     with torch.no_grad():
         student_supergraph_structure = build_super_graph(
@@ -460,6 +463,10 @@ def compute_prompt_graph_loss(
         supernode_prob_deltas=student_supergraph_structure.supernode_prob_deltas,
         logit_token_ids=student_graph.logit_token_ids,
         delta_node_indices=student_supergraph_structure.delta_node_indices,
+        # Always populate graph size metadata so alignment can project to
+        # logit space even when --graph-node-weight 0 (edge-loss-only mode).
+        graph_n_neurons=int(student_graph.n_neurons),
+        graph_n_tokens=int(student_graph.n_tokens),
     )
     if config.verbose:
         print(
