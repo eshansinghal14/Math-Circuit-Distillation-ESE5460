@@ -167,12 +167,8 @@ def build_anova_basis_rules(
         arg2_values = grids[1]
         arg1_center = int(target_args[0])
         arg2_center = int(target_args[1])
-        arg1_mask = (arg1_values >= arg1_center - anova_range_radius) & (
-            arg1_values <= arg1_center + anova_range_radius
-        )
-        arg2_mask = (arg2_values >= arg2_center - anova_range_radius) & (
-            arg2_values <= arg2_center + anova_range_radius
-        )
+        arg1_mask = arg1_values == arg1_center
+        arg2_mask = arg2_values == arg2_center
         mask = arg1_mask & arg2_mask
         rules.append(
             BasisRule(
@@ -192,16 +188,9 @@ def build_anova_basis_rules(
             else sorted({int(value) for value in sums.flatten().tolist()})
         )
         for center in sum_centers:
-            if anova_range_radius:
-                mask = (sums >= center - anova_range_radius) & (
-                    sums <= center + anova_range_radius
-                )
-                label = _mask_interval_label("sum", sums, mask)
-                dynamic_range_label = False
-            else:
-                mask = sums == center
-                label = _format_interval_label("sum", center, center)
-                dynamic_range_label = True
+            mask = sums == center
+            label = _format_interval_label("sum", center, center)
+            dynamic_range_label = True
             rules.append(
                 BasisRule(
                     label,
