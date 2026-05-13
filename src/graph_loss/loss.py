@@ -10,67 +10,68 @@ def _compute_edge_loss(
     student_ids: list[int],
     epsilon: float = 1e-4,
 ) -> torch.Tensor:
-    """Edge-level structural loss: MSE between teacher edge and mean matched student edge.
+    """Edge-level structural loss via teacher-coarsening.
 
-    Uses symmetric MSE (``gap**2``) so the gradient is non-zero whether the student
-    over-covers or under-covers the teacher.  The one-sided relu formulation silently
-    killed the gradient whenever the student — having fewer, coarser supernodes —
-    had systematically larger per-entry adjacency values after L1 row-normalisation.
+    Why coarsening rather than per-entry comparison:
+    Teacher and student adjacency matrices have different shapes (n_T x n_T vs
+    n_S x n_S) and, after L1 row-normalisation, different natural per-entry
+    scales (each entry ~ 1/row_size).  Comparing entries directly forces the
+    student to match values that its row-normalisation constraint forbids.
 
-    Accumulates per-edge loss terms in a list and stacks at the end so the
-    returned scalar carries the autograd graph through W_S.  Initializing
-    ``loss = torch.tensor(0.0)`` and using ``loss += ...`` silently drops
-    gradient because the leaf zero scalar has ``requires_grad=False`` and
-    in-place adds on it do not promote it to a grad-tracking tensor.
+    Coarsening fixes this by viewing the student matrix through the teacher's
+    clustering:
+        W_S_coarse[T_tgt, T_src] =
+            (sum_{s_tgt in map[T_tgt], s_src in map[T_src]} W_S[s_tgt, s_src])
+            / |map[T_tgt]|
+    Both W_T and W_S_coarse now live on the same (n_T x n_T) support; rows of
+    each are distributions over teacher source supernodes; their values are
+    directly comparable.  We then compute element-wise MSE.
+
+    Notes:
+    - Teacher rows with no mapped students contribute (W_T[t,:]**2).mean() with
+      zero gradient — honest: the student lacks a corresponding cluster, so the
+      loss surfaces that gap in value but cannot push the student to grow one.
+    - A student in multiple teacher buckets (rare due to the mapping's gap
+      threshold) is double-counted softly; this is treated as noise.
+    - Builds W_S_coarse as a single tensor (not appended scalars) so the autograd
+      graph is preserved through indexing-and-sum on W_S.
     """
-    t_id2idx = {cid: i for i, cid in enumerate(teacher_ids)}
+    n_T = len(teacher_ids)
     s_id2idx = {cid: i for i, cid in enumerate(student_ids)}
-    device = W_T.device
+    device = W_S.device
+    dtype = W_S.dtype
 
-    loss_terms: list[torch.Tensor] = []
-    total_weight = torch.tensor(0.0, device=device, dtype=W_T.dtype)
+    if n_T == 0 or not mapping:
+        return torch.tensor(0.0, device=device, dtype=dtype)
 
-    for t_src in teacher_ids:
-        for t_tgt in teacher_ids:
-            w_teacher = W_T[t_id2idx[t_tgt], t_id2idx[t_src]]
+    rows: list[torch.Tensor] = []
+    row_indices: list[int] = []
 
-            if w_teacher.abs() < epsilon:
+    for ti_tgt, t_tgt in enumerate(teacher_ids):
+        s_tgts = [s_id2idx[s] for s in mapping.get(t_tgt, set()) if s in s_id2idx]
+        if not s_tgts:
+            continue
+        n_tgt = float(len(s_tgts))
+        s_tgts_t = torch.tensor(s_tgts, device=device, dtype=torch.long)
+        row_entries: list[torch.Tensor] = []
+        for t_src in teacher_ids:
+            s_srcs = [s_id2idx[s] for s in mapping.get(t_src, set()) if s in s_id2idx]
+            if not s_srcs:
+                row_entries.append(torch.zeros((), device=device, dtype=dtype))
                 continue
+            s_srcs_t = torch.tensor(s_srcs, device=device, dtype=torch.long)
+            block_sum = W_S.index_select(0, s_tgts_t).index_select(1, s_srcs_t).sum()
+            row_entries.append(block_sum / n_tgt)
+        rows.append(torch.stack(row_entries))
+        row_indices.append(ti_tgt)
 
-            total_weight = total_weight + w_teacher.abs()
+    if not rows:
+        return torch.tensor(0.0, device=device, dtype=dtype)
 
-            src_students = mapping.get(t_src, set())
-            tgt_students = mapping.get(t_tgt, set())
-
-            if src_students and tgt_students:
-                coverage_list = [
-                    W_S[s_id2idx[s_tgt], s_id2idx[s_src]]
-                    for s_src in src_students for s_tgt in tgt_students
-                    if s_src in s_id2idx and s_tgt in s_id2idx
-                ]
-
-                if coverage_list:
-                    # Mean over matched student edges so every mapped entry gets
-                    # gradient, not just the argmax.
-                    coverage = torch.stack(coverage_list).mean()
-                else:
-                    coverage = torch.tensor(0.0, device=device, dtype=W_T.dtype)
-            else:
-                coverage = torch.tensor(0.0, device=device, dtype=W_T.dtype)
-
-            gap = w_teacher - coverage
-            # Symmetric MSE: penalise both over- and under-coverage.
-            loss_terms.append(gap ** 2)
-
-    if loss_terms:
-        loss = torch.stack(loss_terms).sum()
-    else:
-        loss = torch.tensor(0.0, device=device, dtype=W_T.dtype)
-
-    if total_weight > epsilon:
-        loss = loss / total_weight
-
-    return loss
+    W_S_coarse_partial = torch.stack(rows)
+    teacher_rows = W_T[row_indices].to(device=device, dtype=dtype)
+    diff = teacher_rows - W_S_coarse_partial
+    return (diff ** 2).mean()
 
 
 def _compute_node_loss(

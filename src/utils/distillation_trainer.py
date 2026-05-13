@@ -508,6 +508,15 @@ class DistillationTrainer:
                         eff_lam_key = "graph_grad_norm_scale_effective_lambda"
                         eff_lam_avg = interval.get(eff_lam_key, 0.0) / denom
                         graph_s += f" | effLambda {eff_lam_avg:.4f}"
+                    t_sn = interval.get("graph_teacher_supernodes", 0.0) / denom
+                    s_sn = interval.get("graph_student_supernodes", 0.0) / denom
+                    mapped = interval.get("graph_aligned_teacher_supernodes", 0.0) / denom
+                    cos = interval.get("graph_mean_alignment_similarity", 0.0) / denom
+                    if t_sn > 0 or s_sn > 0:
+                        graph_s += (
+                            f" | align T{t_sn:.1f}/S{s_sn:.1f}"
+                            f" mapped={mapped:.1f} cos={cos:.3f}"
+                        )
                 grad_s = ""
                 if self.config.track_loss_grads:
                     grad_s = (
