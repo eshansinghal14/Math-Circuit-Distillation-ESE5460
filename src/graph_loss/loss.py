@@ -10,31 +10,23 @@ def _compute_edge_loss(
     student_ids: list[int],
     epsilon: float = 1e-4,
 ) -> torch.Tensor:
-    """Edge-level structural loss via teacher-coarsening.
+    """Edge-level structural loss via teacher-coarsening + row cosine distance.
 
-    Why coarsening rather than per-entry comparison:
-    Teacher and student adjacency matrices have different shapes (n_T x n_T vs
-    n_S x n_S) and, after L1 row-normalisation, different natural per-entry
-    scales (each entry ~ 1/row_size).  Comparing entries directly forces the
-    student to match values that its row-normalisation constraint forbids.
-
-    Coarsening fixes this by viewing the student matrix through the teacher's
-    clustering:
+    Coarsening: aggregate student adjacency into teacher-sized matrix.
         W_S_coarse[T_tgt, T_src] =
             (sum_{s_tgt in map[T_tgt], s_src in map[T_src]} W_S[s_tgt, s_src])
             / |map[T_tgt]|
-    Both W_T and W_S_coarse now live on the same (n_T x n_T) support; rows of
-    each are distributions over teacher source supernodes; their values are
-    directly comparable.  We then compute element-wise MSE.
 
-    Notes:
-    - Teacher rows with no mapped students contribute (W_T[t,:]**2).mean() with
-      zero gradient — honest: the student lacks a corresponding cluster, so the
-      loss surfaces that gap in value but cannot push the student to grow one.
-    - A student in multiple teacher buckets (rare due to the mapping's gap
-      threshold) is double-counted softly; this is treated as noise.
-    - Builds W_S_coarse as a single tensor (not appended scalars) so the autograd
-      graph is preserved through indexing-and-sum on W_S.
+    Loss: mean row-wise cosine distance (1 - cosine_similarity) between
+    W_T rows and W_S_coarse rows.  Cosine distance is scale-invariant, so it
+    compares routing *structure* (which supernodes influence which) rather than
+    absolute magnitudes.  This keeps the loss naturally in [0, 2] regardless of
+    adjacency entry scale, making it directly comparable to the KL loss (~1.0)
+    without requiring extreme lambda values.
+
+    MSE on raw entries was the previous formulation; it produced losses ~0.001
+    because adjacency entries are O(0.001-0.01), making lambda=10 effectively
+    invisible (graph gradient was ~100x smaller than KL).
     """
     n_T = len(teacher_ids)
     s_id2idx = {cid: i for i, cid in enumerate(student_ids)}
@@ -68,10 +60,17 @@ def _compute_edge_loss(
     if not rows:
         return torch.tensor(0.0, device=device, dtype=dtype)
 
-    W_S_coarse_partial = torch.stack(rows)
-    teacher_rows = W_T[row_indices].to(device=device, dtype=dtype)
-    diff = teacher_rows - W_S_coarse_partial
-    return (diff ** 2).mean()
+    W_S_coarse_partial = torch.stack(rows)          # [n_matched, n_T]
+    teacher_rows = W_T[row_indices].to(device=device, dtype=dtype)  # [n_matched, n_T]
+
+    # Row-wise cosine distance: 1 - cos_sim, bounded in [0, 2].
+    # Work in float32 for numeric stability; W_S may be bfloat16.
+    t_f = teacher_rows.float()
+    s_f = W_S_coarse_partial.float()
+    t_norm = t_f.norm(dim=1, keepdim=True).clamp(min=epsilon)
+    s_norm = s_f.norm(dim=1, keepdim=True).clamp(min=epsilon)
+    cos_sim = (t_f * s_f).sum(dim=1) / (t_norm.squeeze(1) * s_norm.squeeze(1))
+    return (1.0 - cos_sim).mean().to(dtype)
 
 
 def _compute_node_loss(
