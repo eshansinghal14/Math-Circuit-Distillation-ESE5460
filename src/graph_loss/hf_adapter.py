@@ -1146,25 +1146,30 @@ class HFLlamaGraphAdapter:
 class _HFOldMLP:
     """Shim for ``model.blocks[layer].mlp.old_mlp``.
 
-    TransformerLens exposes ``old_mlp.W_out`` with shape ``[d_mlp, d_model]``
-    so that ``W_out[neuron_id]`` gives the d_model-dimensional write vector
-    for that neuron.
+    TransformerLens naming vs HF LLaMA shapes:
 
-    HF LLaMA stores the equivalent as ``down_proj.weight`` with shape
-    ``[d_model, d_mlp]`` — the transpose.  We expose the transpose here so
-    indexing by neuron_id works the same way as in the TL code path.
+      TL attr   shape (TL)        HF attr            shape (HF)
+      --------  ----------------  -----------------  -----------------
+      W_gate    [d_mlp, d_model]  gate_proj.weight   [d_mlp, d_model]  ← same
+      W_in      [d_mlp, d_model]  up_proj.weight     [d_mlp, d_model]  ← same
+      W_out     [d_mlp, d_model]  down_proj.weight   [d_model, d_mlp]  ← TRANSPOSED
+
+    ``W_out[neuron_id]`` must return the d_model-dimensional write vector for that
+    neuron; indexing is on the d_mlp axis (first dim in TL convention).
     """
 
-    def __init__(self, down_proj_weight: "torch.Tensor"):
+    def __init__(self, hf_mlp):
+        self.W_gate = hf_mlp.gate_proj.weight   # already (d_mlp, d_model)
+        self.W_in   = hf_mlp.up_proj.weight      # already (d_mlp, d_model)
         # down_proj.weight is (d_model, d_mlp) in HF → transpose to (d_mlp, d_model)
-        self.W_out = down_proj_weight.T
+        self.W_out  = hf_mlp.down_proj.weight.T
 
 
 class _HFMLP:
     """Shim for ``model.blocks[layer].mlp``."""
 
     def __init__(self, hf_mlp):
-        self.old_mlp = _HFOldMLP(hf_mlp.down_proj.weight)
+        self.old_mlp = _HFOldMLP(hf_mlp)
 
 
 class _HFBlock:
