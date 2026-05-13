@@ -765,12 +765,22 @@ def main():
         logger.info("Authenticating with Hugging Face token")
         login(HF_READ_TOKEN)
 
-    model_load_path = args.model_path if args.model_path else args.model
-    logger.info("Loading model: %s", model_load_path)
-    model = TransformerLensReplacementModel.from_pretrained(
-        model_load_path,
-        dtype=dtype,
-    )
+    if args.model_path:
+        from transformers import AutoModelForCausalLM
+        logger.info("Loading local weights from: %s", args.model_path)
+        hf_model = AutoModelForCausalLM.from_pretrained(args.model_path, torch_dtype=dtype)
+        logger.info("Wrapping with TransformerLens architecture: %s", args.model)
+        model = TransformerLensReplacementModel.from_pretrained(
+            args.model,
+            dtype=dtype,
+            hf_model=hf_model,
+        )
+    else:
+        logger.info("Loading model: %s", args.model)
+        model = TransformerLensReplacementModel.from_pretrained(
+            args.model,
+            dtype=dtype,
+        )
 
     logger.info("Running attribution graph build")
     graph = attribute(
