@@ -10,7 +10,12 @@ def _compute_edge_loss(
     student_ids: list[int],
     epsilon: float = 1e-4,
 ) -> torch.Tensor:
-    """Edge-level structural loss: penalize student edges that under-cover teacher edges.
+    """Edge-level structural loss: MSE between teacher edge and mean matched student edge.
+
+    Uses symmetric MSE (``gap**2``) so the gradient is non-zero whether the student
+    over-covers or under-covers the teacher.  The one-sided relu formulation silently
+    killed the gradient whenever the student — having fewer, coarser supernodes —
+    had systematically larger per-entry adjacency values after L1 row-normalisation.
 
     Accumulates per-edge loss terms in a list and stacks at the end so the
     returned scalar carries the autograd graph through W_S.  Initializing
@@ -45,18 +50,17 @@ def _compute_edge_loss(
                 ]
 
                 if coverage_list:
-                    coverage_vals = torch.stack(coverage_list)
-                    if w_teacher > 0:
-                        coverage = coverage_vals.max()
-                    else:
-                        coverage = coverage_vals.min()
+                    # Mean over matched student edges so every mapped entry gets
+                    # gradient, not just the argmax.
+                    coverage = torch.stack(coverage_list).mean()
                 else:
                     coverage = torch.tensor(0.0, device=device, dtype=W_T.dtype)
             else:
                 coverage = torch.tensor(0.0, device=device, dtype=W_T.dtype)
 
             gap = w_teacher - coverage
-            loss_terms.append(F.relu(w_teacher.sign() * gap) ** 2)
+            # Symmetric MSE: penalise both over- and under-coverage.
+            loss_terms.append(gap ** 2)
 
     if loss_terms:
         loss = torch.stack(loss_terms).sum()
