@@ -176,8 +176,8 @@ window.initCg = async function (sel, slug, {clickedId, clickedIdCb, isModal, isG
 
   function initGridsnap() {
     var gridData = [
-      {cur: {x: 0, y: 0, w: 9, h: 16}, class: 'link-graph', resizeFn: makeResizeFn(initCgLinkGraph)},
-      {cur: {x: 9, y: 0, w: 5, h: 16}, class: 'node-connections'},
+      {cur: {x: 0, y: 0,  w: 14, h: 10}, class: 'link-graph', resizeFn: makeResizeFn(initCgLinkGraph)},
+      {cur: {x: 0, y: 10, w: 14, h: 6},  class: 'node-connections'},
      ].filter(d => d)
 
     var initFns = [
