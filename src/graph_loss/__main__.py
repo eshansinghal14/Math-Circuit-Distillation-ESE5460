@@ -589,16 +589,12 @@ def main():
     parser.add_argument(
         "--model",
         required=True,
-        help=(
-            "HuggingFace model name or identifier. When --model_path is also given this is used "
-            "as a fallback TransformerLens architecture name; the actual architecture is "
-            "auto-detected from the local config.json's _name_or_path field when possible."
-        ),
+        help="Base model architecture name (e.g. 'gpt2'). Used by TransformerLens to build the model config.",
     )
     parser.add_argument(
         "--model_path",
         default=None,
-        help="Local path to load the model from. If provided, overrides --model for loading but --model is still used as the display name.",
+        help="Local path to a saved HuggingFace model whose weights override the base --model weights.",
     )
     parser.add_argument("--prompt", required=True, help="Prompt to analyze")
     parser.add_argument(
@@ -774,29 +770,12 @@ def main():
         login(HF_READ_TOKEN)
 
     if args.model_path:
-        import json
         from transformers import AutoModelForCausalLM
-
-        # Resolve the TransformerLens architecture name from the local config.
-        # Priority: _name_or_path (if not an absolute/local path) → model_type → args.model
-        tl_arch = args.model
-        config_json = os.path.join(args.model_path, "config.json")
-        if os.path.exists(config_json):
-            with open(config_json) as _f:
-                _cfg = json.load(_f)
-            name_or_path = _cfg.get("_name_or_path", "")
-            model_type = _cfg.get("model_type", "")
-            if name_or_path and not os.path.isabs(name_or_path):
-                tl_arch = name_or_path
-            elif model_type:
-                tl_arch = model_type
-            logger.info("Auto-detected TransformerLens architecture: %s", tl_arch)
-
-        logger.info("Loading local weights from: %s", args.model_path)
+        logger.info("Loading weights from local path: %s", args.model_path)
         hf_model = AutoModelForCausalLM.from_pretrained(args.model_path, torch_dtype=dtype)
-        logger.info("Wrapping with TransformerLens architecture: %s", tl_arch)
+        logger.info("Building TransformerLens model with architecture: %s", args.model)
         model = TransformerLensReplacementModel.from_pretrained(
-            tl_arch,
+            args.model,
             dtype=dtype,
             hf_model=hf_model,
         )
