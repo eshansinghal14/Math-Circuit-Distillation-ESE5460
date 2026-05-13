@@ -327,12 +327,18 @@ def explained_variance_score(activation_grid: torch.Tensor, mask: torch.Tensor) 
     return float(score.clamp(min=0.0, max=1.0).item())
 
 
-def interaction_beta_score(
+def interaction_partial_eta2(
     activation_grid: torch.Tensor,
     arg1_mask: torch.Tensor,
     arg2_mask: torch.Tensor,
 ) -> float:
-    """Return the OLS coefficient for the arg1 x arg2 interaction term."""
+    """Return partial η² for the arg1 × arg2 interaction term (Type II SS).
+
+    Fits activation ~ 1 + arg1 + arg2 + arg1*arg2 and computes
+    SS_interaction / (SS_interaction + SS_residual), where SS_interaction
+    is the drop in residual SS when adding the interaction to the main-effects
+    model.  This naturally gives 0 to neurons driven by a single main effect.
+    """
     if activation_grid.shape != arg1_mask.shape or activation_grid.shape != arg2_mask.shape:
         raise ValueError(
             f"Activation grid shape {tuple(activation_grid.shape)} does not match "
@@ -349,12 +355,22 @@ def interaction_beta_score(
     y = activations[valid]
     a1 = in_arg1[valid]
     a2 = in_arg2[valid]
-
     ones = torch.ones_like(y)
     interaction = a1 * a2
+
     full_design = torch.stack((ones, a1, a2, interaction), dim=1)
-    coefficients = torch.linalg.lstsq(full_design, y.unsqueeze(1)).solution.squeeze(1)
-    return float(coefficients[3].item())
+    full_coeff = torch.linalg.lstsq(full_design, y.unsqueeze(1)).solution.squeeze(1)
+    ss_residual_full = float((y - full_design @ full_coeff).square().sum().item())
+
+    reduced_design = torch.stack((ones, a1, a2), dim=1)
+    reduced_coeff = torch.linalg.lstsq(reduced_design, y.unsqueeze(1)).solution.squeeze(1)
+    ss_residual_reduced = float((y - reduced_design @ reduced_coeff).square().sum().item())
+
+    ss_interaction = ss_residual_reduced - ss_residual_full
+    denom = ss_interaction + ss_residual_full
+    if ss_interaction <= 0.0 or denom <= 0.0:
+        return 0.0
+    return float(min(1.0, ss_interaction / denom))
 
 
 def label_activation_heatmaps(
@@ -384,7 +400,7 @@ def label_activation_heatmaps(
             if rule.interaction_main_masks is None:
                 score = explained_variance_score(activation_grid, rule.mask)
             else:
-                score = interaction_beta_score(
+                score = interaction_partial_eta2(
                     activation_grid,
                     *rule.interaction_main_masks,
                 )
