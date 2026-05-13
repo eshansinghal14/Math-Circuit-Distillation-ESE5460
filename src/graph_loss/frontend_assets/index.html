@@ -1,12 +1,14 @@
 <!DOCTYPE html>
 <meta charset='utf-8'>
-<meta name='viewport' content='width=1000, initial-scale=1'>
+<meta name='viewport' content='width=2000, initial-scale=1'>
 <link rel='stylesheet' href='./style.css'>
 <title>Attribution Graphs</title>
 
 <div class='tooltip tooltip-hidden'></div>
-<div class='nav'></div>
-<div class='cg'></div>
+<div class='dual-graph-container'>
+  <div class='graph-panel' id='graph-panel-left'></div>
+  <div class='graph-panel' id='graph-panel-right'></div>
+</div>
 
 <link rel='stylesheet' href='./attribution_graph/cg.css'>
 <link rel='stylesheet' href='./attribution_graph/gridsnap/gridsnap.css'>
@@ -37,231 +39,155 @@ window.init = async function(){
   var {graphs} = await util.getFile('./data/graph-metadata.json', false)
 
   window.visState = window.visState || {
-    slug: util.params.get('slug') || graphs[0].slug,
-    clickedId: util.params.get('clickedId')?.replace('null', ''),
+    slug:  util.params.get('slug')  || graphs[0].slug,
+    slug2: util.params.get('slug2') || graphs[Math.min(1, graphs.length - 1)].slug,
+    clickedId:  util.params.get('clickedId')?.replace('null', ''),
+    clickedId2: util.params.get('clickedId2')?.replace('null', ''),
     isGridsnap: util.params.get('isGridsnap')?.replace('null', ''),
   }
 
-  // Find the current graph metadata
-  var currentGraph = graphs.find(g => g.slug === visState.slug)
-  
-  // Initialize pruningThreshold only if the graph has node_threshold
-  if (currentGraph && typeof currentGraph.node_threshold === 'number') {
-    visState.pruningThreshold = util.params.get('pruningThreshold') || currentGraph.node_threshold || 0.4
-  }
+  // Initialize pruning thresholds for both panels
+  ;[['slug', 'pruningThreshold'], ['slug2', 'pruningThreshold2']].forEach(([slugKey, thresholdKey]) => {
+    var g = graphs.find(g => g.slug === visState[slugKey])
+    if (g && typeof g.node_threshold === 'number') {
+      visState[thresholdKey] = util.params.get(thresholdKey) || g.node_threshold || 0.4
+    }
+  })
 
-  // Create a container for the controls
-  var navSel = d3.select('.nav').html('')
-    .style('display', 'flex')
-    .style('align-items', 'center')
-    .style('padding-bottom', '15px')
-    .style('justify-content', 'space-between')
-  
-  var controlsContainer = navSel.append('div.controls-container')
-    .style('display', 'flex')
-    .style('align-items', 'center')
-    .style('flex', '1')
-    .style('gap', '20px')
-  
-  var selectSel = controlsContainer.append('select.graph-prompt-select')
-    .style('min-width', '300px')
-    .style('max-width', '600px')
-    .on('click', async function() {
-      // Refetch graphs if local serving
-      if (!window.isLocalServing) return;
+  createPanel(d3.select('#graph-panel-left'), {
+    slugKey: 'slug',
+    thresholdKey: 'pruningThreshold',
+    clickedIdKey: 'clickedId',
+  })
+  createPanel(d3.select('#graph-panel-right'), {
+    slugKey: 'slug2',
+    thresholdKey: 'pruningThreshold2',
+    clickedIdKey: 'clickedId2',
+  })
 
-      var {graphs: newGraphs} = await util.getFile('./data/graph-metadata.json', false)
-      graphs = newGraphs
+  function createPanel(panelSel, {slugKey, thresholdKey, clickedIdKey}) {
+    var navSel = panelSel.append('div.panel-nav')
+      .style('display', 'flex')
+      .style('align-items', 'center')
+      .style('gap', '12px')
+      .style('padding-bottom', '8px')
+      .style('border-bottom', '1px solid #eee')
+      .style('margin-bottom', '8px')
 
-      // Rebuild the options
-      selectSel.selectAll('option').remove()
-      selectSel.appendMany('option', graphs)
-        .text(d => d.slug)
-        .attr('value', d => d.slug)
-        .property('selected', d => d.slug === visState.slug)
-    })
-    .on('change', function() {
-      visState.slug = this.value
-      visState.clickedId = undefined
-      util.params.set('slug', this.value)
-      
-      // Update pruningThreshold when graph changes
-      var newGraph = graphs.find(g => g.slug === this.value)
-      if (newGraph && typeof newGraph.node_threshold === 'number') {
-        visState.pruningThreshold = util.params.get('pruningThreshold') || newGraph.node_threshold || 0.4
-      } else {
-        delete visState.pruningThreshold
-        util.params.set('pruningThreshold', null)
-      }
-      
-      render()
-    })
+    var cgSel = panelSel.append('div.cg')
 
-  // Create debounced render function
-  var debouncedRender = util.debounce(render, 300)
-  
-  // Slider container will be created dynamically in render function
-  var sliderContainer
-
-  selectSel.appendMany('option', graphs)
-    .text(d => d.slug)
-    .attr('value', d => d.slug)
-    .property('selected', d => d.slug === visState.slug)
-
-  // Add save button to the right
-  var saveButton = navSel.append('button.save-button')
-    .text('Save')
-    .style('display', window.isLocalServing ? 'block' : 'none')
-    .on('click', function() {
-      // Get current graph info
-      
-
-      var slug = visState.slug;
-      if (!slug) {
-        console.error("No slug found");
-        return;
-      }
-
-      var url = `/save_graph/${slug}`;
-      
-      // Show loading state
-      saveButton.text("Saving...")
-        .attr("disabled", true)
-        .style("opacity", 0.6);
-      
-      // Send the POST request
-      fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          qParams: Object.fromEntries(["pinnedIds", "supernodes", "linkType", "clickedId", "sg_pos", "pruningThreshold", "clerps"]
-            .map(k => [k, util.params.get(k)])
-            .filter(([k, v]) => v !== undefined && v !== 'null')
-          ),
-          timestamp: new Date().toISOString()
-        })
+    var selectSel = navSel.append('select.graph-prompt-select')
+      .style('flex', '1')
+      .style('min-width', '0')
+      .on('click', async function() {
+        if (!window.isLocalServing) return
+        var {graphs: newGraphs} = await util.getFile('./data/graph-metadata.json', false)
+        graphs = newGraphs
+        selectSel.selectAll('option').remove()
+        selectSel.appendMany('option', graphs)
+          .text(d => d.slug)
+          .attr('value', d => d.slug)
+          .property('selected', d => d.slug === visState[slugKey])
       })
-      .then(response => {
-        if (!response.ok) {
-          throw new Error(`HTTP error! Status: ${response.status}`);
+      .on('change', function() {
+        visState[slugKey] = this.value
+        visState[clickedIdKey] = undefined
+        util.params.set(slugKey, this.value)
+
+        var newGraph = graphs.find(g => g.slug === this.value)
+        if (newGraph && typeof newGraph.node_threshold === 'number') {
+          visState[thresholdKey] = newGraph.node_threshold || 0.4
+        } else {
+          delete visState[thresholdKey]
+          util.params.set(thresholdKey, null)
         }
-        return 1;
-        // return response.text();
-      })
-      .then(data => {
-        console.log("Graph saved successfully:", data);
-        saveButton.text("Saved!")
-          .style("background-color", "#e6f7e6")
-          .style("border-color", "#8bc34a");
-        
-        // Reset button after 2 seconds
-        setTimeout(() => {
-          saveButton.text("Save")
-            .attr("disabled", null)
-            .style("opacity", null)
-            .style("background-color", null)
-            .style("border-color", null);
-        }, 2000);
-      })
-      .catch(error => {
-        console.error("Error saving graph:", error);
-        saveButton.text("Error!")
-          .style("background-color", "#ffebee")
-          .style("border-color", "#f44336");
-        
-        // Reset button after 2 seconds
-        setTimeout(() => {
-          saveButton.text("Save")
-            .attr("disabled", null)
-            .style("opacity", null)
-            .style("background-color", null)
-            .style("border-color", null);
-        }, 2000);
-      });
-    });
 
-  function render() {
-    var m = graphs.find(g => g.slug == visState.slug)
-    if (!m) return
-    
-    // Handle slider creation/removal dynamically
-    if (m && typeof m.node_threshold === 'number') {
-      // Create slider if it doesn't exist
-      if (!sliderContainer) {
-        sliderContainer = controlsContainer.append('div.slider-container')
-          .style('display', 'flex')
-          .style('align-items', 'center')
-          .style('gap', '8px')
-        
-        sliderContainer.append('span').text('Pruning:')
-        
-        var sliderSel = sliderContainer.append('input')
-          .attr('type', 'range')
-          .attr('min', 0)
+        render()
+      })
+
+    selectSel.appendMany('option', graphs)
+      .text(d => d.slug)
+      .attr('value', d => d.slug)
+      .property('selected', d => d.slug === visState[slugKey])
+
+    var debouncedRender = util.debounce(render, 300)
+    var sliderContainer
+
+    function render() {
+      var m = graphs.find(g => g.slug == visState[slugKey])
+      if (!m) return
+
+      // Create or remove pruning slider depending on graph support
+      if (typeof m.node_threshold === 'number') {
+        if (!sliderContainer) {
+          sliderContainer = navSel.append('div.slider-container')
+            .style('display', 'flex')
+            .style('align-items', 'center')
+            .style('gap', '6px')
+            .style('white-space', 'nowrap')
+
+          sliderContainer.append('span')
+            .style('font-size', '12px')
+            .text('Pruning:')
+
+          var sliderSel = sliderContainer.append('input')
+            .attr('type', 'range')
+            .attr('min', 0)
+            .attr('max', m.node_threshold)
+            .attr('step', 0.01)
+            .attr('value', visState[thresholdKey] || m.node_threshold)
+            .on('input', function() {
+              visState[thresholdKey] = this.value
+              util.params.set(thresholdKey, this.value)
+              valueDisplay.text(parseFloat(this.value).toFixed(2))
+              debouncedRender()
+            })
+
+          var valueDisplay = sliderContainer.append('span.value-display')
+            .style('font-size', '12px')
+            .text(parseFloat(visState[thresholdKey] || m.node_threshold).toFixed(2))
+        }
+
+        sliderContainer.select('input')
           .attr('max', m.node_threshold)
-          .attr('step', 0.01)
-          .attr('value', visState.pruningThreshold || m.node_threshold)
-          .on('input', function() {
-            // Update state and UI immediately
-            visState.pruningThreshold = this.value
-            visState.clickedId = util.params.get('clickedId')?.replace('null', '')
-            util.params.set('pruningThreshold', this.value)
-            valueDisplay.text(parseFloat(this.value).toFixed(2))
-            
-            // Debounce the actual render
-            debouncedRender()
-          })
-        
-        var valueDisplay = sliderContainer.append('span.value-display')
-          .text(parseFloat(visState.pruningThreshold || m.node_threshold).toFixed(2))
+          .property('value', visState[thresholdKey] || m.node_threshold)
+
+        sliderContainer.select('.value-display')
+          .text(parseFloat(visState[thresholdKey] || m.node_threshold).toFixed(2))
+
+        sliderContainer.style('display', 'flex')
+
+        if (visState[thresholdKey] === undefined) {
+          visState[thresholdKey] = m.node_threshold
+        }
+      } else {
+        if (sliderContainer) {
+          sliderContainer.remove()
+          sliderContainer = null
+        }
+        delete visState[thresholdKey]
+        util.params.set(thresholdKey, null)
       }
-      
-      // Update slider properties for current graph
-      sliderContainer.select('input')
-        .attr('max', m.node_threshold)
-        .property('value', visState.pruningThreshold || m.node_threshold)
-      
-      sliderContainer.select('.value-display')
-        .text(parseFloat(visState.pruningThreshold || m.node_threshold).toFixed(2))
-      
-      sliderContainer.style('display', 'flex')
-      
-      // Ensure pruningThreshold is set
-      if (visState.pruningThreshold === undefined) {
-        visState.pruningThreshold = m.node_threshold
+
+      cgSel.html('')
+
+      var options = {
+        clickedId: visState[clickedIdKey],
+        clickedIdCb: id => util.params.set(clickedIdKey, id),
+        isGridsnap: visState.isGridsnap || true,
       }
-    } else {
-      // Remove slider if graph doesn't support pruning
-      if (sliderContainer) {
-        sliderContainer.remove()
-        sliderContainer = null
+
+      if (visState[thresholdKey] !== undefined) {
+        options.pruningThreshold = visState[thresholdKey]
       }
-      delete visState.pruningThreshold
-      util.params.set('pruningThreshold', null)
+
+      initCg(cgSel, visState[slugKey], options)
+      selectSel.at({title: m.prompt})
+      document.title = 'Attribution Graphs'
     }
 
-    d3.select('.cg').html('')
-    
-    // Prepare options for initCg
-    var options = {
-      clickedId: visState.clickedId,
-      clickedIdCb: id => util.params.set('clickedId', id),
-      isGridsnap: visState.isGridsnap || true
-    }
-    
-    // Only add pruningThreshold to options if it exists
-    if (visState.pruningThreshold !== undefined) {
-      options.pruningThreshold = visState.pruningThreshold
-    }
-    
-    initCg(d3.select('.cg'), visState.slug, options)
-
-    selectSel.at({title: m.prompt})
-    document.title = 'Attribution Graph: ' + m.prompt
+    render()
   }
-  render()
 }
 
 window.init()

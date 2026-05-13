@@ -145,7 +145,25 @@ d-article{
     gap: 10px;
     flex-wrap: wrap;
     margin-top: 20px;
+}
 
+.dual-graph-container {
+    display: flex;
+    gap: 12px;
+    height: calc(100vh - 20px);
+    margin-top: 10px;
+}
+
+.graph-panel {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.panel-nav {
+    flex-shrink: 0;
 }
 
 
@@ -170,5 +188,7 @@ d-article{
 
 
 .cg{
-    height: calc(100vh - 150px);
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
 }
