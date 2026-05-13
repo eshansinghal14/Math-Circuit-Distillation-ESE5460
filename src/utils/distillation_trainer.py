@@ -38,6 +38,7 @@ class DistillationTrainer:
         self.device = torch.device(config.device)
         self._resume = resume
         self._use_graph = config.lambda_graph > 0.0
+        self._graph_start_step = config.graph_start_step
         seed_all(config.seed)
 
         if tokenizer is not None:
@@ -450,8 +451,13 @@ class DistillationTrainer:
             if not torch.isfinite(loss).item():
                 skipped_nonfinite += 1
                 continue
-            self.optimizer.zero_grad(set_to_none=self._use_graph)
-            if self._use_graph:
+            # graph_start_step is 1-indexed; _train_step hasn't been incremented yet
+            # for the current step, so current step number = _train_step + 1.
+            use_graph_this_step = self._use_graph and (
+                self._train_step + 1 >= self._graph_start_step
+            )
+            self.optimizer.zero_grad(set_to_none=use_graph_this_step)
+            if use_graph_this_step:
                 loss.backward()
                 kl_grads = (
                     self._clone_student_grads()
@@ -469,7 +475,7 @@ class DistillationTrainer:
                     self._record_kl_only_grad_metrics(metrics)
             torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.config.grad_clip)
             self.optimizer.step()
-            if self._use_graph:
+            if use_graph_this_step:
                 self._clear_cuda_cache()
 
             if not torch.isfinite(loss).item():
@@ -493,7 +499,9 @@ class DistillationTrainer:
                 denom = max(interval_steps, 1)
                 kl_avg = interval.get("kl_loss", 0.0) / denom
                 graph_s = ""
-                if self._use_graph:
+                if self._use_graph and self._train_step < self._graph_start_step:
+                    graph_s = f" | Graph [warmup until step {self._graph_start_step}]"
+                elif self._use_graph:
                     graph_avg = interval.get("graph_loss", 0.0) / denom
                     weighted_avg = interval.get("graph_loss_weighted", 0.0) / denom
                     n_prompts = interval.get("graph_graph_prompts", 0.0)
@@ -508,6 +516,15 @@ class DistillationTrainer:
                         eff_lam_key = "graph_grad_norm_scale_effective_lambda"
                         eff_lam_avg = interval.get(eff_lam_key, 0.0) / denom
                         graph_s += f" | effLambda {eff_lam_avg:.4f}"
+                    t_sn = interval.get("graph_teacher_supernodes", 0.0) / denom
+                    s_sn = interval.get("graph_student_supernodes", 0.0) / denom
+                    mapped = interval.get("graph_aligned_teacher_supernodes", 0.0) / denom
+                    cos = interval.get("graph_mean_alignment_similarity", 0.0) / denom
+                    if t_sn > 0 or s_sn > 0:
+                        graph_s += (
+                            f" | align T{t_sn:.1f}/S{s_sn:.1f}"
+                            f" mapped={mapped:.1f} cos={cos:.3f}"
+                        )
                 grad_s = ""
                 if self.config.track_loss_grads:
                     grad_s = (

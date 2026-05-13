@@ -89,12 +89,17 @@ def _build_full_vocab_prob_deltas(
     graph,
     n_vocab: int,
 ) -> torch.Tensor:
-    """Return per-supernode delta vectors in their current space.
+    """Return per-supernode delta vectors projected to the shared logit basis.
 
-    New supergraphs store graph-node deltas over ``delta_node_indices`` and are
-    returned directly. Legacy supergraphs without ``delta_node_indices`` stored
-    compact logit-target deltas, which are expanded to full vocab for backward
-    compatibility.
+    New supergraphs (with ``delta_node_indices``) store graph-node deltas whose
+    columns include logit target positions alongside neuron and token positions.
+    When ``graph_n_neurons`` and ``graph_n_tokens`` metadata are available we
+    extract only the logit columns so that teacher and student vectors are both
+    indexed by the *same* vocabulary positions — making cross-model cosine
+    similarity meaningful for alignment.
+
+    Falls back to returning raw graph-node deltas (old behaviour) when metadata
+    is missing, and to full-vocab expansion for legacy compact-logit caches.
     """
     n_supernodes = len(supergraph.supernodes)
 
@@ -102,9 +107,27 @@ def _build_full_vocab_prob_deltas(
         return torch.zeros(n_supernodes, n_vocab, dtype=torch.float32)
 
     deltas = supergraph.supernode_prob_deltas.detach().float().cpu()
+
     if getattr(supergraph, "delta_node_indices", None) is not None:
+        # New format: try projecting to shared logit space.
+        n_neurons = getattr(supergraph, "graph_n_neurons", None)
+        n_tokens = getattr(supergraph, "graph_n_tokens", None)
+        logit_token_ids = getattr(supergraph, "logit_token_ids", None)
+        if logit_token_ids is None and graph is not None:
+            logit_token_ids = getattr(graph, "logit_token_ids", None)
+        if n_neurons is not None and n_tokens is not None and logit_token_ids is not None:
+            n_logits = int(logit_token_ids.numel())
+            if n_logits > 0:
+                projected = extract_logit_space_deltas(
+                    supergraph, n_logits, n_neurons=n_neurons, n_tokens=n_tokens
+                )
+                if projected is not None:
+                    return projected.detach().float().cpu()
+        # Metadata missing — return raw graph-node deltas (different bases
+        # for teacher vs student, cosine similarity is only approximate).
         return deltas
 
+    # Legacy format: compact logit-target deltas → expand to full vocab.
     if graph is not None:
         logit_token_ids = graph.logit_token_ids.cpu()
     elif getattr(supergraph, "logit_token_ids", None) is not None:

@@ -57,6 +57,47 @@ class HFLlamaGraphAdapter:
     def W_U(self) -> torch.Tensor:
         return self.lm_head.weight.T
 
+    @property
+    def cfg(self) -> "_HFGraphConfig":
+        """Lazy TransformerLens-shaped config shim.
+
+        ``graph.py`` paths inherited from the TL pipeline read ``model.cfg.device``,
+        ``model.cfg.d_model``, etc.  Building one ``_HFGraphConfig`` and caching it
+        on first access lets that code work unchanged against this HF adapter.
+        """
+        cached = getattr(self, "_cfg_cache", None)
+        if cached is None:
+            cached = _HFGraphConfig(self)
+            self._cfg_cache = cached
+        return cached
+
+    @property
+    def blocks(self) -> "_HFBlockList":
+        """TransformerLens-shaped block list shim.
+
+        ``graph.py``'s full_search path reads ``model.blocks[layer].mlp.old_mlp.W_out``
+        to get the down-projection weight for each MLP layer.  This shim lazily wraps
+        the HF ``model.layers`` so those accesses work unchanged.
+        """
+        cached = getattr(self, "_blocks_cache", None)
+        if cached is None:
+            cached = _HFBlockList(self.layers)
+            self._blocks_cache = cached
+        return cached
+
+    @property
+    def unembed(self) -> "_HFUnembed":
+        """TransformerLens-shaped unembed shim.
+
+        ``graph.py``'s full_search path reads ``model.unembed.W_U``.
+        Returns a lightweight wrapper around ``lm_head.weight.T``.
+        """
+        cached = getattr(self, "_unembed_cache", None)
+        if cached is None:
+            cached = _HFUnembed(self.lm_head)
+            self._unembed_cache = cached
+        return cached
+
     def autocast_context(self, dtype: torch.dtype | None):
         if dtype is None or self.device.type != "cuda":
             return contextlib.nullcontext()
@@ -82,7 +123,18 @@ class HFLlamaGraphAdapter:
         return tokens.to(self.device)
 
     @staticmethod
-    def _row_oriented_weight(weight: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
+    def _row_oriented_weight(
+        weight: torch.Tensor, rows: int | None = None, cols: int | None = None
+    ) -> torch.Tensor:
+        """Return weight in (rows, cols) orientation.
+
+        When ``rows``/``cols`` are omitted (graph.py's ``full_search`` path passes
+        only the weight), the matrix is returned as-is — the caller already loaded
+        ``down_proj.weight`` which is (d_model, d_mlp) in HF, so ``_HFOldMLP``
+        exposes it as ``W_out`` and this call is a no-op identity.
+        """
+        if rows is None or cols is None:
+            return weight
         if weight.shape == (rows, cols):
             return weight
         if weight.shape == (cols, rows):
@@ -1091,6 +1143,70 @@ class HFLlamaGraphAdapter:
         return supernode_dlas
 
 
+class _HFOldMLP:
+    """Shim for ``model.blocks[layer].mlp.old_mlp``.
+
+    TransformerLens naming vs HF LLaMA shapes:
+
+      TL attr   shape (TL)        HF attr            shape (HF)
+      --------  ----------------  -----------------  -----------------
+      W_gate    [d_mlp, d_model]  gate_proj.weight   [d_mlp, d_model]  ← same
+      W_in      [d_mlp, d_model]  up_proj.weight     [d_mlp, d_model]  ← same
+      W_out     [d_mlp, d_model]  down_proj.weight   [d_model, d_mlp]  ← TRANSPOSED
+
+    ``W_out[neuron_id]`` must return the d_model-dimensional write vector for that
+    neuron; indexing is on the d_mlp axis (first dim in TL convention).
+    """
+
+    def __init__(self, hf_mlp):
+        self.W_gate = hf_mlp.gate_proj.weight   # already (d_mlp, d_model)
+        self.W_in   = hf_mlp.up_proj.weight      # already (d_mlp, d_model)
+        # down_proj.weight is (d_model, d_mlp) in HF → transpose to (d_mlp, d_model)
+        self.W_out  = hf_mlp.down_proj.weight.T
+
+
+class _HFMLP:
+    """Shim for ``model.blocks[layer].mlp``."""
+
+    def __init__(self, hf_mlp):
+        self.old_mlp = _HFOldMLP(hf_mlp)
+
+
+class _HFBlock:
+    """Shim for a single ``model.blocks[layer]``."""
+
+    def __init__(self, hf_layer):
+        self.mlp = _HFMLP(hf_layer.mlp)
+
+
+class _HFBlockList:
+    """Shim for ``model.blocks`` — indexable list of ``_HFBlock`` objects."""
+
+    def __init__(self, hf_layers):
+        self._layers = hf_layers
+
+    def __getitem__(self, idx: int) -> _HFBlock:
+        return _HFBlock(self._layers[idx])
+
+    def __len__(self) -> int:
+        return len(self._layers)
+
+
+class _HFUnembed:
+    """Shim for ``model.unembed``.
+
+    TransformerLens exposes ``model.unembed.W_U`` (shape [d_model, d_vocab]).
+    HF stores the transposed version in ``lm_head.weight`` ([d_vocab, d_model]).
+    """
+
+    def __init__(self, lm_head):
+        self._lm_head = lm_head
+
+    @property
+    def W_U(self) -> "torch.Tensor":
+        return self._lm_head.weight.T
+
+
 class _HFGraphConfig:
     def __init__(self, adapter: HFLlamaGraphAdapter):
         self.n_layers = adapter.n_layers
@@ -1100,6 +1216,7 @@ class _HFGraphConfig:
         self.d_head = int(getattr(adapter.config, "head_dim", 0) or adapter.d_model // adapter.config.num_attention_heads)
         self.n_heads = int(adapter.config.num_attention_heads)
         self.n_key_value_heads = getattr(adapter.config, "num_key_value_heads", None)
+        self.device = adapter.device
         name = getattr(adapter.config, "_name_or_path", None) or getattr(adapter.config, "name_or_path", "llama")
         self.model_name = name
         self.tokenizer_name = name

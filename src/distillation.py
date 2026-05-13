@@ -155,6 +155,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--graph-start-step",
+        type=int,
+        default=1,
+        help=(
+            "Step (1-indexed, inclusive) at which graph loss is first applied. "
+            "Steps before this use KL loss only, allowing the student to warm up "
+            "before the graph signal is switched on.  Default 1 (graph loss always on)."
+        ),
+    )
+    parser.add_argument(
         "--ablation-batch-size",
         type=int,
         default=32,
@@ -406,6 +416,7 @@ def main() -> None:
             ablation_batch_size=args.ablation_batch_size,
             lambda_kl=args.lambda_kl,
             graph_grad_norm_scale=args.graph_grad_norm_scale,
+            graph_start_step=args.graph_start_step,
             save_best=args.save_best,
             eval_max_new_tokens=(
                 args.eval_max_new_tokens
