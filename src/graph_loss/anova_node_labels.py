@@ -17,7 +17,6 @@ class BasisRule:
     range_center: int | None = None
     range_prefix: str | None = None
     dynamic_range_label: bool = True
-    interaction_main_masks: tuple[torch.Tensor, torch.Tensor] | None = None
 
 
 @dataclass(frozen=True)
@@ -167,16 +166,23 @@ def build_anova_basis_rules(
         arg2_values = grids[1]
         arg1_center = int(target_args[0])
         arg2_center = int(target_args[1])
-        arg1_mask = arg1_values == arg1_center
-        arg2_mask = arg2_values == arg2_center
-        mask = arg1_mask & arg2_mask
+        if anova_range_radius:
+            arg1_box = (arg1_values >= arg1_center - anova_range_radius) & (
+                arg1_values <= arg1_center + anova_range_radius
+            )
+            arg2_box = (arg2_values >= arg2_center - anova_range_radius) & (
+                arg2_values <= arg2_center + anova_range_radius
+            )
+        else:
+            arg1_box = arg1_values == arg1_center
+            arg2_box = arg2_values == arg2_center
+        mask = arg1_box & arg2_box
         rules.append(
             BasisRule(
                 _joint_range_label(arg1_values, arg2_values, mask),
                 mask,
                 category="arg1 range and arg2 range",
                 dynamic_range_label=False,
-                interaction_main_masks=(arg1_mask, arg2_mask),
             )
         )
 
@@ -327,52 +333,6 @@ def explained_variance_score(activation_grid: torch.Tensor, mask: torch.Tensor) 
     return float(score.clamp(min=0.0, max=1.0).item())
 
 
-def interaction_partial_eta2(
-    activation_grid: torch.Tensor,
-    arg1_mask: torch.Tensor,
-    arg2_mask: torch.Tensor,
-) -> float:
-    """Return partial η² for the arg1 × arg2 interaction term (Type II SS).
-
-    Fits activation ~ 1 + arg1 + arg2 + arg1*arg2 and computes
-    SS_interaction / (SS_interaction + SS_residual), where SS_interaction
-    is the drop in residual SS when adding the interaction to the main-effects
-    model.  This naturally gives 0 to neurons driven by a single main effect.
-    """
-    if activation_grid.shape != arg1_mask.shape or activation_grid.shape != arg2_mask.shape:
-        raise ValueError(
-            f"Activation grid shape {tuple(activation_grid.shape)} does not match "
-            f"interaction mask shapes {tuple(arg1_mask.shape)} and {tuple(arg2_mask.shape)}"
-        )
-
-    activations = activation_grid.detach().double().flatten()
-    in_arg1 = arg1_mask.detach().double().flatten()
-    in_arg2 = arg2_mask.detach().double().flatten()
-    valid = ~torch.isnan(activations)
-    if int(valid.sum().item()) < 4:
-        return 0.0
-
-    y = activations[valid]
-    a1 = in_arg1[valid]
-    a2 = in_arg2[valid]
-    ones = torch.ones_like(y)
-    interaction = a1 * a2
-
-    full_design = torch.stack((ones, a1, a2, interaction), dim=1)
-    full_coeff = torch.linalg.lstsq(full_design, y.unsqueeze(1)).solution.squeeze(1)
-    ss_residual_full = float((y - full_design @ full_coeff).square().sum().item())
-
-    reduced_design = torch.stack((ones, a1, a2), dim=1)
-    reduced_coeff = torch.linalg.lstsq(reduced_design, y.unsqueeze(1)).solution.squeeze(1)
-    ss_residual_reduced = float((y - reduced_design @ reduced_coeff).square().sum().item())
-
-    ss_interaction = ss_residual_reduced - ss_residual_full
-    denom = ss_interaction + ss_residual_full
-    if ss_interaction <= 0.0 or denom <= 0.0:
-        return 0.0
-    return float(min(1.0, ss_interaction / denom))
-
-
 def label_activation_heatmaps(
     activations: torch.Tensor,
     arg_values: list[list[int]],
@@ -397,13 +357,7 @@ def label_activation_heatmaps(
         category_labels: dict[str, str] = {}
         category_scores: dict[str, float] = {}
         for rule in rules:
-            if rule.interaction_main_masks is None:
-                score = explained_variance_score(activation_grid, rule.mask)
-            else:
-                score = interaction_partial_eta2(
-                    activation_grid,
-                    *rule.interaction_main_masks,
-                )
+            score = explained_variance_score(activation_grid, rule.mask)
             label = _high_activation_range_label(
                 activation_grid,
                 rule,
@@ -421,25 +375,8 @@ def label_activation_heatmaps(
             category_labels[category] = (
                 f"{category_labels['arg1 units']} and {category_labels['arg2 units']}"
             )
-        if (
-            "arg1 range and arg2 range" not in category_scores
-            and "arg1 range" in category_scores
-            and "arg2 range" in category_scores
-        ):
-            category = "arg1 range and arg2 range"
-            category_scores[category] = min(
-                category_scores["arg1 range"],
-                category_scores["arg2 range"],
-            )
-            category_labels[category] = (
-                f"{category_labels['arg1 range']} and {category_labels['arg2 range']}"
-            )
-
         category_specificity: dict[str, float] = {}
         for category, target_score in category_scores.items():
-            if category == "arg1 range and arg2 range":
-                category_specificity[category] = target_score
-                continue
             excluded_categories = {category} | CATEGORY_COMPONENTS.get(category, set())
             competitor_scores = [
                 category_scores[competitor]
