@@ -586,7 +586,15 @@ def main():
     parser = argparse.ArgumentParser(
         description="Build, prune, and summarize neuron attribution graphs."
     )
-    parser.add_argument("--model", required=True, help="HuggingFace model name or identifier")
+    parser.add_argument(
+        "--model",
+        required=True,
+        help=(
+            "HuggingFace model name or identifier. When --model_path is also given this is used "
+            "as a fallback TransformerLens architecture name; the actual architecture is "
+            "auto-detected from the local config.json's _name_or_path field when possible."
+        ),
+    )
     parser.add_argument(
         "--model_path",
         default=None,
@@ -766,12 +774,26 @@ def main():
         login(HF_READ_TOKEN)
 
     if args.model_path:
+        import json
         from transformers import AutoModelForCausalLM
+
+        # Resolve the TransformerLens architecture name from the local config when possible.
+        # config.json's _name_or_path is usually the original HF identifier (e.g. "gpt2").
+        tl_arch = args.model
+        config_json = os.path.join(args.model_path, "config.json")
+        if os.path.exists(config_json):
+            with open(config_json) as _f:
+                _cfg = json.load(_f)
+            name_or_path = _cfg.get("_name_or_path", "")
+            if name_or_path and not os.path.isdir(name_or_path):
+                tl_arch = name_or_path
+                logger.info("Auto-detected TransformerLens architecture: %s", tl_arch)
+
         logger.info("Loading local weights from: %s", args.model_path)
         hf_model = AutoModelForCausalLM.from_pretrained(args.model_path, torch_dtype=dtype)
-        logger.info("Wrapping with TransformerLens architecture: %s", args.model)
+        logger.info("Wrapping with TransformerLens architecture: %s", tl_arch)
         model = TransformerLensReplacementModel.from_pretrained(
-            args.model,
+            tl_arch,
             dtype=dtype,
             hf_model=hf_model,
         )
