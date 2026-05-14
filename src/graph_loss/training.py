@@ -138,6 +138,9 @@ class GraphAuxConfig:
     # Cap on members per ANOVA-labelled student supernode.
     student_anova_nodes_per_label: int = 10
     student_sum_min_specificity: float = 0.0
+    # Path to a JSON file from precompute_fixed_labels.py.  When set and
+    # student_cluster_method == "fixed_labels", ANOVA is skipped each step.
+    student_fixed_labels_path: str | None = None
 
 
 def _log_alignment_diagnostic(
@@ -402,6 +405,10 @@ def compute_prompt_graph_loss(
                 student_mlp_input_cache = load_mlp_input_cache(
                     config.student_mlp_input_cache_path, _student_model_name, dataset_path
                 )
+
+    # Load fixed labels once (passed in via caller for efficiency; tolerate None).
+    fixed_labels: dict | None = getattr(config, "_fixed_labels_cache", None)
+
     with torch.no_grad():
         student_supergraph_structure = build_super_graph(
             student_graph,
@@ -417,6 +424,7 @@ def compute_prompt_graph_loss(
             anova_range_radius=config.student_anova_range_radius,
             anova_nodes_per_label=config.student_anova_nodes_per_label,
             sum_min_specificity=config.student_sum_min_specificity,
+            fixed_labels=fixed_labels,
         )
     # Skip the (expensive, dense) supernode adjacency aggregation when no
     # edge term consumes it.  In fast_student_graph mode the underlying

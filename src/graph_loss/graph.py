@@ -423,6 +423,7 @@ def build_super_graph(
     anova_nodes_per_label: int = 10,
     anova_range_radius: int = 0,
     sum_min_specificity: float = 0.0,
+    fixed_labels: dict | None = None,
 ) -> SuperGraph:
     """Cluster kept neurons into numeric-token embedding and final-token computation supernodes."""
 
@@ -437,8 +438,8 @@ def build_super_graph(
         raise ValueError("embedding_eps and computation_eps must be non-negative")
     if embedding_sigma < 0.0 or computation_sigma < 0.0:
         raise ValueError("embedding_sigma and computation_sigma must be non-negative")
-    if cluster_method not in {"full_search", "ablation"}:
-        raise ValueError("cluster_method must be one of: full_search, ablation")
+    if cluster_method not in {"full_search", "ablation", "fixed_labels"}:
+        raise ValueError("cluster_method must be one of: full_search, ablation, fixed_labels")
     if anova_nodes_per_label <= 0:
         raise ValueError("anova_nodes_per_label must be positive")
     if anova_range_radius < 0:
@@ -1240,6 +1241,44 @@ def build_super_graph(
                     )
                     logger.info("  Saved supernode heatmap PDF: %s", saved_path)
                     supernode_heatmap_pdf_paths.append(saved_path)
+    elif cluster_method == "fixed_labels" and kept_neuron_indices.numel():
+        # Fast path: neuron→label mapping was pre-computed once and saved to disk.
+        # No ANOVA, no activation-write-cache reads.  Just look up each selected
+        # neuron in the fixed mapping and group by label.
+        # Key format: (layer, neuron_id) as ints.  Token position is intentionally
+        # ignored because the same neuron circuit function persists across positions.
+        if fixed_labels is None:
+            raise ValueError(
+                "cluster_method='fixed_labels' requires fixed_labels dict. "
+                "Run precompute_fixed_labels.py first and pass --student-fixed-labels."
+            )
+        locations = graph.neuron_locations.detach().cpu().to(dtype=torch.long)
+        supernodes_by_label: dict[str, list[int]] = {}
+        for member_idx in range(int(kept_neuron_indices.numel())):
+            member = int(kept_neuron_indices[member_idx].item())
+            layer = int(locations[member, 0].item())
+            neuron_id = int(locations[member, 2].item())
+            key = f"{layer}:{neuron_id}"
+            label = fixed_labels.get(key)
+            if label is not None:
+                supernodes_by_label.setdefault(label, []).append(member)
+        supernodes = list(supernodes_by_label.values())
+        supernode_labels = [[lbl] for lbl in supernodes_by_label.keys()]
+        if supernodes:
+            supernode_deltas = compute_supernode_node_deltas(supernodes)
+            supernode_prob_delta_norms = supernode_deltas.norm(dim=1).tolist()
+            supernode_prob_deltas = supernode_deltas
+            all_supernode_prob_delta_norms = torch.tensor(
+                supernode_prob_delta_norms, dtype=torch.float32
+            )
+            logger.info(
+                "  fixed_labels clustering: %d supernodes from %d labeled neurons",
+                len(supernodes),
+                sum(len(v) for v in supernodes_by_label.values()),
+            )
+        else:
+            logger.info("  fixed_labels clustering: no labeled neurons found in this graph")
+
     elif cluster_method == "full_search" and kept_neuron_indices.numel():
         activation_write_result = get_activation_write_result_for_kept()
         target_args = parse_numeric_args(graph.input_string)

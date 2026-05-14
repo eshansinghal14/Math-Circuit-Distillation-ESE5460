@@ -61,6 +61,7 @@ class DistillationConfig:
     lambda_kl: float = 1.0
     graph_grad_norm_scale: bool = False
     graph_start_step: int = 1
+    student_fixed_labels_path: Optional[str] = None
     eval_batch_size: int = 50
     step_log_interval: int = 50
     save_best: bool = False

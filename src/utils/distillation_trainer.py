@@ -150,7 +150,20 @@ class DistillationTrainer:
                 student_anova_range_radius=config.student_anova_range_radius,
                 student_anova_nodes_per_label=config.student_anova_nodes_per_label,
                 student_sum_min_specificity=config.student_sum_min_specificity,
+                student_fixed_labels_path=config.student_fixed_labels_path,
             )
+            # Load the fixed-labels JSON once at startup and attach to the config
+            # object so every call to compute_prompt_graph_loss can look it up
+            # without re-reading the file.
+            if config.student_fixed_labels_path:
+                import json as _json
+                print(f"[graph] Loading fixed labels from {config.student_fixed_labels_path} …")
+                with open(config.student_fixed_labels_path, encoding="utf-8") as _fh:
+                    self.graph_loss_config._fixed_labels_cache = _json.load(_fh)
+                print(f"[graph] Loaded {len(self.graph_loss_config._fixed_labels_cache)} fixed neuron labels.")
+            else:
+                self.graph_loss_config._fixed_labels_cache = None
+
             self.student_graph_adapter = HFLlamaGraphAdapter(
                 self.student,
                 self.tokenizer,
