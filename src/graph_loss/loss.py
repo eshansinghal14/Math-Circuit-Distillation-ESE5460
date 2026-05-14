@@ -10,13 +10,13 @@ def _compute_edge_loss(
     student_ids: list[int],
     epsilon: float = 1e-8,
 ) -> torch.Tensor:
-    """Edge-level structural loss: row-wise KL between coarsened adjacency.
+    """Edge-level structural loss: row-wise Jensen-Shannon between coarsened adjacency.
 
     Conceptual model:  each row of the supernode adjacency matrix represents
     "where does this supernode route its causal influence to downstream
     supernodes".  After L1 normalisation of absolute values, each row is a
     probability distribution over downstream supernodes.  The loss is the
-    mean over rows of KL(teacher_row || student_row).
+    mean over rows of JSD(teacher_row, student_row).
 
     Why KL on distributions instead of MSE on raw entries:
     1. Scale-invariant — the loss compares routing *structure*, not absolute
@@ -80,8 +80,19 @@ def _compute_edge_loss(
     t_dist = t_abs / t_abs.sum(dim=1, keepdim=True).clamp(min=epsilon)
     s_dist = s_abs / s_abs.sum(dim=1, keepdim=True).clamp(min=epsilon)
 
+    # Jensen-Shannon Divergence per row (mean over rows).  JSD = 0.5*KL(t||m) +
+    # 0.5*KL(s||m) where m = (t+s)/2.  Symmetric, bounded in [0, log 2], and
+    # well-defined even when one distribution has zero mass at indices the
+    # other has nonzero mass at.  Forward-only KL doesn't penalize student
+    # mass at indices where teacher has 0 (e.g. spurious self-loops); JSD does.
+    m_dist = 0.5 * (t_dist.detach() + s_dist)
+    log_m = (m_dist + epsilon).log()
+    log_t = (t_dist.detach() + epsilon).log()
     log_s = (s_dist + epsilon).log()
-    return F.kl_div(log_s, t_dist.detach(), reduction="batchmean").to(dtype)
+    kl_t_m = (t_dist.detach() * (log_t - log_m)).sum(dim=1)
+    kl_s_m = (s_dist * (log_s - log_m)).sum(dim=1)
+    jsd = 0.5 * (kl_t_m + kl_s_m)
+    return jsd.mean().to(dtype)
 
 
 def _compute_node_loss(
