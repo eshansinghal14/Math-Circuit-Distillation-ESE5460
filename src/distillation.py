@@ -216,7 +216,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--student-cluster-method",
         type=str,
         default="ablation",
-        choices=["ablation", "full_search"],
+        choices=["ablation", "full_search", "fixed_labels"],
         help="Supergraph clustering method for the student.  full_search builds "
              "activation heatmaps (requires --student-dataset).",
     )
