@@ -33,7 +33,6 @@ import logging
 import os
 import sys
 from collections import Counter
-from typing import Any
 
 import torch
 
@@ -79,8 +78,25 @@ def main() -> None:
 
     # --- Load model ---
     logger.info("Loading student model: %s", args.model)
+    import sys, os as _os
+    # Ensure the utils package (load_model) is importable when running as -m
+    _src_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    if _src_dir not in sys.path:
+        sys.path.insert(0, _src_dir)
+
+    from utils.hf_models import load_student_model_for_distillation
     from graph_loss.hf_adapter import HFLlamaGraphAdapter
-    adapter = HFLlamaGraphAdapter(args.model, dtype=dtype, device=args.device)
+
+    device = torch.device(args.device) if args.device else (
+        torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    )
+    student_model, tokenizer = load_student_model_for_distillation(
+        student_source=None,
+        student_model_id=args.model,
+        device=device,
+    )
+    student_model = student_model.to(dtype=dtype)
+    adapter = HFLlamaGraphAdapter(student_model, tokenizer, device)
 
     # --- Load prompts ---
     prompts = _load_prompts(args.train_json, args.n_prompts)
@@ -133,6 +149,7 @@ def main() -> None:
                     dataset=args.dataset,
                     activation_write_cache_path=args.activation_write_cache,
                     mlp_input_cache=mlp_input_cache,
+                    model_name=model_name,
                     anova_nodes_per_label=args.anova_nodes_per_label,
                     anova_range_radius=args.anova_range_radius,
                     sum_min_specificity=args.sum_min_specificity,
