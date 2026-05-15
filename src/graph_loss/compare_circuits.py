@@ -509,7 +509,7 @@ def main() -> None:
 
         # --- Build student graph ---
         print(f"[2/4] Building student attribution graph (prop_neurons={args.prop_neurons_per_layer})...")
-        with torch.no_grad():
+        with torch.enable_grad():
             student_graph = adapter.build_graph(
                 prompt,
                 prop_neurons_per_layer=args.prop_neurons_per_layer,
