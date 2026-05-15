@@ -216,7 +216,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--student-cluster-method",
         type=str,
         default="ablation",
-        choices=["ablation", "full_search"],
+        choices=["ablation", "full_search", "fixed_labels"],
         help="Supergraph clustering method for the student.  full_search builds "
              "activation heatmaps (requires --student-dataset).",
     )
@@ -240,6 +240,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="PATH",
         help="Local path for caching student activation-write grids between steps.",
+    )
+    parser.add_argument(
+        "--student-fixed-labels",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a JSON file produced by precompute_fixed_labels.py mapping "
+            "'layer:neuron_id' -> label string.  When set and "
+            "--student-cluster-method is 'fixed_labels', ANOVA is skipped each "
+            "step — neuron labels are looked up from this file instead.  "
+            "Reduces step time from ~20 min to ~80s."
+        ),
     )
     parser.add_argument(
         "--student-anova-range-radius",
@@ -432,6 +445,7 @@ def main() -> None:
             student_dataset=args.student_dataset,
             student_mlp_input_cache_path=args.student_mlp_input_cache,
             student_activation_write_cache_path=args.student_activation_write_cache,
+            student_fixed_labels_path=args.student_fixed_labels,
             student_anova_range_radius=args.student_anova_range_radius,
             student_anova_nodes_per_label=args.student_anova_nodes_per_label,
             student_sum_min_specificity=args.student_sum_min_specificity,

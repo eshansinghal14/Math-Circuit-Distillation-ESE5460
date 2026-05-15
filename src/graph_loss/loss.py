@@ -8,33 +8,37 @@ def _compute_edge_loss(
     mapping: dict[int, set[int]],
     teacher_ids: list[int],
     student_ids: list[int],
-    epsilon: float = 1e-4,
+    epsilon: float = 1e-8,
 ) -> torch.Tensor:
-    """Edge-level structural loss via teacher-coarsening.
+    """Edge-level structural loss: row-wise Jensen-Shannon between coarsened adjacency.
 
-    Why coarsening rather than per-entry comparison:
-    Teacher and student adjacency matrices have different shapes (n_T x n_T vs
-    n_S x n_S) and, after L1 row-normalisation, different natural per-entry
-    scales (each entry ~ 1/row_size).  Comparing entries directly forces the
-    student to match values that its row-normalisation constraint forbids.
+    Conceptual model:  each row of the supernode adjacency matrix represents
+    "where does this supernode route its causal influence to downstream
+    supernodes".  After L1 normalisation of absolute values, each row is a
+    probability distribution over downstream supernodes.  The loss is the
+    mean over rows of JSD(teacher_row, student_row).
 
-    Coarsening fixes this by viewing the student matrix through the teacher's
-    clustering:
-        W_S_coarse[T_tgt, T_src] =
-            (sum_{s_tgt in map[T_tgt], s_src in map[T_src]} W_S[s_tgt, s_src])
-            / |map[T_tgt]|
-    Both W_T and W_S_coarse now live on the same (n_T x n_T) support; rows of
-    each are distributions over teacher source supernodes; their values are
-    directly comparable.  We then compute element-wise MSE.
+    Why KL on distributions instead of MSE on raw entries:
+    1. Scale-invariant — the loss compares routing *structure*, not absolute
+       magnitudes.  Teacher and student adjacency entries are at different
+       scales (different model sizes, different attribution magnitudes); MSE
+       on raw entries was O(1e-6), making the graph signal ~100x smaller than
+       KL distillation (~1.0) even at lambda=10.
+    2. Probabilistically interpretable — "the student should distribute its
+       influence the way the teacher does", which is the intent of structural
+       distillation.
+    3. Naturally bounded — KL on n_T-dim distributions is in [0, log(n_T)],
+       same order of magnitude as the token-level KL distillation loss.
+
+    Coarsening step (unchanged): the student adjacency is aggregated into a
+    teacher-sized matrix using the alignment mapping, so both matrices live
+    on the same (n_T x n_T) support before KL is computed.
 
     Notes:
-    - Teacher rows with no mapped students contribute (W_T[t,:]**2).mean() with
-      zero gradient — honest: the student lacks a corresponding cluster, so the
-      loss surfaces that gap in value but cannot push the student to grow one.
-    - A student in multiple teacher buckets (rare due to the mapping's gap
-      threshold) is double-counted softly; this is treated as noise.
-    - Builds W_S_coarse as a single tensor (not appended scalars) so the autograd
-      graph is preserved through indexing-and-sum on W_S.
+    - Uses |entries| then L1-normalises so the sign of attribution magnitudes
+      doesn't matter (they represent strength of influence, not direction).
+    - Teacher distribution is detached: it's the fixed target.
+    - Rows with no matched student supernode are skipped (no gradient).
     """
     n_T = len(teacher_ids)
     s_id2idx = {cid: i for i, cid in enumerate(student_ids)}
@@ -70,8 +74,25 @@ def _compute_edge_loss(
 
     W_S_coarse_partial = torch.stack(rows)
     teacher_rows = W_T[row_indices].to(device=device, dtype=dtype)
-    diff = teacher_rows - W_S_coarse_partial
-    return (diff ** 2).mean()
+
+    t_abs = teacher_rows.float().abs()
+    s_abs = W_S_coarse_partial.float().abs()
+    t_dist = t_abs / t_abs.sum(dim=1, keepdim=True).clamp(min=epsilon)
+    s_dist = s_abs / s_abs.sum(dim=1, keepdim=True).clamp(min=epsilon)
+
+    # Jensen-Shannon Divergence per row (mean over rows).  JSD = 0.5*KL(t||m) +
+    # 0.5*KL(s||m) where m = (t+s)/2.  Symmetric, bounded in [0, log 2], and
+    # well-defined even when one distribution has zero mass at indices the
+    # other has nonzero mass at.  Forward-only KL doesn't penalize student
+    # mass at indices where teacher has 0 (e.g. spurious self-loops); JSD does.
+    m_dist = 0.5 * (t_dist.detach() + s_dist)
+    log_m = (m_dist + epsilon).log()
+    log_t = (t_dist.detach() + epsilon).log()
+    log_s = (s_dist + epsilon).log()
+    kl_t_m = (t_dist.detach() * (log_t - log_m)).sum(dim=1)
+    kl_s_m = (s_dist * (log_s - log_m)).sum(dim=1)
+    jsd = 0.5 * (kl_t_m + kl_s_m)
+    return jsd.mean().to(dtype)
 
 
 def _compute_node_loss(
