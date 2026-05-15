@@ -1021,8 +1021,15 @@ def plot_neuron_activation_heatmap(args: argparse.Namespace) -> str:
 
     from graph_loss.replacement_model import TransformerLensReplacementModel
 
-    logger.info("Loading model: %s", args.model)
-    model = TransformerLensReplacementModel.from_pretrained(args.model, dtype=dtype)
+    if args.model_path:
+        from transformers import AutoModelForCausalLM
+        logger.info("Loading weights from local path: %s", args.model_path)
+        hf_model = AutoModelForCausalLM.from_pretrained(args.model_path, torch_dtype=dtype)
+        logger.info("Building TransformerLens model with architecture: %s", args.model)
+        model = TransformerLensReplacementModel.from_pretrained(args.model, dtype=dtype, hf_model=hf_model)
+    else:
+        logger.info("Loading model: %s", args.model)
+        model = TransformerLensReplacementModel.from_pretrained(args.model, dtype=dtype)
     model.eval()
 
     layer, token_pos, neuron_id = _validate_neuron_location(
@@ -1118,7 +1125,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Plot a specific MLP neuron's activations over a numeric dataset.",
     )
-    parser.add_argument("--model", required=True, help="HuggingFace model name")
+    parser.add_argument("--model", required=True, help="Base model architecture name (e.g. 'gpt2'). Used by TransformerLens to build the model config.")
+    parser.add_argument(
+        "--model_path",
+        default=None,
+        help="Local path to a saved HuggingFace model whose weights override the base --model weights.",
+    )
     parser.add_argument("--layer", type=int, required=True, help="Layer index")
     parser.add_argument("--token-pos", type=int, required=True, help="Token position")
     parser.add_argument("--neuron-id", type=int, required=True, help="Per-layer MLP neuron id")
