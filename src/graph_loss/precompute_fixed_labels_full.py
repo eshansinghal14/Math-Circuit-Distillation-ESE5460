@@ -86,7 +86,7 @@ def _vectorized_anova_scores(
     m_var = m_c.pow(2).sum(dim=-1).unsqueeze(0)      # [1, n_rules]
     denom = (y_var * m_var).clamp(min=1e-20)         # [d_mlp, n_rules]
 
-    return (proj.pow(2) / denom).clamp(0.0, 1.0).cpu().float().numpy()
+    return (proj.pow(2) / denom).clamp(0.0, 1.0).detach().cpu().float().numpy()
 
 
 def _run_gpu_anova_all_neurons(
@@ -231,7 +231,7 @@ def _run_gpu_anova_all_neurons(
 
         # ── Vectorized ANOVA: all (neuron, rule) scores in ONE matmul ──────────
         # scores[d_mlp, n_rules] = explained_variance_score for every pair
-        scores_np = _vectorized_anova_scores(grid_flat, masks_gpu)  # numpy [d_mlp, n_rules]
+        scores_np = _vectorized_anova_scores(grid_flat.detach(), masks_gpu)  # numpy [d_mlp, n_rules]
         del grid_flat
         if device.type == "cuda":
             torch.cuda.empty_cache()
