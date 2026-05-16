@@ -697,7 +697,20 @@ class DistillationTrainer:
         print(f"  [checkpoint] Saved step {step:04d} → {path}")
 
     def _refresh_fixed_labels(self, step: int) -> None:
-        """Re-run ANOVA on a small batch of training prompts and update _fixed_labels_cache."""
+        """Re-run ANOVA on the *full* neuron set and update _fixed_labels_cache.
+
+        Mirrors :mod:`graph_loss.precompute_fixed_labels_full`: skips any
+        forward-pass top-K filtering and instead runs ANOVA over every
+        ``(layer, token_pos, neuron_id)`` combination using the pre-computed
+        MLP input cache and the student's *current* MLP weights.
+
+        The MLP input cache is stale residual stream + current weights — same
+        approximation as before, but the candidate set is no longer constrained
+        to neurons that look "important" under a snapshot top-K filter.
+
+        Time per refresh on an A100: ~20-30 min.  Tune
+        ``--label-refresh-interval`` accordingly.
+        """
         config = self.config
         if self.graph_loss_config is None or self.student_graph_adapter is None:
             return
@@ -715,8 +728,6 @@ class DistillationTrainer:
             return
 
         try:
-            import torch.nn.functional as F
-
             from graph_loss.anova_node_labels import ANOVA_LABEL_CATEGORIES, label_activation_heatmaps
             from graph_loss.neuron_activation_heatmap import (
                 _resolve_dataset_path,
@@ -727,11 +738,6 @@ class DistillationTrainer:
                 mlp_input_cache_exists,
             )
 
-            n_prompts = config.label_refresh_n_prompts
-            prompts = list(self.train_data.keys())[:n_prompts]
-
-            # Load mlp_input_cache (same pattern as training.py lines 396-407).
-            student_mlp_input_cache = None
             dataset_path = _resolve_dataset_path(config.student_dataset)
             _student_model_name = getattr(
                 getattr(self.student_graph_adapter.model, "config", None),
@@ -759,86 +765,40 @@ class DistillationTrainer:
                 return
 
             adapter = self.student_graph_adapter
+            cache_meta = student_mlp_input_cache["meta"]
+            n_cache_positions = int(cache_meta["n_positions"])
+            n_layers = adapter.n_layers
             d_mlp = adapter.d_mlp
 
-            # Forward-only pass: collect union of top-K (layer, pos, neuron_id) triples.
-            all_neurons: set = set()
+            # Build full neuron_locations: every (layer, token_pos, neuron_id) triple.
+            layers_arange = torch.arange(n_layers, dtype=torch.long)
+            positions_arange = torch.arange(n_cache_positions, dtype=torch.long)
+            neurons_arange = torch.arange(d_mlp, dtype=torch.long)
+            neuron_locations = torch.cartesian_prod(
+                layers_arange, positions_arange, neurons_arange
+            ).contiguous()
+            n_total = int(neuron_locations.shape[0])
+            print(
+                f"[graph] Step {step}: starting ANOVA on {n_total} total neurons "
+                f"(layers={n_layers} × positions={n_cache_positions} × d_mlp={d_mlp}). "
+                f"This is the slow step (~20-30 min on A100)."
+            )
 
+            # The student's training-mode flag controls dropout etc.; the heatmap
+            # builder reads weights only, so eval-mode is a no-op for this model
+            # but is still safer (matches precompute_fixed_labels_full semantics).
             self.student.eval()
             try:
-                for prompt in prompts:
-                    try:
-                        input_ids = adapter.ensure_tokenized(prompt)
-                    except Exception:
-                        continue
-
-                    input_batch = input_ids.unsqueeze(0)
-                    mlp_inputs: Dict[int, torch.Tensor] = {}
-                    handles: List = []
-
-                    for layer_idx, layer in enumerate(adapter.layers):
-                        def _pre_hook(_module, inputs, *, idx: int = layer_idx) -> None:
-                            mlp_inputs[idx] = inputs[0]
-
-                        handles.append(layer.mlp.register_forward_pre_hook(_pre_hook))
-
-                    try:
-                        with torch.no_grad():
-                            self.student(
-                                input_ids=input_batch.to(self.device),
-                                attention_mask=torch.ones_like(input_batch).to(self.device),
-                                output_hidden_states=False,
-                                use_cache=False,
-                            )
-                    except Exception:
-                        continue
-                    finally:
-                        for h in handles:
-                            h.remove()
-
-                    for layer_idx in range(adapter.n_layers):
-                        if layer_idx not in mlp_inputs:
-                            continue
-
-                        layer_input = mlp_inputs[layer_idx].squeeze(0)  # [n_pos, d_model]
-
-                        with torch.no_grad():
-                            _, _, source_vectors = adapter._compute_layer_neuron_data(
-                                layer_idx, layer_input
-                            )
-                        # source_vectors: [n_pos, d_mlp, d_model]
-                        sv_norms = source_vectors.norm(dim=-1)  # [n_pos, d_mlp]
-                        flat_norms = sv_norms.reshape(-1)       # [n_pos * d_mlp]
-                        total = int(flat_norms.numel())
-                        k = min(total, max(1, int(total * config.graph_prop_neurons_per_layer)))
-                        keep = torch.topk(flat_norms, k).indices  # [k]
-
-                        keep_pos = (keep // d_mlp).tolist()
-                        keep_nid = (keep % d_mlp).tolist()
-                        for pos, nid in zip(keep_pos, keep_nid):
-                            all_neurons.add((layer_idx, pos, nid))
-
-                    mlp_inputs.clear()
+                result = build_neuron_activation_write_result(
+                    adapter,
+                    dataset_path,
+                    neuron_locations,
+                    mlp_input_cache=student_mlp_input_cache,
+                    include_w_down_vectors=False,
+                )
             finally:
                 self.student.train()
 
-            if not all_neurons:
-                print(f"[graph] Step {step}: no neurons selected — skipping label refresh.")
-                return
-
-            # Build neuron locations tensor [N, 3] sorted for reproducibility.
-            neuron_locations = torch.tensor(sorted(all_neurons), dtype=torch.long)
-
-            # Build activation heatmaps (ANOVA grid) using the MLP input cache.
-            result = build_neuron_activation_write_result(
-                adapter,
-                dataset_path,
-                neuron_locations,
-                mlp_input_cache=student_mlp_input_cache,
-                include_w_down_vectors=False,
-            )
-
-            # ANOVA labeling across all dataset arg values.
             label_results = label_activation_heatmaps(
                 result.activations,
                 result.arg_values,
@@ -846,7 +806,6 @@ class DistillationTrainer:
                 anova_range_radius=config.student_anova_range_radius,
             )
 
-            # Pick top anova_nodes_per_label neurons per ANOVA category.
             new_labels: Dict[str, str] = {}
             for category in ANOVA_LABEL_CATEGORIES:
                 all_scored = [
@@ -869,9 +828,8 @@ class DistillationTrainer:
 
             self.graph_loss_config._fixed_labels_cache = new_labels
             print(
-                f"[graph] Step {step}: refreshed fixed labels (fast) from {len(prompts)} prompts "
-                f"→ {len(new_labels)} labeled neurons "
-                f"(union of {len(all_neurons)} top-K triples)"
+                f"[graph] Step {step}: refreshed fixed labels (full) from "
+                f"{n_total} candidate neurons → {len(new_labels)} labeled neurons"
             )
         except Exception as exc:
             import warnings
