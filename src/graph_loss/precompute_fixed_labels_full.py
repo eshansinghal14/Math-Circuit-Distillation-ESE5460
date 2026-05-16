@@ -2,29 +2,35 @@
 
 Unlike :mod:`precompute_fixed_labels_fast` (which first runs forward passes on
 all dataset prompts to filter neurons by ``source_vector_norm`` and then runs
-ANOVA on the union), this script skips the filtering phase entirely.  It uses
-the pre-computed MLP input cache to compute activations for *every*
-``(layer, token_pos, neuron_id)`` combination directly via::
+ANOVA on the filtered union), this script skips the filtering phase entirely.
 
-    activation_neuron_i(prompt_j) = silu(x_j @ W_gate_i^T) * (x_j @ W_up_i^T)
+It uses the pre-computed MLP input cache to compute activations for *every*
+``(layer, neuron_id)`` combination via a vectorized GPU matrix multiply::
 
-where ``x_j`` is the cached residual-stream input to the MLP at the layer of
-interest for prompt ``j``.
+    activation_neuron_i(prompt_j, pos_p) = silu(x_jp @ W_gate_i^T) * (x_jp @ W_up_i^T)
 
-Trade-offs vs. the fast script:
+where ``x_jp`` is the cached residual-stream input to the MLP at layer ``l``,
+token position ``p``, for prompt ``j``.
 
-* No forward-pass filtering pass — much simpler.
-* ANOVA grid covers all neurons (16 × 5 × 8192 = 655 k rows for 1B), so this
-  takes longer (~20-30 min on an A100) but explores the full neuron space.
-* Same final output format ``{layer:neuron_id → label}`` — drop-in compatible.
+Processing is done one layer at a time.  For each layer the activation tensor
+is ``[n_valid_prompts, d_mlp]`` (< 100 MB on GPU for a 1B model), so there is
+no CPU OOM risk.  The ANOVA grid per layer is ``[d_mlp, n_arg1, n_arg2]``
+(< 350 MB for d_mlp=8192, 100×100 arg grid).
+
+Across token positions, labels are aggregated by taking the best specificity
+score so that the final neuron label reflects the position where its
+discriminative signal is strongest.
+
+Same output format as :mod:`precompute_fixed_labels_fast`:
+``{"{layer}:{neuron_id}": "<label>"}`` — drop-in compatible.
 
 Usage (run once before training)::
 
     python -m graph_loss.precompute_fixed_labels_full \\
         --model meta-llama/Llama-3.2-1B-Instruct \\
-        --dataset 22_add_tight \\
-        --mlp-input-cache /content/mlp_input_cache \\
-        --output /content/fixed_labels_full_1b.json \\
+        --dataset 22_add_tight_all \\
+        --mlp-input-cache /content/local_caches/mlp-input-cache \\
+        --output /content/fixed_labels_full.json \\
         --anova-nodes-per-label 3
 """
 
@@ -36,8 +42,10 @@ import logging
 import os
 import sys
 from collections import Counter
+from typing import Dict, List
 
 import torch
+import torch.nn.functional as F
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -49,15 +57,186 @@ def _ensure_src_on_path() -> None:
         sys.path.insert(0, src_dir)
 
 
-def _build_full_neuron_locations(
-    n_layers: int, n_positions: int, d_mlp: int
-) -> torch.Tensor:
-    """Return ``[n_layers * n_positions * d_mlp, 3]`` covering every triple."""
-    layers = torch.arange(n_layers, dtype=torch.long)
-    positions = torch.arange(n_positions, dtype=torch.long)
-    neurons = torch.arange(d_mlp, dtype=torch.long)
-    grid = torch.cartesian_prod(layers, positions, neurons)
-    return grid.contiguous()
+def _run_gpu_anova_all_neurons(
+    adapter,
+    mlp_input_cache: dict,
+    arg_values: List[List[int]],
+    device: torch.device,
+    anova_range_radius: int,
+    anova_nodes_per_label: int,
+    sum_min_specificity: float,
+) -> Dict[str, str]:
+    """Layer-by-layer GPU-vectorized ANOVA over all neurons.
+
+    For each layer ``l`` and token position ``p``:
+      1. Load cached MLP inputs ``x`` of shape ``[n_valid, d_model]`` to GPU.
+      2. Compute ``acts = silu(x @ W_gate^T) * (x @ W_up^T)`` → ``[n_valid, d_mlp]``
+         in a single batched matrix multiply (fast on GPU).
+      3. Scatter-add into ANOVA grid ``[d_mlp, n_arg1, n_arg2]`` using the
+         pre-computed flat argument-grid indices.
+      4. Divide by counts to get mean activation per (neuron, arg-combo) cell.
+      5. Run ``label_activation_heatmaps`` on the grid (CPU, iterates over
+         d_mlp neurons — typically 8192 — with a ~40-rule ANOVA per neuron).
+      6. Track the highest specificity score per (neuron_id, category) across
+         all token positions.
+
+    After all positions are done for a layer, assign labels to the top-K neurons
+    per category and free GPU memory before moving to the next layer.
+
+    Peak GPU memory per layer: ≈ 2 × d_mlp × n_valid × 4 bytes
+                                 + d_mlp × n_flat × 4 bytes
+    For d_mlp=8192, n_valid=10k, n_flat=10k:  ≈ 970 MB  (fits on any GPU ≥ 4 GB)
+    """
+    from graph_loss.anova_node_labels import ANOVA_LABEL_CATEGORIES, label_activation_heatmaps
+
+    cache_meta = mlp_input_cache["meta"]
+    cache_layer_inputs: List[torch.Tensor] = mlp_input_cache["layer_inputs"]
+    cache_args: List[List[int]] = cache_meta["numeric_args_by_prompt"]
+    n_cache_prompts = int(cache_meta["n_prompts"])
+    n_cache_positions = int(cache_meta["n_positions"])
+
+    grid_shape = tuple(len(v) for v in arg_values)
+    n_grid_dims = len(arg_values)
+    arg_to_idx = [{v: i for i, v in enumerate(vals)} for vals in arg_values]
+
+    n_flat = 1
+    for s in grid_shape:
+        n_flat *= s
+
+    # Compute stride for row-major flat index
+    strides = [1] * n_grid_dims
+    for dim in range(n_grid_dims - 2, -1, -1):
+        strides[dim] = strides[dim + 1] * grid_shape[dim + 1]
+
+    # Build valid prompt mask and flat grid index (done once, reused every layer)
+    valid_mask = torch.zeros(n_cache_prompts, dtype=torch.bool)
+    flat_indices = torch.zeros(n_cache_prompts, dtype=torch.long)
+    for j, args in enumerate(cache_args):
+        if len(args) != n_grid_dims:
+            continue
+        ok = True
+        flat = 0
+        for dim, val in enumerate(args):
+            if val not in arg_to_idx[dim]:
+                ok = False
+                break
+            flat += arg_to_idx[dim][val] * strides[dim]
+        if ok:
+            valid_mask[j] = True
+            flat_indices[j] = flat
+
+    valid_idx = valid_mask.nonzero(as_tuple=True)[0]  # [n_valid]
+    n_valid = int(valid_idx.shape[0])
+    logger.info("Valid prompts for ANOVA grid: %d / %d", n_valid, n_cache_prompts)
+    if n_valid == 0:
+        raise ValueError(
+            "No valid prompts found — check that the MLP cache was built with the "
+            "same dataset as --dataset."
+        )
+
+    flat_idx_dev = flat_indices[valid_idx].to(device)  # [n_valid] on GPU
+
+    # Counts per grid cell — same for all neurons, layers, positions
+    counts_flat = torch.zeros(n_flat, dtype=torch.float32, device=device)
+    counts_flat.scatter_add_(0, flat_idx_dev, torch.ones(n_valid, dtype=torch.float32, device=device))
+    counts_grid = counts_flat.reshape(grid_shape).clamp(min=1.0)  # [*grid_shape]
+
+    n_layers = adapter.n_layers
+    d_mlp = adapter.d_mlp
+
+    fixed_labels: Dict[str, str] = {}
+
+    for layer_idx in range(n_layers):
+        logger.info("━━ Layer %d / %d ━━", layer_idx + 1, n_layers)
+
+        hf_layer = adapter.layers[layer_idx]
+        W_gate = hf_layer.mlp.gate_proj.weight.to(device=device, dtype=torch.float32)  # [d_mlp, d_model]
+        W_up   = hf_layer.mlp.up_proj.weight.to(device=device, dtype=torch.float32)   # [d_mlp, d_model]
+
+        # layer_inputs: list entry is [n_prompts, n_positions, d_model]
+        # Slice valid prompts on CPU to keep transfer cost low, then move to GPU per-position.
+        layer_inputs_cpu = cache_layer_inputs[layer_idx][valid_idx]  # [n_valid, n_pos, d_model]
+
+        # Per-position best specificity / label, aggregated across positions
+        best_specificity: Dict[str, List[float]] = {
+            cat: [float("-inf")] * d_mlp for cat in ANOVA_LABEL_CATEGORIES
+        }
+        best_label: Dict[str, List[str]] = {
+            cat: [""] * d_mlp for cat in ANOVA_LABEL_CATEGORIES
+        }
+
+        for pos_idx in range(n_cache_positions):
+            x = layer_inputs_cpu[:, pos_idx, :].to(device=device, dtype=torch.float32)  # [n_valid, d_model]
+
+            gate_pre = x @ W_gate.T  # [n_valid, d_mlp]
+            up_pre   = x @ W_up.T   # [n_valid, d_mlp]
+            acts = F.silu(gate_pre) * up_pre  # [n_valid, d_mlp]
+
+            if pos_idx == 0:
+                # BOS / padding token — activations are noisy; zero them out
+                acts.zero_()
+
+            # Scatter-add into ANOVA grid [d_mlp, n_flat]
+            grid_flat = torch.zeros(d_mlp, n_flat, dtype=torch.float32, device=device)
+            grid_flat.scatter_add_(
+                1,
+                flat_idx_dev.unsqueeze(0).expand(d_mlp, -1),  # [d_mlp, n_valid]
+                acts.T.contiguous().float(),
+            )
+
+            # Average: [d_mlp, *grid_shape]
+            grid = grid_flat.reshape(d_mlp, *grid_shape) / counts_grid
+
+            # ANOVA (CPU-bound Python loop over d_mlp neurons)
+            label_results = label_activation_heatmaps(
+                grid.cpu(),
+                arg_values,
+                target_args=None,
+                anova_range_radius=anova_range_radius,
+            )
+
+            # Update best-across-positions tracking
+            for neuron_id, lr in enumerate(label_results):
+                for cat in ANOVA_LABEL_CATEGORIES:
+                    if cat not in lr.category_specificity:
+                        continue
+                    score = float(lr.category_scores.get(cat, 0.0))
+                    spec  = float(lr.category_specificity[cat])
+                    if score > 0.0 and spec > sum_min_specificity and spec > best_specificity[cat][neuron_id]:
+                        best_specificity[cat][neuron_id] = spec
+                        best_label[cat][neuron_id] = lr.categories.get(cat, "")
+
+            del x, gate_pre, up_pre, acts, grid_flat, grid
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+
+        # Assign labels: top-K per category
+        n_labeled_this_layer = 0
+        for cat in ANOVA_LABEL_CATEGORIES:
+            scored = [
+                (nid, best_specificity[cat][nid])
+                for nid in range(d_mlp)
+                if best_specificity[cat][nid] > float("-inf") and best_label[cat][nid]
+            ]
+            scored.sort(key=lambda kv: kv[1], reverse=True)
+            for neuron_id, _spec in scored[:anova_nodes_per_label]:
+                key = f"{layer_idx}:{neuron_id}"
+                if key not in fixed_labels:
+                    fixed_labels[key] = best_label[cat][neuron_id]
+                    n_labeled_this_layer += 1
+
+        del W_gate, W_up, layer_inputs_cpu, best_specificity, best_label
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        logger.info(
+            "  Layer %d: %d new labels this layer, %d total so far",
+            layer_idx + 1,
+            n_labeled_this_layer,
+            len(fixed_labels),
+        )
+
+    return fixed_labels
 
 
 def main() -> None:
@@ -73,13 +252,12 @@ def main() -> None:
     )
     parser.add_argument(
         "--dataset", required=True,
-        help="Dataset name (e.g. '22_add_tight') or explicit path to a JSON file. "
-             "_resolve_dataset_path will search for *_all.json, *_train.json, etc.",
+        help="Dataset name (e.g. '22_add_tight_all') or path to a JSON file",
     )
     parser.add_argument(
         "--mlp-input-cache", required=True,
         help="Path to the pre-computed MLP input cache root directory "
-             "(created by precompute_mlp_inputs.py). Required — fails fast if missing.",
+             "(created by precompute_mlp_inputs.py). Fails fast if missing.",
     )
     parser.add_argument(
         "--output", required=True,
@@ -87,7 +265,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--anova-nodes-per-label", type=int, default=3,
-        help="Maximum number of neurons to assign per ANOVA label category (default: 3)",
+        help="Maximum neurons to assign per ANOVA label category (default: 3)",
     )
     parser.add_argument(
         "--anova-range-radius", type=int, default=0,
@@ -95,7 +273,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--sum-min-specificity", type=float, default=0.0,
-        help="Minimum ANOVA specificity score a neuron must have to receive any label",
+        help="Minimum ANOVA specificity a neuron must have to receive any label",
     )
     parser.add_argument(
         "--device", default="cuda" if torch.cuda.is_available() else "cpu",
@@ -103,7 +281,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--dtype", default="bfloat16", choices=["float16", "bfloat16", "float32"],
-        help="Model dtype (default: bfloat16)",
+        help="Model dtype for loading (activations are computed in float32)",
     )
     args = parser.parse_args()
 
@@ -111,22 +289,24 @@ def main() -> None:
     dtype = dtype_map[args.dtype]
     device = torch.device(args.device)
 
-    # ── Imports (deferred so sys.path is already set) ─────────────────────────
+    # ── Deferred imports (sys.path already adjusted above) ────────────────────
     from utils.hf_models import load_student_model_for_distillation
     from graph_loss.hf_adapter import HFLlamaGraphAdapter
     from graph_loss.neuron_activation_heatmap import (
         _resolve_dataset_path,
-        build_neuron_activation_write_result,
+        _parse_numeric_args,
     )
+    from utils.dataset_json import load_prompt_answer_json
     from graph_loss.precompute_mlp_inputs import (
         load_mlp_input_cache,
         mlp_input_cache_dir,
         mlp_input_cache_exists,
     )
-    from graph_loss.anova_node_labels import ANOVA_LABEL_CATEGORIES, label_activation_heatmaps
 
     # ── Load student model ────────────────────────────────────────────────────
-    logger.info("Loading student model: %s  (device=%s  dtype=%s)", args.model, device, dtype)
+    logger.info(
+        "Loading student model: %s  (device=%s  dtype=%s)", args.model, device, dtype
+    )
     student_model, tokenizer = load_student_model_for_distillation(
         student_source=None,
         student_model_id=args.model,
@@ -136,160 +316,92 @@ def main() -> None:
     adapter = HFLlamaGraphAdapter(student_model, tokenizer, device)
     model_name = getattr(adapter.model.config, "_name_or_path", args.model)
     logger.info(
-        "Model loaded: %d layers, d_mlp=%d, d_model=%d",
+        "Model: %d layers, d_mlp=%d, d_model=%d",
         adapter.n_layers,
         adapter.d_mlp,
         adapter.d_model,
     )
 
-    # ── Resolve dataset ───────────────────────────────────────────────────────
+    # ── Resolve dataset and build arg_values ──────────────────────────────────
     dataset_path = _resolve_dataset_path(args.dataset)
-    logger.info("Dataset resolved to: %s", dataset_path)
+    logger.info("Dataset: %s", dataset_path)
+    samples = list(load_prompt_answer_json(dataset_path).items())
+    numeric_args_by_sample: List[List[int]] = []
+    for prompt, _answer in samples:
+        try:
+            numeric_args_by_sample.append(_parse_numeric_args(prompt))
+        except ValueError:
+            pass
+    if not numeric_args_by_sample:
+        raise ValueError(f"No parseable prompts in dataset: {dataset_path}")
+    n_arg_dims = len(numeric_args_by_sample[0])
+    arg_values: List[List[int]] = [
+        sorted({args[dim] for args in numeric_args_by_sample if len(args) == n_arg_dims})
+        for dim in range(n_arg_dims)
+    ]
+    logger.info(
+        "Dataset arg grid: %s (total cells: %d)",
+        [len(v) for v in arg_values],
+        int(__import__("math").prod(len(v) for v in arg_values)),
+    )
 
     # ── Load MLP input cache (REQUIRED) ───────────────────────────────────────
     if not mlp_input_cache_exists(args.mlp_input_cache, model_name, dataset_path):
         expected_dir = mlp_input_cache_dir(args.mlp_input_cache, model_name, dataset_path)
         logger.error(
-            "MLP input cache not found at %r for model=%r dataset=%r. "
-            "Expected directory: %r. Run precompute_mlp_inputs.py first.",
-            args.mlp_input_cache,
-            model_name,
-            dataset_path,
+            "MLP input cache not found. Expected: %r\n"
+            "Run:  python -m graph_loss.precompute_mlp_inputs \\\n"
+            "          --model %s \\\n"
+            "          --dataset %s \\\n"
+            "          --cache-dir %s",
             expected_dir,
+            args.model,
+            args.dataset,
+            args.mlp_input_cache,
         )
         sys.exit(1)
 
     mlp_input_cache = load_mlp_input_cache(args.mlp_input_cache, model_name, dataset_path)
-    cache_meta = mlp_input_cache["meta"]
-    n_cache_prompts = int(cache_meta["n_prompts"])
-    n_cache_positions = int(cache_meta["n_positions"])
+    n_cache_prompts = int(mlp_input_cache["meta"]["n_prompts"])
+    n_cache_positions = int(mlp_input_cache["meta"]["n_positions"])
     logger.info(
-        "Loaded MLP input cache: %d prompts, %d positions",
-        n_cache_prompts,
-        n_cache_positions,
+        "MLP input cache: %d prompts, %d positions", n_cache_prompts, n_cache_positions
     )
 
-    # ── Build full neuron_locations tensor ────────────────────────────────────
-    neuron_locations = _build_full_neuron_locations(
-        n_layers=adapter.n_layers,
-        n_positions=n_cache_positions,
-        d_mlp=adapter.d_mlp,
-    )
-    n_total_neurons = int(neuron_locations.shape[0])
+    # ── Run GPU-vectorized ANOVA layer by layer ───────────────────────────────
     logger.info(
-        "Built full neuron_locations tensor: shape=%s "
-        "(layers=%d × positions=%d × d_mlp=%d = %d rows)",
-        tuple(neuron_locations.shape),
+        "Starting full-coverage GPU ANOVA: %d layers × %d positions × d_mlp=%d …",
         adapter.n_layers,
         n_cache_positions,
         adapter.d_mlp,
-        n_total_neurons,
     )
-
-    # ── Build activation heatmaps (ANOVA grid) ────────────────────────────────
-    logger.info(
-        "Starting ANOVA on %d total neurons — this is the slow step, "
-        "expect ~20-30 min on an A100.",
-        n_total_neurons,
-    )
-    result = build_neuron_activation_write_result(
-        adapter,
-        dataset_path,
-        neuron_locations,
+    fixed_labels = _run_gpu_anova_all_neurons(
+        adapter=adapter,
         mlp_input_cache=mlp_input_cache,
-        include_w_down_vectors=False,
-    )
-    logger.info(
-        "Activation result shape: %s  arg_values dims: %s",
-        tuple(result.activations.shape),
-        [len(v) for v in result.arg_values],
-    )
-
-    # ── ANOVA labeling ────────────────────────────────────────────────────────
-    logger.info(
-        "Running ANOVA labeling (target_args=None — global across all arg values, "
-        "anova_range_radius=%d) ...",
-        args.anova_range_radius,
-    )
-    label_results = label_activation_heatmaps(
-        result.activations,
-        result.arg_values,
-        target_args=None,
+        arg_values=arg_values,
+        device=device,
         anova_range_radius=args.anova_range_radius,
+        anova_nodes_per_label=args.anova_nodes_per_label,
+        sum_min_specificity=args.sum_min_specificity,
     )
-
-    # ── Category loop: pick top anova_nodes_per_label per category ────────────
-    # Same ranking logic as precompute_fixed_labels_fast.py: rank by
-    # category_specificity, keep top-K per category, never overwrite an
-    # existing assignment for a (layer, neuron_id) key.
-    fixed_labels: dict[str, str] = {}
-    category_summary: list[tuple[str, int, int, float]] = []
-
-    for category in ANOVA_LABEL_CATEGORIES:
-        all_scored: list[tuple[int, float]] = [
-            (row_idx, float(label_result.category_specificity[category]))
-            for row_idx, label_result in enumerate(label_results)
-            if category in label_result.category_specificity
-            and label_result.category_scores.get(category, 0.0) > 0.0
-            and label_result.category_specificity.get(category, float("-inf"))
-            > args.sum_min_specificity
-        ]
-        sorted_rows = sorted(all_scored, key=lambda x: x[1], reverse=True)
-        top_rows = sorted_rows[: args.anova_nodes_per_label]
-
-        if not top_rows:
-            logger.info("  ANOVA category %-35s no qualifying neurons", f"{category!r}:")
-            category_summary.append((category, 0, 0, float("nan")))
-            continue
-
-        newly_labeled = 0
-        for row_idx, _score in top_rows:
-            layer = int(neuron_locations[row_idx, 0].item())
-            neuron_id = int(neuron_locations[row_idx, 2].item())
-            key = f"{layer}:{neuron_id}"
-            if key not in fixed_labels:
-                fixed_labels[key] = label_results[row_idx].categories[category]
-                newly_labeled += 1
-
-        best_score = float(top_rows[0][1])
-        logger.info(
-            "  ANOVA category %-35s top=%d  new_labels=%d  best_specificity=%.4f",
-            f"{category!r}:",
-            len(top_rows),
-            newly_labeled,
-            best_score,
-        )
-        category_summary.append((category, len(top_rows), newly_labeled, best_score))
 
     # ── Summary ───────────────────────────────────────────────────────────────
     logger.info(
-        "Fixed label map: %d neurons labeled  (from full neuron set of %d triples)",
+        "Done. %d neurons labeled (from %d layers × d_mlp=%d)",
         len(fixed_labels),
-        n_total_neurons,
+        adapter.n_layers,
+        adapter.d_mlp,
     )
     label_counts: Counter = Counter(fixed_labels.values())
     for lbl, cnt in sorted(label_counts.items()):
-        logger.info("  %-40s : %d neurons", lbl, cnt)
-
-    logger.info("Per-category summary (category | top | newly_labeled | best_specificity):")
-    for category, n_top, n_new, best in category_summary:
-        if n_top == 0:
-            logger.info("  %-35s : skipped (no qualifying neurons)", category)
-        else:
-            logger.info(
-                "  %-35s : top=%d  new=%d  best_specificity=%.4f",
-                category,
-                n_top,
-                n_new,
-                best,
-            )
+        logger.info("  %-45s : %d", lbl, cnt)
 
     # ── Save ──────────────────────────────────────────────────────────────────
     output_dir = os.path.dirname(os.path.abspath(args.output))
     os.makedirs(output_dir, exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(fixed_labels, f, indent=2)
-    logger.info("Saved fixed labels to %s", args.output)
+    logger.info("Saved → %s", args.output)
 
 
 if __name__ == "__main__":

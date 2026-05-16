@@ -697,19 +697,26 @@ class DistillationTrainer:
         print(f"  [checkpoint] Saved step {step:04d} → {path}")
 
     def _refresh_fixed_labels(self, step: int) -> None:
-        """Re-run ANOVA on the *full* neuron set and update _fixed_labels_cache.
+        """Re-run GPU-vectorized ANOVA on every neuron and update _fixed_labels_cache.
 
-        Mirrors :mod:`graph_loss.precompute_fixed_labels_full`: skips any
-        forward-pass top-K filtering and instead runs ANOVA over every
-        ``(layer, token_pos, neuron_id)`` combination using the pre-computed
-        MLP input cache and the student's *current* MLP weights.
+        Uses the same layer-by-layer GPU approach as
+        :func:`graph_loss.precompute_fixed_labels_full._run_gpu_anova_all_neurons`:
+        for each layer, activations are computed via batched matrix multiply on GPU
+        (``[n_valid, d_mlp]``), scattered into an ANOVA grid
+        ``[d_mlp, n_arg1, n_arg2]``, and labeled with
+        :func:`graph_loss.anova_node_labels.label_activation_heatmaps`.
 
-        The MLP input cache is stale residual stream + current weights — same
-        approximation as before, but the candidate set is no longer constrained
-        to neurons that look "important" under a snapshot top-K filter.
+        This avoids the CPU OOM that occurred when
+        ``build_neuron_activation_write_result`` was called with 655 k neuron
+        locations (allocating a ≈26 GB CPU tensor for a 1B model on a 100×100
+        arg grid).
 
-        Time per refresh on an A100: ~20-30 min.  Tune
-        ``--label-refresh-interval`` accordingly.
+        Peak GPU memory per layer ≈ d_mlp × n_valid × 4 bytes × 2
+                                    + d_mlp × n_flat × 4 bytes
+        (< 1 GB for the 1B model with 10k prompts, 100×100 grid).
+
+        Time per refresh on a Colab L4: ~5-15 min.
+        Tune ``--label-refresh-interval`` accordingly.
         """
         config = self.config
         if self.graph_loss_config is None or self.student_graph_adapter is None:
@@ -728,15 +735,18 @@ class DistillationTrainer:
             return
 
         try:
+            import torch.nn.functional as F
             from graph_loss.anova_node_labels import ANOVA_LABEL_CATEGORIES, label_activation_heatmaps
             from graph_loss.neuron_activation_heatmap import (
                 _resolve_dataset_path,
-                build_neuron_activation_write_result,
+                _parse_numeric_args,
             )
             from graph_loss.precompute_mlp_inputs import (
                 load_mlp_input_cache,
+                mlp_input_cache_dir,
                 mlp_input_cache_exists,
             )
+            from utils.dataset_json import load_prompt_answer_json
 
             dataset_path = _resolve_dataset_path(config.student_dataset)
             _student_model_name = getattr(
@@ -744,92 +754,162 @@ class DistillationTrainer:
                 "_name_or_path",
                 "unknown_model",
             )
-            if mlp_input_cache_exists(
+            if not mlp_input_cache_exists(
                 config.student_mlp_input_cache_path, _student_model_name, dataset_path
             ):
-                student_mlp_input_cache = load_mlp_input_cache(
-                    config.student_mlp_input_cache_path, _student_model_name, dataset_path
-                )
-            else:
                 import warnings
-                from graph_loss.precompute_mlp_inputs import mlp_input_cache_dir
                 expected_dir = mlp_input_cache_dir(
                     config.student_mlp_input_cache_path, _student_model_name, dataset_path
                 )
                 warnings.warn(
                     f"[graph] Step {step}: label refresh skipped — MLP input cache not found at "
-                    f"{expected_dir!r}. Set --student-mlp-input-cache to the *parent* of the "
-                    f"model-slug directory (e.g. /content/local_caches/mlp-input-cache), not the "
-                    f"model-slug subdirectory itself."
+                    f"{expected_dir!r}. Set --student-mlp-input-cache to the *parent* directory "
+                    f"(e.g. /content/local_caches/mlp-input-cache), not the model-slug subdir."
                 )
                 return
 
-            adapter = self.student_graph_adapter
+            student_mlp_input_cache = load_mlp_input_cache(
+                config.student_mlp_input_cache_path, _student_model_name, dataset_path
+            )
             cache_meta = student_mlp_input_cache["meta"]
             n_cache_positions = int(cache_meta["n_positions"])
+            cache_args: list = cache_meta["numeric_args_by_prompt"]
+
+            # Build arg_values from the dataset file
+            samples = list(load_prompt_answer_json(dataset_path).items())
+            numeric_args_by_sample = []
+            for prompt, _ in samples:
+                try:
+                    numeric_args_by_sample.append(_parse_numeric_args(prompt))
+                except ValueError:
+                    pass
+            n_arg_dims = len(numeric_args_by_sample[0]) if numeric_args_by_sample else 2
+            arg_values = [
+                sorted({args[dim] for args in numeric_args_by_sample if len(args) == n_arg_dims})
+                for dim in range(n_arg_dims)
+            ]
+
+            grid_shape = tuple(len(v) for v in arg_values)
+            arg_to_idx = [{v: i for i, v in enumerate(vals)} for vals in arg_values]
+            n_flat = 1
+            for s in grid_shape:
+                n_flat *= s
+            strides = [1] * n_arg_dims
+            for dim in range(n_arg_dims - 2, -1, -1):
+                strides[dim] = strides[dim + 1] * grid_shape[dim + 1]
+
+            n_cache_prompts = int(cache_meta["n_prompts"])
+            valid_mask = torch.zeros(n_cache_prompts, dtype=torch.bool)
+            flat_indices = torch.zeros(n_cache_prompts, dtype=torch.long)
+            for j, args in enumerate(cache_args):
+                if len(args) != n_arg_dims:
+                    continue
+                ok = True
+                flat = 0
+                for dim, val in enumerate(args):
+                    if val not in arg_to_idx[dim]:
+                        ok = False
+                        break
+                    flat += arg_to_idx[dim][val] * strides[dim]
+                if ok:
+                    valid_mask[j] = True
+                    flat_indices[j] = flat
+
+            valid_idx = valid_mask.nonzero(as_tuple=True)[0]
+            n_valid = int(valid_idx.shape[0])
+            dev = self.student_graph_adapter.device
+            flat_idx_dev = flat_indices[valid_idx].to(dev)
+
+            counts_flat = torch.zeros(n_flat, dtype=torch.float32, device=dev)
+            counts_flat.scatter_add_(0, flat_idx_dev, torch.ones(n_valid, dtype=torch.float32, device=dev))
+            counts_grid = counts_flat.reshape(grid_shape).clamp(min=1.0)
+
+            adapter = self.student_graph_adapter
+            cache_layer_inputs = student_mlp_input_cache["layer_inputs"]
             n_layers = adapter.n_layers
             d_mlp = adapter.d_mlp
 
-            # Build full neuron_locations: every (layer, token_pos, neuron_id) triple.
-            layers_arange = torch.arange(n_layers, dtype=torch.long)
-            positions_arange = torch.arange(n_cache_positions, dtype=torch.long)
-            neurons_arange = torch.arange(d_mlp, dtype=torch.long)
-            neuron_locations = torch.cartesian_prod(
-                layers_arange, positions_arange, neurons_arange
-            ).contiguous()
-            n_total = int(neuron_locations.shape[0])
             print(
-                f"[graph] Step {step}: starting ANOVA on {n_total} total neurons "
-                f"(layers={n_layers} × positions={n_cache_positions} × d_mlp={d_mlp}). "
-                f"This is the slow step (~20-30 min on A100)."
+                f"[graph] Step {step}: starting GPU ANOVA refresh "
+                f"({n_layers} layers × {n_cache_positions} positions × d_mlp={d_mlp}, "
+                f"valid_prompts={n_valid})"
             )
 
-            # The student's training-mode flag controls dropout etc.; the heatmap
-            # builder reads weights only, so eval-mode is a no-op for this model
-            # but is still safer (matches precompute_fixed_labels_full semantics).
             self.student.eval()
+            new_labels: Dict[str, str] = {}
             try:
-                result = build_neuron_activation_write_result(
-                    adapter,
-                    dataset_path,
-                    neuron_locations,
-                    mlp_input_cache=student_mlp_input_cache,
-                    include_w_down_vectors=False,
-                )
+                for layer_idx in range(n_layers):
+                    hf_layer = adapter.layers[layer_idx]
+                    W_gate = hf_layer.mlp.gate_proj.weight.to(device=dev, dtype=torch.float32)
+                    W_up   = hf_layer.mlp.up_proj.weight.to(device=dev, dtype=torch.float32)
+                    layer_inputs_cpu = cache_layer_inputs[layer_idx][valid_idx]
+
+                    best_spec: Dict[str, list] = {
+                        cat: [float("-inf")] * d_mlp for cat in ANOVA_LABEL_CATEGORIES
+                    }
+                    best_lbl: Dict[str, list] = {
+                        cat: [""] * d_mlp for cat in ANOVA_LABEL_CATEGORIES
+                    }
+
+                    for pos_idx in range(n_cache_positions):
+                        x = layer_inputs_cpu[:, pos_idx, :].to(device=dev, dtype=torch.float32)
+                        acts = F.silu(x @ W_gate.T) * (x @ W_up.T)
+                        if pos_idx == 0:
+                            acts.zero_()
+
+                        grid_flat = torch.zeros(d_mlp, n_flat, dtype=torch.float32, device=dev)
+                        grid_flat.scatter_add_(
+                            1,
+                            flat_idx_dev.unsqueeze(0).expand(d_mlp, -1),
+                            acts.T.contiguous().float(),
+                        )
+                        grid = grid_flat.reshape(d_mlp, *grid_shape) / counts_grid
+
+                        label_results = label_activation_heatmaps(
+                            grid.cpu(), arg_values,
+                            target_args=None,
+                            anova_range_radius=config.student_anova_range_radius,
+                        )
+                        for neuron_id, lr in enumerate(label_results):
+                            for cat in ANOVA_LABEL_CATEGORIES:
+                                if cat not in lr.category_specificity:
+                                    continue
+                                spec = float(lr.category_specificity[cat])
+                                if (
+                                    lr.category_scores.get(cat, 0.0) > 0.0
+                                    and spec > config.student_sum_min_specificity
+                                    and spec > best_spec[cat][neuron_id]
+                                ):
+                                    best_spec[cat][neuron_id] = spec
+                                    best_lbl[cat][neuron_id] = lr.categories.get(cat, "")
+
+                        del x, acts, grid_flat, grid
+                        if dev.type == "cuda":
+                            torch.cuda.empty_cache()
+
+                    for cat in ANOVA_LABEL_CATEGORIES:
+                        scored = [
+                            (nid, best_spec[cat][nid])
+                            for nid in range(d_mlp)
+                            if best_spec[cat][nid] > float("-inf") and best_lbl[cat][nid]
+                        ]
+                        scored.sort(key=lambda kv: kv[1], reverse=True)
+                        for neuron_id, _ in scored[: config.student_anova_nodes_per_label]:
+                            key = f"{layer_idx}:{neuron_id}"
+                            if key not in new_labels:
+                                new_labels[key] = best_lbl[cat][neuron_id]
+
+                    del W_gate, W_up, layer_inputs_cpu, best_spec, best_lbl
+                    if dev.type == "cuda":
+                        torch.cuda.empty_cache()
+                    print(f"[graph]   layer {layer_idx + 1}/{n_layers} done, labels so far: {len(new_labels)}")
             finally:
                 self.student.train()
 
-            label_results = label_activation_heatmaps(
-                result.activations,
-                result.arg_values,
-                target_args=None,
-                anova_range_radius=config.student_anova_range_radius,
-            )
-
-            new_labels: Dict[str, str] = {}
-            for category in ANOVA_LABEL_CATEGORIES:
-                all_scored = [
-                    (row_idx, float(label_result.category_specificity[category]))
-                    for row_idx, label_result in enumerate(label_results)
-                    if category in label_result.category_specificity
-                    and label_result.category_scores.get(category, 0.0) > 0.0
-                    and label_result.category_specificity.get(category, float("-inf"))
-                    > config.student_sum_min_specificity
-                ]
-                sorted_rows = sorted(all_scored, key=lambda x: x[1], reverse=True)
-                top_rows = sorted_rows[: config.student_anova_nodes_per_label]
-
-                for row_idx, _ in top_rows:
-                    layer = int(neuron_locations[row_idx, 0].item())
-                    neuron_id = int(neuron_locations[row_idx, 2].item())
-                    key = f"{layer}:{neuron_id}"
-                    if key not in new_labels:
-                        new_labels[key] = label_results[row_idx].categories[category]
-
             self.graph_loss_config._fixed_labels_cache = new_labels
             print(
-                f"[graph] Step {step}: refreshed fixed labels (full) from "
-                f"{n_total} candidate neurons → {len(new_labels)} labeled neurons"
+                f"[graph] Step {step}: label refresh complete — "
+                f"{len(new_labels)} neurons labeled"
             )
         except Exception as exc:
             import warnings
