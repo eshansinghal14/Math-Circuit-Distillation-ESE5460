@@ -741,6 +741,19 @@ class DistillationTrainer:
                 student_mlp_input_cache = load_mlp_input_cache(
                     config.student_mlp_input_cache_path, _student_model_name, dataset_path
                 )
+            else:
+                import warnings
+                from graph_loss.precompute_mlp_inputs import mlp_input_cache_dir
+                expected_dir = mlp_input_cache_dir(
+                    config.student_mlp_input_cache_path, _student_model_name, dataset_path
+                )
+                warnings.warn(
+                    f"[graph] Step {step}: label refresh skipped — MLP input cache not found at "
+                    f"{expected_dir!r}. Set --student-mlp-input-cache to the *parent* of the "
+                    f"model-slug directory (e.g. /content/local_caches/mlp-input-cache), not the "
+                    f"model-slug subdirectory itself."
+                )
+                return
 
             # Collect per-neuron label votes across all sampled prompts.
             votes: Dict[str, List[str]] = {}
