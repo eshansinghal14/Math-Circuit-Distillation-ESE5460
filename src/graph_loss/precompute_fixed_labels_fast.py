@@ -220,6 +220,11 @@ def main() -> None:
         "--dtype", default="bfloat16", choices=["float16", "bfloat16", "float32"],
         help="Model dtype (default: bfloat16)",
     )
+    parser.add_argument(
+        "--min-frequency", type=int, default=5,
+        help="Minimum number of prompts a neuron must appear in to be included for ANOVA "
+             "labeling. Higher values reduce union size and speed up ANOVA.",
+    )
     args = parser.parse_args()
 
     dtype_map = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}
@@ -272,6 +277,7 @@ def main() -> None:
         out_row_norms=out_row_norms,
         device=device,
         dtype=dtype,
+        min_frequency=args.min_frequency,
     )
     logger.info(
         "Union: %d unique (layer, token_pos, neuron_id) triples from %d prompts",
@@ -308,7 +314,10 @@ def main() -> None:
         )
 
     # ── Build activation heatmaps (ANOVA grid) ────────────────────────────────
-    logger.info("Building activation write result for %d neurons ...", len(neuron_locations))
+    logger.info(
+        "Building activation write result for %d neurons (this is the ANOVA step — may take a few minutes) ...",
+        len(neuron_locations),
+    )
     result = build_neuron_activation_write_result(
         adapter,
         dataset_path,
