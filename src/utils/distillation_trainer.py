@@ -715,10 +715,13 @@ class DistillationTrainer:
             return
 
         try:
-            from collections import Counter
+            import torch.nn.functional as F
 
-            from graph_loss.graph import build_super_graph
-            from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
+            from graph_loss.anova_node_labels import ANOVA_LABEL_CATEGORIES, label_activation_heatmaps
+            from graph_loss.neuron_activation_heatmap import (
+                _resolve_dataset_path,
+                build_neuron_activation_write_result,
+            )
             from graph_loss.precompute_mlp_inputs import (
                 load_mlp_input_cache,
                 mlp_input_cache_exists,
@@ -755,60 +758,120 @@ class DistillationTrainer:
                 )
                 return
 
-            # Collect per-neuron label votes across all sampled prompts.
-            votes: Dict[str, List[str]] = {}
+            adapter = self.student_graph_adapter
+            d_mlp = adapter.d_mlp
+
+            # Forward-only pass: collect union of top-K (layer, pos, neuron_id) triples.
+            all_neurons: set = set()
 
             self.student.eval()
             try:
                 for prompt in prompts:
-                    with torch.enable_grad():
-                        graph = self.student_graph_adapter.build_graph(
-                            prompt,
-                            prop_neurons_per_layer=config.graph_prop_neurons_per_layer,
-                            batch_size=1,
-                            dtype=config.graph_dtype,
-                            create_graph=False,
-                            detach_result=True,
-                            fast=False,
-                            skip_logit_attribution=True,
-                        )
-                    with torch.no_grad():
-                        sg = build_super_graph(
-                            graph,
-                            self.student_graph_adapter,
-                            cluster_method="full_search",
-                            dataset=config.student_dataset,
-                            activation_write_cache_path=config.student_activation_write_cache_path,
-                            mlp_input_cache=student_mlp_input_cache,
-                            anova_nodes_per_label=config.student_anova_nodes_per_label,
-                            anova_range_radius=config.student_anova_range_radius,
-                            sum_min_specificity=config.student_sum_min_specificity,
-                        )
-
-                    if sg.supernode_labels is None:
+                    try:
+                        input_ids = adapter.ensure_tokenized(prompt)
+                    except Exception:
                         continue
 
-                    locations = graph.neuron_locations.detach().cpu().to(dtype=torch.long)
-                    for members, labels in zip(sg.supernodes, sg.supernode_labels):
-                        for label in labels:
-                            for member in members:
-                                layer = int(locations[member, 0].item())
-                                neuron_id = int(locations[member, 2].item())
-                                key = f"{layer}:{neuron_id}"
-                                votes.setdefault(key, []).append(label)
+                    input_batch = input_ids.unsqueeze(0)
+                    mlp_inputs: Dict[int, torch.Tensor] = {}
+                    handles: List = []
+
+                    for layer_idx, layer in enumerate(adapter.layers):
+                        def _pre_hook(_module, inputs, *, idx: int = layer_idx) -> None:
+                            mlp_inputs[idx] = inputs[0]
+
+                        handles.append(layer.mlp.register_forward_pre_hook(_pre_hook))
+
+                    try:
+                        with torch.no_grad():
+                            self.student(
+                                input_ids=input_batch.to(self.device),
+                                attention_mask=torch.ones_like(input_batch).to(self.device),
+                                output_hidden_states=False,
+                                use_cache=False,
+                            )
+                    except Exception:
+                        continue
+                    finally:
+                        for h in handles:
+                            h.remove()
+
+                    for layer_idx in range(adapter.n_layers):
+                        if layer_idx not in mlp_inputs:
+                            continue
+
+                        layer_input = mlp_inputs[layer_idx].squeeze(0)  # [n_pos, d_model]
+
+                        with torch.no_grad():
+                            _, _, source_vectors = adapter._compute_layer_neuron_data(
+                                layer_idx, layer_input
+                            )
+                        # source_vectors: [n_pos, d_mlp, d_model]
+                        sv_norms = source_vectors.norm(dim=-1)  # [n_pos, d_mlp]
+                        flat_norms = sv_norms.reshape(-1)       # [n_pos * d_mlp]
+                        total = int(flat_norms.numel())
+                        k = min(total, max(1, int(total * config.graph_prop_neurons_per_layer)))
+                        keep = torch.topk(flat_norms, k).indices  # [k]
+
+                        keep_pos = (keep // d_mlp).tolist()
+                        keep_nid = (keep % d_mlp).tolist()
+                        for pos, nid in zip(keep_pos, keep_nid):
+                            all_neurons.add((layer_idx, pos, nid))
+
+                    mlp_inputs.clear()
             finally:
                 self.student.train()
 
-            # Majority vote: for each neuron, pick the most frequent label.
-            new_labels: Dict[str, str] = {
-                key: Counter(label_list).most_common(1)[0][0]
-                for key, label_list in votes.items()
-            }
+            if not all_neurons:
+                print(f"[graph] Step {step}: no neurons selected — skipping label refresh.")
+                return
+
+            # Build neuron locations tensor [N, 3] sorted for reproducibility.
+            neuron_locations = torch.tensor(sorted(all_neurons), dtype=torch.long)
+
+            # Build activation heatmaps (ANOVA grid) using the MLP input cache.
+            result = build_neuron_activation_write_result(
+                adapter,
+                dataset_path,
+                neuron_locations,
+                mlp_input_cache=student_mlp_input_cache,
+                include_w_down_vectors=False,
+            )
+
+            # ANOVA labeling across all dataset arg values.
+            label_results = label_activation_heatmaps(
+                result.activations,
+                result.arg_values,
+                target_args=None,
+                anova_range_radius=config.student_anova_range_radius,
+            )
+
+            # Pick top anova_nodes_per_label neurons per ANOVA category.
+            new_labels: Dict[str, str] = {}
+            for category in ANOVA_LABEL_CATEGORIES:
+                all_scored = [
+                    (row_idx, float(label_result.category_specificity[category]))
+                    for row_idx, label_result in enumerate(label_results)
+                    if category in label_result.category_specificity
+                    and label_result.category_scores.get(category, 0.0) > 0.0
+                    and label_result.category_specificity.get(category, float("-inf"))
+                    > config.student_sum_min_specificity
+                ]
+                sorted_rows = sorted(all_scored, key=lambda x: x[1], reverse=True)
+                top_rows = sorted_rows[: config.student_anova_nodes_per_label]
+
+                for row_idx, _ in top_rows:
+                    layer = int(neuron_locations[row_idx, 0].item())
+                    neuron_id = int(neuron_locations[row_idx, 2].item())
+                    key = f"{layer}:{neuron_id}"
+                    if key not in new_labels:
+                        new_labels[key] = label_results[row_idx].categories[category]
 
             self.graph_loss_config._fixed_labels_cache = new_labels
             print(
-                f"[graph] Step {step}: refreshed fixed labels from {len(prompts)} prompts "
-                f"→ {len(new_labels)} labeled neurons"
+                f"[graph] Step {step}: refreshed fixed labels (fast) from {len(prompts)} prompts "
+                f"→ {len(new_labels)} labeled neurons "
+                f"(union of {len(all_neurons)} top-K triples)"
             )
         except Exception as exc:
             import warnings

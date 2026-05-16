@@ -73,7 +73,7 @@ class DistillationConfig:
     device: torch.device = get_default_device()
     save_interval: int = 0
     label_refresh_interval: int = 0
-    label_refresh_n_prompts: int = 8
+    label_refresh_n_prompts: int = 64
 
 
 def resolve_distillation_run_dir(

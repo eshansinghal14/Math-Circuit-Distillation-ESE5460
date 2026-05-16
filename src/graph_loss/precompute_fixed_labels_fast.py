@@ -70,13 +70,16 @@ def _collect_top_k_neurons(
     out_row_norms: dict[int, torch.Tensor],
     device: torch.device,
     dtype: torch.dtype,
+    min_frequency: int = 1,
 ) -> set[tuple[int, int, int]]:
     """Forward pass every prompt and collect the union of top-K (layer, pos, neuron) triples.
 
-    Returns a set of ``(layer_idx, token_pos, neuron_id)`` tuples — one for each
-    unique neuron selected in at least one prompt.
+    Returns a set of ``(layer_idx, token_pos, neuron_id)`` tuples that appear in
+    at least ``min_frequency`` prompts' top-K sets.  Raising ``min_frequency``
+    (e.g. to 5-10) dramatically reduces the union size when processing many prompts,
+    keeping only neurons that fire consistently across the dataset.
     """
-    all_neurons: set[tuple[int, int, int]] = set()
+    neuron_counts: Counter = Counter()
     d_mlp = adapter.d_mlp
     n_prompts = len(prompts)
 
@@ -86,7 +89,7 @@ def _collect_top_k_neurons(
                 "[%d/%d] forward pass | unique neurons so far: %d",
                 i + 1,
                 n_prompts,
-                len(all_neurons),
+                len(neuron_counts),
             )
 
         try:
@@ -150,10 +153,16 @@ def _collect_top_k_neurons(
             keep_pos = (keep // d_mlp).tolist()
             keep_nid = (keep % d_mlp).tolist()
             for pos, nid in zip(keep_pos, keep_nid):
-                all_neurons.add((layer_idx, pos, nid))
+                neuron_counts[(layer_idx, pos, nid)] += 1
 
         mlp_inputs.clear()
 
+    # Keep only neurons that appear in at least min_frequency prompts
+    all_neurons = {k for k, v in neuron_counts.items() if v >= min_frequency}
+    logger.info(
+        "Frequency filter (min=%d): %d → %d unique neurons",
+        min_frequency, len(neuron_counts), len(all_neurons),
+    )
     return all_neurons
 
 
