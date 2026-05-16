@@ -71,6 +71,9 @@ class DistillationConfig:
     teacher_data_cache: Optional[str] = None
     seed: int = 42
     device: torch.device = get_default_device()
+    save_interval: int = 0
+    label_refresh_interval: int = 0
+    label_refresh_n_prompts: int = 8
 
 
 def resolve_distillation_run_dir(

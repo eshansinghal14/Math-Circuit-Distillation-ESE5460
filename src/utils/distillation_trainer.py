@@ -501,6 +501,21 @@ class DistillationTrainer:
             n_steps += 1
             interval_steps += 1
 
+            # Periodic fixed-label refresh via ANOVA on a small sample of training prompts.
+            if (
+                self.config.label_refresh_interval > 0
+                and self.config.student_cluster_method == "fixed_labels"
+                and self._train_step > 0
+                and self._train_step % self.config.label_refresh_interval == 0
+                and self.config.student_mlp_input_cache_path
+                and self.config.student_dataset
+            ):
+                self._refresh_fixed_labels(self._train_step)
+
+            # Periodic checkpoint save.
+            if self.config.save_interval > 0 and self._train_step % self.config.save_interval == 0:
+                self._save_checkpoint_at_step(self._train_step)
+
             if self._train_step == 1 or self._train_step % max(1, self.config.step_log_interval) == 0:
                 self._run_training_eval(epoch, step)
                 extra_eval_s = ""
@@ -626,6 +641,13 @@ class DistillationTrainer:
             print(f"  graph top_k_logits: {cfg.graph_top_k_logits}")
             print(f"  graph prop neurons/layer: {cfg.graph_prop_neurons_per_layer}")
         print(f"  Eval every:       {cfg.step_log_interval} training batches")
+        if cfg.save_interval > 0:
+            print(f"  Save every:       {cfg.save_interval} steps → checkpoint_step_NNNN/")
+        if cfg.label_refresh_interval > 0:
+            print(
+                f"  Label refresh:    every {cfg.label_refresh_interval} steps "
+                f"({cfg.label_refresh_n_prompts} prompts)"
+            )
         print("=" * 60)
 
         epoch = start_epoch
@@ -664,6 +686,122 @@ class DistillationTrainer:
         os.makedirs(path, exist_ok=True)
         self.student.save_pretrained(path)
         self.tokenizer.save_pretrained(path)
+
+    def _save_checkpoint_at_step(self, step: int) -> None:
+        step_dir = os.path.join(self.config.save_dir, f"checkpoint_step_{step:04d}")
+        path = os.path.join(step_dir, STUDENT_MODEL_DIR)
+        rm_dir_tree(path)
+        os.makedirs(path, exist_ok=True)
+        self.student.save_pretrained(path)
+        self.tokenizer.save_pretrained(path)
+        print(f"  [checkpoint] Saved step {step:04d} → {path}")
+
+    def _refresh_fixed_labels(self, step: int) -> None:
+        """Re-run ANOVA on a small batch of training prompts and update _fixed_labels_cache."""
+        config = self.config
+        if self.graph_loss_config is None or self.student_graph_adapter is None:
+            return
+
+        if not (
+            config.student_cluster_method == "fixed_labels"
+            and config.student_mlp_input_cache_path
+            and config.student_dataset
+        ):
+            print(
+                "[graph] Warning: --label-refresh-interval has no effect unless "
+                "--student-cluster-method=fixed_labels, --student-mlp-input-cache, "
+                "and --student-dataset are all set."
+            )
+            return
+
+        try:
+            from collections import Counter
+
+            from graph_loss.graph import build_super_graph
+            from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
+            from graph_loss.precompute_mlp_inputs import (
+                load_mlp_input_cache,
+                mlp_input_cache_exists,
+            )
+
+            n_prompts = config.label_refresh_n_prompts
+            prompts = list(self.train_data.keys())[:n_prompts]
+
+            # Load mlp_input_cache (same pattern as training.py lines 396-407).
+            student_mlp_input_cache = None
+            dataset_path = _resolve_dataset_path(config.student_dataset)
+            _student_model_name = getattr(
+                getattr(self.student_graph_adapter.model, "config", None),
+                "_name_or_path",
+                "unknown_model",
+            )
+            if mlp_input_cache_exists(
+                config.student_mlp_input_cache_path, _student_model_name, dataset_path
+            ):
+                student_mlp_input_cache = load_mlp_input_cache(
+                    config.student_mlp_input_cache_path, _student_model_name, dataset_path
+                )
+
+            # Collect per-neuron label votes across all sampled prompts.
+            votes: Dict[str, List[str]] = {}
+
+            self.student.eval()
+            try:
+                for prompt in prompts:
+                    with torch.no_grad():
+                        graph = self.student_graph_adapter.build_graph(
+                            prompt,
+                            prop_neurons_per_layer=config.graph_prop_neurons_per_layer,
+                            batch_size=1,
+                            dtype=config.graph_dtype,
+                            create_graph=False,
+                            detach_result=True,
+                            fast=False,
+                            skip_logit_attribution=True,
+                        )
+                        sg = build_super_graph(
+                            graph,
+                            self.student_graph_adapter,
+                            cluster_method="full_search",
+                            dataset=config.student_dataset,
+                            activation_write_cache_path=config.student_activation_write_cache_path,
+                            mlp_input_cache=student_mlp_input_cache,
+                            anova_nodes_per_label=config.student_anova_nodes_per_label,
+                            anova_range_radius=config.student_anova_range_radius,
+                            sum_min_specificity=config.student_sum_min_specificity,
+                        )
+
+                    if sg.supernode_labels is None:
+                        continue
+
+                    locations = graph.neuron_locations.detach().cpu().to(dtype=torch.long)
+                    for members, labels in zip(sg.supernodes, sg.supernode_labels):
+                        for label in labels:
+                            for member in members:
+                                layer = int(locations[member, 0].item())
+                                neuron_id = int(locations[member, 2].item())
+                                key = f"{layer}:{neuron_id}"
+                                votes.setdefault(key, []).append(label)
+            finally:
+                self.student.train()
+
+            # Majority vote: for each neuron, pick the most frequent label.
+            new_labels: Dict[str, str] = {
+                key: Counter(label_list).most_common(1)[0][0]
+                for key, label_list in votes.items()
+            }
+
+            self.graph_loss_config._fixed_labels_cache = new_labels
+            print(
+                f"[graph] Step {step}: refreshed fixed labels from {len(prompts)} prompts "
+                f"→ {len(new_labels)} labeled neurons"
+            )
+        except Exception as exc:
+            import warnings
+
+            warnings.warn(
+                f"[graph] Step {step}: label refresh failed ({exc!r}), keeping old labels."
+            )
 
     def _save_history(self) -> None:
         os.makedirs(self.config.save_dir, exist_ok=True)

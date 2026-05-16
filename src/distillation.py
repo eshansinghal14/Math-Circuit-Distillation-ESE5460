@@ -284,6 +284,33 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint-run", default=None, metavar="PATH")
     parser.add_argument("--save-best", action="store_true")
     parser.add_argument("--step-log-interval", type=int, default=50)
+    parser.add_argument(
+        "--save-interval",
+        type=int,
+        default=0,
+        help=(
+            "Save a checkpoint every N steps. 0 = final only. "
+            "Set to (train_limit // batch_size) for once-per-epoch."
+        ),
+    )
+    parser.add_argument(
+        "--label-refresh-interval",
+        type=int,
+        default=0,
+        help=(
+            "Re-run ANOVA on --label-refresh-n-prompts training prompts every N steps "
+            "to refresh the in-memory fixed-label cache. "
+            "0 = never refresh (use precomputed labels only). "
+            "Only active when --student-cluster-method=fixed_labels, "
+            "--student-mlp-input-cache, and --student-dataset are all set."
+        ),
+    )
+    parser.add_argument(
+        "--label-refresh-n-prompts",
+        type=int,
+        default=8,
+        help="Number of training prompts (taken from the start of the train set) used for each label refresh.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     return parser
 
@@ -450,6 +477,9 @@ def main() -> None:
             student_anova_nodes_per_label=args.student_anova_nodes_per_label,
             student_sum_min_specificity=args.student_sum_min_specificity,
             step_log_interval=args.step_log_interval,
+            save_interval=args.save_interval,
+            label_refresh_interval=args.label_refresh_interval,
+            label_refresh_n_prompts=args.label_refresh_n_prompts,
             seed=args.seed,
             device=device,
         ),
