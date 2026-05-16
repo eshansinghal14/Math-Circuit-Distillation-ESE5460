@@ -157,75 +157,61 @@ def _run_gpu_anova_all_neurons(
         # Slice valid prompts on CPU to keep transfer cost low, then move to GPU per-position.
         layer_inputs_cpu = cache_layer_inputs[layer_idx][valid_idx]  # [n_valid, n_pos, d_model]
 
-        # Per-position best specificity / label, aggregated across positions
-        best_specificity: Dict[str, List[float]] = {
-            cat: [float("-inf")] * d_mlp for cat in ANOVA_LABEL_CATEGORIES
-        }
-        best_label: Dict[str, List[str]] = {
-            cat: [""] * d_mlp for cat in ANOVA_LABEL_CATEGORIES
-        }
+        # Accumulate activations across all (non-BOS) positions into one grid,
+        # then call label_activation_heatmaps ONCE per layer instead of once per
+        # position.  This is ~n_positions× faster with equivalent label quality.
+        layer_grid_flat = torch.zeros(d_mlp, n_flat, dtype=torch.float32, device=device)
+        n_active_positions = 0
 
         for pos_idx in range(n_cache_positions):
-            x = layer_inputs_cpu[:, pos_idx, :].to(device=device, dtype=torch.float32)  # [n_valid, d_model]
-
-            gate_pre = x @ W_gate.T  # [n_valid, d_mlp]
-            up_pre   = x @ W_up.T   # [n_valid, d_mlp]
-            acts = F.silu(gate_pre) * up_pre  # [n_valid, d_mlp]
-
             if pos_idx == 0:
-                # BOS / padding token — activations are noisy; zero them out
-                acts.zero_()
-
-            # Scatter-add into ANOVA grid [d_mlp, n_flat]
-            grid_flat = torch.zeros(d_mlp, n_flat, dtype=torch.float32, device=device)
-            grid_flat.scatter_add_(
+                continue  # BOS / padding — skip
+            x = layer_inputs_cpu[:, pos_idx, :].to(device=device, dtype=torch.float32)
+            acts = F.silu(x @ W_gate.T) * (x @ W_up.T)  # [n_valid, d_mlp]
+            layer_grid_flat.scatter_add_(
                 1,
-                flat_idx_dev.unsqueeze(0).expand(d_mlp, -1),  # [d_mlp, n_valid]
+                flat_idx_dev.unsqueeze(0).expand(d_mlp, -1),
                 acts.T.contiguous().float(),
             )
+            n_active_positions += 1
+            del x, acts
 
-            # Average: [d_mlp, *grid_shape]
-            grid = grid_flat.reshape(d_mlp, *grid_shape) / counts_grid
+        if n_active_positions == 0:
+            n_active_positions = 1
 
-            # ANOVA (CPU-bound Python loop over d_mlp neurons)
-            label_results = label_activation_heatmaps(
-                grid.cpu(),
-                arg_values,
-                target_args=None,
-                anova_range_radius=anova_range_radius,
-            )
+        # Mean over positions, then mean over prompt counts per grid cell
+        grid = (layer_grid_flat / n_active_positions).reshape(d_mlp, *grid_shape) / counts_grid
+        del layer_grid_flat
 
-            # Update best-across-positions tracking
-            for neuron_id, lr in enumerate(label_results):
-                for cat in ANOVA_LABEL_CATEGORIES:
-                    if cat not in lr.category_specificity:
-                        continue
-                    score = float(lr.category_scores.get(cat, 0.0))
-                    spec  = float(lr.category_specificity[cat])
-                    if score > 0.0 and spec > sum_min_specificity and spec > best_specificity[cat][neuron_id]:
-                        best_specificity[cat][neuron_id] = spec
-                        best_label[cat][neuron_id] = lr.categories.get(cat, "")
-
-            del x, gate_pre, up_pre, acts, grid_flat, grid
-            if device.type == "cuda":
-                torch.cuda.empty_cache()
+        # Single ANOVA call per layer
+        label_results = label_activation_heatmaps(
+            grid.cpu(),
+            arg_values,
+            target_args=None,
+            anova_range_radius=anova_range_radius,
+        )
+        del grid
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
         # Assign labels: top-K per category
         n_labeled_this_layer = 0
         for cat in ANOVA_LABEL_CATEGORIES:
             scored = [
-                (nid, best_specificity[cat][nid])
-                for nid in range(d_mlp)
-                if best_specificity[cat][nid] > float("-inf") and best_label[cat][nid]
+                (neuron_id, float(lr.category_specificity[cat]))
+                for neuron_id, lr in enumerate(label_results)
+                if cat in lr.category_specificity
+                and lr.category_scores.get(cat, 0.0) > 0.0
+                and lr.category_specificity.get(cat, float("-inf")) > sum_min_specificity
             ]
             scored.sort(key=lambda kv: kv[1], reverse=True)
             for neuron_id, _spec in scored[:anova_nodes_per_label]:
                 key = f"{layer_idx}:{neuron_id}"
                 if key not in fixed_labels:
-                    fixed_labels[key] = best_label[cat][neuron_id]
+                    fixed_labels[key] = label_results[neuron_id].categories[cat]
                     n_labeled_this_layer += 1
 
-        del W_gate, W_up, layer_inputs_cpu, best_specificity, best_label
+        del W_gate, W_up, layer_inputs_cpu, label_results
         if device.type == "cuda":
             torch.cuda.empty_cache()
 

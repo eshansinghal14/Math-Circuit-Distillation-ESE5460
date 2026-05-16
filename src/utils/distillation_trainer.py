@@ -844,62 +844,51 @@ class DistillationTrainer:
                     W_up   = hf_layer.mlp.up_proj.weight.to(device=dev, dtype=torch.float32)
                     layer_inputs_cpu = cache_layer_inputs[layer_idx][valid_idx]
 
-                    best_spec: Dict[str, list] = {
-                        cat: [float("-inf")] * d_mlp for cat in ANOVA_LABEL_CATEGORIES
-                    }
-                    best_lbl: Dict[str, list] = {
-                        cat: [""] * d_mlp for cat in ANOVA_LABEL_CATEGORIES
-                    }
-
+                    # Accumulate activations across positions, call ANOVA once per layer
+                    layer_grid_flat = torch.zeros(d_mlp, n_flat, dtype=torch.float32, device=dev)
+                    n_active_pos = 0
                     for pos_idx in range(n_cache_positions):
+                        if pos_idx == 0:
+                            continue  # skip BOS
                         x = layer_inputs_cpu[:, pos_idx, :].to(device=dev, dtype=torch.float32)
                         acts = F.silu(x @ W_gate.T) * (x @ W_up.T)
-                        if pos_idx == 0:
-                            acts.zero_()
-
-                        grid_flat = torch.zeros(d_mlp, n_flat, dtype=torch.float32, device=dev)
-                        grid_flat.scatter_add_(
+                        layer_grid_flat.scatter_add_(
                             1,
                             flat_idx_dev.unsqueeze(0).expand(d_mlp, -1),
                             acts.T.contiguous().float(),
                         )
-                        grid = grid_flat.reshape(d_mlp, *grid_shape) / counts_grid
+                        n_active_pos += 1
+                        del x, acts
 
-                        label_results = label_activation_heatmaps(
-                            grid.cpu(), arg_values,
-                            target_args=None,
-                            anova_range_radius=config.student_anova_range_radius,
-                        )
-                        for neuron_id, lr in enumerate(label_results):
-                            for cat in ANOVA_LABEL_CATEGORIES:
-                                if cat not in lr.category_specificity:
-                                    continue
-                                spec = float(lr.category_specificity[cat])
-                                if (
-                                    lr.category_scores.get(cat, 0.0) > 0.0
-                                    and spec > config.student_sum_min_specificity
-                                    and spec > best_spec[cat][neuron_id]
-                                ):
-                                    best_spec[cat][neuron_id] = spec
-                                    best_lbl[cat][neuron_id] = lr.categories.get(cat, "")
+                    if n_active_pos == 0:
+                        n_active_pos = 1
+                    grid = (layer_grid_flat / n_active_pos).reshape(d_mlp, *grid_shape) / counts_grid
+                    del layer_grid_flat
 
-                        del x, acts, grid_flat, grid
-                        if dev.type == "cuda":
-                            torch.cuda.empty_cache()
+                    label_results = label_activation_heatmaps(
+                        grid.cpu(), arg_values,
+                        target_args=None,
+                        anova_range_radius=config.student_anova_range_radius,
+                    )
+                    del grid
+                    if dev.type == "cuda":
+                        torch.cuda.empty_cache()
 
                     for cat in ANOVA_LABEL_CATEGORIES:
                         scored = [
-                            (nid, best_spec[cat][nid])
-                            for nid in range(d_mlp)
-                            if best_spec[cat][nid] > float("-inf") and best_lbl[cat][nid]
+                            (nid, float(lr.category_specificity[cat]))
+                            for nid, lr in enumerate(label_results)
+                            if cat in lr.category_specificity
+                            and lr.category_scores.get(cat, 0.0) > 0.0
+                            and lr.category_specificity.get(cat, float("-inf")) > config.student_sum_min_specificity
                         ]
                         scored.sort(key=lambda kv: kv[1], reverse=True)
                         for neuron_id, _ in scored[: config.student_anova_nodes_per_label]:
                             key = f"{layer_idx}:{neuron_id}"
                             if key not in new_labels:
-                                new_labels[key] = best_lbl[cat][neuron_id]
+                                new_labels[key] = label_results[neuron_id].categories[cat]
 
-                    del W_gate, W_up, layer_inputs_cpu, best_spec, best_lbl
+                    del W_gate, W_up, layer_inputs_cpu, label_results
                     if dev.type == "cuda":
                         torch.cuda.empty_cache()
                     print(f"[graph]   layer {layer_idx + 1}/{n_layers} done, labels so far: {len(new_labels)}")
