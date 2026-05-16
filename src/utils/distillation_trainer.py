@@ -748,7 +748,7 @@ class DistillationTrainer:
             self.student.eval()
             try:
                 for prompt in prompts:
-                    with torch.no_grad():
+                    with torch.enable_grad():
                         graph = self.student_graph_adapter.build_graph(
                             prompt,
                             prop_neurons_per_layer=config.graph_prop_neurons_per_layer,
@@ -759,6 +759,7 @@ class DistillationTrainer:
                             fast=False,
                             skip_logit_attribution=True,
                         )
+                    with torch.no_grad():
                         sg = build_super_graph(
                             graph,
                             self.student_graph_adapter,
