@@ -3,6 +3,7 @@ import importlib
 import json
 import math
 import os
+import time
 from collections import defaultdict
 from functools import partial
 from typing import Any, Dict, List, Optional
@@ -745,7 +746,11 @@ class DistillationTrainer:
                 build_anova_basis_rules,
                 parse_numeric_args as _parse_prompt_args,
             )
-            from graph_loss.precompute_fixed_labels_full import _vectorized_anova_scores
+            from graph_loss.precompute_fixed_labels_full import (
+                _vectorized_anova_scores,
+                _build_fast_anova_tables,
+                _fast_anova_pair_loop,
+            )
             from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
             from graph_loss.precompute_mlp_inputs import (
                 load_mlp_input_cache,
@@ -843,16 +848,21 @@ class DistillationTrainer:
                 print(f"[graph] Step {step}: no parseable training prompts — skipping refresh")
                 return
 
+            use_fast_refresh = (
+                config.student_anova_range_radius == 0 and n_arg_dims == 2
+            )
             print(
                 f"[graph] Step {step}: starting per-prompt GPU ANOVA refresh "
                 f"({n_layers} layers × {n_cache_positions} positions × d_mlp={d_mlp}, "
-                f"valid_prompts={n_valid}, unique_train_pairs={len(unique_train_targets)})"
+                f"valid_prompts={n_valid}, unique_train_pairs={len(unique_train_targets)}, "
+                f"fast={'yes' if use_fast_refresh else 'no (radius>0 fallback)'})"
             )
 
             self.student.eval()
             new_labels: Dict[str, str] = {}
             try:
                 for layer_idx in range(n_layers):
+                    t0_layer = time.time()
                     hf_layer = adapter.layers[layer_idx]
                     W_gate = hf_layer.mlp.gate_proj.weight.to(device=dev, dtype=torch.float32)
                     W_up   = hf_layer.mlp.up_proj.weight.to(device=dev, dtype=torch.float32)
@@ -879,80 +889,108 @@ class DistillationTrainer:
                     grid_flat = layer_grid_flat / n_active_pos / counts_grid.reshape(1, -1)
                     del layer_grid_flat, W_gate, W_up, layer_inputs_cpu
 
-                    # For each unique training (a1, a2), run vectorized ANOVA
-                    # with that exact target_args — matching the teacher's labels.
-                    for target_args in unique_train_targets:
-                        rules = build_anova_basis_rules(
-                            arg_values,
-                            target_args=target_args,
-                            anova_range_radius=config.student_anova_range_radius,
+                    if use_fast_refresh:
+                        # ── Precompute score tables (~7 matmuls) ──────────────
+                        t_grid = time.time()
+                        tables = _build_fast_anova_tables(grid_flat, arg_values, dev)
+                        del grid_flat
+                        if dev.type == "cuda":
+                            torch.cuda.empty_cache()
+                        t_tables = time.time()
+
+                        # ── O(1) lookup per (a1, a2) pair ─────────────────────
+                        n_new = _fast_anova_pair_loop(
+                            tables=tables,
+                            unique_targets=unique_train_targets,
+                            layer_idx=layer_idx,
+                            d_mlp=d_mlp,
+                            arg_to_idx=arg_to_idx,
+                            fixed_labels=new_labels,
+                            anova_nodes_per_label=config.student_anova_nodes_per_label,
+                            sum_min_specificity=config.student_sum_min_specificity,
                         )
-                        if not rules:
-                            continue
-
-                        masks_gpu = torch.stack(
-                            [rule.mask.float().reshape(-1).to(dev) for rule in rules], dim=0
+                        t_lookup = time.time()
+                        print(
+                            f"[graph]   layer {layer_idx + 1}/{n_layers} — "
+                            f"tables {t_tables - t_grid:.1f}s, "
+                            f"lookup {t_lookup - t_tables:.1f}s, "
+                            f"+{n_new} labels, total: {len(new_labels)}"
                         )
-                        category_rule_indices: Dict[str, List[int]] = _defaultdict(list)
-                        for ri, rule in enumerate(rules):
-                            category_rule_indices[rule.category].append(ri)
 
-                        scores_np = _vectorized_anova_scores(grid_flat, masks_gpu)
-                        del masks_gpu
-
-                        cat_scores: Dict[str, np.ndarray] = {}
-                        cat_labels: Dict[str, list] = {}
-                        for category, rule_idxs in category_rule_indices.items():
-                            sub = scores_np[:, rule_idxs]
-                            best_local = sub.argmax(axis=1)
-                            cat_scores[category] = sub.max(axis=1)
-                            cat_labels[category] = [
-                                rules[rule_idxs[best_local[n]]].label for n in range(d_mlp)
-                            ]
-
-                        if "arg1 units" in cat_scores and "arg2 units" in cat_scores:
-                            cat_scores["arg1 units and arg2 units"] = np.minimum(
-                                cat_scores["arg1 units"], cat_scores["arg2 units"]
+                    else:
+                        # ── Fallback: original per-pair ANOVA (radius > 0) ────
+                        for target_args in unique_train_targets:
+                            rules = build_anova_basis_rules(
+                                arg_values,
+                                target_args=target_args,
+                                anova_range_radius=config.student_anova_range_radius,
                             )
-                            cat_labels["arg1 units and arg2 units"] = [
-                                f"{cat_labels['arg1 units'][n]} and {cat_labels['arg2 units'][n]}"
-                                for n in range(d_mlp)
-                            ]
-                        if "arg1 range" in cat_scores and "arg2 range" in cat_scores:
-                            cat_scores["arg1 range and arg2 range"] = np.minimum(
-                                cat_scores["arg1 range"], cat_scores["arg2 range"]
-                            )
-                            cat_labels["arg1 range and arg2 range"] = [
-                                f"{cat_labels['arg1 range'][n]} and {cat_labels['arg2 range'][n]}"
-                                for n in range(d_mlp)
-                            ]
-
-                        for category in ANOVA_LABEL_CATEGORIES:
-                            if category not in cat_scores:
+                            if not rules:
                                 continue
-                            cat_arr = cat_scores[category]
-                            excluded = {category} | CATEGORY_COMPONENTS.get(category, set())
-                            competitor = np.zeros(d_mlp, dtype=np.float32)
-                            for comp in BASE_ANOVA_LABEL_CATEGORIES:
-                                if comp not in excluded and comp in cat_scores:
-                                    competitor = np.maximum(competitor, cat_scores[comp])
-                            specificity = cat_arr - competitor
-                            scored = [
-                                (nid, float(specificity[nid]))
-                                for nid in range(d_mlp)
-                                if float(cat_arr[nid]) > 0.0
-                                and float(specificity[nid]) > config.student_sum_min_specificity
-                            ]
-                            scored.sort(key=lambda kv: kv[1], reverse=True)
-                            for neuron_id, _ in scored[: config.student_anova_nodes_per_label]:
-                                key = f"{layer_idx}:{neuron_id}"
-                                if key not in new_labels:
-                                    new_labels[key] = cat_labels[category][neuron_id]
 
-                    del grid_flat
-                    if dev.type == "cuda":
-                        torch.cuda.empty_cache()
-                    print(f"[graph]   layer {layer_idx + 1}/{n_layers} done, labels so far: {len(new_labels)}")
+                            masks_gpu = torch.stack(
+                                [rule.mask.float().reshape(-1).to(dev) for rule in rules], dim=0
+                            )
+                            category_rule_indices: Dict[str, List[int]] = _defaultdict(list)
+                            for ri, rule in enumerate(rules):
+                                category_rule_indices[rule.category].append(ri)
+
+                            scores_np = _vectorized_anova_scores(grid_flat, masks_gpu)
+                            del masks_gpu
+
+                            cat_scores: Dict[str, np.ndarray] = {}
+                            cat_labels: Dict[str, list] = {}
+                            for category, rule_idxs in category_rule_indices.items():
+                                sub = scores_np[:, rule_idxs]
+                                best_local = sub.argmax(axis=1)
+                                cat_scores[category] = sub.max(axis=1)
+                                cat_labels[category] = [
+                                    rules[rule_idxs[best_local[n]]].label for n in range(d_mlp)
+                                ]
+
+                            if "arg1 units" in cat_scores and "arg2 units" in cat_scores:
+                                cat_scores["arg1 units and arg2 units"] = np.minimum(
+                                    cat_scores["arg1 units"], cat_scores["arg2 units"]
+                                )
+                                cat_labels["arg1 units and arg2 units"] = [
+                                    f"{cat_labels['arg1 units'][n]} and {cat_labels['arg2 units'][n]}"
+                                    for n in range(d_mlp)
+                                ]
+                            if "arg1 range" in cat_scores and "arg2 range" in cat_scores:
+                                cat_scores["arg1 range and arg2 range"] = np.minimum(
+                                    cat_scores["arg1 range"], cat_scores["arg2 range"]
+                                )
+                                cat_labels["arg1 range and arg2 range"] = [
+                                    f"{cat_labels['arg1 range'][n]} and {cat_labels['arg2 range'][n]}"
+                                    for n in range(d_mlp)
+                                ]
+
+                            for category in ANOVA_LABEL_CATEGORIES:
+                                if category not in cat_scores:
+                                    continue
+                                cat_arr = cat_scores[category]
+                                excluded = {category} | CATEGORY_COMPONENTS.get(category, set())
+                                competitor = np.zeros(d_mlp, dtype=np.float32)
+                                for comp in BASE_ANOVA_LABEL_CATEGORIES:
+                                    if comp not in excluded and comp in cat_scores:
+                                        competitor = np.maximum(competitor, cat_scores[comp])
+                                specificity = cat_arr - competitor
+                                scored = [
+                                    (nid, float(specificity[nid]))
+                                    for nid in range(d_mlp)
+                                    if float(cat_arr[nid]) > 0.0
+                                    and float(specificity[nid]) > config.student_sum_min_specificity
+                                ]
+                                scored.sort(key=lambda kv: kv[1], reverse=True)
+                                for neuron_id, _ in scored[: config.student_anova_nodes_per_label]:
+                                    key = f"{layer_idx}:{neuron_id}"
+                                    if key not in new_labels:
+                                        new_labels[key] = cat_labels[category][neuron_id]
+
+                        del grid_flat
+                        if dev.type == "cuda":
+                            torch.cuda.empty_cache()
+                        print(f"[graph]   layer {layer_idx + 1}/{n_layers} done, labels so far: {len(new_labels)}")
             finally:
                 self.student.train()
 

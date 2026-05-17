@@ -42,7 +42,7 @@ import logging
 import os
 import sys
 from collections import Counter
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -87,6 +87,254 @@ def _vectorized_anova_scores(
     denom = (y_var * m_var).clamp(min=1e-20)         # [d_mlp, n_rules]
 
     return (proj.pow(2) / denom).clamp(0.0, 1.0).detach().cpu().float().numpy()
+
+
+def _build_fast_anova_tables(
+    grid_flat: torch.Tensor,
+    cache_arg_values: List[List[int]],
+    device: torch.device,
+) -> dict:
+    """Precompute ANOVA score tables for all arg/sum/unit values in ~7 matmuls.
+
+    For a radius-0, 2-D (arg1 × arg2) grid this replaces the per-(a1, a2)
+    inner loop with a small number of matrix multiplications — one per group
+    of structurally identical masks — and returns numpy score arrays for O(1)
+    lookup.
+
+    Args:
+        grid_flat: ``[d_mlp, n_flat]`` float32 tensor on ``device``.
+        cache_arg_values: ``[arg1_values, arg2_values]`` grid axes.
+        device: device that ``grid_flat`` lives on (CPU or CUDA).
+
+    Returns:
+        dict with numpy arrays (all CPU) and metadata:
+        ``scores_a1``   [d_mlp, n_arg1],
+        ``scores_a2``   [d_mlp, n_arg2],
+        ``scores_sum``  [d_mlp, n_sums],
+        ``scores_u1``   [d_mlp, 10],
+        ``scores_u2``   [d_mlp, 10],
+        ``scores_su``   [d_mlp, 10],
+        ``scores_carry`` [d_mlp] or None,
+        ``has_carry`` bool, ``min_sum`` int, ``n_sums`` int.
+    """
+    import numpy as np  # noqa: F401
+
+    n_arg1 = len(cache_arg_values[0])
+    n_arg2 = len(cache_arg_values[1])
+    n_flat = n_arg1 * n_arg2
+
+    # Build actual arg values at each flat grid cell (row-major: arg1 major)
+    k       = torch.arange(n_flat, dtype=torch.long)
+    a1_vals = torch.tensor(cache_arg_values[0], dtype=torch.long)  # [n_arg1]
+    a2_vals = torch.tensor(cache_arg_values[1], dtype=torch.long)  # [n_arg2]
+    a1_flat  = a1_vals[k // n_arg2]   # actual arg1 at each cell [n_flat]
+    a2_flat  = a2_vals[k %  n_arg2]   # actual arg2 at each cell [n_flat]
+    sum_flat = a1_flat + a2_flat      # arg1+arg2               [n_flat]
+
+    a1_units  = a1_flat  % 10
+    a2_units  = a2_flat  % 10
+    sum_units = sum_flat % 10
+
+    min_sum = int(sum_flat.min().item())
+    max_sum = int(sum_flat.max().item())
+    n_sums  = max_sum - min_sum + 1
+
+    sum_range  = torch.arange(min_sum, max_sum + 1, dtype=torch.long)  # [n_sums]
+    unit_range = torch.arange(10, dtype=torch.long)                     # [10]
+
+    # One-hot mask tensors (CPU float32): each row is one basis mask
+    masks_a1  = (a1_flat.unsqueeze(0)  == a1_vals.unsqueeze(1)).float()    # [n_arg1, n_flat]
+    masks_a2  = (a2_flat.unsqueeze(0)  == a2_vals.unsqueeze(1)).float()    # [n_arg2, n_flat]
+    masks_sum = (sum_flat.unsqueeze(0) == sum_range.unsqueeze(1)).float()  # [n_sums, n_flat]
+    masks_u1  = (a1_units.unsqueeze(0) == unit_range.unsqueeze(1)).float() # [10,     n_flat]
+    masks_u2  = (a2_units.unsqueeze(0) == unit_range.unsqueeze(1)).float() # [10,     n_flat]
+    masks_su  = (sum_units.unsqueeze(0) == unit_range.unsqueeze(1)).float()# [10,     n_flat]
+
+    # Carry: (arg1 % 10) + (arg2 % 10) >= 10
+    carry_mask = ((a1_units + a2_units) >= 10).float().unsqueeze(0)  # [1, n_flat]
+    has_carry  = bool(carry_mask.any().item()) and bool((1.0 - carry_mask).any().item())
+
+    # Precompute centered activations on device once per layer
+    y     = torch.nan_to_num(grid_flat, nan=0.0)
+    y_c   = y - y.mean(dim=-1, keepdim=True)   # [d_mlp, n_flat]
+    y_var = y_c.pow(2).sum(dim=-1)             # [d_mlp]
+    del y
+
+    def _score(masks_cpu: torch.Tensor) -> "np.ndarray":
+        """Batch ANOVA scores. Returns [d_mlp, n_masks] numpy float32."""
+        m     = masks_cpu.to(device=device)
+        m_c   = m - m.mean(dim=-1, keepdim=True)        # [n_masks, n_flat]
+        proj  = y_c @ m_c.T                              # [d_mlp,   n_masks]
+        m_var = m_c.pow(2).sum(dim=-1).unsqueeze(0)      # [1,       n_masks]
+        denom = (y_var.unsqueeze(1) * m_var).clamp(min=1e-20)
+        out   = (proj.pow(2) / denom).clamp(0.0, 1.0).cpu().float().numpy()
+        del m, m_c, proj, m_var, denom
+        return out
+
+    scores_a1    = _score(masks_a1)                                   # [d_mlp, n_arg1]
+    scores_a2    = _score(masks_a2)                                   # [d_mlp, n_arg2]
+    scores_sum   = _score(masks_sum)                                  # [d_mlp, n_sums]
+    scores_u1    = _score(masks_u1)                                   # [d_mlp, 10]
+    scores_u2    = _score(masks_u2)                                   # [d_mlp, 10]
+    scores_su    = _score(masks_su)                                   # [d_mlp, 10]
+    scores_carry = _score(carry_mask)[:, 0] if has_carry else None    # [d_mlp] | None
+    del y_c, y_var
+
+    return {
+        "scores_a1":    scores_a1,
+        "scores_a2":    scores_a2,
+        "scores_sum":   scores_sum,
+        "scores_u1":    scores_u1,
+        "scores_u2":    scores_u2,
+        "scores_su":    scores_su,
+        "scores_carry": scores_carry,
+        "has_carry":    has_carry,
+        "min_sum":      min_sum,
+        "n_sums":       n_sums,
+    }
+
+
+def _fast_anova_pair_loop(
+    tables: dict,
+    unique_targets: List[Tuple[int, ...]],
+    layer_idx: int,
+    d_mlp: int,
+    arg_to_idx: List[Dict[int, int]],
+    fixed_labels: Dict[str, str],
+    anova_nodes_per_label: int,
+    sum_min_specificity: float,
+) -> int:
+    """Assign neuron labels via O(1) lookup into precomputed ANOVA score tables.
+
+    For each ``(a1, a2)`` in *unique_targets* (processed in order so the first
+    pair to assign a neuron wins), looks up explained-variance scores from
+    *tables*, applies the specificity filter, and assigns the top-K neurons per
+    ANOVA category.  No GPU operations are performed; all computation is numpy.
+
+    Label strings are reconstructed from the ``(a1, a2)`` pair using the same
+    format as :func:`graph_loss.anova_node_labels.build_anova_basis_rules`
+    (e.g. ``"arg1 22-22"``, ``"arg1 units 2"``, ``"sum 55-55"``).
+
+    Args:
+        tables:               Output of :func:`_build_fast_anova_tables`.
+        unique_targets:       Ordered ``(a1, a2)`` pairs (first-wins ordering).
+        layer_idx:            Current layer (builds ``"{layer}:{neuron}"`` keys).
+        d_mlp:                MLP width.
+        arg_to_idx:           ``[{a1_val: grid_idx}, {a2_val: grid_idx}]``.
+        fixed_labels:         Running label dict, modified in place.
+        anova_nodes_per_label: Max neurons to claim per category per pair.
+        sum_min_specificity:  Minimum specificity threshold.
+
+    Returns:
+        Number of new neuron labels added.
+    """
+    import numpy as np
+    from graph_loss.anova_node_labels import (
+        ANOVA_LABEL_CATEGORIES,
+        BASE_ANOVA_LABEL_CATEGORIES,
+        CATEGORY_COMPONENTS,
+    )
+
+    scores_a1    = tables["scores_a1"]
+    scores_a2    = tables["scores_a2"]
+    scores_sum   = tables["scores_sum"]
+    scores_u1    = tables["scores_u1"]
+    scores_u2    = tables["scores_u2"]
+    scores_su    = tables["scores_su"]
+    scores_carry = tables["scores_carry"]
+    has_carry    = tables["has_carry"]
+    min_sum      = tables["min_sum"]
+    n_sums       = tables["n_sums"]
+
+    zeros     = np.zeros(d_mlp, dtype=np.float32)
+    n_labeled = 0
+
+    for target_args in unique_targets:
+        a1, a2 = int(target_args[0]), int(target_args[1])
+
+        a1_idx = arg_to_idx[0].get(a1, -1)
+        a2_idx = arg_to_idx[1].get(a2, -1)
+        s      = a1 + a2
+        s_idx  = s - min_sum
+        u1, u2, su = a1 % 10, a2 % 10, s % 10
+
+        cs_a1r = scores_a1[:, a1_idx]  if 0 <= a1_idx < scores_a1.shape[1]  else zeros
+        cs_a2r = scores_a2[:, a2_idx]  if 0 <= a2_idx < scores_a2.shape[1]  else zeros
+        cs_sr  = scores_sum[:, s_idx]  if 0 <= s_idx  < n_sums              else zeros
+        cs_u1  = scores_u1[:, u1]
+        cs_u2  = scores_u2[:, u2]
+        cs_su  = scores_su[:, su]
+
+        label_a1r = f"arg1 {a1}-{a1}"
+        label_a2r = f"arg2 {a2}-{a2}"
+        label_u1  = f"arg1 units {u1}"
+        label_u2  = f"arg2 units {u2}"
+        label_sr  = f"sum {s}-{s}"
+        label_su  = f"sum units {su}"
+
+        # Competitor scores for specificity (base categories only)
+        base_cs: Dict[str, "np.ndarray"] = {
+            "arg1 range": cs_a1r,
+            "arg1 units": cs_u1,
+            "arg2 range": cs_a2r,
+            "arg2 units": cs_u2,
+            "sum range":  cs_sr,
+            "sum units":  cs_su,
+        }
+        if has_carry:
+            base_cs["carry"] = scores_carry
+
+        for category in ANOVA_LABEL_CATEGORIES:
+            if category == "arg1 range":
+                cat_arr, label_str = cs_a1r, label_a1r
+            elif category == "arg1 units":
+                cat_arr, label_str = cs_u1, label_u1
+            elif category == "arg2 range":
+                cat_arr, label_str = cs_a2r, label_a2r
+            elif category == "arg2 units":
+                cat_arr, label_str = cs_u2, label_u2
+            elif category == "arg1 units and arg2 units":
+                cat_arr   = np.minimum(cs_u1, cs_u2)
+                label_str = f"{label_u1} and {label_u2}"
+            elif category == "arg1 range and arg2 range":
+                cat_arr   = np.minimum(cs_a1r, cs_a2r)
+                label_str = f"{label_a1r} and {label_a2r}"
+            elif category == "carry":
+                if not has_carry:
+                    continue
+                cat_arr, label_str = scores_carry, "carry"
+            elif category == "sum range":
+                cat_arr, label_str = cs_sr, label_sr
+            elif category == "sum units":
+                cat_arr, label_str = cs_su, label_su
+            else:
+                continue
+
+            # specificity = score - max competitor base-category score
+            excluded   = {category} | CATEGORY_COMPONENTS.get(category, set())
+            competitor = zeros
+            for comp in BASE_ANOVA_LABEL_CATEGORIES:
+                if comp not in excluded and comp in base_cs:
+                    competitor = np.maximum(competitor, base_cs[comp])
+            specificity = cat_arr - competitor
+
+            valid = (cat_arr > 0.0) & (specificity > sum_min_specificity)
+            cand  = np.where(valid)[0]
+            if len(cand) == 0:
+                continue
+            if len(cand) > anova_nodes_per_label:
+                top_local = np.argpartition(
+                    specificity[cand], -anova_nodes_per_label
+                )[-anova_nodes_per_label:]
+                cand = cand[top_local]
+
+            for neuron_id in cand:
+                lkey = f"{layer_idx}:{neuron_id}"
+                if lkey not in fixed_labels:
+                    fixed_labels[lkey] = label_str
+                    n_labeled += 1
+
+    return n_labeled
 
 
 def _run_gpu_anova_all_neurons(
