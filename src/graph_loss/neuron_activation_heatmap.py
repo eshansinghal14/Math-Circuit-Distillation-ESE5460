@@ -322,7 +322,7 @@ def compute_activation_grid_from_mlp_cache(
         location_groups[(layer, token_pos)].append((loc_idx, neuron_id))
 
     for (layer, token_pos), group_members in location_groups.items():
-        if layer not in layer_inputs:
+        if layer >= len(layer_inputs):
             continue
         layer_tensor = layer_inputs[layer]  # [n_cache_prompts, n_positions, d_model]
         n_positions = int(layer_tensor.shape[1])
