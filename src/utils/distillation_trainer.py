@@ -110,6 +110,9 @@ class DistillationTrainer:
 
         self.graph_loss_config = None
         self.student_graph_adapter = None
+        self._mlp_cache_root: Optional[str] = None
+        self._mlp_dataset_path: Optional[str] = None
+        self._mlp_model_name: Optional[str] = None
         if self._use_graph:
             from graph_loss.hf_adapter import HFLlamaGraphAdapter
             from graph_loss.training import GraphAuxConfig
@@ -150,11 +153,13 @@ class DistillationTrainer:
 
             if (
                 config.student_cluster_method in {"full_search", "live_anova"}
-                and config.student_mlp_input_cache_path
                 and config.student_dataset
             ):
+                import tempfile
+
                 from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
                 from graph_loss.precompute_mlp_inputs import (
+                    build_mlp_input_cache,
                     load_mlp_input_cache,
                     mlp_input_cache_exists,
                 )
@@ -165,14 +170,49 @@ class DistillationTrainer:
                     "_name_or_path",
                     "unknown_model",
                 )
-                if mlp_input_cache_exists(
-                    config.student_mlp_input_cache_path, student_model_name, dataset_path
+                self._mlp_dataset_path = dataset_path
+                self._mlp_model_name = student_model_name
+
+                if (
+                    config.student_mlp_input_cache_path
+                    and mlp_input_cache_exists(
+                        config.student_mlp_input_cache_path, student_model_name, dataset_path
+                    )
                 ):
+                    self._mlp_cache_root = config.student_mlp_input_cache_path
                     self.graph_loss_config.mlp_input_cache = load_mlp_input_cache(
                         config.student_mlp_input_cache_path, student_model_name, dataset_path
                     )
                     print(
                         f"[graph] MLP input cache loaded: "
+                        f"{len(self.graph_loss_config.mlp_input_cache['layer_inputs'])} layers"
+                    )
+                else:
+                    from utils import load_prompt_answer_json as _lpaj
+
+                    cache_root = (
+                        config.student_mlp_input_cache_path
+                        if config.student_mlp_input_cache_path
+                        else tempfile.mkdtemp(prefix="mlp_cache_")
+                    )
+                    self._mlp_cache_root = cache_root
+                    n_cache_prompts = len(_lpaj(dataset_path))
+                    print(
+                        f"[graph] Building MLP input cache from scratch: "
+                        f"{n_cache_prompts} prompts..."
+                    )
+                    self.student.eval()
+                    with torch.no_grad():
+                        self.graph_loss_config.mlp_input_cache = build_mlp_input_cache(
+                            self.student_graph_adapter,
+                            dataset_path,
+                            student_model_name,
+                            cache_root=cache_root,
+                            overwrite=True,
+                        )
+                    self.student.train()
+                    print(
+                        f"[graph] MLP input cache built: "
                         f"{len(self.graph_loss_config.mlp_input_cache['layer_inputs'])} layers"
                     )
 
@@ -506,6 +546,27 @@ class DistillationTrainer:
                 interval[key] += float(value)
             n_steps += 1
             interval_steps += 1
+
+            # Periodic MLP input cache refresh.
+            if (
+                self._mlp_cache_root is not None
+                and self.graph_loss_config is not None
+                and self.config.mlp_cache_refresh_interval > 0
+                and self._train_step % self.config.mlp_cache_refresh_interval == 0
+            ):
+                print(f"[graph] Refreshing MLP input cache at step {self._train_step}...")
+                from graph_loss.precompute_mlp_inputs import build_mlp_input_cache as _bmc
+
+                self.student.eval()
+                with torch.no_grad():
+                    self.graph_loss_config.mlp_input_cache = _bmc(
+                        self.student_graph_adapter,
+                        self._mlp_dataset_path,
+                        self._mlp_model_name,
+                        cache_root=self._mlp_cache_root,
+                        overwrite=True,
+                    )
+                self.student.train()
 
             # Periodic checkpoint save.
             if self.config.save_interval > 0 and self._train_step % self.config.save_interval == 0:

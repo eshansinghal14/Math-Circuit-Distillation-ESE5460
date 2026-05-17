@@ -59,18 +59,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--teacher-graph-batch-size", type=int, default=512)
     parser.add_argument("--student-graph-batch-size", type=int, default=1)
     parser.add_argument(
-        "--student-computation-eps",
-        type=float,
-        default=0.1,
-        help="Angular distance threshold for student supernode clustering.",
-    )
-    parser.add_argument(
-        "--student-embedding-eps",
-        type=float,
-        default=0.1,
-        help="Angular distance threshold for student embedding supernode clustering.",
-    )
-    parser.add_argument(
         "--student-activation-forward-batch-size",
         type=int,
         default=32,
@@ -80,22 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--graph-prune", action="store_true")
     parser.add_argument("--graph-node-threshold", type=float, default=0.8)
     parser.add_argument("--graph-edge-threshold", type=float, default=0.98)
-    parser.add_argument("--graph-node-weight", type=float, default=1.0)
     parser.add_argument("--graph-edge-weight", type=float, default=0.0)
-    parser.add_argument(
-        "--graph-focus-weight",
-        type=float,
-        default=0.0,
-        help=(
-            "Weight for Phase-3 logit-focus distribution loss "
-            "(KL(teacher_focus || student_focus), no alignment required). "
-            "Set >0 to enable, e.g. --graph-focus-weight 1.0. "
-            "When this is the only active graph loss term, also set "
-            "--graph-node-weight 0 --graph-edge-weight 0."
-        ),
-    )
-    parser.add_argument("--graph-similarity-threshold", type=float, default=0.7)
-    parser.add_argument("--graph-max-fan-out", type=int, default=4)
     parser.add_argument("--fast-teacher-graph", action="store_true")
     parser.add_argument(
         "--graph-grad-mode",
@@ -185,15 +158,6 @@ def build_parser() -> argparse.ArgumentParser:
             "real Jacobian logit-influence rows and use those for alignment."
         ),
     )
-    parser.add_argument(
-        "--align-diagnostic",
-        action="store_true",
-        help=(
-            "Log per-prompt teacher/student supernode cosine-matrix stats "
-            "(mean/median/max, fraction of teacher SNs with any match >= 0.3) "
-            "to verify alignment quality before/after a fix."
-        ),
-    )
     parser.add_argument("--eval-max-new-tokens", type=int, default=None)
     parser.add_argument("--eval-batch-size", type=int, default=50)
     parser.add_argument("--eval-datasets", nargs="*", default=None, metavar="DATASET")
@@ -203,15 +167,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Log KL and graph gradient norms plus their cosine similarity.",
     )
     parser.add_argument("--teacher-data-cache", type=str, default=None, metavar="PATH")
-    parser.add_argument(
-        "--graph-align-by-label",
-        action="store_true",
-        help=(
-            "Align teacher↔student supernodes by ANOVA label string instead of "
-            "cosine similarity of prob-delta vectors.  Requires teacher cache built "
-            "with full_search (labels saved)."
-        ),
-    )
     parser.add_argument(
         "--student-cluster-method",
         type=str,
@@ -240,9 +195,22 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help=(
             "Path to pre-computed student MLP input cache "
-            "(built via ``precompute_mlp_inputs``).  Loaded into the graph-loss "
-            "config when set; currently pass-through to ``build_super_graph`` "
-            "(downstream consumption pending re-wire)."
+            "(built via ``precompute_mlp_inputs``).  If provided and the cache "
+            "exists, it is loaded from disk.  If omitted or the path does not "
+            "exist, the cache is built from scratch at startup using the student "
+            "model and ``--student-dataset``."
+        ),
+    )
+    parser.add_argument(
+        "--mlp-cache-refresh-interval",
+        type=int,
+        default=0,
+        help=(
+            "Rebuild the in-memory MLP input cache every N training steps "
+            "using the current student model weights.  0 = no refresh "
+            "(use the cache built at startup for the entire run).  "
+            "Useful when the student weights change enough that the cached "
+            "activations become stale."
         ),
     )
     parser.add_argument(
@@ -320,20 +288,12 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--teacher-graph-batch-size must be >= 1")
     if args.student_graph_batch_size < 1:
         raise SystemExit("--student-graph-batch-size must be >= 1")
-    if args.student_computation_eps < 0:
-        raise SystemExit("--student-computation-eps must be >= 0")
-    if args.student_embedding_eps < 0:
-        raise SystemExit("--student-embedding-eps must be >= 0")
     if args.student_activation_forward_batch_size < 1:
         raise SystemExit("--student-activation-forward-batch-size must be >= 1")
     if not (0.0 <= args.graph_node_threshold <= 1.0):
         raise SystemExit("--graph-node-threshold must be in [0, 1]")
     if not (0.0 <= args.graph_edge_threshold <= 1.0):
         raise SystemExit("--graph-edge-threshold must be in [0, 1]")
-    if not (0.0 <= args.graph_similarity_threshold <= 1.0):
-        raise SystemExit("--graph-similarity-threshold must be in [0, 1]")
-    if args.graph_max_fan_out < 1:
-        raise SystemExit("--graph-max-fan-out must be >= 1")
 
 
 def main() -> None:
@@ -362,9 +322,7 @@ def main() -> None:
     print(f"  train_path:         {train_path}")
     print(f"  test_path:          {test_path}")
     print(f"  lambda_graph:       {args.lambda_graph}")
-    print(f"  graph node weight:  {args.graph_node_weight}")
     print(f"  graph edge weight:  {args.graph_edge_weight}")
-    print(f"  graph focus weight: {args.graph_focus_weight}")
     print(f"  graph grad mode:    {args.graph_grad_mode}", end="")
     if args.graph_grad_mode == "true":
         print(f" (chunk_size={args.graph_true_grad_chunk_size})")
@@ -419,17 +377,10 @@ def main() -> None:
             graph_prune=args.graph_prune,
             graph_node_threshold=args.graph_node_threshold,
             graph_edge_threshold=args.graph_edge_threshold,
-            graph_node_weight=args.graph_node_weight,
             graph_edge_weight=args.graph_edge_weight,
-            graph_similarity_threshold=args.graph_similarity_threshold,
-            graph_max_fan_out=args.graph_max_fan_out,
             fast_teacher_graph=args.fast_teacher_graph,
-            student_computation_eps=args.student_computation_eps,
-            student_embedding_eps=args.student_embedding_eps,
             student_activation_forward_batch_size=args.student_activation_forward_batch_size,
             student_skip_logit_attribution=args.student_skip_logit_attribution,
-            align_diagnostic=args.align_diagnostic,
-            graph_focus_weight=args.graph_focus_weight,
             graph_grad_mode=args.graph_grad_mode,
             graph_true_grad_chunk_size=args.graph_true_grad_chunk_size,
             fast_student_graph=args.fast_student_graph,
@@ -447,10 +398,10 @@ def main() -> None:
             track_loss_grads=args.track_loss_grads,
             save_dir=run_dir,
             teacher_data_cache=args.teacher_data_cache,
-            align_by_label=args.graph_align_by_label,
             student_cluster_method=args.student_cluster_method,
             student_dataset=args.student_dataset,
             student_mlp_input_cache_path=args.student_mlp_input_cache,
+            mlp_cache_refresh_interval=args.mlp_cache_refresh_interval,
             student_activation_write_cache_path=args.student_activation_write_cache,
             student_anova_range_radius=args.student_anova_range_radius,
             student_anova_nodes_per_label=args.student_anova_nodes_per_label,
