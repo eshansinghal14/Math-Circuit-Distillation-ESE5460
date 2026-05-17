@@ -949,6 +949,19 @@ class DistillationTrainer:
                 f"[graph] Step {step}: label refresh complete — "
                 f"{len(new_labels)} neurons labeled"
             )
+
+            # Persist refreshed labels to save_dir so they survive crashes / restarts
+            try:
+                labels_save_path = os.path.join(
+                    self.config.save_dir,
+                    f"labels_refresh_step_{step:04d}.json",
+                )
+                os.makedirs(self.config.save_dir, exist_ok=True)
+                with open(labels_save_path, "w", encoding="utf-8") as _lf:
+                    json.dump(new_labels, _lf, indent=2)
+                print(f"[graph] Step {step}: saved refreshed labels → {labels_save_path}")
+            except Exception as _save_exc:
+                print(f"[graph] Step {step}: warning — could not save refreshed labels: {_save_exc!r}")
         except Exception as exc:
             import warnings
 
