@@ -167,7 +167,7 @@ def _build_fast_anova_tables(
         proj  = y_c @ m_c.T                              # [d_mlp,   n_masks]
         m_var = m_c.pow(2).sum(dim=-1).unsqueeze(0)      # [1,       n_masks]
         denom = (y_var.unsqueeze(1) * m_var).clamp(min=1e-20)
-        out   = (proj.pow(2) / denom).clamp(0.0, 1.0).cpu().float().numpy()
+        out   = (proj.pow(2) / denom).clamp(0.0, 1.0).detach().cpu().float().numpy()
         del m, m_c, proj, m_var, denom
         return out
 
