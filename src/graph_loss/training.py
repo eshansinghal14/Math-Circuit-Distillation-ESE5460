@@ -393,7 +393,10 @@ def compute_prompt_graph_loss(
 
     supergraph_start = time.perf_counter()
     student_mlp_input_cache = None
-    if config.student_cluster_method == "full_search" and config.student_mlp_input_cache_path:
+    if (
+        config.student_cluster_method in {"full_search", "live_anova"}
+        and config.student_mlp_input_cache_path
+    ):
         from graph_loss.precompute_mlp_inputs import load_mlp_input_cache, mlp_input_cache_exists
         from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
         if config.student_dataset:

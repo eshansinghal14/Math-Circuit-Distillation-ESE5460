@@ -216,9 +216,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--student-cluster-method",
         type=str,
         default="ablation",
-        choices=["ablation", "full_search", "fixed_labels"],
+        choices=["ablation", "full_search", "fixed_labels", "live_anova"],
         help="Supergraph clustering method for the student.  full_search builds "
-             "activation heatmaps (requires --student-dataset).",
+             "activation heatmaps (requires --student-dataset).  live_anova runs "
+             "per-prompt ANOVA over only the attribution-selected kept neurons "
+             "and assigns each neuron to the argmax category (winner-take-all), "
+             "producing at most ~8 disjoint supernodes that match the teacher.",
     )
     parser.add_argument(
         "--student-dataset",
