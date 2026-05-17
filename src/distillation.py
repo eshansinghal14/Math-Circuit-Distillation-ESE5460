@@ -213,11 +213,37 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--student-cluster-method",
+        type=str,
+        default="live_anova",
+        choices=["full_search", "live_anova"],
+        help=(
+            "Supergraph clustering method for the student.  ``live_anova`` "
+            "runs per-prompt ANOVA over only the attribution-selected kept "
+            "neurons and assigns each to the argmax category (winner-take-all), "
+            "producing at most ~8 disjoint supernodes that align cleanly with "
+            "the teacher cache.  ``full_search`` is the legacy per-category "
+            "top-K labelling path."
+        ),
+    )
+    parser.add_argument(
         "--student-dataset",
         type=str,
         default=None,
         metavar="DATASET",
-        help="Activation dataset for student full_search clustering (e.g. 22_add_tight_all.json).",
+        help="Activation dataset for student clustering (e.g. 22_add_tight_all.json).",
+    )
+    parser.add_argument(
+        "--student-mlp-input-cache",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to pre-computed student MLP input cache "
+            "(built via ``precompute_mlp_inputs``).  Loaded into the graph-loss "
+            "config when set; currently pass-through to ``build_super_graph`` "
+            "(downstream consumption pending re-wire)."
+        ),
     )
     parser.add_argument(
         "--student-activation-write-cache",
@@ -264,23 +290,6 @@ def build_parser() -> argparse.ArgumentParser:
             "Save a checkpoint every N steps. 0 = final only. "
             "Set to (train_limit // batch_size) for once-per-epoch."
         ),
-    )
-    parser.add_argument(
-        "--label-refresh-interval",
-        type=int,
-        default=0,
-        help=(
-            "Re-run ANOVA on --label-refresh-n-prompts training prompts every N steps "
-            "to refresh the in-memory fixed-label cache. "
-            "0 = never refresh (use precomputed labels only). "
-            "Only active when --student-dataset is set."
-        ),
-    )
-    parser.add_argument(
-        "--label-refresh-n-prompts",
-        type=int,
-        default=8,
-        help="Number of training prompts (taken from the start of the train set) used for each label refresh.",
     )
     parser.add_argument("--seed", type=int, default=42)
     return parser
@@ -439,15 +448,15 @@ def main() -> None:
             save_dir=run_dir,
             teacher_data_cache=args.teacher_data_cache,
             align_by_label=args.graph_align_by_label,
+            student_cluster_method=args.student_cluster_method,
             student_dataset=args.student_dataset,
+            student_mlp_input_cache_path=args.student_mlp_input_cache,
             student_activation_write_cache_path=args.student_activation_write_cache,
             student_anova_range_radius=args.student_anova_range_radius,
             student_anova_nodes_per_label=args.student_anova_nodes_per_label,
             student_sum_min_specificity=args.student_sum_min_specificity,
             step_log_interval=args.step_log_interval,
             save_interval=args.save_interval,
-            label_refresh_interval=args.label_refresh_interval,
-            label_refresh_n_prompts=args.label_refresh_n_prompts,
             seed=args.seed,
             device=device,
         ),

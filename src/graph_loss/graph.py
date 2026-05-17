@@ -401,17 +401,43 @@ def build_super_graph(
     dataset: str | None = None,
     activation_forward_batch_size: int = 32,
     activation_write_cache_path: str | None = None,
+    mlp_input_cache: dict | None = None,
     model_name: str | None = None,
+    cluster_method: str = "live_anova",
     supernode_heatmap_output_dir: str | None = None,
     anova_nodes_per_label: int = 10,
     anova_range_radius: int = 0,
     sum_min_specificity: float = 0.0,
 ) -> SuperGraph:
-    """Cluster kept neurons into supernodes via ANOVA-based labeling."""
+    """Cluster kept neurons into supernodes.
+
+    ``cluster_method`` selects between two strategies:
+
+    * ``"full_search"`` — per-category top-K ANOVA labeling. Each kept neuron
+      can appear in multiple supernodes (one per category it scores well on).
+      Produces the rich, overlapping supernode set used for heatmap inspection.
+    * ``"live_anova"`` (default) — winner-take-all over per-prompt ANOVA rules.
+      Each kept neuron is assigned to exactly one rule (the rule whose mask
+      best explains its activation grid via squared Pearson correlation),
+      producing at most ``len(rules)`` (~8) disjoint supernodes that align
+      cleanly with the teacher's labels.
+
+    ``mlp_input_cache`` is accepted for forward compatibility with
+    pre-computed MLP-input caches (``precompute_mlp_inputs``). It is currently
+    a no-op pass-through — ``build_neuron_activation_write_result`` no longer
+    consumes the cache directly after the recent clean-up; wire it back in if
+    the speed-up is needed again.
+    """
+
+    del mlp_input_cache  # accepted for CLI plumbing, not currently consumed
 
     if prune_result is not None:
         graph = graph.apply_prune_result(prune_result)
 
+    if cluster_method not in {"full_search", "live_anova"}:
+        raise ValueError(
+            "cluster_method must be one of: full_search, live_anova"
+        )
     if anova_nodes_per_label <= 0:
         raise ValueError("anova_nodes_per_label must be positive")
     if anova_range_radius < 0:
@@ -681,7 +707,106 @@ def build_super_graph(
             )
         return activation_write_result_for_kept
 
-    if kept_neuron_indices.numel():
+    if cluster_method == "live_anova" and kept_neuron_indices.numel():
+        # Winner-take-all clustering over the *attribution-selected* kept neurons.
+        # Each kept neuron picks the single ANOVA rule it explains the most
+        # variance for, producing at most ``len(rules)`` (~8) disjoint
+        # supernodes per prompt — same labels as full_search but with disjoint
+        # membership, which aligns much more cleanly with the teacher cache.
+        activation_write_result = get_activation_write_result_for_kept()
+
+        try:
+            target_args = parse_numeric_args(graph.input_string)
+        except ValueError:
+            target_args = None
+
+        supernodes = []
+        supernode_labels = []
+        if target_args is not None and len(target_args) >= 2:
+            rules = build_anova_basis_rules(
+                activation_write_result.arg_values,
+                target_args=target_args,
+                anova_range_radius=anova_range_radius,
+            )
+            if rules:
+                n_kept = int(activation_write_result.activations.shape[0])
+                acts_flat = (
+                    activation_write_result.activations.detach()
+                    .float()
+                    .reshape(n_kept, -1)
+                )
+                rule_mask_matrix = torch.stack(
+                    [rule.mask.reshape(-1).to(dtype=torch.float32) for rule in rules],
+                    dim=0,
+                )
+                rule_labels = [rule.label for rule in rules]
+
+                # Squared Pearson correlation between each neuron's activation
+                # grid and each rule mask, vectorized across all (neuron, rule)
+                # pairs.
+                y = torch.nan_to_num(acts_flat, nan=0.0)
+                y_c = y - y.mean(dim=-1, keepdim=True)
+                m_c = rule_mask_matrix - rule_mask_matrix.mean(dim=-1, keepdim=True)
+                proj = y_c @ m_c.T
+                y_var = y_c.pow(2).sum(dim=-1, keepdim=True)
+                m_var = m_c.pow(2).sum(dim=-1).unsqueeze(0)
+                denom = (y_var * m_var).clamp(min=1e-20)
+                scores = (proj.pow(2) / denom).clamp(min=0.0, max=1.0)
+
+                best_score, best_rule_idx = scores.max(dim=-1)
+                min_score = float(sum_min_specificity)
+                valid_mask = best_score >= min_score
+
+                category_to_neurons: dict[str, list[int]] = {}
+                kept_member_list = kept_neuron_indices.tolist()
+                best_rule_idx_list = best_rule_idx.tolist()
+                valid_mask_list = valid_mask.tolist()
+                for kept_local_idx in range(n_kept):
+                    if not valid_mask_list[kept_local_idx]:
+                        continue
+                    rule_label = rule_labels[int(best_rule_idx_list[kept_local_idx])]
+                    global_neuron_idx = int(kept_member_list[kept_local_idx])
+                    category_to_neurons.setdefault(rule_label, []).append(global_neuron_idx)
+                    node_labels.setdefault(global_neuron_idx, [])
+                    if rule_label not in node_labels[global_neuron_idx]:
+                        node_labels[global_neuron_idx].append(rule_label)
+
+                for rule_label, members in category_to_neurons.items():
+                    supernodes.append(members)
+                    supernode_labels.append([rule_label])
+
+                logger.info(
+                    "[live_anova] target_args=%s: %d/%d neurons assigned to %d supernodes",
+                    target_args,
+                    int(valid_mask.sum().item()),
+                    n_kept,
+                    len(supernodes),
+                )
+            else:
+                logger.info(
+                    "[live_anova] target_args=%s: no rules built; producing empty supernodes",
+                    target_args,
+                )
+        else:
+            logger.info(
+                "[live_anova] No target_args parsed from prompt; producing empty supernodes"
+            )
+
+        for supernode_idx, members in enumerate(supernodes):
+            label = (
+                supernode_labels[supernode_idx][0]
+                if supernode_idx < len(supernode_labels)
+                else "none"
+            )
+            logger.info(
+                "  supernode %d label=%s influence=%.6g neuron locations: %s",
+                supernode_idx,
+                label,
+                supernode_influence(members),
+                format_member_locations(members),
+            )
+
+    elif cluster_method == "full_search" and kept_neuron_indices.numel():
         activation_write_result = get_activation_write_result_for_kept()
         target_args = parse_numeric_args(graph.input_string)
         label_results = label_activation_heatmaps(

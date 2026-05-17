@@ -71,6 +71,18 @@ class GraphAuxConfig:
     # Cap on members per ANOVA-labelled student supernode.
     student_anova_nodes_per_label: int = 10
     student_sum_min_specificity: float = 0.0
+    # Supergraph clustering method for the student. ``live_anova`` performs
+    # per-prompt ANOVA over only the attribution-selected kept neurons and
+    # assigns each to the argmax category (winner-take-all) — produces at
+    # most ~8 disjoint supernodes that match the teacher cache.  ``full_search``
+    # is the legacy per-category top-K labelling path.
+    student_cluster_method: str = "live_anova"
+    # Optional MLP-input cache (built via ``precompute_mlp_inputs``) for the
+    # student model.  Currently loaded but not consumed downstream — the
+    # neuron-activation builder no longer reads it after the recent
+    # ``neuron_activation_heatmap`` clean-up.  Kept for CLI compatibility and
+    # so the cache can be wired back in when the speed-up is needed.
+    student_mlp_input_cache_path: str | None = None
 
 
 def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
@@ -229,6 +241,33 @@ def compute_prompt_graph_loss(
 
     supergraph_start = time.perf_counter()
 
+    student_mlp_input_cache = None
+    if (
+        config.student_cluster_method in {"full_search", "live_anova"}
+        and config.student_mlp_input_cache_path
+        and config.student_dataset
+    ):
+        from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
+        from graph_loss.precompute_mlp_inputs import (
+            load_mlp_input_cache,
+            mlp_input_cache_exists,
+        )
+
+        dataset_path = _resolve_dataset_path(config.student_dataset)
+        student_model_name = getattr(
+            getattr(student_adapter.model, "config", None),
+            "_name_or_path",
+            "unknown_model",
+        )
+        if mlp_input_cache_exists(
+            config.student_mlp_input_cache_path, student_model_name, dataset_path
+        ):
+            student_mlp_input_cache = load_mlp_input_cache(
+                config.student_mlp_input_cache_path,
+                student_model_name,
+                dataset_path,
+            )
+
     with torch.no_grad():
         student_supergraph_structure = build_super_graph(
             student_graph,
@@ -237,6 +276,8 @@ def compute_prompt_graph_loss(
             activation_forward_batch_size=config.student_activation_forward_batch_size,
             dataset=config.student_dataset,
             activation_write_cache_path=config.student_activation_write_cache_path,
+            mlp_input_cache=student_mlp_input_cache,
+            cluster_method=config.student_cluster_method,
             anova_range_radius=config.student_anova_range_radius,
             anova_nodes_per_label=config.student_anova_nodes_per_label,
             sum_min_specificity=config.student_sum_min_specificity,
@@ -474,8 +515,8 @@ def backward_batch_graph_loss(
         )
         detached_losses.append(prompt_loss.detach())
         pending_losses.append(prompt_loss)
-            if len(pending_losses) >= gen_batch_size:
-                flush_pending_losses()
+        if len(pending_losses) >= gen_batch_size:
+            flush_pending_losses()
         for key, value in prompt_metrics.items():
             metric_sums[key] = metric_sums.get(key, 0.0) + float(value)
 

@@ -51,7 +51,9 @@ class DistillationConfig:
     fast_student_graph: bool = False
     ablation_batch_size: int = 32
     align_by_label: bool = False
+    student_cluster_method: str = "live_anova"
     student_dataset: Optional[str] = None
+    student_mlp_input_cache_path: Optional[str] = None
     student_activation_write_cache_path: Optional[str] = None
     student_anova_range_radius: int = 0
     student_anova_nodes_per_label: int = 10
@@ -69,8 +71,6 @@ class DistillationConfig:
     seed: int = 42
     device: torch.device = get_default_device()
     save_interval: int = 0
-    label_refresh_interval: int = 0
-    label_refresh_n_prompts: int = 64
 
 
 def resolve_distillation_run_dir(

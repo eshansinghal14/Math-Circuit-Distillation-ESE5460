@@ -126,25 +126,16 @@ class DistillationTrainer:
                 graph_prune=config.graph_prune,
                 graph_node_threshold=config.graph_node_threshold,
                 graph_edge_threshold=config.graph_edge_threshold,
-                graph_node_weight=config.graph_node_weight,
                 graph_edge_weight=config.graph_edge_weight,
-                graph_similarity_threshold=config.graph_similarity_threshold,
-                graph_max_fan_out=config.graph_max_fan_out,
                 fast_teacher_graph=config.fast_teacher_graph,
-                student_computation_eps=config.student_computation_eps,
-                student_embedding_eps=config.student_embedding_eps,
                 student_activation_forward_batch_size=(
                     config.student_activation_forward_batch_size
                 ),
                 student_skip_logit_attribution=config.student_skip_logit_attribution,
-                align_diagnostic=config.align_diagnostic,
-                graph_focus_weight=config.graph_focus_weight,
-                graph_grad_mode=config.graph_grad_mode,
-                graph_true_grad_chunk_size=config.graph_true_grad_chunk_size,
                 fast_student_graph=config.fast_student_graph,
-                ablation_batch_size=config.ablation_batch_size,
-                align_by_label=config.align_by_label,
+                student_cluster_method=config.student_cluster_method,
                 student_dataset=config.student_dataset,
+                student_mlp_input_cache_path=config.student_mlp_input_cache_path,
                 student_activation_write_cache_path=config.student_activation_write_cache_path,
                 student_anova_range_radius=config.student_anova_range_radius,
                 student_anova_nodes_per_label=config.student_anova_nodes_per_label,
@@ -619,11 +610,6 @@ class DistillationTrainer:
         print(f"  Eval every:       {cfg.step_log_interval} training batches")
         if cfg.save_interval > 0:
             print(f"  Save every:       {cfg.save_interval} steps → checkpoint_step_NNNN/")
-        if cfg.label_refresh_interval > 0:
-            print(
-                f"  Label refresh:    every {cfg.label_refresh_interval} steps "
-                f"({cfg.label_refresh_n_prompts} prompts)"
-            )
         print("=" * 60)
 
         epoch = start_epoch
