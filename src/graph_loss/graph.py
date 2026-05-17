@@ -406,6 +406,7 @@ def build_super_graph(
     anova_nodes_per_label: int = 10,
     anova_range_radius: int = 0,
     sum_min_specificity: float = 0.0,
+    fixed_labels: dict[str, str] | None = None,
 ) -> SuperGraph:
     """Cluster kept neurons into supernodes via ANOVA-based labeling."""
 
@@ -681,7 +682,30 @@ def build_super_graph(
             )
         return activation_write_result_for_kept
 
-    if kept_neuron_indices.numel():
+    if fixed_labels is not None and kept_neuron_indices.numel():
+        locations = graph.neuron_locations[kept_neuron_indices_device].detach().cpu().to(dtype=torch.long)
+        label_to_members: dict[str, list[int]] = {}
+        for i, neuron_idx in enumerate(kept_neuron_indices.tolist()):
+            layer = int(locations[i, 0].item())
+            neuron_id = int(locations[i, 2].item())
+            key = f"{layer}:{neuron_id}"
+            if key in fixed_labels:
+                label = fixed_labels[key]
+                label_to_members.setdefault(label, []).append(int(neuron_idx))
+        for label, members in label_to_members.items():
+            capped = members[:anova_nodes_per_label]
+            supernodes.append(capped)
+            supernode_labels.append([label])
+            for member in capped:
+                node_labels.setdefault(member, [])
+                if label not in node_labels[member]:
+                    node_labels[member].append(label)
+        logger.info(
+            "  Fixed labels: %d supernodes, %d labeled neurons",
+            len(supernodes),
+            sum(len(m) for m in supernodes),
+        )
+    elif kept_neuron_indices.numel():
         activation_write_result = get_activation_write_result_for_kept()
         target_args = parse_numeric_args(graph.input_string)
         label_results = label_activation_heatmaps(
