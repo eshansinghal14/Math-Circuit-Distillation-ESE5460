@@ -12,6 +12,7 @@ import torch.nn.functional as F
 
 from graph_loss.anova_node_labels import (
     ANOVA_LABEL_CATEGORIES,
+    build_anova_basis_rules,
     label_activation_heatmaps,
     parse_numeric_args,
 )

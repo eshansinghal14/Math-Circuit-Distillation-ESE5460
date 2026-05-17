@@ -42,7 +42,7 @@ import logging
 import os
 import sys
 from collections import Counter
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -151,26 +151,30 @@ def _run_gpu_anova_all_neurons(
 ) -> Dict[str, str]:
     """Layer-by-layer GPU-vectorized ANOVA over all neurons.
 
-    For each layer ``l`` and token position ``p``:
-      1. Load cached MLP inputs ``x`` of shape ``[n_valid, d_model]`` to GPU.
-      2. Compute ``acts = silu(x @ W_gate^T) * (x @ W_up^T)`` → ``[n_valid, d_mlp]``
-         in a single batched matrix multiply (fast on GPU).
-      3. Scatter-add into ANOVA grid ``[d_mlp, n_arg1, n_arg2]`` using the
-         pre-computed flat argument-grid indices.
-      4. Divide by counts to get mean activation per (neuron, arg-combo) cell.
-      5. Run ``label_activation_heatmaps`` on the grid (CPU, iterates over
-         d_mlp neurons — typically 8192 — with a ~40-rule ANOVA per neuron).
-      6. Track the highest specificity score per (neuron_id, category) across
-         all token positions.
+    For each layer ``l``:
+      1. Accumulate ``acts[n_valid, d_mlp]`` across all (non-BOS) positions via
+         batched matrix multiplies on GPU.
+      2. Scatter-add into mean ANOVA grid ``[d_mlp, n_flat]``.
+      3. Compute all ``(d_mlp × n_rules)`` explained-variance scores in a single
+         SGEMM (the squared Pearson correlation trick).
+      4. Pick top-K neurons per ANOVA category using the scores.
 
-    After all positions are done for a layer, assign labels to the top-K neurons
-    per category and free GPU memory before moving to the next layer.
+    One ``label_activation_heatmaps`` call (slow Python loop) is replaced by
+    a single GPU matrix multiply + cheap numpy post-processing.
 
-    Peak GPU memory per layer: ≈ 2 × d_mlp × n_valid × 4 bytes
-                                 + d_mlp × n_flat × 4 bytes
-    For d_mlp=8192, n_valid=10k, n_flat=10k:  ≈ 970 MB  (fits on any GPU ≥ 4 GB)
+    Peak GPU memory per layer:
+        d_mlp × n_flat × 4 B  +  n_rules × n_flat × 4 B  +  2 × n_valid × d_mlp × 4 B
+    ≈ 328 MB + 17 MB + 655 MB = ~1 GB for d_mlp=8192, n_flat=10k, n_valid=10k
+    (fits on any GPU ≥ 4 GB)
     """
-    from graph_loss.anova_node_labels import ANOVA_LABEL_CATEGORIES, label_activation_heatmaps
+    import numpy as np
+    from collections import defaultdict
+    from graph_loss.anova_node_labels import (
+        ANOVA_LABEL_CATEGORIES,
+        BASE_ANOVA_LABEL_CATEGORIES,
+        CATEGORY_COMPONENTS,
+        build_anova_basis_rules,
+    )
 
     cache_meta = mlp_input_cache["meta"]
     cache_layer_inputs: List[torch.Tensor] = mlp_input_cache["layer_inputs"]
@@ -227,88 +231,116 @@ def _run_gpu_anova_all_neurons(
     n_layers = adapter.n_layers
     d_mlp = adapter.d_mlp
 
+    # ── Build ANOVA rules once (same for every layer) ─────────────────────────
+    rules = build_anova_basis_rules(
+        arg_values, target_args=None, anova_range_radius=anova_range_radius
+    )
+    n_rules = len(rules)
+    logger.info("Built %d ANOVA rules for arg grid %s", n_rules, [len(v) for v in arg_values])
+
+    # Pre-stack rule masks: [n_rules, n_flat] on GPU (reused every layer)
+    masks_gpu = torch.stack(
+        [rule.mask.float().reshape(-1).to(device) for rule in rules], dim=0
+    )  # [n_rules, n_flat]
+
+    # Pre-build per-category rule index lists (for score grouping)
+    category_rule_indices: Dict[str, List[int]] = defaultdict(list)
+    for ri, rule in enumerate(rules):
+        category_rule_indices[rule.category].append(ri)
+
     fixed_labels: Dict[str, str] = {}
 
     for layer_idx in range(n_layers):
         logger.info("━━ Layer %d / %d ━━", layer_idx + 1, n_layers)
 
         hf_layer = adapter.layers[layer_idx]
-        W_gate = hf_layer.mlp.gate_proj.weight.to(device=device, dtype=torch.float32)  # [d_mlp, d_model]
-        W_up   = hf_layer.mlp.up_proj.weight.to(device=device, dtype=torch.float32)   # [d_mlp, d_model]
-
-        # layer_inputs: list entry is [n_prompts, n_positions, d_model]
-        # Slice valid prompts on CPU to keep transfer cost low, then move to GPU per-position.
+        W_gate = hf_layer.mlp.gate_proj.weight.to(device=device, dtype=torch.float32)
+        W_up   = hf_layer.mlp.up_proj.weight.to(device=device, dtype=torch.float32)
         layer_inputs_cpu = cache_layer_inputs[layer_idx][valid_idx]  # [n_valid, n_pos, d_model]
 
-        # Per-position best specificity / label, aggregated across positions
-        best_specificity: Dict[str, List[float]] = {
-            cat: [float("-inf")] * d_mlp for cat in ANOVA_LABEL_CATEGORIES
-        }
-        best_label: Dict[str, List[str]] = {
-            cat: [""] * d_mlp for cat in ANOVA_LABEL_CATEGORIES
-        }
-
+        # Accumulate mean activation across all non-BOS positions → [d_mlp, n_flat]
+        layer_grid_flat = torch.zeros(d_mlp, n_flat, dtype=torch.float32, device=device)
+        n_active_positions = 0
         for pos_idx in range(n_cache_positions):
-            x = layer_inputs_cpu[:, pos_idx, :].to(device=device, dtype=torch.float32)  # [n_valid, d_model]
-
-            gate_pre = x @ W_gate.T  # [n_valid, d_mlp]
-            up_pre   = x @ W_up.T   # [n_valid, d_mlp]
-            acts = F.silu(gate_pre) * up_pre  # [n_valid, d_mlp]
-
             if pos_idx == 0:
-                # BOS / padding token — activations are noisy; zero them out
-                acts.zero_()
-
-            # Scatter-add into ANOVA grid [d_mlp, n_flat]
-            grid_flat = torch.zeros(d_mlp, n_flat, dtype=torch.float32, device=device)
-            grid_flat.scatter_add_(
+                continue  # skip BOS
+            x = layer_inputs_cpu[:, pos_idx, :].to(device=device, dtype=torch.float32)
+            acts = F.silu(x @ W_gate.T) * (x @ W_up.T)  # [n_valid, d_mlp]
+            layer_grid_flat.scatter_add_(
                 1,
-                flat_idx_dev.unsqueeze(0).expand(d_mlp, -1),  # [d_mlp, n_valid]
+                flat_idx_dev.unsqueeze(0).expand(d_mlp, -1),
                 acts.T.contiguous().float(),
             )
+            n_active_positions += 1
+            del x, acts
 
-            # Average: [d_mlp, *grid_shape]
-            grid = grid_flat.reshape(d_mlp, *grid_shape) / counts_grid
+        if n_active_positions == 0:
+            n_active_positions = 1
+        # grid[d_mlp, n_flat]: mean activation per (neuron, arg-cell)
+        grid_flat = layer_grid_flat / n_active_positions / counts_grid.reshape(1, -1)
+        del layer_grid_flat, W_gate, W_up, layer_inputs_cpu
 
-            # ANOVA (CPU-bound Python loop over d_mlp neurons)
-            label_results = label_activation_heatmaps(
-                grid.cpu(),
-                arg_values,
-                target_args=None,
-                anova_range_radius=anova_range_radius,
+        # ── Vectorized ANOVA: all (neuron, rule) scores in ONE matmul ──────────
+        # scores[d_mlp, n_rules] = explained_variance_score for every pair
+        scores_np = _vectorized_anova_scores(grid_flat.detach(), masks_gpu)  # numpy [d_mlp, n_rules]
+        del grid_flat
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        # ── Category scores: max rule score per (neuron, category) ────────────
+        cat_scores: Dict[str, np.ndarray] = {}  # category → [d_mlp]
+        cat_labels: Dict[str, List[str]] = {}   # category → list of str [d_mlp]
+
+        for category, rule_idxs in category_rule_indices.items():
+            sub = scores_np[:, rule_idxs]               # [d_mlp, n_cat_rules]
+            best_local = sub.argmax(axis=1)              # [d_mlp]
+            cat_scores[category] = sub.max(axis=1)       # [d_mlp]
+            cat_labels[category] = [
+                rules[rule_idxs[best_local[nid]]].label for nid in range(d_mlp)
+            ]
+
+        # Combined categories
+        if "arg1 units" in cat_scores and "arg2 units" in cat_scores:
+            cat_scores["arg1 units and arg2 units"] = np.minimum(
+                cat_scores["arg1 units"], cat_scores["arg2 units"]
             )
+            cat_labels["arg1 units and arg2 units"] = [
+                f"{cat_labels['arg1 units'][n]} and {cat_labels['arg2 units'][n]}"
+                for n in range(d_mlp)
+            ]
+        if "arg1 range" in cat_scores and "arg2 range" in cat_scores:
+            cat_scores["arg1 range and arg2 range"] = np.minimum(
+                cat_scores["arg1 range"], cat_scores["arg2 range"]
+            )
+            cat_labels["arg1 range and arg2 range"] = [
+                f"{cat_labels['arg1 range'][n]} and {cat_labels['arg2 range'][n]}"
+                for n in range(d_mlp)
+            ]
 
-            # Update best-across-positions tracking
-            for neuron_id, lr in enumerate(label_results):
-                for cat in ANOVA_LABEL_CATEGORIES:
-                    if cat not in lr.category_specificity:
-                        continue
-                    score = float(lr.category_scores.get(cat, 0.0))
-                    spec  = float(lr.category_specificity[cat])
-                    if score > 0.0 and spec > sum_min_specificity and spec > best_specificity[cat][neuron_id]:
-                        best_specificity[cat][neuron_id] = spec
-                        best_label[cat][neuron_id] = lr.categories.get(cat, "")
-
-            del x, gate_pre, up_pre, acts, grid_flat, grid
-            if device.type == "cuda":
-                torch.cuda.empty_cache()
-
-        # Assign labels: top-K per category
+        # ── Specificity and top-K label assignment ─────────────────────────────
         n_labeled_this_layer = 0
-        for cat in ANOVA_LABEL_CATEGORIES:
+        for category in ANOVA_LABEL_CATEGORIES:
+            if category not in cat_scores:
+                continue
+            cat_arr = cat_scores[category]
+            excluded = {category} | CATEGORY_COMPONENTS.get(category, set())
+            competitor = np.zeros(d_mlp, dtype=np.float32)
+            for comp in BASE_ANOVA_LABEL_CATEGORIES:
+                if comp not in excluded and comp in cat_scores:
+                    competitor = np.maximum(competitor, cat_scores[comp])
+            specificity = cat_arr - competitor
+
             scored = [
-                (nid, best_specificity[cat][nid])
+                (nid, float(specificity[nid]))
                 for nid in range(d_mlp)
-                if best_specificity[cat][nid] > float("-inf") and best_label[cat][nid]
+                if float(cat_arr[nid]) > 0.0 and float(specificity[nid]) > sum_min_specificity
             ]
             scored.sort(key=lambda kv: kv[1], reverse=True)
             for neuron_id, _spec in scored[:anova_nodes_per_label]:
                 key = f"{layer_idx}:{neuron_id}"
                 if key not in fixed_labels:
-                    fixed_labels[key] = best_label[cat][neuron_id]
+                    fixed_labels[key] = cat_labels[category][neuron_id]
                     n_labeled_this_layer += 1
-
-        del W_gate, W_up, layer_inputs_cpu, best_specificity, best_label
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
