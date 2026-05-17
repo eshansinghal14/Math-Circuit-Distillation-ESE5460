@@ -209,16 +209,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Align teacher↔student supernodes by ANOVA label string instead of "
             "cosine similarity of prob-delta vectors.  Requires teacher cache built "
-            "with full_search (labels saved) and --student-cluster-method full_search."
+            "with full_search (labels saved)."
         ),
-    )
-    parser.add_argument(
-        "--student-cluster-method",
-        type=str,
-        default="ablation",
-        choices=["ablation", "full_search", "fixed_labels"],
-        help="Supergraph clustering method for the student.  full_search builds "
-             "activation heatmaps (requires --student-dataset).",
     )
     parser.add_argument(
         "--student-dataset",
@@ -228,31 +220,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Activation dataset for student full_search clustering (e.g. 22_add_tight_all.json).",
     )
     parser.add_argument(
-        "--student-mlp-input-cache",
-        type=str,
-        default=None,
-        metavar="PATH",
-        help="Path to pre-computed student MLP input cache (speeds up full_search heatmaps).",
-    )
-    parser.add_argument(
         "--student-activation-write-cache",
         type=str,
         default=None,
         metavar="PATH",
         help="Local path for caching student activation-write grids between steps.",
-    )
-    parser.add_argument(
-        "--student-fixed-labels",
-        type=str,
-        default=None,
-        metavar="PATH",
-        help=(
-            "Path to a JSON file produced by precompute_fixed_labels.py mapping "
-            "'layer:neuron_id' -> label string.  When set and "
-            "--student-cluster-method is 'fixed_labels', ANOVA is skipped each "
-            "step — neuron labels are looked up from this file instead.  "
-            "Reduces step time from ~20 min to ~80s."
-        ),
     )
     parser.add_argument(
         "--student-anova-range-radius",
@@ -301,8 +273,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Re-run ANOVA on --label-refresh-n-prompts training prompts every N steps "
             "to refresh the in-memory fixed-label cache. "
             "0 = never refresh (use precomputed labels only). "
-            "Only active when --student-cluster-method=fixed_labels, "
-            "--student-mlp-input-cache, and --student-dataset are all set."
+            "Only active when --student-dataset is set."
         ),
     )
     parser.add_argument(
@@ -468,11 +439,8 @@ def main() -> None:
             save_dir=run_dir,
             teacher_data_cache=args.teacher_data_cache,
             align_by_label=args.graph_align_by_label,
-            student_cluster_method=args.student_cluster_method,
             student_dataset=args.student_dataset,
-            student_mlp_input_cache_path=args.student_mlp_input_cache,
             student_activation_write_cache_path=args.student_activation_write_cache,
-            student_fixed_labels_path=args.student_fixed_labels,
             student_anova_range_radius=args.student_anova_range_radius,
             student_anova_nodes_per_label=args.student_anova_nodes_per_label,
             student_sum_min_specificity=args.student_sum_min_specificity,

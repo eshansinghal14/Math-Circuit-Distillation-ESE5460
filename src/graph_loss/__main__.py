@@ -52,101 +52,6 @@ def _format_top_logit_targets(graph: Graph, limit: int = 5) -> str:
     )
 
 
-def _log_supernode_top_prob_deltas(
-    supergraph: SuperGraph,
-    graph: Graph,
-    *,
-    logger: logging.Logger,
-    top_k: int = 10,
-) -> None:
-    logger.info("Supernode top kept-node deltas")
-    if not supergraph.supernodes:
-        logger.info("  no supernodes")
-        return
-    if supergraph.supernode_prob_deltas is None:
-        logger.info("  no stored supernode kept-node deltas")
-        return
-    if supergraph.supernode_prob_deltas.shape[1] == 0:
-        logger.info("  no delta targets")
-        return
-
-    deltas = supergraph.supernode_prob_deltas.detach().float().cpu()
-    delta_node_indices = (
-        supergraph.delta_node_indices.detach().cpu()
-        if supergraph.delta_node_indices is not None
-        else torch.arange(deltas.shape[1], dtype=torch.long)
-    )
-
-    def format_node_label(node_idx: int) -> str:
-        if node_idx < graph.n_neurons:
-            layer = int(graph.neuron_locations[node_idx, 0].item())
-            token_pos = int(graph.neuron_locations[node_idx, 1].item())
-            neuron_id = int(graph.neuron_locations[node_idx, 2].item())
-            return f"neuron[{node_idx}] layer={layer} token={token_pos} id={neuron_id}"
-        token_start = graph.n_neurons
-        logit_start = graph.n_neurons + graph.n_tokens
-        if node_idx < logit_start:
-            token_pos = node_idx - token_start
-            token_id = int(graph.input_tokens[token_pos].item())
-            return f"token[{token_pos}] id={token_id}"
-        logit_idx = node_idx - logit_start
-        if 0 <= logit_idx < graph.n_logits:
-            return f"logit[{logit_idx}] {graph.logit_targets[logit_idx].token_str!r}"
-        return f"node[{node_idx}]"
-
-    for supernode_idx, members in enumerate(supergraph.supernodes):
-        delta = deltas[supernode_idx]
-        k = min(top_k, int(delta.numel()))
-        values, indices = torch.topk(delta.abs(), k=k)
-        formatted = ", ".join(
-            f"{format_node_label(int(delta_node_indices[int(idx.item())].item()))}:{float(delta[int(idx.item())].item()):.6g}"
-            for _value, idx in zip(values, indices, strict=True)
-        )
-        logger.info(
-            "  supernode %d (size=%d): %s",
-            supernode_idx,
-            len(members),
-            formatted,
-        )
-
-
-def _plot_supernode_prob_delta_norms(
-    supergraph: SuperGraph,
-    *,
-    output_path: str,
-    logger: logging.Logger,
-) -> None:
-    if supergraph.supernode_prob_deltas is None:
-        logger.info("Skipping supernode probability-delta norm plot: no stored deltas")
-        return
-    if supergraph.supernode_prob_deltas.numel() == 0:
-        logger.info("Skipping supernode probability-delta norm plot: no deltas")
-        return
-
-    import matplotlib.pyplot as plt
-
-    norms = (
-        supergraph.all_supernode_prob_delta_norms.detach().float().cpu()
-        if supergraph.all_supernode_prob_delta_norms is not None
-        else supergraph.supernode_prob_deltas.detach().float().cpu().norm(dim=1)
-    )
-    xs = list(range(int(norms.numel())))
-    fig, ax = plt.subplots(figsize=(10, 4))
-    ax.bar(xs, norms.tolist())
-    if supergraph.prob_delta_elbow_index is not None and int(norms.numel()):
-        elbow_idx = min(max(int(supergraph.prob_delta_elbow_index), 0), int(norms.numel()) - 1)
-        ax.axvline(elbow_idx, color="red", linestyle="--", label=f"elbow={elbow_idx}")
-        ax.scatter([elbow_idx], [float(norms[elbow_idx].item())], color="red", zorder=3)
-        ax.legend()
-    ax.set_xlabel("supernode")
-    ax.set_ylabel("||kept-node delta||")
-    ax.set_title("Supernode Kept-Node Delta Norms")
-    fig.tight_layout()
-    fig.savefig(output_path)
-    plt.close(fig)
-    logger.info("Saved supernode probability-delta norm plot: %s", output_path)
-
-
 def _log_graph_summary(graph: Graph, *, logger: logging.Logger, stage: str) -> None:
     total_nodes = graph.n_nodes
     total_edges = int(graph.adjacency_matrix.count_nonzero().item())
@@ -353,10 +258,6 @@ def _save_supergraph(path: str, supergraph: SuperGraph) -> None:
         {
             "supernode_adjacency_matrix": supergraph.supernode_adjacency_matrix,
             "supernodes": supergraph.supernodes,
-            "supernode_prob_deltas": supergraph.supernode_prob_deltas,
-            "all_supernode_prob_delta_norms": supergraph.all_supernode_prob_delta_norms,
-            "prob_delta_elbow_index": supergraph.prob_delta_elbow_index,
-            "delta_node_indices": supergraph.delta_node_indices,
             "node_labels": supergraph.node_labels,
             "supernode_labels": supergraph.supernode_labels,
             "supernode_heatmap_pdf_paths": supergraph.supernode_heatmap_pdf_paths,
@@ -652,47 +553,6 @@ def main():
         help="Path to save the influence calibration scatter plot",
     )
     parser.add_argument(
-        "--cossim_eps",
-        type=float,
-        default=0.1,
-        help="Deprecated fallback clustering epsilon; use --embedding_eps and --computation_eps",
-    )
-    parser.add_argument(
-        "--embedding_sigma",
-        type=float,
-        default=1.5,
-        help="Gaussian smoothing sigma for numeric-token embedding supernode clustering",
-    )
-    parser.add_argument(
-        "--embedding_eps",
-        type=float,
-        default=0.1,
-        help="Angular distance epsilon for numeric-token embedding supernode clustering",
-    )
-    parser.add_argument(
-        "--computation_sigma",
-        type=float,
-        default=1.5,
-        help="Gaussian smoothing sigma for final-token computation supernode clustering",
-    )
-    parser.add_argument(
-        "--computation_eps",
-        type=float,
-        default=0.1,
-        help="Angular distance epsilon for final-token computation supernode clustering",
-    )
-    parser.add_argument(
-        "--cluster-method",
-        "--cluster_method",
-        dest="cluster_method",
-        choices=("full_search", "ablation"),
-        default="full_search",
-        help=(
-            "Supernode clustering method. full_search uses the existing dataset activation-write "
-            "clustering; ablation clusters by cosine similarity of zero-ablation probability deltas."
-        ),
-    )
-    parser.add_argument(
         "--dataset",
         help=(
             "Optional dataset prefix, filename, or path for activation-write "
@@ -713,13 +573,6 @@ def main():
             "Optional cache root for dataset activation-write results. "
             "A model-name folder is created inside this path."
         ),
-    )
-    parser.add_argument(
-        "--supernode-prob-delta-norm-output-path",
-        "--supernode_prob_delta_norm_output_path",
-        dest="supernode_prob_delta_norm_output_path",
-        default="supernode_prob_delta_norms.png",
-        help="Path for the post-supergraph supernode probability-delta norm plot",
     )
     parser.add_argument(
         "--supernode-heatmap-output-dir",
@@ -844,16 +697,10 @@ def main():
         graph,
         model,
         prune_result=prune_result,
-        cossim_eps=args.cossim_eps,
-        embedding_sigma=args.embedding_sigma,
-        embedding_eps=args.embedding_eps,
-        computation_sigma=args.computation_sigma,
-        computation_eps=args.computation_eps,
         dataset=args.dataset,
         activation_forward_batch_size=args.activation_forward_batch_size,
         activation_write_cache_path=args.activation_write_cache_path,
         model_name=args.model,
-        cluster_method=args.cluster_method,
         supernode_heatmap_output_dir=args.supernode_heatmap_output_dir,
         anova_nodes_per_label=args.anova_nodes_per_label,
         anova_range_radius=args.anova_range_radius,
@@ -862,12 +709,6 @@ def main():
     _log_supergraph_summary(
         graph,
         supergraph,
-        logger=logger,
-    )
-    _log_supernode_top_prob_deltas(supergraph, graph, logger=logger)
-    _plot_supernode_prob_delta_norms(
-        supergraph,
-        output_path=args.supernode_prob_delta_norm_output_path,
         logger=logger,
     )
     if args.supergraph_output_path:

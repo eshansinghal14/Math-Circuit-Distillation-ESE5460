@@ -283,15 +283,8 @@ def build_neuron_activation_write_result(
     limit: int | None = None,
     log_interval: int = 100,
     include_w_down_vectors: bool = True,
-    mlp_input_cache: dict | None = None,
 ) -> ActivationWriteResult:
-    """Return activation grids and down-projection vectors for the requested neurons.
-
-    If ``mlp_input_cache`` is provided (loaded via
-    ``precompute_mlp_inputs.load_mlp_input_cache``), neuron activations are
-    computed from the pre-cached MLP hidden-state inputs instead of running
-    new forward passes — typically 10-100× faster.
-    """
+    """Return activation grids and down-projection vectors for the requested neurons."""
     logger = logging.getLogger(__name__)
     if forward_batch_size <= 0:
         raise ValueError("forward_batch_size must be positive")
@@ -379,203 +372,112 @@ def build_neuron_activation_write_result(
         if include_w_down_vectors:
             w_down_vectors[location_idx] = w_out_cache[layer][neuron_id].detach().float().cpu()
 
-    if mlp_input_cache is not None:
-        # ── Fast path: compute activations from pre-cached MLP hidden-state inputs ──
-        # mlp_input_cache["layer_inputs"][i] has shape [n_cache_prompts, n_positions, d_model]
-        # mlp_input_cache["meta"]["numeric_args_by_prompt"] gives arg values per prompt.
-        cache_meta = mlp_input_cache["meta"]
-        cache_layer_inputs: list[torch.Tensor] = mlp_input_cache["layer_inputs"]
-        cache_args: list[list[int]] = cache_meta["numeric_args_by_prompt"]
-        n_cache_prompts = int(cache_meta["n_prompts"])
-        n_cache_positions = int(cache_meta["n_positions"])
+    for batch_start in range(0, len(prompts), forward_batch_size):
+        batch_prompts = prompts[batch_start:batch_start + forward_batch_size]
+        batch_numeric_args = numeric_args_by_prompt[
+            batch_start:batch_start + len(batch_prompts)
+        ]
+        input_ids, lengths = _tokenize_prompt_batch(model, batch_prompts)
+        max_len = input_ids.shape[1]
+        active_groups = {
+            group_key: group_members
+            for group_key, group_members in location_groups.items()
+            if group_key[1] < max_len
+        }
+        if not active_groups:
+            continue
 
-        logger.info(
-            "  Using pre-cached MLP inputs (%d prompts, %d positions) — skipping forward passes",
-            n_cache_prompts,
-            n_cache_positions,
-        )
+        cached_inputs: dict[tuple[int, int], torch.Tensor] = {}
+        hooks = []
+        for layer, token_pos in active_groups:
+            hook_name = f"blocks.{layer}.{model.feature_input_hook}"
 
-        # Precompute linear grid index for every cached prompt — done once, reused per group.
-        n_grid_dims = len(arg_to_idx)
-        n_flat = 1
-        for s in grid_shape:
-            n_flat *= s
-        prompt_valid = torch.ones(n_cache_prompts, dtype=torch.bool)
-        prompt_linear_idx = torch.zeros(n_cache_prompts, dtype=torch.long)
-        for prompt_idx, numeric_args in enumerate(cache_args):
-            if len(numeric_args) != n_grid_dims:
-                prompt_valid[prompt_idx] = False
-                continue
-            linear = 0
-            stride = 1
-            ok = True
-            for dim in range(n_grid_dims - 1, -1, -1):
-                val = numeric_args[dim]
-                if val not in arg_to_idx[dim]:
-                    ok = False
-                    break
-                linear += arg_to_idx[dim][val] * stride
-                stride *= grid_shape[dim]
-            if not ok:
-                prompt_valid[prompt_idx] = False
-            else:
-                prompt_linear_idx[prompt_idx] = linear
+            def cache_target_position(
+                acts: torch.Tensor,
+                hook,
+                *,
+                key: tuple[int, int] = (layer, token_pos),
+            ) -> torch.Tensor:
+                cached_inputs[key] = acts[:, key[1], :].detach()
+                return acts
 
-        valid_linear = prompt_linear_idx[prompt_valid]  # [n_valid]
-        flat_counts_row = torch.zeros(n_flat, dtype=torch.float32)
-        flat_counts_row.scatter_add_(0, valid_linear, torch.ones(int(prompt_valid.sum()), dtype=torch.float32))
+            hooks.append((hook_name, cache_target_position))
 
-        for (layer, token_pos), group_members in location_groups.items():
-            if token_pos >= n_cache_positions:
-                continue
-            # [n_cache_prompts, d_model]
-            mlp_input_at_pos = cache_layer_inputs[layer][:, token_pos, :].float()
+        model.run_with_hooks(input_ids, fwd_hooks=hooks)
+        for (layer, token_pos), group_members in active_groups.items():
+            mlp_input_at_pos = cached_inputs.get((layer, token_pos))
+            if mlp_input_at_pos is None:
+                raise RuntimeError(
+                    f"Did not cache target hook for layer={layer}, token_pos={token_pos}"
+                )
+
             old_mlp = model.blocks[layer].mlp.old_mlp
+            valid_at_pos = torch.tensor(
+                [token_pos < length for length in lengths],
+                dtype=torch.bool,
+                device=mlp_input_at_pos.device,
+            )
             location_indices = [location_idx for location_idx, _neuron_id in group_members]
             neuron_ids = torch.tensor(
                 [neuron_id for _location_idx, neuron_id in group_members],
                 dtype=torch.long,
             )
             gate_weights = _select_mlp_neuron_weights(
-                model, old_mlp.W_gate, neuron_ids, device="cpu", dtype=torch.float32
+                model,
+                old_mlp.W_gate,
+                neuron_ids,
+                device=mlp_input_at_pos.device,
+                dtype=mlp_input_at_pos.dtype,
             )
             up_weights = _select_mlp_neuron_weights(
-                model, old_mlp.W_in, neuron_ids, device="cpu", dtype=torch.float32
+                model,
+                old_mlp.W_in,
+                neuron_ids,
+                device=mlp_input_at_pos.device,
+                dtype=mlp_input_at_pos.dtype,
             )
             gate_biases = _select_mlp_neuron_biases(
-                old_mlp, "b_gate", neuron_ids, device="cpu", dtype=torch.float32
+                old_mlp,
+                "b_gate",
+                neuron_ids,
+                device=mlp_input_at_pos.device,
+                dtype=mlp_input_at_pos.dtype,
             )
             up_biases = _select_mlp_neuron_biases(
-                old_mlp, "b_in", neuron_ids, device="cpu", dtype=torch.float32
+                old_mlp,
+                "b_in",
+                neuron_ids,
+                device=mlp_input_at_pos.device,
+                dtype=mlp_input_at_pos.dtype,
             )
-            gate_pre = mlp_input_at_pos @ gate_weights.T + gate_biases
-            up_pre = mlp_input_at_pos @ up_weights.T + up_biases
-            acts_by_prompt = F.silu(gate_pre) * up_pre
+            activations_by_prompt = (
+                F.silu(mlp_input_at_pos @ gate_weights.T + gate_biases)
+                * (mlp_input_at_pos @ up_weights.T + up_biases)
+            )
             if token_pos == 0:
-                acts_by_prompt.zero_()
+                activations_by_prompt.zero_()
 
-            # acts_valid: [n_valid, n_group_neurons]
-            acts_valid = acts_by_prompt[prompt_valid].detach().float()
-            n_group = len(location_indices)
-            n_valid = acts_valid.shape[0]
-            # scatter_add all neurons at once: [n_group, n_flat]
-            flat_sums = torch.zeros(n_group, n_flat, dtype=torch.float32)
-            flat_sums.scatter_add_(
-                1,
-                valid_linear.unsqueeze(0).expand(n_group, -1),
-                acts_valid.T,
-            )
+            activations_cpu = activations_by_prompt.detach().float().cpu()
+            valid_cpu = valid_at_pos.detach().cpu()
             for group_idx, location_idx in enumerate(location_indices):
-                activation_sums[location_idx] += flat_sums[group_idx].reshape(grid_shape)
-                activation_counts[location_idx] += flat_counts_row.reshape(grid_shape)
-    else:
-        # ── Standard path: run forward passes per batch ──
-        for batch_start in range(0, len(prompts), forward_batch_size):
-            batch_prompts = prompts[batch_start:batch_start + forward_batch_size]
-            batch_numeric_args = numeric_args_by_prompt[
-                batch_start:batch_start + len(batch_prompts)
-            ]
-            input_ids, lengths = _tokenize_prompt_batch(model, batch_prompts)
-            max_len = input_ids.shape[1]
-            active_groups = {
-                group_key: group_members
-                for group_key, group_members in location_groups.items()
-                if group_key[1] < max_len
-            }
-            if not active_groups:
-                continue
-
-            cached_inputs: dict[tuple[int, int], torch.Tensor] = {}
-            hooks = []
-            for layer, token_pos in active_groups:
-                hook_name = f"blocks.{layer}.{model.feature_input_hook}"
-
-                def cache_target_position(
-                    acts: torch.Tensor,
-                    hook,
-                    *,
-                    key: tuple[int, int] = (layer, token_pos),
-                ) -> torch.Tensor:
-                    cached_inputs[key] = acts[:, key[1], :].detach()
-                    return acts
-
-                hooks.append((hook_name, cache_target_position))
-
-            model.run_with_hooks(input_ids, fwd_hooks=hooks)
-            for (layer, token_pos), group_members in active_groups.items():
-                mlp_input_at_pos = cached_inputs.get((layer, token_pos))
-                if mlp_input_at_pos is None:
-                    raise RuntimeError(
-                        f"Did not cache target hook for layer={layer}, token_pos={token_pos}"
+                for numeric_args, activation, is_valid in zip(
+                    batch_numeric_args,
+                    activations_cpu[:, group_idx],
+                    valid_cpu,
+                    strict=True,
+                ):
+                    if not bool(is_valid.item()):
+                        continue
+                    grid_idx = tuple(
+                        arg_to_idx[dim][arg_value]
+                        for dim, arg_value in enumerate(numeric_args)
                     )
+                    activation_sums[(location_idx, *grid_idx)] += float(activation.item())
+                    activation_counts[(location_idx, *grid_idx)] += 1.0
 
-                old_mlp = model.blocks[layer].mlp.old_mlp
-                valid_at_pos = torch.tensor(
-                    [token_pos < length for length in lengths],
-                    dtype=torch.bool,
-                    device=mlp_input_at_pos.device,
-                )
-                location_indices = [location_idx for location_idx, _neuron_id in group_members]
-                neuron_ids = torch.tensor(
-                    [neuron_id for _location_idx, neuron_id in group_members],
-                    dtype=torch.long,
-                )
-                gate_weights = _select_mlp_neuron_weights(
-                    model,
-                    old_mlp.W_gate,
-                    neuron_ids,
-                    device=mlp_input_at_pos.device,
-                    dtype=mlp_input_at_pos.dtype,
-                )
-                up_weights = _select_mlp_neuron_weights(
-                    model,
-                    old_mlp.W_in,
-                    neuron_ids,
-                    device=mlp_input_at_pos.device,
-                    dtype=mlp_input_at_pos.dtype,
-                )
-                gate_biases = _select_mlp_neuron_biases(
-                    old_mlp,
-                    "b_gate",
-                    neuron_ids,
-                    device=mlp_input_at_pos.device,
-                    dtype=mlp_input_at_pos.dtype,
-                )
-                up_biases = _select_mlp_neuron_biases(
-                    old_mlp,
-                    "b_in",
-                    neuron_ids,
-                    device=mlp_input_at_pos.device,
-                    dtype=mlp_input_at_pos.dtype,
-                )
-                activations_by_prompt = (
-                    F.silu(mlp_input_at_pos @ gate_weights.T + gate_biases)
-                    * (mlp_input_at_pos @ up_weights.T + up_biases)
-                )
-                if token_pos == 0:
-                    activations_by_prompt.zero_()
-
-                activations_cpu = activations_by_prompt.detach().float().cpu()
-                valid_cpu = valid_at_pos.detach().cpu()
-                for group_idx, location_idx in enumerate(location_indices):
-                    for numeric_args, activation, is_valid in zip(
-                        batch_numeric_args,
-                        activations_cpu[:, group_idx],
-                        valid_cpu,
-                        strict=True,
-                    ):
-                        if not bool(is_valid.item()):
-                            continue
-                        grid_idx = tuple(
-                            arg_to_idx[dim][arg_value]
-                            for dim, arg_value in enumerate(numeric_args)
-                        )
-                        activation_sums[(location_idx, *grid_idx)] += float(activation.item())
-                        activation_counts[(location_idx, *grid_idx)] += 1.0
-
-            processed = batch_start + len(batch_prompts)
-            if log_interval and processed % log_interval == 0:
-                logger.info("Processed %d activation samples", processed)
+        processed = batch_start + len(batch_prompts)
+        if log_interval and processed % log_interval == 0:
+            logger.info("Processed %d activation samples", processed)
 
     activations = activation_sums / activation_counts.clamp(min=1.0)
     activations[activation_counts == 0] = float("nan")

@@ -13,9 +13,7 @@ import torch
 from huggingface_hub import login
 from transformers import AutoTokenizer
 
-from graph_loss.align import compute_supernode_dla
 from graph_loss.attribution.attribute import attribute
-from graph_loss.precompute_mlp_inputs import load_mlp_input_cache, mlp_input_cache_exists
 from graph_loss.__main__ import (
     _log_graph_summary,
     _log_pipeline_comparison,
@@ -23,11 +21,9 @@ from graph_loss.__main__ import (
     _log_supergraph_summary,
 )
 from graph_loss.graph import (
-    Graph,
     PruneResult,
     SuperGraph,
     build_super_graph,
-    extract_supernode_members,
     prune_graph,
 )
 from graph_loss.replacement_model import TransformerLensReplacementModel
@@ -61,17 +57,10 @@ class TeacherDataConfig:
     start_index: int = 0
     overwrite: bool = False
     fast: bool = True
-    cluster_method: str = "ablation"
     skip_graph_save: bool = True
-    cossim_eps: float = 0.1
-    embedding_sigma: float = 1.5
-    embedding_eps: float = 0.1
-    computation_sigma: float = 1.5
-    computation_eps: float = 0.1
     dataset: str | None = None
     activation_forward_batch_size: int = 32
     activation_write_cache_path: str | None = None
-    mlp_input_cache_path: str | None = None
     anova_nodes_per_label: int = 10
     anova_range_radius: int = 0
     sum_min_specificity: float = 0.0
@@ -116,26 +105,14 @@ def _save_supergraph(
     path: str,
     supergraph: SuperGraph,
     logit_token_ids: torch.Tensor | None = None,
-    graph_n_neurons: int | None = None,
-    graph_n_tokens: int | None = None,
 ) -> None:
     data: dict[str, Any] = {
         "supernode_adjacency_matrix": supergraph.supernode_adjacency_matrix,
         "supernodes": supergraph.supernodes,
-        "supernode_prob_deltas": supergraph.supernode_prob_deltas,
-        "all_supernode_prob_delta_norms": supergraph.all_supernode_prob_delta_norms,
-        "prob_delta_elbow_index": supergraph.prob_delta_elbow_index,
-        "delta_node_indices": supergraph.delta_node_indices,
         "supernode_labels": supergraph.supernode_labels,
     }
     if logit_token_ids is not None:
         data["logit_token_ids"] = logit_token_ids.cpu()
-    # Saved so the loss can identify which delta_node_indices rows are
-    # logit positions vs. neurons/tokens (needed for cross-model node loss).
-    if graph_n_neurons is not None:
-        data["graph_n_neurons"] = int(graph_n_neurons)
-    if graph_n_tokens is not None:
-        data["graph_n_tokens"] = int(graph_n_tokens)
     torch.save(data, path)
 
 
@@ -179,36 +156,6 @@ def _compute_teacher_logits(model, input_ids: torch.Tensor) -> torch.Tensor:
     return logits.squeeze(0).detach().cpu()
 
 
-@torch.no_grad()
-def _save_teacher_supernode_dla(
-    path: str,
-    *,
-    supergraph: SuperGraph,
-    graph: Graph,
-    model: TransformerLensReplacementModel,
-) -> None:
-    members = extract_supernode_members(supergraph, graph, model)
-    W_U = model.unembed.W_U
-    cluster_ids = [int(member["cluster_id"]) for member in members]
-    dla_vectors = [
-        compute_supernode_dla(member, W_U).detach().cpu()
-        for member in members
-    ]
-    dla = (
-        torch.stack(dla_vectors, dim=0)
-        if dla_vectors
-        else torch.empty((0, W_U.shape[1]), dtype=W_U.dtype)
-    )
-    torch.save(
-        {
-            "cluster_ids": cluster_ids,
-            "teacher_ids": cluster_ids,
-            "dla": dla,
-        },
-        path,
-    )
-
-
 def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
     logger = logging.getLogger(__name__)
     store_path = os.path.abspath(config.store_path)
@@ -245,26 +192,6 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
         AutoTokenizer.from_pretrained(config.student_model)
     )
     tokenizer.pad_token = tokenizer.eos_token
-
-    mlp_input_cache: dict | None = None
-    if config.mlp_input_cache_path:
-        # The MLP input cache is keyed on the activation dataset (--dataset), not the
-        # training dataset (--dataset-file), since it's built from the activation dataset.
-        activation_dataset = config.dataset or config.dataset_file
-        dataset_path_for_cache = _resolve_dataset_file(activation_dataset)
-        if mlp_input_cache_exists(config.mlp_input_cache_path, config.teacher_model, dataset_path_for_cache):
-            logger.info("Loading pre-computed MLP input cache from %s", config.mlp_input_cache_path)
-            mlp_input_cache = load_mlp_input_cache(
-                config.mlp_input_cache_path, config.teacher_model, dataset_path_for_cache
-            )
-            logger.info("  Loaded: %d prompts, %d layers", mlp_input_cache["meta"]["n_prompts"], mlp_input_cache["meta"]["n_layers"])
-        else:
-            logger.warning(
-                "MLP input cache not found at %s for model=%s dataset=%s — falling back to forward passes",
-                config.mlp_input_cache_path,
-                config.teacher_model,
-                dataset_path_for_cache,
-            )
 
     manifest: dict[str, Any] = {
         "version": 1,
@@ -332,8 +259,7 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
 
         activation_dataset = config.dataset or config.dataset_file
         logger.info(
-            "Running build_super_graph (cluster_method=%s, activation_dataset=%s)",
-            config.cluster_method,
+            "Running build_super_graph (activation_dataset=%s)",
             activation_dataset,
         )
         with torch.no_grad():
@@ -341,17 +267,10 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
                 graph_for_supergraph,
                 model,
                 prune_result=prune_result,
-                cossim_eps=config.cossim_eps,
-                embedding_sigma=config.embedding_sigma,
-                embedding_eps=config.embedding_eps,
-                computation_sigma=config.computation_sigma,
-                computation_eps=config.computation_eps,
                 dataset=activation_dataset,
                 activation_forward_batch_size=config.activation_forward_batch_size,
                 activation_write_cache_path=config.activation_write_cache_path,
-                mlp_input_cache=mlp_input_cache,
                 model_name=config.teacher_model,
-                cluster_method=config.cluster_method,
                 anova_nodes_per_label=config.anova_nodes_per_label,
                 anova_range_radius=config.anova_range_radius,
                 sum_min_specificity=config.sum_min_specificity,
@@ -367,8 +286,6 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
             supergraph_path,
             supergraph,
             logit_token_ids=graph.logit_token_ids,
-            graph_n_neurons=graph.n_neurons,
-            graph_n_tokens=graph.n_tokens,
         )
         _log_pipeline_comparison(
             graph_for_supergraph,
@@ -376,16 +293,6 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
             logger=logger,
             prune_result=prune_result,
         )
-
-        dla_path = os.path.join(sample_dir, "teacher_supernode_dla.pt")
-        logger.info("Saving teacher supernode DLA to %s", dla_path)
-        with torch.no_grad():
-            _save_teacher_supernode_dla(
-                dla_path,
-                supergraph=supergraph,
-                graph=graph_for_supergraph,
-                model=model,
-            )
 
         logger.info("Computing teacher logits for distillation cache")
         distill_tensors = _build_distillation_tensors(prompt, answer, tokenizer)
@@ -418,7 +325,6 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
                 "graph": _relative(graph_path, sample_dir) if not config.skip_graph_save else None,
                 "prune_result": _relative(prune_path, sample_dir) if prune_path else None,
                 "supergraph": _relative(supergraph_path, sample_dir),
-                "teacher_supernode_dla": _relative(dla_path, sample_dir),
                 "teacher_logits": _relative(logits_path, sample_dir),
             },
         }
@@ -435,7 +341,6 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
                 "metadata": _relative(metadata_path, store_path),
                 "teacher_logits": _relative(logits_path, store_path),
                 "supergraph": _relative(supergraph_path, store_path),
-                "teacher_supernode_dla": _relative(dla_path, store_path),
                 "graph": _relative(graph_path, store_path) if not config.skip_graph_save else None,
                 "prune_result": _relative(prune_path, store_path) if prune_path else None,
             }
@@ -519,44 +424,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use full Jacobian attribution instead of fast mode.",
     )
     parser.add_argument(
-        "--cluster-method",
-        "--cluster_method",
-        dest="cluster_method",
-        choices=("full_search", "ablation"),
-        default="ablation",
-        help="Supergraph clustering method (default: ablation)",
-    )
-    parser.add_argument(
-        "--cossim_eps",
-        type=float,
-        default=0.1,
-        help="Deprecated fallback clustering epsilon; use --embedding_eps and --computation_eps",
-    )
-    parser.add_argument(
-        "--embedding_sigma",
-        type=float,
-        default=1.5,
-        help="Gaussian smoothing sigma for numeric-token embedding supernode clustering",
-    )
-    parser.add_argument(
-        "--embedding_eps",
-        type=float,
-        default=0.1,
-        help="Angular distance epsilon for numeric-token embedding supernode clustering",
-    )
-    parser.add_argument(
-        "--computation_sigma",
-        type=float,
-        default=1.5,
-        help="Gaussian smoothing sigma for final-token computation supernode clustering",
-    )
-    parser.add_argument(
-        "--computation_eps",
-        type=float,
-        default=0.1,
-        help="Angular distance epsilon for final-token computation supernode clustering",
-    )
-    parser.add_argument(
         "--dataset",
         help=(
             "Optional dataset prefix, filename, or path for activation-write "
@@ -576,18 +443,6 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Optional cache root for dataset activation-write results. "
             "A model-name folder is created inside this path."
-        ),
-    )
-    parser.add_argument(
-        "--mlp-input-cache",
-        "--mlp_input_cache_path",
-        dest="mlp_input_cache_path",
-        default=None,
-        help=(
-            "Path to a pre-computed MLP residual-stream input cache (generated by "
-            "python -m graph_loss.precompute_mlp_inputs). When provided, "
-            "build_neuron_activation_write_result uses cached hidden states instead "
-            "of running fresh forward passes — typically 10-100x faster."
         ),
     )
     parser.add_argument(
@@ -670,17 +525,10 @@ def main() -> None:
         start_index=args.start_index,
         overwrite=args.overwrite,
         fast=args.fast,
-        cluster_method=args.cluster_method,
         skip_graph_save=args.skip_graph_save,
-        cossim_eps=args.cossim_eps,
-        embedding_sigma=args.embedding_sigma,
-        embedding_eps=args.embedding_eps,
-        computation_sigma=args.computation_sigma,
-        computation_eps=args.computation_eps,
         dataset=args.dataset,
         activation_forward_batch_size=args.activation_forward_batch_size,
         activation_write_cache_path=args.activation_write_cache_path,
-        mlp_input_cache_path=args.mlp_input_cache_path,
         anova_nodes_per_label=args.anova_nodes_per_label,
         anova_range_radius=args.anova_range_radius,
         sum_min_specificity=args.sum_min_specificity,

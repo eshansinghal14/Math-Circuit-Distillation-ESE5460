@@ -159,11 +159,7 @@ def _supergraph_nodes(
 ) -> list[dict[str, Any]]:
     locations = graph.neuron_locations.detach().cpu()
     activations = graph.neuron_activations.detach().float().cpu()
-    delta_norms = (
-        supergraph.supernode_prob_deltas.detach().float().cpu().norm(dim=1)
-        if supergraph.supernode_prob_deltas is not None
-        else None
-    )
+    delta_norms = None
 
     nodes = []
     for supernode_idx, members in enumerate(supergraph.supernodes):

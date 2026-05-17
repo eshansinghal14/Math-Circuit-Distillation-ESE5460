@@ -51,9 +51,7 @@ class DistillationConfig:
     fast_student_graph: bool = False
     ablation_batch_size: int = 32
     align_by_label: bool = False
-    student_cluster_method: str = "ablation"
     student_dataset: Optional[str] = None
-    student_mlp_input_cache_path: Optional[str] = None
     student_activation_write_cache_path: Optional[str] = None
     student_anova_range_radius: int = 0
     student_anova_nodes_per_label: int = 10
@@ -61,7 +59,6 @@ class DistillationConfig:
     lambda_kl: float = 1.0
     graph_grad_norm_scale: bool = False
     graph_start_step: int = 1
-    student_fixed_labels_path: Optional[str] = None
     eval_batch_size: int = 50
     step_log_interval: int = 50
     save_best: bool = False

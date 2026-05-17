@@ -4,12 +4,13 @@ Unlike :mod:`precompute_fixed_labels_fast` (which first runs forward passes on
 all dataset prompts to filter neurons by ``source_vector_norm`` and then runs
 ANOVA on the filtered union), this script skips the filtering phase entirely.
 
-It uses the pre-computed MLP input cache to compute activations for *every*
+It runs forward passes over all dataset prompts, captures the residual-stream
+input to each MLP layer in CPU RAM, then computes activations for *every*
 ``(layer, neuron_id)`` combination via a vectorized GPU matrix multiply::
 
     activation_neuron_i(prompt_j, pos_p) = silu(x_jp @ W_gate_i^T) * (x_jp @ W_up_i^T)
 
-where ``x_jp`` is the cached residual-stream input to the MLP at layer ``l``,
+where ``x_jp`` is the captured residual-stream input to the MLP at layer ``l``,
 token position ``p``, for prompt ``j``.
 
 Processing is done one layer at a time.  For each layer the activation tensor
@@ -29,7 +30,6 @@ Usage (run once before training)::
     python -m graph_loss.precompute_fixed_labels_full \\
         --model meta-llama/Llama-3.2-1B-Instruct \\
         --dataset 22_add_tight_all \\
-        --mlp-input-cache /content/local_caches/mlp-input-cache \\
         --output /content/fixed_labels_full.json \\
         --anova-nodes-per-label 3
 """
@@ -55,6 +55,89 @@ def _ensure_src_on_path() -> None:
     src_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if src_dir not in sys.path:
         sys.path.insert(0, src_dir)
+
+
+@torch.no_grad()
+def _collect_mlp_inputs_in_memory(
+    adapter,
+    prompts: List[str],
+    numeric_args_by_prompt: List[List[int]],
+    *,
+    batch_size: int = 8,
+) -> dict:
+    """Forward-pass all prompts and collect MLP residual-stream inputs in CPU RAM.
+
+    Uses ``register_forward_pre_hook`` on each MLP layer to capture the
+    residual-stream tensor entering the MLP (shape ``[bs, seq_len, d_model]``)
+    without storing anything to disk.
+
+    Returns a dict with the same structure expected by
+    ``_run_gpu_anova_all_neurons``:
+      - ``meta``: n_prompts, n_layers, d_model, d_mlp, n_positions,
+                  numeric_args_by_prompt
+      - ``layer_inputs``: list of ``[n_prompts, n_positions, d_model]`` float16
+                          CPU tensors, one per layer.
+    """
+    from graph_loss.neuron_activation_heatmap import _tokenize_prompt_batch
+
+    n_prompts = len(prompts)
+    n_layers = adapter.n_layers
+    d_model = adapter.d_model
+
+    first_ids, _ = _tokenize_prompt_batch(adapter, prompts[:1])
+    n_positions = first_ids.shape[1]
+
+    layer_inputs = [
+        torch.zeros(n_prompts, n_positions, d_model, dtype=torch.float16)
+        for _ in range(n_layers)
+    ]
+
+    for batch_start in range(0, n_prompts, batch_size):
+        batch_prompts = prompts[batch_start : batch_start + batch_size]
+        input_ids, _ = _tokenize_prompt_batch(adapter, batch_prompts)
+        bs, seq_len = input_ids.shape
+        store_len = min(seq_len, n_positions)
+
+        captured: Dict[int, torch.Tensor] = {}
+        handles = []
+        for layer_idx, layer in enumerate(adapter.layers):
+            def _pre_hook(_module, inputs, *, idx=layer_idx):
+                captured[idx] = inputs[0].detach().cpu().to(torch.float16)
+            handles.append(layer.mlp.register_forward_pre_hook(_pre_hook))
+
+        try:
+            adapter.model(
+                input_ids=input_ids,
+                attention_mask=torch.ones_like(input_ids),
+                use_cache=False,
+            )
+        finally:
+            for h in handles:
+                h.remove()
+
+        for layer_idx in range(n_layers):
+            acts = captured[layer_idx]  # [bs, seq_len, d_model]
+            layer_inputs[layer_idx][batch_start : batch_start + bs, :store_len, :] = (
+                acts[:, :store_len, :]
+            )
+
+        logger.info(
+            "  Collected %d / %d prompts",
+            min(batch_start + batch_size, n_prompts),
+            n_prompts,
+        )
+
+    return {
+        "meta": {
+            "n_prompts": n_prompts,
+            "n_layers": n_layers,
+            "d_model": d_model,
+            "d_mlp": adapter.d_mlp,
+            "n_positions": n_positions,
+            "numeric_args_by_prompt": numeric_args_by_prompt,
+        },
+        "layer_inputs": layer_inputs,
+    }
 
 
 def _run_gpu_anova_all_neurons(
@@ -255,9 +338,8 @@ def main() -> None:
         help="Dataset name (e.g. '22_add_tight_all') or path to a JSON file",
     )
     parser.add_argument(
-        "--mlp-input-cache", required=True,
-        help="Path to the pre-computed MLP input cache root directory "
-             "(created by precompute_mlp_inputs.py). Fails fast if missing.",
+        "--batch-size", type=int, default=8,
+        help="Number of prompts per forward pass when collecting MLP inputs (default: 8)",
     )
     parser.add_argument(
         "--output", required=True,
@@ -297,11 +379,6 @@ def main() -> None:
         _parse_numeric_args,
     )
     from utils.dataset_json import load_prompt_answer_json
-    from graph_loss.precompute_mlp_inputs import (
-        load_mlp_input_cache,
-        mlp_input_cache_dir,
-        mlp_input_cache_exists,
-    )
 
     # ── Load student model ────────────────────────────────────────────────────
     logger.info(
@@ -314,7 +391,6 @@ def main() -> None:
     )
     student_model = student_model.to(dtype=dtype)
     adapter = HFLlamaGraphAdapter(student_model, tokenizer, device)
-    model_name = getattr(adapter.model.config, "_name_or_path", args.model)
     logger.info(
         "Model: %d layers, d_mlp=%d, d_model=%d",
         adapter.n_layers,
@@ -326,17 +402,19 @@ def main() -> None:
     dataset_path = _resolve_dataset_path(args.dataset)
     logger.info("Dataset: %s", dataset_path)
     samples = list(load_prompt_answer_json(dataset_path).items())
-    numeric_args_by_sample: List[List[int]] = []
+    prompts: List[str] = []
+    numeric_args_by_prompt: List[List[int]] = []
     for prompt, _answer in samples:
         try:
-            numeric_args_by_sample.append(_parse_numeric_args(prompt))
+            numeric_args_by_prompt.append(_parse_numeric_args(prompt))
+            prompts.append(prompt)
         except ValueError:
             pass
-    if not numeric_args_by_sample:
+    if not prompts:
         raise ValueError(f"No parseable prompts in dataset: {dataset_path}")
-    n_arg_dims = len(numeric_args_by_sample[0])
+    n_arg_dims = len(numeric_args_by_prompt[0])
     arg_values: List[List[int]] = [
-        sorted({args[dim] for args in numeric_args_by_sample if len(args) == n_arg_dims})
+        sorted({args[dim] for args in numeric_args_by_prompt if len(args) == n_arg_dims})
         for dim in range(n_arg_dims)
     ]
     logger.info(
@@ -345,28 +423,21 @@ def main() -> None:
         int(__import__("math").prod(len(v) for v in arg_values)),
     )
 
-    # ── Load MLP input cache (REQUIRED) ───────────────────────────────────────
-    if not mlp_input_cache_exists(args.mlp_input_cache, model_name, dataset_path):
-        expected_dir = mlp_input_cache_dir(args.mlp_input_cache, model_name, dataset_path)
-        logger.error(
-            "MLP input cache not found. Expected: %r\n"
-            "Run:  python -m graph_loss.precompute_mlp_inputs \\\n"
-            "          --model %s \\\n"
-            "          --dataset %s \\\n"
-            "          --cache-dir %s",
-            expected_dir,
-            args.model,
-            args.dataset,
-            args.mlp_input_cache,
-        )
-        sys.exit(1)
-
-    mlp_input_cache = load_mlp_input_cache(args.mlp_input_cache, model_name, dataset_path)
+    # ── Collect MLP inputs in memory ─────────────────────────────────────────
+    logger.info(
+        "Collecting MLP inputs for %d prompts (batch_size=%d) …",
+        len(prompts),
+        args.batch_size,
+    )
+    mlp_input_cache = _collect_mlp_inputs_in_memory(
+        adapter,
+        prompts,
+        numeric_args_by_prompt,
+        batch_size=args.batch_size,
+    )
     n_cache_prompts = int(mlp_input_cache["meta"]["n_prompts"])
     n_cache_positions = int(mlp_input_cache["meta"]["n_positions"])
-    logger.info(
-        "MLP input cache: %d prompts, %d positions", n_cache_prompts, n_cache_positions
-    )
+    logger.info("Collected %d prompts, %d positions", n_cache_prompts, n_cache_positions)
 
     # ── Run GPU-vectorized ANOVA layer by layer ───────────────────────────────
     logger.info(
