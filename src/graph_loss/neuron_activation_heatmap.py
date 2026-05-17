@@ -274,6 +274,115 @@ def _activations_for_location_batch(
 
 
 @torch.no_grad()
+def compute_activation_grid_from_mlp_cache(
+    model,
+    kept_neuron_locations: torch.Tensor,
+    mlp_input_cache: dict,
+) -> ActivationWriteResult:
+    """Build activation grid from in-memory MLP cache — no disk I/O, fully vectorized."""
+    meta = mlp_input_cache.get("meta", {})
+    layer_inputs = mlp_input_cache.get("layer_inputs", {})
+    numeric_args_list = meta.get("numeric_args_by_prompt", [])
+
+    if not numeric_args_list:
+        raise ValueError("MLP input cache missing numeric_args_by_prompt")
+
+    n_cache_prompts = len(numeric_args_list)
+    n_dims = len(numeric_args_list[0])
+
+    arg_values = [
+        sorted({args[dim] for args in numeric_args_list})
+        for dim in range(n_dims)
+    ]
+    arg_to_idx = [{v: i for i, v in enumerate(vals)} for vals in arg_values]
+    grid_shape = tuple(len(vals) for vals in arg_values)
+    grid_cells = 1
+    for s in grid_shape:
+        grid_cells *= s
+
+    flat_indices = torch.zeros(n_cache_prompts, dtype=torch.long)
+    stride = 1
+    for dim in range(n_dims - 1, -1, -1):
+        dim_indices = torch.tensor(
+            [arg_to_idx[dim][args[dim]] for args in numeric_args_list], dtype=torch.long
+        )
+        flat_indices = flat_indices + dim_indices * stride
+        stride *= grid_shape[dim]
+
+    n_kept = int(kept_neuron_locations.shape[0])
+    activation_sums = torch.zeros((n_kept, grid_cells), dtype=torch.float32)
+    activation_counts = torch.zeros((n_kept, grid_cells), dtype=torch.float32)
+    ones = torch.ones(n_cache_prompts, dtype=torch.float32)
+
+    location_groups: dict[tuple[int, int], list[tuple[int, int]]] = defaultdict(list)
+    for loc_idx in range(n_kept):
+        layer = int(kept_neuron_locations[loc_idx, 0].item())
+        token_pos = int(kept_neuron_locations[loc_idx, 1].item())
+        neuron_id = int(kept_neuron_locations[loc_idx, 2].item())
+        location_groups[(layer, token_pos)].append((loc_idx, neuron_id))
+
+    for (layer, token_pos), group_members in location_groups.items():
+        if layer not in layer_inputs:
+            continue
+        layer_tensor = layer_inputs[layer]  # [n_cache_prompts, n_positions, d_model]
+        n_positions = int(layer_tensor.shape[1])
+        if token_pos >= n_positions:
+            continue
+
+        device = model.cfg.device
+        mlp_input_at_pos = layer_tensor[:, token_pos, :].to(device=device)
+
+        loc_indices = [loc_idx for loc_idx, _ in group_members]
+        neuron_ids = torch.tensor(
+            [nid for _, nid in group_members], dtype=torch.long, device=device
+        )
+
+        old_mlp = model.blocks[layer].mlp.old_mlp
+        gate_w = _select_mlp_neuron_weights(
+            model, old_mlp.W_gate, neuron_ids, device=device, dtype=mlp_input_at_pos.dtype
+        )
+        up_w = _select_mlp_neuron_weights(
+            model, old_mlp.W_in, neuron_ids, device=device, dtype=mlp_input_at_pos.dtype
+        )
+        gate_b = _select_mlp_neuron_biases(
+            old_mlp, "b_gate", neuron_ids, device=device, dtype=mlp_input_at_pos.dtype
+        )
+        up_b = _select_mlp_neuron_biases(
+            old_mlp, "b_in", neuron_ids, device=device, dtype=mlp_input_at_pos.dtype
+        )
+
+        # [n_cache_prompts, n_group_neurons]
+        acts = F.silu(mlp_input_at_pos @ gate_w.T + gate_b) * (mlp_input_at_pos @ up_w.T + up_b)
+        acts = acts.detach().float().cpu()
+
+        flat_idx_expanded = flat_indices.unsqueeze(1).expand(-1, len(loc_indices))
+        acts_T = acts.T.contiguous()            # [n_group, n_prompts]
+        flat_idx_T = flat_idx_expanded.T.contiguous()  # [n_group, n_prompts]
+
+        sums_group = torch.zeros((len(loc_indices), grid_cells), dtype=torch.float32)
+        counts_group = torch.zeros((len(loc_indices), grid_cells), dtype=torch.float32)
+        sums_group.scatter_add_(1, flat_idx_T, acts_T)
+        counts_group.scatter_add_(1, flat_idx_T, ones.unsqueeze(0).expand(len(loc_indices), -1))
+
+        for i, loc_idx in enumerate(loc_indices):
+            activation_sums[loc_idx] += sums_group[i]
+            activation_counts[loc_idx] += counts_group[i]
+
+    activations_flat = torch.where(
+        activation_counts > 0,
+        activation_sums / activation_counts.clamp(min=1e-10),
+        torch.zeros_like(activation_sums),
+    )
+    activations = activations_flat.reshape(n_kept, *grid_shape)
+
+    return ActivationWriteResult(
+        activations=activations,
+        w_down_vectors=torch.empty((n_kept, 0), dtype=torch.float32),
+        arg_values=arg_values,
+    )
+
+
+@torch.no_grad()
 def build_neuron_activation_write_result(
     model,
     dataset_name: str,

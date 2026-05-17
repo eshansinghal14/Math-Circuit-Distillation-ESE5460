@@ -1,4 +1,4 @@
-﻿"""Graph container and influence utilities for LLaMA neuron attribution."""
+"""Graph container and influence utilities for LLaMA neuron attribution."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from graph_loss.anova_node_labels import (
 from graph_loss.attribution.targets import LogitTarget
 from graph_loss.neuron_activation_heatmap import (
     build_neuron_activation_write_result,
+    compute_activation_grid_from_mlp_cache,
     save_supernode_activation_heatmap_pdf,
 )
 from graph_loss.utils import (
@@ -715,7 +716,19 @@ def build_super_graph(
         # variance for, producing at most ``len(rules)`` (~8) disjoint
         # supernodes per prompt — same labels as full_search but with disjoint
         # membership, which aligns much more cleanly with the teacher cache.
-        activation_write_result = get_activation_write_result_for_kept()
+        logger.info(
+            "[live_anova] Computing activation grid for %d kept neurons (cache fast path)",
+            int(kept_neuron_indices.numel()),
+        )
+        if mlp_input_cache is not None:
+            kept_neuron_locations = graph.neuron_locations[kept_neuron_indices_device].detach().cpu()
+            activation_write_result = compute_activation_grid_from_mlp_cache(
+                model=model,
+                kept_neuron_locations=kept_neuron_locations,
+                mlp_input_cache=mlp_input_cache,
+            )
+        else:
+            activation_write_result = get_activation_write_result_for_kept()
 
         try:
             target_args = parse_numeric_args(graph.input_string)
