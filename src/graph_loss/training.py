@@ -84,6 +84,10 @@ class GraphAuxConfig:
     # instead of running a forward pass per prompt — the dominant cost
     # of student supergraph clustering once attribution is fast.
     student_mlp_input_cache_path: str | None = None
+    # Pre-loaded MLP input cache.  Populated once at trainer startup from
+    # ``student_mlp_input_cache_path`` and reused every step — avoids
+    # reloading the (potentially multi-GB) file on every prompt.
+    mlp_input_cache: dict | None = None
 
 
 def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
@@ -242,32 +246,7 @@ def compute_prompt_graph_loss(
 
     supergraph_start = time.perf_counter()
 
-    student_mlp_input_cache = None
-    if (
-        config.student_cluster_method in {"full_search", "live_anova"}
-        and config.student_mlp_input_cache_path
-        and config.student_dataset
-    ):
-        from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
-        from graph_loss.precompute_mlp_inputs import (
-            load_mlp_input_cache,
-            mlp_input_cache_exists,
-        )
-
-        dataset_path = _resolve_dataset_path(config.student_dataset)
-        student_model_name = getattr(
-            getattr(student_adapter.model, "config", None),
-            "_name_or_path",
-            "unknown_model",
-        )
-        if mlp_input_cache_exists(
-            config.student_mlp_input_cache_path, student_model_name, dataset_path
-        ):
-            student_mlp_input_cache = load_mlp_input_cache(
-                config.student_mlp_input_cache_path,
-                student_model_name,
-                dataset_path,
-            )
+    student_mlp_input_cache = config.mlp_input_cache
 
     with torch.no_grad():
         student_supergraph_structure = build_super_graph(

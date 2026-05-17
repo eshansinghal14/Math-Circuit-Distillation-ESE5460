@@ -148,6 +148,34 @@ class DistillationTrainer:
                 self.device,
             )
 
+            if (
+                config.student_cluster_method in {"full_search", "live_anova"}
+                and config.student_mlp_input_cache_path
+                and config.student_dataset
+            ):
+                from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
+                from graph_loss.precompute_mlp_inputs import (
+                    load_mlp_input_cache,
+                    mlp_input_cache_exists,
+                )
+
+                dataset_path = _resolve_dataset_path(config.student_dataset)
+                student_model_name = getattr(
+                    getattr(self.student, "config", None),
+                    "_name_or_path",
+                    "unknown_model",
+                )
+                if mlp_input_cache_exists(
+                    config.student_mlp_input_cache_path, student_model_name, dataset_path
+                ):
+                    self.graph_loss_config.mlp_input_cache = load_mlp_input_cache(
+                        config.student_mlp_input_cache_path, student_model_name, dataset_path
+                    )
+                    print(
+                        f"[graph] MLP input cache loaded: "
+                        f"{len(self.graph_loss_config.mlp_input_cache['layer_inputs'])} layers"
+                    )
+
         bnb = None
         try:
             bnb = importlib.import_module("bitsandbytes")
