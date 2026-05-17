@@ -404,6 +404,29 @@ class SuperGraph(NamedTuple):
     graph_n_tokens: int | None = None
 
 
+def _valid_labels_for_target_args(target_args: tuple[int, ...]) -> set[str]:
+    """Return the set of fixed-label strings semantically active for *target_args*.
+
+    Matches exactly the ``.label`` attributes produced by
+    ``build_anova_basis_rules(arg_values, target_args=target_args,
+    anova_range_radius=0)`` without needing the full activation-write grid.
+    """
+    if len(target_args) < 2:
+        return set()
+    a1, a2 = int(target_args[0]), int(target_args[1])
+    total = a1 + a2
+    return {
+        f"arg1 {a1}-{a1}",
+        f"arg1 units {a1 % 10}",
+        f"arg2 {a2}-{a2}",
+        f"arg2 units {a2 % 10}",
+        f"arg1 {a1}-{a1} and arg2 {a2}-{a2}",
+        f"sum {total}-{total}",
+        f"sum units {total % 10}",
+        "carry",
+    }
+
+
 def build_super_graph(
     graph: Graph,
     model,
@@ -1253,6 +1276,25 @@ def build_super_graph(
                 "cluster_method='fixed_labels' requires fixed_labels dict. "
                 "Run precompute_fixed_labels.py first and pass --student-fixed-labels."
             )
+        # Filter the global label cache to only the labels active for this prompt's
+        # specific (a1, a2) values.  Without this filter every labeled neuron fires
+        # (e.g. "arg1 0-0" … "arg1 99-99" all exist in the cache), producing ~34
+        # supernodes per prompt instead of the ~9 the teacher produces.
+        try:
+            prompt_target_args = parse_numeric_args(graph.input_string)
+        except ValueError:
+            prompt_target_args = None
+        if prompt_target_args is not None and len(prompt_target_args) >= 2:
+            valid_labels = _valid_labels_for_target_args(prompt_target_args)
+            effective_fixed_labels = {k: v for k, v in fixed_labels.items() if v in valid_labels}
+            logger.info(
+                "[fixed_labels] Prompt target_args=%s: %d valid labels → %d matching neurons",
+                prompt_target_args,
+                len(valid_labels),
+                len(effective_fixed_labels),
+            )
+        else:
+            effective_fixed_labels = fixed_labels
         locations = graph.neuron_locations.detach().cpu().to(dtype=torch.long)
         supernodes_by_label: dict[str, list[int]] = {}
         for member_idx in range(int(kept_neuron_indices.numel())):
@@ -1260,7 +1302,7 @@ def build_super_graph(
             layer = int(locations[member, 0].item())
             neuron_id = int(locations[member, 2].item())
             key = f"{layer}:{neuron_id}"
-            label = fixed_labels.get(key)
+            label = effective_fixed_labels.get(key)
             if label is not None:
                 supernodes_by_label.setdefault(label, []).append(member)
         supernodes = list(supernodes_by_label.values())
