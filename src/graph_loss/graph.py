@@ -422,14 +422,14 @@ def build_super_graph(
       producing at most ``len(rules)`` (~8) disjoint supernodes that align
       cleanly with the teacher's labels.
 
-    ``mlp_input_cache`` is accepted for forward compatibility with
-    pre-computed MLP-input caches (``precompute_mlp_inputs``). It is currently
-    a no-op pass-through — ``build_neuron_activation_write_result`` no longer
-    consumes the cache directly after the recent clean-up; wire it back in if
-    the speed-up is needed again.
+    ``mlp_input_cache`` (built via ``graph_loss.precompute_mlp_inputs``) is
+    forwarded to ``build_neuron_activation_write_result`` whenever a fresh
+    activation grid is built.  Cached prompts skip the per-step forward
+    pass; for the kept-neuron grid the SwiGLU activation is recomputed
+    directly from the cached residual-stream input via ``silu(x @ W_gate.T)
+    * (x @ W_up.T)`` using the *current* model weights (so weights that
+    have moved during distillation are still respected).
     """
-
-    del mlp_input_cache  # accepted for CLI plumbing, not currently consumed
 
     if prune_result is not None:
         graph = graph.apply_prune_result(prune_result)
@@ -677,6 +677,7 @@ def build_super_graph(
                     kept_neuron_locations,
                     forward_batch_size=activation_forward_batch_size,
                     include_w_down_vectors=False,
+                    mlp_input_cache=mlp_input_cache,
                 )
                 kept_activations = kept_activation_write_result.activations
                 kept_arg_values = kept_activation_write_result.arg_values
@@ -704,6 +705,7 @@ def build_super_graph(
                 dataset,
                 kept_neuron_locations,
                 forward_batch_size=activation_forward_batch_size,
+                mlp_input_cache=mlp_input_cache,
             )
         return activation_write_result_for_kept
 
@@ -739,7 +741,14 @@ def build_super_graph(
                     [rule.mask.reshape(-1).to(dtype=torch.float32) for rule in rules],
                     dim=0,
                 )
-                rule_labels = [rule.label for rule in rules]
+                # Use the *category* (e.g. "arg1 range") rather than the
+                # value-specific rule label (e.g. "arg1 22-22") so the
+                # supernode_labels emitted here line up with the labels the
+                # teacher cache (built via full_search) carries.  Multiple
+                # rules can share a category (e.g. when anova_range_radius
+                # widens to several values); winning the argmax in any of
+                # them collapses into the same category supernode.
+                rule_categories = [rule.category for rule in rules]
 
                 # Squared Pearson correlation between each neuron's activation
                 # grid and each rule mask, vectorized across all (neuron, rule)
@@ -764,16 +773,16 @@ def build_super_graph(
                 for kept_local_idx in range(n_kept):
                     if not valid_mask_list[kept_local_idx]:
                         continue
-                    rule_label = rule_labels[int(best_rule_idx_list[kept_local_idx])]
+                    category = rule_categories[int(best_rule_idx_list[kept_local_idx])]
                     global_neuron_idx = int(kept_member_list[kept_local_idx])
-                    category_to_neurons.setdefault(rule_label, []).append(global_neuron_idx)
+                    category_to_neurons.setdefault(category, []).append(global_neuron_idx)
                     node_labels.setdefault(global_neuron_idx, [])
-                    if rule_label not in node_labels[global_neuron_idx]:
-                        node_labels[global_neuron_idx].append(rule_label)
+                    if category not in node_labels[global_neuron_idx]:
+                        node_labels[global_neuron_idx].append(category)
 
-                for rule_label, members in category_to_neurons.items():
+                for category, members in category_to_neurons.items():
                     supernodes.append(members)
-                    supernode_labels.append([rule_label])
+                    supernode_labels.append([category])
 
                 logger.info(
                     "[live_anova] target_args=%s: %d/%d neurons assigned to %d supernodes",

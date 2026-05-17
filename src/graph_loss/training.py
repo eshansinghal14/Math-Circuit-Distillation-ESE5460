@@ -78,10 +78,11 @@ class GraphAuxConfig:
     # is the legacy per-category top-K labelling path.
     student_cluster_method: str = "live_anova"
     # Optional MLP-input cache (built via ``precompute_mlp_inputs``) for the
-    # student model.  Currently loaded but not consumed downstream — the
-    # neuron-activation builder no longer reads it after the recent
-    # ``neuron_activation_heatmap`` clean-up.  Kept for CLI compatibility and
-    # so the cache can be wired back in when the speed-up is needed.
+    # student model.  When set, ``build_super_graph`` forwards the loaded
+    # cache to ``build_neuron_activation_write_result``, which recomputes
+    # SwiGLU activations directly from the cached residual-stream input
+    # instead of running a forward pass per prompt — the dominant cost
+    # of student supergraph clustering once attribution is fast.
     student_mlp_input_cache_path: str | None = None
 
 
