@@ -743,12 +743,10 @@ class DistillationTrainer:
                 BASE_ANOVA_LABEL_CATEGORIES,
                 CATEGORY_COMPONENTS,
                 build_anova_basis_rules,
+                parse_numeric_args as _parse_prompt_args,
             )
             from graph_loss.precompute_fixed_labels_full import _vectorized_anova_scores
-            from graph_loss.neuron_activation_heatmap import (
-                _resolve_dataset_path,
-                _parse_numeric_args,
-            )
+            from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
             from graph_loss.precompute_mlp_inputs import (
                 load_mlp_input_cache,
                 mlp_input_cache_dir,
@@ -783,19 +781,9 @@ class DistillationTrainer:
             n_cache_positions = int(cache_meta["n_positions"])
             cache_args: list = cache_meta["numeric_args_by_prompt"]
 
-            # Build arg_values from the dataset file
-            samples = list(load_prompt_answer_json(dataset_path).items())
-            numeric_args_by_sample = []
-            for prompt, _ in samples:
-                try:
-                    numeric_args_by_sample.append(_parse_numeric_args(prompt))
-                except ValueError:
-                    pass
-            n_arg_dims = len(numeric_args_by_sample[0]) if numeric_args_by_sample else 2
-            arg_values = [
-                sorted({args[dim] for args in numeric_args_by_sample if len(args) == n_arg_dims})
-                for dim in range(n_arg_dims)
-            ]
+            # arg_values for the grid come from the full MLP-cache dataset
+            arg_values: List[List[int]] = cache_meta["arg_values"]
+            n_arg_dims = len(arg_values)
 
             grid_shape = tuple(len(v) for v in arg_values)
             arg_to_idx = [{v: i for i, v in enumerate(vals)} for vals in arg_values]
@@ -837,24 +825,29 @@ class DistillationTrainer:
             n_layers = adapter.n_layers
             d_mlp = adapter.d_mlp
 
-            print(
-                f"[graph] Step {step}: starting GPU ANOVA refresh "
-                f"({n_layers} layers × {n_cache_positions} positions × d_mlp={d_mlp}, "
-                f"valid_prompts={n_valid})"
-            )
+            # ── Collect unique (a1, a2) pairs from the training prompts ───────
+            # These are the exact target_args the teacher uses for each prompt,
+            # so our labels will match the teacher's per-prompt labels exactly.
+            _seen_targets: set = set()
+            unique_train_targets: List[tuple] = []
+            for train_prompt in self.train_data.keys():
+                try:
+                    t = _parse_prompt_args(train_prompt)
+                    if t not in _seen_targets:
+                        _seen_targets.add(t)
+                        unique_train_targets.append(t)
+                except ValueError:
+                    pass
 
-            # Build ANOVA rules + masks once (reused across layers)
-            rules = build_anova_basis_rules(
-                arg_values,
-                target_args=None,
-                anova_range_radius=config.student_anova_range_radius,
+            if not unique_train_targets:
+                print(f"[graph] Step {step}: no parseable training prompts — skipping refresh")
+                return
+
+            print(
+                f"[graph] Step {step}: starting per-prompt GPU ANOVA refresh "
+                f"({n_layers} layers × {n_cache_positions} positions × d_mlp={d_mlp}, "
+                f"valid_prompts={n_valid}, unique_train_pairs={len(unique_train_targets)})"
             )
-            masks_gpu = torch.stack(
-                [rule.mask.float().reshape(-1).to(dev) for rule in rules], dim=0
-            )
-            category_rule_indices: Dict[str, List[int]] = _defaultdict(list)
-            for ri, rule in enumerate(rules):
-                category_rule_indices[rule.category].append(ri)
 
             self.student.eval()
             new_labels: Dict[str, str] = {}
@@ -865,6 +858,7 @@ class DistillationTrainer:
                     W_up   = hf_layer.mlp.up_proj.weight.to(device=dev, dtype=torch.float32)
                     layer_inputs_cpu = cache_layer_inputs[layer_idx][valid_idx]
 
+                    # Build mean-activation grid for this layer: [d_mlp, n_flat]
                     layer_grid_flat = torch.zeros(d_mlp, n_flat, dtype=torch.float32, device=dev)
                     n_active_pos = 0
                     for pos_idx in range(n_cache_positions):
@@ -885,59 +879,77 @@ class DistillationTrainer:
                     grid_flat = layer_grid_flat / n_active_pos / counts_grid.reshape(1, -1)
                     del layer_grid_flat, W_gate, W_up, layer_inputs_cpu
 
-                    # Vectorized ANOVA: one matmul → all (neuron, rule) scores
-                    scores_np = _vectorized_anova_scores(grid_flat, masks_gpu)
-                    del grid_flat
-                    if dev.type == "cuda":
-                        torch.cuda.empty_cache()
-
-                    cat_scores: Dict[str, np.ndarray] = {}
-                    cat_labels: Dict[str, list] = {}
-                    for category, rule_idxs in category_rule_indices.items():
-                        sub = scores_np[:, rule_idxs]
-                        best_local = sub.argmax(axis=1)
-                        cat_scores[category] = sub.max(axis=1)
-                        cat_labels[category] = [rules[rule_idxs[best_local[n]]].label for n in range(d_mlp)]
-
-                    if "arg1 units" in cat_scores and "arg2 units" in cat_scores:
-                        cat_scores["arg1 units and arg2 units"] = np.minimum(
-                            cat_scores["arg1 units"], cat_scores["arg2 units"]
+                    # For each unique training (a1, a2), run vectorized ANOVA
+                    # with that exact target_args — matching the teacher's labels.
+                    for target_args in unique_train_targets:
+                        rules = build_anova_basis_rules(
+                            arg_values,
+                            target_args=target_args,
+                            anova_range_radius=config.student_anova_range_radius,
                         )
-                        cat_labels["arg1 units and arg2 units"] = [
-                            f"{cat_labels['arg1 units'][n]} and {cat_labels['arg2 units'][n]}"
-                            for n in range(d_mlp)
-                        ]
-                    if "arg1 range" in cat_scores and "arg2 range" in cat_scores:
-                        cat_scores["arg1 range and arg2 range"] = np.minimum(
-                            cat_scores["arg1 range"], cat_scores["arg2 range"]
-                        )
-                        cat_labels["arg1 range and arg2 range"] = [
-                            f"{cat_labels['arg1 range'][n]} and {cat_labels['arg2 range'][n]}"
-                            for n in range(d_mlp)
-                        ]
-
-                    for category in ANOVA_LABEL_CATEGORIES:
-                        if category not in cat_scores:
+                        if not rules:
                             continue
-                        cat_arr = cat_scores[category]
-                        excluded = {category} | CATEGORY_COMPONENTS.get(category, set())
-                        competitor = np.zeros(d_mlp, dtype=np.float32)
-                        for comp in BASE_ANOVA_LABEL_CATEGORIES:
-                            if comp not in excluded and comp in cat_scores:
-                                competitor = np.maximum(competitor, cat_scores[comp])
-                        specificity = cat_arr - competitor
-                        scored = [
-                            (nid, float(specificity[nid]))
-                            for nid in range(d_mlp)
-                            if float(cat_arr[nid]) > 0.0
-                            and float(specificity[nid]) > config.student_sum_min_specificity
-                        ]
-                        scored.sort(key=lambda kv: kv[1], reverse=True)
-                        for neuron_id, _ in scored[: config.student_anova_nodes_per_label]:
-                            key = f"{layer_idx}:{neuron_id}"
-                            if key not in new_labels:
-                                new_labels[key] = cat_labels[category][neuron_id]
 
+                        masks_gpu = torch.stack(
+                            [rule.mask.float().reshape(-1).to(dev) for rule in rules], dim=0
+                        )
+                        category_rule_indices: Dict[str, List[int]] = _defaultdict(list)
+                        for ri, rule in enumerate(rules):
+                            category_rule_indices[rule.category].append(ri)
+
+                        scores_np = _vectorized_anova_scores(grid_flat, masks_gpu)
+                        del masks_gpu
+
+                        cat_scores: Dict[str, np.ndarray] = {}
+                        cat_labels: Dict[str, list] = {}
+                        for category, rule_idxs in category_rule_indices.items():
+                            sub = scores_np[:, rule_idxs]
+                            best_local = sub.argmax(axis=1)
+                            cat_scores[category] = sub.max(axis=1)
+                            cat_labels[category] = [
+                                rules[rule_idxs[best_local[n]]].label for n in range(d_mlp)
+                            ]
+
+                        if "arg1 units" in cat_scores and "arg2 units" in cat_scores:
+                            cat_scores["arg1 units and arg2 units"] = np.minimum(
+                                cat_scores["arg1 units"], cat_scores["arg2 units"]
+                            )
+                            cat_labels["arg1 units and arg2 units"] = [
+                                f"{cat_labels['arg1 units'][n]} and {cat_labels['arg2 units'][n]}"
+                                for n in range(d_mlp)
+                            ]
+                        if "arg1 range" in cat_scores and "arg2 range" in cat_scores:
+                            cat_scores["arg1 range and arg2 range"] = np.minimum(
+                                cat_scores["arg1 range"], cat_scores["arg2 range"]
+                            )
+                            cat_labels["arg1 range and arg2 range"] = [
+                                f"{cat_labels['arg1 range'][n]} and {cat_labels['arg2 range'][n]}"
+                                for n in range(d_mlp)
+                            ]
+
+                        for category in ANOVA_LABEL_CATEGORIES:
+                            if category not in cat_scores:
+                                continue
+                            cat_arr = cat_scores[category]
+                            excluded = {category} | CATEGORY_COMPONENTS.get(category, set())
+                            competitor = np.zeros(d_mlp, dtype=np.float32)
+                            for comp in BASE_ANOVA_LABEL_CATEGORIES:
+                                if comp not in excluded and comp in cat_scores:
+                                    competitor = np.maximum(competitor, cat_scores[comp])
+                            specificity = cat_arr - competitor
+                            scored = [
+                                (nid, float(specificity[nid]))
+                                for nid in range(d_mlp)
+                                if float(cat_arr[nid]) > 0.0
+                                and float(specificity[nid]) > config.student_sum_min_specificity
+                            ]
+                            scored.sort(key=lambda kv: kv[1], reverse=True)
+                            for neuron_id, _ in scored[: config.student_anova_nodes_per_label]:
+                                key = f"{layer_idx}:{neuron_id}"
+                                if key not in new_labels:
+                                    new_labels[key] = cat_labels[category][neuron_id]
+
+                    del grid_flat
                     if dev.type == "cuda":
                         torch.cuda.empty_cache()
                     print(f"[graph]   layer {layer_idx + 1}/{n_layers} done, labels so far: {len(new_labels)}")

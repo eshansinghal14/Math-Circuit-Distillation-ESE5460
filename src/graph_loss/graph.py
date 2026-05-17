@@ -1073,6 +1073,7 @@ def build_super_graph(
     logger.info("  Delta nodes for supergraph: %d", int(kept_node_indices.numel()))
     all_supernode_prob_delta_norms = torch.empty(0, dtype=torch.float32)
     prob_delta_elbow_index = None
+    supernode_prob_deltas: torch.Tensor | None = None
     activation_write_result_for_kept: ActivationWriteResult | None = None
     node_labels: dict[int, list[str]] = {}
     supernode_labels: list[list[str]] | None = None
