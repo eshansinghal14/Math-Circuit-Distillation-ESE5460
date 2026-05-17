@@ -274,6 +274,115 @@ def _activations_for_location_batch(
 
 
 @torch.no_grad()
+def compute_activation_grid_from_mlp_cache(
+    model,
+    kept_neuron_locations: torch.Tensor,
+    mlp_input_cache: dict,
+) -> ActivationWriteResult:
+    """Build activation grid from in-memory MLP cache — no disk I/O, fully vectorized."""
+    meta = mlp_input_cache.get("meta", {})
+    layer_inputs = mlp_input_cache.get("layer_inputs", {})
+    numeric_args_list = meta.get("numeric_args_by_prompt", [])
+
+    if not numeric_args_list:
+        raise ValueError("MLP input cache missing numeric_args_by_prompt")
+
+    n_cache_prompts = len(numeric_args_list)
+    n_dims = len(numeric_args_list[0])
+
+    arg_values = [
+        sorted({args[dim] for args in numeric_args_list})
+        for dim in range(n_dims)
+    ]
+    arg_to_idx = [{v: i for i, v in enumerate(vals)} for vals in arg_values]
+    grid_shape = tuple(len(vals) for vals in arg_values)
+    grid_cells = 1
+    for s in grid_shape:
+        grid_cells *= s
+
+    flat_indices = torch.zeros(n_cache_prompts, dtype=torch.long)
+    stride = 1
+    for dim in range(n_dims - 1, -1, -1):
+        dim_indices = torch.tensor(
+            [arg_to_idx[dim][args[dim]] for args in numeric_args_list], dtype=torch.long
+        )
+        flat_indices = flat_indices + dim_indices * stride
+        stride *= grid_shape[dim]
+
+    n_kept = int(kept_neuron_locations.shape[0])
+    activation_sums = torch.zeros((n_kept, grid_cells), dtype=torch.float32)
+    activation_counts = torch.zeros((n_kept, grid_cells), dtype=torch.float32)
+    ones = torch.ones(n_cache_prompts, dtype=torch.float32)
+
+    location_groups: dict[tuple[int, int], list[tuple[int, int]]] = defaultdict(list)
+    for loc_idx in range(n_kept):
+        layer = int(kept_neuron_locations[loc_idx, 0].item())
+        token_pos = int(kept_neuron_locations[loc_idx, 1].item())
+        neuron_id = int(kept_neuron_locations[loc_idx, 2].item())
+        location_groups[(layer, token_pos)].append((loc_idx, neuron_id))
+
+    for (layer, token_pos), group_members in location_groups.items():
+        if layer not in layer_inputs:
+            continue
+        layer_tensor = layer_inputs[layer]  # [n_cache_prompts, n_positions, d_model]
+        n_positions = int(layer_tensor.shape[1])
+        if token_pos >= n_positions:
+            continue
+
+        device = model.cfg.device
+        mlp_input_at_pos = layer_tensor[:, token_pos, :].to(device=device)
+
+        loc_indices = [loc_idx for loc_idx, _ in group_members]
+        neuron_ids = torch.tensor(
+            [nid for _, nid in group_members], dtype=torch.long, device=device
+        )
+
+        old_mlp = model.blocks[layer].mlp.old_mlp
+        gate_w = _select_mlp_neuron_weights(
+            model, old_mlp.W_gate, neuron_ids, device=device, dtype=mlp_input_at_pos.dtype
+        )
+        up_w = _select_mlp_neuron_weights(
+            model, old_mlp.W_in, neuron_ids, device=device, dtype=mlp_input_at_pos.dtype
+        )
+        gate_b = _select_mlp_neuron_biases(
+            old_mlp, "b_gate", neuron_ids, device=device, dtype=mlp_input_at_pos.dtype
+        )
+        up_b = _select_mlp_neuron_biases(
+            old_mlp, "b_in", neuron_ids, device=device, dtype=mlp_input_at_pos.dtype
+        )
+
+        # [n_cache_prompts, n_group_neurons]
+        acts = F.silu(mlp_input_at_pos @ gate_w.T + gate_b) * (mlp_input_at_pos @ up_w.T + up_b)
+        acts = acts.detach().float().cpu()
+
+        flat_idx_expanded = flat_indices.unsqueeze(1).expand(-1, len(loc_indices))
+        acts_T = acts.T.contiguous()            # [n_group, n_prompts]
+        flat_idx_T = flat_idx_expanded.T.contiguous()  # [n_group, n_prompts]
+
+        sums_group = torch.zeros((len(loc_indices), grid_cells), dtype=torch.float32)
+        counts_group = torch.zeros((len(loc_indices), grid_cells), dtype=torch.float32)
+        sums_group.scatter_add_(1, flat_idx_T, acts_T)
+        counts_group.scatter_add_(1, flat_idx_T, ones.unsqueeze(0).expand(len(loc_indices), -1))
+
+        for i, loc_idx in enumerate(loc_indices):
+            activation_sums[loc_idx] += sums_group[i]
+            activation_counts[loc_idx] += counts_group[i]
+
+    activations_flat = torch.where(
+        activation_counts > 0,
+        activation_sums / activation_counts.clamp(min=1e-10),
+        torch.zeros_like(activation_sums),
+    )
+    activations = activations_flat.reshape(n_kept, *grid_shape)
+
+    return ActivationWriteResult(
+        activations=activations,
+        w_down_vectors=torch.empty((n_kept, 0), dtype=torch.float32),
+        arg_values=arg_values,
+    )
+
+
+@torch.no_grad()
 def build_neuron_activation_write_result(
     model,
     dataset_name: str,
@@ -283,8 +392,18 @@ def build_neuron_activation_write_result(
     limit: int | None = None,
     log_interval: int = 100,
     include_w_down_vectors: bool = True,
+    mlp_input_cache: dict | None = None,
 ) -> ActivationWriteResult:
-    """Return activation grids and down-projection vectors for the requested neurons."""
+    """Return activation grids and down-projection vectors for the requested neurons.
+
+    When ``mlp_input_cache`` is provided (as built by
+    ``graph_loss.precompute_mlp_inputs``) and covers a prompt's
+    ``numeric_args``, we skip the forward pass for that prompt entirely and
+    recompute the SwiGLU activation directly from the cached residual-stream
+    input via ``silu(x @ W_gate.T) * (x @ W_up.T)`` using the *current* model
+    weights.  Prompts not represented in the cache fall back to the original
+    forward-pass path.
+    """
     logger = logging.getLogger(__name__)
     if forward_batch_size <= 0:
         raise ValueError("forward_batch_size must be positive")
@@ -372,11 +491,142 @@ def build_neuron_activation_write_result(
         if include_w_down_vectors:
             w_down_vectors[location_idx] = w_out_cache[layer][neuron_id].detach().float().cpu()
 
-    for batch_start in range(0, len(prompts), forward_batch_size):
-        batch_prompts = prompts[batch_start:batch_start + forward_batch_size]
-        batch_numeric_args = numeric_args_by_prompt[
-            batch_start:batch_start + len(batch_prompts)
+    # ------------------------------------------------------------------
+    # Split prompts into "covered by MLP-input cache" vs "needs forward
+    # pass".  For covered prompts we skip the model forward entirely and
+    # recompute the SwiGLU activation directly from the cached residual-
+    # stream input — orders of magnitude cheaper per prompt.
+    # ------------------------------------------------------------------
+    cache_prompt_idx_for_local: list[int | None] = [None] * len(prompts)
+    cache_meta: dict | None = None
+    cache_layer_inputs = None
+    cache_n_positions = 0
+    if mlp_input_cache is not None:
+        cache_meta = mlp_input_cache.get("meta") if isinstance(mlp_input_cache, dict) else None
+        cache_layer_inputs = (
+            mlp_input_cache.get("layer_inputs") if isinstance(mlp_input_cache, dict) else None
+        )
+        if cache_meta is not None and cache_layer_inputs is not None:
+            cache_args_list = cache_meta.get("numeric_args_by_prompt", [])
+            cache_args_to_idx: dict[tuple[int, ...], int] = {}
+            for cache_idx, args in enumerate(cache_args_list):
+                cache_args_to_idx[tuple(int(value) for value in args)] = cache_idx
+            cache_n_positions = int(cache_meta.get("n_positions", 0))
+            for local_idx, args in enumerate(numeric_args_by_prompt):
+                cache_idx = cache_args_to_idx.get(tuple(int(value) for value in args))
+                if cache_idx is not None:
+                    cache_prompt_idx_for_local[local_idx] = cache_idx
+            covered = sum(1 for idx in cache_prompt_idx_for_local if idx is not None)
+            logger.info(
+                "MLP-input cache covers %d / %d prompts (n_positions=%d, falling back for the rest)",
+                covered,
+                len(prompts),
+                cache_n_positions,
+            )
+        else:
+            logger.warning(
+                "mlp_input_cache supplied but missing meta/layer_inputs; ignoring cache"
+            )
+
+    cached_local_indices = [
+        local_idx
+        for local_idx, cache_idx in enumerate(cache_prompt_idx_for_local)
+        if cache_idx is not None
+    ]
+    fallback_local_indices = [
+        local_idx
+        for local_idx, cache_idx in enumerate(cache_prompt_idx_for_local)
+        if cache_idx is None
+    ]
+
+    def _scatter_activations(
+        activations_per_prompt: torch.Tensor,
+        prompt_local_indices: list[int],
+        location_indices: list[int],
+    ) -> None:
+        """Add a [batch, k] activation tensor into ``activation_sums``."""
+        activations_cpu = activations_per_prompt.detach().float().cpu()
+        for group_idx, location_idx in enumerate(location_indices):
+            col = activations_cpu[:, group_idx]
+            for batch_idx, local_idx in enumerate(prompt_local_indices):
+                value = float(col[batch_idx].item())
+                grid_idx = tuple(
+                    arg_to_idx[dim][arg_value]
+                    for dim, arg_value in enumerate(numeric_args_by_prompt[local_idx])
+                )
+                activation_sums[(location_idx, *grid_idx)] += value
+                activation_counts[(location_idx, *grid_idx)] += 1.0
+
+    # ------------------------------------------------------------------
+    # Cached fast path: per-(layer, token_pos) group, slice the cache and
+    # do a single matmul to compute activations across all cached prompts.
+    # ------------------------------------------------------------------
+    if cached_local_indices and cache_layer_inputs is not None:
+        cache_idx_tensor_full = torch.tensor(
+            [int(cache_prompt_idx_for_local[local_idx]) for local_idx in cached_local_indices],
+            dtype=torch.long,
+        )
+        for (layer, token_pos), group_members in location_groups.items():
+            if cache_n_positions and token_pos >= cache_n_positions:
+                continue
+            cache_idx_tensor = cache_idx_tensor_full
+            layer_input_tensor = cache_layer_inputs[layer]
+            mlp_input_at_pos = layer_input_tensor.index_select(0, cache_idx_tensor)[:, token_pos, :]
+            mlp_input_at_pos = mlp_input_at_pos.to(device=model.cfg.device)
+
+            old_mlp = model.blocks[layer].mlp.old_mlp
+            location_indices = [location_idx for location_idx, _neuron_id in group_members]
+            neuron_ids = torch.tensor(
+                [neuron_id for _location_idx, neuron_id in group_members],
+                dtype=torch.long,
+            )
+            gate_weights = _select_mlp_neuron_weights(
+                model,
+                old_mlp.W_gate,
+                neuron_ids,
+                device=mlp_input_at_pos.device,
+                dtype=mlp_input_at_pos.dtype,
+            )
+            up_weights = _select_mlp_neuron_weights(
+                model,
+                old_mlp.W_in,
+                neuron_ids,
+                device=mlp_input_at_pos.device,
+                dtype=mlp_input_at_pos.dtype,
+            )
+            gate_biases = _select_mlp_neuron_biases(
+                old_mlp,
+                "b_gate",
+                neuron_ids,
+                device=mlp_input_at_pos.device,
+                dtype=mlp_input_at_pos.dtype,
+            )
+            up_biases = _select_mlp_neuron_biases(
+                old_mlp,
+                "b_in",
+                neuron_ids,
+                device=mlp_input_at_pos.device,
+                dtype=mlp_input_at_pos.dtype,
+            )
+            activations_by_prompt = (
+                F.silu(mlp_input_at_pos @ gate_weights.T + gate_biases)
+                * (mlp_input_at_pos @ up_weights.T + up_biases)
+            )
+            if token_pos == 0:
+                activations_by_prompt.zero_()
+            _scatter_activations(activations_by_prompt, cached_local_indices, location_indices)
+
+    # ------------------------------------------------------------------
+    # Fallback / legacy path: forward-pass any prompts the cache did not
+    # cover.  Identical math to the cached path so they accumulate into
+    # the same activation grid.
+    # ------------------------------------------------------------------
+    fallback_prompts = [prompts[local_idx] for local_idx in fallback_local_indices]
+    for batch_start in range(0, len(fallback_prompts), forward_batch_size):
+        batch_local_indices = fallback_local_indices[
+            batch_start:batch_start + forward_batch_size
         ]
+        batch_prompts = [prompts[local_idx] for local_idx in batch_local_indices]
         input_ids, lengths = _tokenize_prompt_batch(model, batch_prompts)
         max_len = input_ids.shape[1]
         active_groups = {
@@ -459,34 +709,37 @@ def build_neuron_activation_write_result(
 
             activations_cpu = activations_by_prompt.detach().float().cpu()
             valid_cpu = valid_at_pos.detach().cpu()
-            for group_idx, location_idx in enumerate(location_indices):
-                for numeric_args, activation, is_valid in zip(
-                    batch_numeric_args,
-                    activations_cpu[:, group_idx],
-                    valid_cpu,
-                    strict=True,
-                ):
-                    if not bool(is_valid.item()):
-                        continue
-                    grid_idx = tuple(
-                        arg_to_idx[dim][arg_value]
-                        for dim, arg_value in enumerate(numeric_args)
-                    )
-                    activation_sums[(location_idx, *grid_idx)] += float(activation.item())
-                    activation_counts[(location_idx, *grid_idx)] += 1.0
+            valid_local_indices = [
+                local_idx
+                for local_idx, is_valid in zip(batch_local_indices, valid_cpu, strict=True)
+                if bool(is_valid.item())
+            ]
+            valid_rows = torch.tensor(
+                [bool(is_valid.item()) for is_valid in valid_cpu],
+                dtype=torch.bool,
+            )
+            if valid_local_indices:
+                _scatter_activations(
+                    activations_cpu[valid_rows],
+                    valid_local_indices,
+                    location_indices,
+                )
 
         processed = batch_start + len(batch_prompts)
         if log_interval and processed % log_interval == 0:
-            logger.info("Processed %d activation samples", processed)
+            logger.info("Processed %d fallback activation samples", processed)
 
     activations = activation_sums / activation_counts.clamp(min=1.0)
     activations[activation_counts == 0] = float("nan")
     logger.info(
-        "Built activation grid for %d neurons with arg dims %s from %s (skipped=%d)",
+        "Built activation grid for %d neurons with arg dims %s from %s "
+        "(skipped=%d, cached_prompts=%d, fallback_prompts=%d)",
         len(locations),
         grid_shape,
         dataset_path,
         skipped,
+        len(cached_local_indices),
+        len(fallback_local_indices),
     )
     return ActivationWriteResult(
         activations=activations,

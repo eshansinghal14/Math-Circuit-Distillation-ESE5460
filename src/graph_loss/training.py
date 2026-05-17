@@ -43,7 +43,9 @@ class GraphAuxConfig:
     student_anova_range_radius: int = 0
     student_anova_nodes_per_label: int = 10
     student_sum_min_specificity: float = 0.0
-    fixed_labels: dict[str, str] | None = None
+    student_cluster_method: str = "live_anova"
+    student_mlp_input_cache_path: str | None = None
+    mlp_input_cache: dict | None = None
 
 
 def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
@@ -125,16 +127,19 @@ def compute_prompt_graph_loss(
 
     supergraph_start = time.perf_counter()
 
+    student_mlp_input_cache = config.mlp_input_cache
+
     with torch.no_grad():
         student_supergraph_structure = build_super_graph(
             student_graph,
             student_adapter,
             prune_result=student_prune_result,
             activation_forward_batch_size=config.student_activation_forward_batch_size,
+            mlp_input_cache=student_mlp_input_cache,
+            cluster_method=config.student_cluster_method,
             anova_range_radius=config.student_anova_range_radius,
             anova_nodes_per_label=config.student_anova_nodes_per_label,
             sum_min_specificity=config.student_sum_min_specificity,
-            fixed_labels=config.fixed_labels,
         )
     student_supergraph = _aggregate_supergraph_adjacency(
         student_graph,
