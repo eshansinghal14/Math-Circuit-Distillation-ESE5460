@@ -45,6 +45,8 @@ class GraphAuxConfig:
     student_sum_min_specificity: float = 0.0
     student_mlp_input_cache_path: str | None = None
     mlp_input_cache: dict | None = None
+    dataset: str | None = None
+    student_activation_write_cache_path: str | None = None
 
 
 def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
@@ -133,6 +135,8 @@ def compute_prompt_graph_loss(
             student_graph,
             student_adapter,
             prune_result=student_prune_result,
+            dataset=config.dataset,
+            activation_write_cache_path=config.student_activation_write_cache_path,
             activation_forward_batch_size=config.student_activation_forward_batch_size,
             mlp_input_cache=student_mlp_input_cache,
             anova_range_radius=config.student_anova_range_radius,

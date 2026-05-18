@@ -352,6 +352,8 @@ class DistillationTrainer:
                 student_anova_range_radius=config.student_anova_range_radius,
                 student_anova_nodes_per_label=config.student_anova_nodes_per_label,
                 student_sum_min_specificity=config.student_sum_min_specificity,
+                dataset=config.student_dataset,
+                student_activation_write_cache_path=config.student_activation_write_cache_path,
             )
 
             self.student_graph_adapter = HFLlamaGraphAdapter(
