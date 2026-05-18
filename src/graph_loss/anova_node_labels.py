@@ -194,9 +194,16 @@ def build_anova_basis_rules(
             else sorted({int(value) for value in sums.flatten().tolist()})
         )
         for center in sum_centers:
-            mask = sums == center
-            label = _format_interval_label("sum", center, center)
-            dynamic_range_label = True
+            if anova_range_radius:
+                mask = (sums >= center - anova_range_radius) & (
+                    sums <= center + anova_range_radius
+                )
+                label = _mask_interval_label("sum", sums, mask)
+                dynamic_range_label = False
+            else:
+                mask = sums == center
+                label = _format_interval_label("sum", center, center)
+                dynamic_range_label = True
             rules.append(
                 BasisRule(
                     label,
