@@ -279,7 +279,14 @@ def compute_activation_grid_from_mlp_cache(
     kept_neuron_locations: torch.Tensor,
     mlp_input_cache: dict,
 ) -> ActivationWriteResult:
-    """Build activation grid from in-memory MLP cache — no disk I/O, fully vectorized."""
+    """Build activation grid from in-memory MLP cache — no disk I/O, fully vectorized.
+
+    Neurons are grouped by *layer* so that each layer's CPU tensor is transferred
+    to the GPU exactly once per call.  The previous (layer, token_pos) grouping
+    forced a strided non-contiguous copy of the full ~800 MB CPU layer tensor for
+    every group, causing CPU cache thrashing: ~64 ms/group × up to 128 groups ×
+    16 training prompts/step ≈ 130 s of wasted memory latency per training step.
+    """
     meta = mlp_input_cache.get("meta", {})
     layer_inputs = mlp_input_cache.get("layer_inputs", {})
     numeric_args_list = meta.get("numeric_args_by_prompt", [])
@@ -314,59 +321,80 @@ def compute_activation_grid_from_mlp_cache(
     activation_counts = torch.zeros((n_kept, grid_cells), dtype=torch.float32)
     ones = torch.ones(n_cache_prompts, dtype=torch.float32)
 
-    location_groups: dict[tuple[int, int], list[tuple[int, int]]] = defaultdict(list)
+    # Group by LAYER only.  This lets us load each layer's CPU tensor to the GPU
+    # once (one contiguous DMA transfer) instead of once per (layer, token_pos)
+    # group.  Slicing by token_pos happens on the GPU after the transfer — fast,
+    # because GPU memory bandwidth is ~2 TB/s vs ~50 GB/s for CPU with poor
+    # cache locality on large strided tensors.
+    layer_to_neurons: dict[int, list[tuple[int, int, int]]] = defaultdict(list)
     for loc_idx in range(n_kept):
         layer = int(kept_neuron_locations[loc_idx, 0].item())
         token_pos = int(kept_neuron_locations[loc_idx, 1].item())
         neuron_id = int(kept_neuron_locations[loc_idx, 2].item())
-        location_groups[(layer, token_pos)].append((loc_idx, neuron_id))
+        layer_to_neurons[layer].append((loc_idx, token_pos, neuron_id))
 
-    for (layer, token_pos), group_members in location_groups.items():
+    device = model.cfg.device
+
+    for layer, layer_members in layer_to_neurons.items():
         if layer >= len(layer_inputs):
             continue
-        layer_tensor = layer_inputs[layer]  # [n_cache_prompts, n_positions, d_model]
+        layer_tensor = layer_inputs[layer]  # [n_cache_prompts, n_positions, d_model] on CPU
         n_positions = int(layer_tensor.shape[1])
-        if token_pos >= n_positions:
-            continue
 
-        device = model.cfg.device
-        mlp_input_at_pos = layer_tensor[:, token_pos, :].to(device=device)
+        # One contiguous CPU→GPU transfer for the entire layer tensor.
+        # Previously we called layer_tensor[:, token_pos, :].to(device) per group,
+        # which forced PyTorch to walk the full (~800 MB) non-contiguous tensor on CPU
+        # to produce a 40 MB contiguous copy before the GPU transfer — O(800 MB) of
+        # DRAM reads per group instead of O(40 MB).
+        layer_tensor_gpu = layer_tensor.to(device=device)  # [n_cache_prompts, n_positions, d_model]
 
-        loc_indices = [loc_idx for loc_idx, _ in group_members]
-        neuron_ids = torch.tensor(
-            [nid for _, nid in group_members], dtype=torch.long, device=device
-        )
+        # Sub-group by token_pos within this layer; all slicing now happens on GPU.
+        pos_to_members: dict[int, list[tuple[int, int]]] = defaultdict(list)
+        for loc_idx, token_pos, neuron_id in layer_members:
+            if token_pos < n_positions:
+                pos_to_members[token_pos].append((loc_idx, neuron_id))
 
-        old_mlp = model.blocks[layer].mlp.old_mlp
-        gate_w = _select_mlp_neuron_weights(
-            model, old_mlp.W_gate, neuron_ids, device=device, dtype=mlp_input_at_pos.dtype
-        )
-        up_w = _select_mlp_neuron_weights(
-            model, old_mlp.W_in, neuron_ids, device=device, dtype=mlp_input_at_pos.dtype
-        )
-        gate_b = _select_mlp_neuron_biases(
-            old_mlp, "b_gate", neuron_ids, device=device, dtype=mlp_input_at_pos.dtype
-        )
-        up_b = _select_mlp_neuron_biases(
-            old_mlp, "b_in", neuron_ids, device=device, dtype=mlp_input_at_pos.dtype
-        )
+        for token_pos, pos_members in pos_to_members.items():
+            # Contiguous slice on GPU — negligible cost at 2 TB/s.
+            mlp_input_at_pos = layer_tensor_gpu[:, token_pos, :].contiguous()
 
-        # [n_cache_prompts, n_group_neurons]
-        acts = F.silu(mlp_input_at_pos @ gate_w.T + gate_b) * (mlp_input_at_pos @ up_w.T + up_b)
-        acts = acts.detach().float().cpu()
+            loc_indices = [loc_idx for loc_idx, _ in pos_members]
+            neuron_ids = torch.tensor(
+                [nid for _, nid in pos_members], dtype=torch.long, device=device
+            )
 
-        flat_idx_expanded = flat_indices.unsqueeze(1).expand(-1, len(loc_indices))
-        acts_T = acts.T.contiguous()            # [n_group, n_prompts]
-        flat_idx_T = flat_idx_expanded.T.contiguous()  # [n_group, n_prompts]
+            old_mlp = model.blocks[layer].mlp.old_mlp
+            gate_w = _select_mlp_neuron_weights(
+                model, old_mlp.W_gate, neuron_ids, device=device, dtype=mlp_input_at_pos.dtype
+            )
+            up_w = _select_mlp_neuron_weights(
+                model, old_mlp.W_in, neuron_ids, device=device, dtype=mlp_input_at_pos.dtype
+            )
+            gate_b = _select_mlp_neuron_biases(
+                old_mlp, "b_gate", neuron_ids, device=device, dtype=mlp_input_at_pos.dtype
+            )
+            up_b = _select_mlp_neuron_biases(
+                old_mlp, "b_in", neuron_ids, device=device, dtype=mlp_input_at_pos.dtype
+            )
 
-        sums_group = torch.zeros((len(loc_indices), grid_cells), dtype=torch.float32)
-        counts_group = torch.zeros((len(loc_indices), grid_cells), dtype=torch.float32)
-        sums_group.scatter_add_(1, flat_idx_T, acts_T)
-        counts_group.scatter_add_(1, flat_idx_T, ones.unsqueeze(0).expand(len(loc_indices), -1))
+            # [n_cache_prompts, n_group_neurons]
+            acts = F.silu(mlp_input_at_pos @ gate_w.T + gate_b) * (mlp_input_at_pos @ up_w.T + up_b)
+            acts = acts.detach().float().cpu()
 
-        for i, loc_idx in enumerate(loc_indices):
-            activation_sums[loc_idx] += sums_group[i]
-            activation_counts[loc_idx] += counts_group[i]
+            flat_idx_expanded = flat_indices.unsqueeze(1).expand(-1, len(loc_indices))
+            acts_T = acts.T.contiguous()            # [n_group, n_prompts]
+            flat_idx_T = flat_idx_expanded.T.contiguous()  # [n_group, n_prompts]
+
+            sums_group = torch.zeros((len(loc_indices), grid_cells), dtype=torch.float32)
+            counts_group = torch.zeros((len(loc_indices), grid_cells), dtype=torch.float32)
+            sums_group.scatter_add_(1, flat_idx_T, acts_T)
+            counts_group.scatter_add_(1, flat_idx_T, ones.unsqueeze(0).expand(len(loc_indices), -1))
+
+            for i, loc_idx in enumerate(loc_indices):
+                activation_sums[loc_idx] += sums_group[i]
+                activation_counts[loc_idx] += counts_group[i]
+
+        del layer_tensor_gpu  # free GPU memory before loading the next layer
 
     activations_flat = torch.where(
         activation_counts > 0,

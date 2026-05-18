@@ -95,13 +95,20 @@ def build_mlp_input_cache(
 
     This is the training-time counterpart to ``precompute_mlp_inputs`` (which
     requires a TransformerLens model).  Uses PyTorch forward pre-hooks to
-    capture the residual-stream input entering each MLP layer, writes to disk
-    via memory-mapped arrays (to avoid OOM on large datasets), then loads and
-    returns the full cache dict.
+    capture the residual-stream input entering each MLP layer, accumulates
+    results directly in RAM (bfloat16), writes ``.pt`` files to disk once for
+    optional reuse, then returns the in-memory cache dict.
 
     The full dataset (all ~10k prompts) should be used so that ANOVA neuron
     labels have sufficient statistical coverage and match the teacher's labels.
     On an A100 GPU, processing 10k prompts at batch_size=64 takes ~3 seconds.
+
+    The previous implementation wrote to numpy memmaps then flushed, read them
+    back with ``np.array()``, converted to bfloat16, saved as ``.pt``, and
+    finally reloaded via ``load_mlp_input_cache`` — roughly 50 GB of
+    unnecessary disk I/O that caused a 3.5-minute delay on typical NVMe disks.
+    This version pre-allocates bfloat16 tensors in RAM and eliminates that
+    round-trip entirely.
 
     Args:
         adapter: ``HFLlamaGraphAdapter`` wrapping the current student model.
@@ -123,8 +130,6 @@ def build_mlp_input_cache(
         Cache dict with keys ``"meta"`` and ``"layer_inputs"`` (same format
         as ``load_mlp_input_cache``).
     """
-    import numpy as np
-
     _tmp_dir: str | None = None
     if cache_root is None:
         _tmp_dir = tempfile.mkdtemp(prefix="mlp_cache_")
@@ -169,10 +174,14 @@ def build_mlp_input_cache(
     first_ids, _ = _tokenize_prompt_batch(adapter, prompts[:1])
     n_positions = first_ids.shape[1]
 
-    mmap_paths = [os.path.join(cache_dir, f"layer_{i}.npy") for i in range(n_layers)]
-    mmaps: list[np.memmap] = [
-        np.memmap(p, dtype="float16", mode="w+", shape=(n_prompts, n_positions, d_model))
-        for p in mmap_paths
+    # Pre-allocate in-RAM bfloat16 buffers.  Avoids the old memmap flush →
+    # np.array read → torch.save → load_mlp_input_cache reload cycle that
+    # produced ~50 GB of disk I/O (≈ 3.5 min on typical NVMe).
+    # Memory cost: n_layers × n_prompts × n_positions × d_model × 2 B.
+    # For a 1B student: 16 × 10k × 20 × 2048 × 2 ≈ 12.8 GB — fine on A100.
+    layer_inputs: list[torch.Tensor] = [
+        torch.zeros((n_prompts, n_positions, d_model), dtype=torch.bfloat16)
+        for _ in range(n_layers)
     ]
 
     prompt_idx = 0
@@ -187,7 +196,7 @@ def build_mlp_input_cache(
 
         for layer_idx, layer in enumerate(adapter.layers):
             def _pre_hook(_module, inputs, *, idx=layer_idx):
-                captured[idx] = inputs[0].detach().cpu().to(torch.float16)
+                captured[idx] = inputs[0].detach().cpu().to(torch.bfloat16)
 
             handles.append(layer.mlp.register_forward_pre_hook(_pre_hook))
 
@@ -203,26 +212,19 @@ def build_mlp_input_cache(
 
         store_len = min(batch_n_pos, n_positions)
         for layer_idx in range(n_layers):
-            acts = captured[layer_idx]  # [bs, batch_n_pos, d_model]
-            mmaps[layer_idx][batch_start : batch_start + bs, :store_len, :] = (
-                acts[:, :store_len, :].numpy()
+            acts = captured[layer_idx]  # [bs, batch_n_pos, d_model] bfloat16 on CPU
+            layer_inputs[layer_idx][batch_start : batch_start + bs, :store_len, :] = (
+                acts[:, :store_len, :]
             )
 
         prompt_idx += bs
         if prompt_idx % max(batch_size * 10, 50) == 0 or prompt_idx == n_prompts:
             logger.info("  Cached %d / %d prompts", prompt_idx, n_prompts)
 
-    logger.info("Flushing memmaps and converting to .pt ...")
-    for i, (mmap, mmap_path) in enumerate(zip(mmaps, mmap_paths)):
-        mmap.flush()
-        del mmap
-        arr = np.memmap(
-            mmap_path, dtype="float16", mode="r", shape=(n_prompts, n_positions, d_model)
-        )
-        buf = torch.from_numpy(np.array(arr)).to(torch.bfloat16)
-        torch.save(buf, os.path.join(cache_dir, f"layer_{i}.pt"))
-        del buf
-        os.remove(mmap_path)
+    # Write .pt files once to disk for optional reuse across restarts.
+    logger.info("Saving MLP input cache to %s ...", cache_dir)
+    for i, tensor in enumerate(layer_inputs):
+        torch.save(tensor, os.path.join(cache_dir, f"layer_{i}.pt"))
         logger.info("  Saved layer_%d.pt  shape=(%d, %d, %d)", i, n_prompts, n_positions, d_model)
 
     arg_values = [
@@ -243,7 +245,7 @@ def build_mlp_input_cache(
     torch.save(meta, meta_path)
     logger.info("MLP input cache written to %s", cache_dir)
 
-    return load_mlp_input_cache(cache_root, model_name, dataset_path)
+    return {"meta": meta, "layer_inputs": layer_inputs}
 
 
 @torch.no_grad()
