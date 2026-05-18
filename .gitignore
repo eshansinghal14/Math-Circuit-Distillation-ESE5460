@@ -6,7 +6,6 @@ __pycache__/
 esinghal.pem
 src/constants.py
 src/run_colab_code.ipynb
-src/experiments/random_ablation_vs_fraction/results/
 results/distillation
 results/circuit-discovery/neuron_cossim_topk
 results/clustering
