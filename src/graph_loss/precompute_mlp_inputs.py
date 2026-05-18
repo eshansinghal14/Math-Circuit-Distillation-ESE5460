@@ -88,7 +88,7 @@ def build_mlp_input_cache(
     *,
     data_dict: dict | None = None,
     cache_root: str | None = None,
-    batch_size: int = 8,
+    batch_size: int = 64,
     overwrite: bool = True,
 ) -> dict:
     """Build an MLP-input cache from a live HF model (via ``HFLlamaGraphAdapter``).
@@ -99,18 +99,23 @@ def build_mlp_input_cache(
     via memory-mapped arrays (to avoid OOM on large datasets), then loads and
     returns the full cache dict.
 
+    The full dataset (all ~10k prompts) should be used so that ANOVA neuron
+    labels have sufficient statistical coverage and match the teacher's labels.
+    On an A100 GPU, processing 10k prompts at batch_size=64 takes ~3 seconds.
+
     Args:
         adapter: ``HFLlamaGraphAdapter`` wrapping the current student model.
         dataset_path: Resolved absolute path to the dataset JSON (also used as
-            the cache directory key).
+            the cache directory key).  The full dataset should be passed here —
+            NOT just a training subset.
         model_name: HuggingFace model name string (cache key).
         data_dict: Optional pre-loaded ``{prompt: answer}`` dict.  When
             provided the prompts are taken from here instead of loading from
-            ``dataset_path``.  Pass this to avoid processing the full dataset
-            when only a training subset is needed (avoids the 7–8 min hang).
+            ``dataset_path``.  Prefer passing ``None`` (default) so the full
+            dataset is used for ANOVA coverage.
         cache_root: Root directory for the on-disk cache.  If ``None``, a
             temporary directory is created automatically.
-        batch_size: Prompts per batched forward pass (default 8).
+        batch_size: Prompts per batched forward pass (default 64, fast on GPU).
         overwrite: Rebuild even if a valid cache already exists (default
             ``True`` — caller knows the model weights have changed).
 

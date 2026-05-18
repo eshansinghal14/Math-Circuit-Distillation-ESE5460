@@ -184,6 +184,7 @@ class DistillationConfig:
     student_activation_write_cache_path: Optional[str] = None
     student_mlp_input_cache_path: Optional[str] = None
     mlp_cache_refresh_interval: int = 0
+    mlp_cache_batch_size: int = 64
     student_clustering_mode: str = "live_anova"
     graph_gen_batch_size: int = 1
 
@@ -378,11 +379,8 @@ class DistillationTrainer:
             elif config.student_dataset and not config.label_refresh_interval:
                 # Only build here when label_refresh_interval==0; otherwise
                 # train() will call _refresh_student_labels() at startup.
-                #
-                # IMPORTANT: pass data_dict=self.train_data so only the
-                # training prompts (~192) are forward-passed, not the full
-                # student_dataset file (which may be the 10k _all.json and
-                # would cause a 7–8 min hang on CPU).
+                # Use the full dataset path so ANOVA has sufficient statistical
+                # coverage (~10k prompts).  On an A100 this takes ~3 seconds.
                 from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
                 from graph_loss.precompute_mlp_inputs import build_mlp_input_cache
 
@@ -393,9 +391,8 @@ class DistillationTrainer:
                     self.student_graph_adapter,
                     dataset_path,
                     config.student_model,
-                    data_dict=self.train_data,
                     cache_root=cache_root,
-                    batch_size=config.student_activation_forward_batch_size,
+                    batch_size=config.mlp_cache_batch_size,
                 )
                 self.student.train()
                 self.graph_loss_config.mlp_input_cache = mlp_cache
@@ -462,9 +459,8 @@ class DistillationTrainer:
             self.student_graph_adapter,
             dataset_path,
             self.config.student_model,
-            data_dict=self.train_data,
             cache_root=cache_root,
-            batch_size=self.config.student_activation_forward_batch_size,
+            batch_size=self.config.mlp_cache_batch_size,
             overwrite=True,
         )
         self.student.train()
@@ -1243,6 +1239,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--mlp-cache-batch-size",
+        type=int,
+        default=64,
+        help=(
+            "Batch size for building the MLP input cache (default 64, fast on GPU). "
+            "The full dataset (~10k prompts) is always used for ANOVA coverage."
+        ),
+    )
+    parser.add_argument(
         "--student-clustering-mode",
         type=str,
         default="live_anova",
@@ -1408,6 +1413,7 @@ def main() -> None:
             label_refresh_n_prompts=args.label_refresh_n_prompts,
             student_mlp_input_cache_path=args.student_mlp_input_cache,
             mlp_cache_refresh_interval=args.mlp_cache_refresh_interval,
+            mlp_cache_batch_size=args.mlp_cache_batch_size,
             student_clustering_mode=args.student_clustering_mode,
             graph_gen_batch_size=args.graph_gen_batch_size,
             seed=args.seed,
