@@ -1,4 +1,4 @@
-"""Graph container and influence utilities for LLaMA neuron attribution."""
+﻿"""Graph container and influence utilities for LLaMA neuron attribution."""
 
 from __future__ import annotations
 
@@ -738,11 +738,28 @@ def build_super_graph(
         supernodes = []
         supernode_labels = []
         if target_args is not None and len(target_args) >= 2:
+            # Use population-level rules (target_args=None) so range/units masks
+            # cover all arg values in the dataset, not just this prompt's specific
+            # args.  With per-prompt masks (e.g. "arg1==23"), the rule mask is a
+            # single narrow column that almost never wins the winner-take-all
+            # against the broader units/carry patterns, causing arg1 range, arg2
+            # range, and arg1+arg2 range to always produce zero neurons.
             rules = build_anova_basis_rules(
+                activation_write_result.arg_values,
+                target_args=None,
+                anova_range_radius=anova_range_radius,
+            )
+            # The joint "arg1 range and arg2 range" rule requires target_args to
+            # identify the specific (arg1, arg2) pair; add it explicitly so all 9
+            # teacher categories are at least eligible to form.
+            target_specific_rules = build_anova_basis_rules(
                 activation_write_result.arg_values,
                 target_args=target_args,
                 anova_range_radius=anova_range_radius,
             )
+            rules = rules + [
+                r for r in target_specific_rules if r.category == "arg1 range and arg2 range"
+            ]
             if rules:
                 n_kept = int(activation_write_result.activations.shape[0])
                 acts_flat = (
@@ -776,17 +793,38 @@ def build_super_graph(
                 scores = (proj.pow(2) / denom).clamp(min=0.0, max=1.0)
 
                 best_score, best_rule_idx = scores.max(dim=-1)
+
+                # Synthesise the "arg1 units and arg2 units" composite category,
+                # mirroring how label_activation_heatmaps handles it for full_search.
+                # A neuron qualifies when min(best_arg1_units_score,
+                # best_arg2_units_score) >= its current single-rule best score —
+                # i.e. it explains both units patterns at least as well as any
+                # individual rule.  We use >= so ties go to the composite (a neuron
+                # that scores equally on both arg1_units and arg2_units should be
+                # labelled with the joint category, not arbitrarily one of them).
+                arg1_units_cols = [i for i, c in enumerate(rule_categories) if c == "arg1 units"]
+                arg2_units_cols = [i for i, c in enumerate(rule_categories) if c == "arg2 units"]
+                best_category_list = [rule_categories[int(idx)] for idx in best_rule_idx.tolist()]
+                if arg1_units_cols and arg2_units_cols:
+                    arg1_max = scores[:, arg1_units_cols].max(dim=-1).values
+                    arg2_max = scores[:, arg2_units_cols].max(dim=-1).values
+                    composite_score = torch.min(arg1_max, arg2_max)
+                    use_composite = composite_score >= best_score
+                    for i in range(n_kept):
+                        if bool(use_composite[i].item()):
+                            best_category_list[i] = "arg1 units and arg2 units"
+                    best_score = torch.where(use_composite, composite_score, best_score)
+
                 min_score = float(sum_min_specificity)
                 valid_mask = best_score >= min_score
 
                 category_to_neurons: dict[str, list[int]] = {}
                 kept_member_list = kept_neuron_indices.tolist()
-                best_rule_idx_list = best_rule_idx.tolist()
                 valid_mask_list = valid_mask.tolist()
                 for kept_local_idx in range(n_kept):
                     if not valid_mask_list[kept_local_idx]:
                         continue
-                    category = rule_categories[int(best_rule_idx_list[kept_local_idx])]
+                    category = best_category_list[kept_local_idx]
                     global_neuron_idx = int(kept_member_list[kept_local_idx])
                     category_to_neurons.setdefault(category, []).append(global_neuron_idx)
                     node_labels.setdefault(global_neuron_idx, [])

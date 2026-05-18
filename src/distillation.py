@@ -550,14 +550,17 @@ class DistillationTrainer:
                 for n, p in self.student.named_parameters()
             }
 
+        n_graph = self.config.graph_gen_batch_size
+        graph_prompts = batch["prompts"][:n_graph]
+        graph_answers = batch["answers"][:n_graph]
         graph_loss, graph_metrics = backward_batch_graph_loss(
-            prompts=batch["prompts"],
+            prompts=graph_prompts,
             student_adapter=self.student_graph_adapter,
             config=self.graph_loss_config,
             device=self.device,
             loss_scale=1.0 if use_grad_norm_scale else self.config.lambda_graph,
             teacher_cache=self.teacher_data_cache,
-            answers=batch["answers"],
+            answers=graph_answers,
         )
 
         if use_grad_norm_scale:
