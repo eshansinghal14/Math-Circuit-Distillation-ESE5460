@@ -1025,16 +1025,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--lambda-kl",
-        type=float,
-        default=1.0,
-        help=(
-            "Scale factor for the KL distillation loss.  Set to 0 to run "
-            "graph-loss-only (diagnostic: tests whether graph signal alone "
-            "carries useful gradient).  Default 1.0."
-        ),
-    )
-    parser.add_argument(
         "--graph-grad-norm-scale",
         action="store_true",
         default=False,
