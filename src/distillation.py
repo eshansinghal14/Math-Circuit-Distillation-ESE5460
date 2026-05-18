@@ -385,7 +385,7 @@ class DistillationTrainer:
                 from graph_loss.precompute_mlp_inputs import build_mlp_input_cache
 
                 dataset_path = _resolve_dataset_path(config.student_dataset)
-                cache_root = os.path.join(config.save_dir, "mlp_input_cache")
+                cache_root = os.path.join("/tmp", "mlp_input_cache")
                 self.student.eval()
                 mlp_cache = build_mlp_input_cache(
                     self.student_graph_adapter,
@@ -453,7 +453,7 @@ class DistillationTrainer:
         from graph_loss.precompute_mlp_inputs import build_mlp_input_cache
 
         dataset_path = _resolve_dataset_path(self.config.student_dataset)
-        cache_root = os.path.join(self.config.save_dir, "mlp_input_cache")
+        cache_root = os.path.join("/tmp", "mlp_input_cache")
         self.student.eval()
         mlp_cache = build_mlp_input_cache(
             self.student_graph_adapter,
