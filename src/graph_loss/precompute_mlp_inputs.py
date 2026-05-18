@@ -86,6 +86,7 @@ def build_mlp_input_cache(
     dataset_path: str,
     model_name: str,
     *,
+    data_dict: dict | None = None,
     cache_root: str | None = None,
     batch_size: int = 8,
     overwrite: bool = True,
@@ -100,8 +101,13 @@ def build_mlp_input_cache(
 
     Args:
         adapter: ``HFLlamaGraphAdapter`` wrapping the current student model.
-        dataset_path: Resolved absolute path to the dataset JSON.
+        dataset_path: Resolved absolute path to the dataset JSON (also used as
+            the cache directory key).
         model_name: HuggingFace model name string (cache key).
+        data_dict: Optional pre-loaded ``{prompt: answer}`` dict.  When
+            provided the prompts are taken from here instead of loading from
+            ``dataset_path``.  Pass this to avoid processing the full dataset
+            when only a training subset is needed (avoids the 7–8 min hang).
         cache_root: Root directory for the on-disk cache.  If ``None``, a
             temporary directory is created automatically.
         batch_size: Prompts per batched forward pass (default 8).
@@ -125,7 +131,10 @@ def build_mlp_input_cache(
         return load_mlp_input_cache(cache_root, model_name, dataset_path)
 
     os.makedirs(cache_dir, exist_ok=True)
-    samples = list(load_prompt_answer_json(dataset_path).items())
+    if data_dict is not None:
+        samples = list(data_dict.items())
+    else:
+        samples = list(load_prompt_answer_json(dataset_path).items())
 
     n_layers = adapter.n_layers
     d_model = adapter.d_model

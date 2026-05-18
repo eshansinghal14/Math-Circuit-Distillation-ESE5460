@@ -378,6 +378,11 @@ class DistillationTrainer:
             elif config.student_dataset and not config.label_refresh_interval:
                 # Only build here when label_refresh_interval==0; otherwise
                 # train() will call _refresh_student_labels() at startup.
+                #
+                # IMPORTANT: pass data_dict=self.train_data so only the
+                # training prompts (~192) are forward-passed, not the full
+                # student_dataset file (which may be the 10k _all.json and
+                # would cause a 7–8 min hang on CPU).
                 from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
                 from graph_loss.precompute_mlp_inputs import build_mlp_input_cache
 
@@ -388,6 +393,7 @@ class DistillationTrainer:
                     self.student_graph_adapter,
                     dataset_path,
                     config.student_model,
+                    data_dict=self.train_data,
                     cache_root=cache_root,
                     batch_size=config.student_activation_forward_batch_size,
                 )
@@ -456,6 +462,7 @@ class DistillationTrainer:
             self.student_graph_adapter,
             dataset_path,
             self.config.student_model,
+            data_dict=self.train_data,
             cache_root=cache_root,
             batch_size=self.config.student_activation_forward_batch_size,
             overwrite=True,
