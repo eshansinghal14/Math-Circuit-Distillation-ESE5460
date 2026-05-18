@@ -738,28 +738,45 @@ def build_super_graph(
         supernodes = []
         supernode_labels = []
         if target_args is not None and len(target_args) >= 2:
-            # Use population-level rules (target_args=None) so range/units masks
-            # cover all arg values in the dataset, not just this prompt's specific
-            # args.  With per-prompt masks (e.g. "arg1==23"), the rule mask is a
-            # single narrow column that almost never wins the winner-take-all
-            # against the broader units/carry patterns, causing arg1 range, arg2
-            # range, and arg1+arg2 range to always produce zero neurons.
-            rules = build_anova_basis_rules(
+            # Hybrid rule strategy that fixes two independent root causes:
+            #
+            # Root cause 1 (original S5.0 cap): per-prompt range masks like
+            # "arg1==23" cover only 1 row of the activation grid and almost
+            # never win the WTA against broader units/carry patterns, so arg1
+            # range, arg2 range, and sum range supernodes never formed.
+            # Fix: use population-level rules (target_args=None) for the three
+            # range categories so any range-tuned neuron is identifiable
+            # regardless of where the prompt's specific arg values fall.
+            #
+            # Root cause 2 (542ffef S4.5 regression): switching *all* rules to
+            # population-level created 10 arg1 units rules (digits 0-9).  Carry
+            # neurons correlate with high-digit arg1/arg2 units (P(carry|arg1
+            # %10=9)=0.9 → R²≈0.09), so arg1_max/arg2_max for carry neurons
+            # jumped from ~0 to ~0.09.  Weaker carry neurons (R²(carry)<0.09)
+            # then had composite_score=min(0.09,0.09)=0.09 >= best_score=0.09,
+            # triggering the composite synthesis and stealing those neurons into
+            # "arg1 units and arg2 units", collapsing the carry supernode on
+            # some prompts (S4.5 average).
+            # Fix: keep units and carry rules target-specific (1 per category),
+            # so carry neurons see arg1_max≈0 and the composite never triggers.
+            _RANGE_CATS = {"arg1 range", "arg2 range", "sum range"}
+            pop_rules = build_anova_basis_rules(
                 activation_write_result.arg_values,
                 target_args=None,
                 anova_range_radius=anova_range_radius,
             )
-            # The joint "arg1 range and arg2 range" rule requires target_args to
-            # identify the specific (arg1, arg2) pair; add it explicitly so all 9
-            # teacher categories are at least eligible to form.
             target_specific_rules = build_anova_basis_rules(
                 activation_write_result.arg_values,
                 target_args=target_args,
                 anova_range_radius=anova_range_radius,
             )
-            rules = rules + [
-                r for r in target_specific_rules if r.category == "arg1 range and arg2 range"
-            ]
+            # Range categories → population-level (full dataset coverage).
+            # Units, carry, "arg1 range and arg2 range" → target-specific
+            # (1 rule each; keeps composite synthesis safe for carry neurons).
+            rules = (
+                [r for r in pop_rules if r.category in _RANGE_CATS]
+                + [r for r in target_specific_rules if r.category not in _RANGE_CATS]
+            )
             if rules:
                 n_kept = int(activation_write_result.activations.shape[0])
                 acts_flat = (
