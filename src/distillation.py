@@ -165,6 +165,27 @@ class DistillationConfig:
     device: torch.device = field(default_factory=get_default_device)
     save_interval: int = 0
     label_refresh_interval: int = 0
+    label_refresh_n_prompts: int = 8
+    graph_node_weight: float = 1.0
+    graph_edge_weight: float = 0.0
+    graph_similarity_threshold: float = 0.7
+    graph_max_fan_out: int = 4
+    fast_teacher_graph: bool = False
+    student_computation_eps: float = 1e-6
+    student_embedding_eps: float = 0.0
+    student_skip_logit_attribution: bool = False
+    align_diagnostic: bool = False
+    graph_focus_weight: float = 0.0
+    graph_grad_mode: str = "approx"
+    graph_true_grad_chunk_size: int = 4
+    fast_student_graph: bool = False
+    ablation_batch_size: int = 1
+    align_by_label: bool = False
+    student_activation_write_cache_path: Optional[str] = None
+    student_mlp_input_cache_path: Optional[str] = None
+    mlp_cache_refresh_interval: int = 0
+    student_clustering_mode: str = "live_anova"
+    graph_gen_batch_size: int = 1
 
 
 def resolve_distillation_run_dir(
@@ -331,7 +352,7 @@ class DistillationTrainer:
                 student_anova_range_radius=config.student_anova_range_radius,
                 student_anova_nodes_per_label=config.student_anova_nodes_per_label,
                 student_sum_min_specificity=config.student_sum_min_specificity,
-                student_cluster_method="live_anova",
+                student_cluster_method=config.student_clustering_mode,
             )
 
             self.student_graph_adapter = HFLlamaGraphAdapter(
@@ -339,6 +360,44 @@ class DistillationTrainer:
                 self.tokenizer,
                 self.device,
             )
+
+            # Build or load MLP input cache at startup so live_anova never
+            # falls back to per-prompt disk I/O during training.
+            if config.student_mlp_input_cache_path and os.path.isfile(
+                config.student_mlp_input_cache_path
+            ):
+                mlp_cache = torch.load(
+                    config.student_mlp_input_cache_path, map_location="cpu"
+                )
+                self.graph_loss_config.mlp_input_cache = mlp_cache
+                n_prompts = int(mlp_cache.get("meta", {}).get("n_prompts", 0))
+                print(
+                    f"  Loaded MLP input cache from {config.student_mlp_input_cache_path} "
+                    f"({n_prompts} prompts)"
+                )
+            elif config.student_dataset and not config.label_refresh_interval:
+                # Only build here when label_refresh_interval==0; otherwise
+                # train() will call _refresh_student_labels() at startup.
+                from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
+                from graph_loss.precompute_mlp_inputs import build_mlp_input_cache
+
+                dataset_path = _resolve_dataset_path(config.student_dataset)
+                cache_root = os.path.join(config.save_dir, "mlp_input_cache")
+                self.student.eval()
+                mlp_cache = build_mlp_input_cache(
+                    self.student_graph_adapter,
+                    dataset_path,
+                    config.student_model,
+                    cache_root=cache_root,
+                    batch_size=config.student_activation_forward_batch_size,
+                )
+                self.student.train()
+                self.graph_loss_config.mlp_input_cache = mlp_cache
+                n_prompts = int(mlp_cache.get("meta", {}).get("n_prompts", 0))
+                print(
+                    f"  Built MLP input cache at startup: {n_prompts} prompts, "
+                    f"{len(mlp_cache.get('layer_inputs', []))} layers"
+                )
 
         bnb = None
         try:
@@ -680,10 +739,15 @@ class DistillationTrainer:
             if self.config.save_interval > 0 and self._train_step % self.config.save_interval == 0:
                 self._save_checkpoint_at_step(self._train_step)
 
-            if (
-                self._use_graph
-                and self.config.label_refresh_interval > 0
-                and self._train_step % self.config.label_refresh_interval == 0
+            if self._use_graph and (
+                (
+                    self.config.label_refresh_interval > 0
+                    and self._train_step % self.config.label_refresh_interval == 0
+                )
+                or (
+                    self.config.mlp_cache_refresh_interval > 0
+                    and self._train_step % self.config.mlp_cache_refresh_interval == 0
+                )
             ):
                 self._refresh_student_labels()
 
@@ -1045,18 +1109,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--graph-grad-norm-scale",
-        action="store_true",
-        default=False,
-        help=(
-            "If set, the student attribution graph keeps the legacy "
-            "skip_logit_attribution=True (saves memory but the student supernode "
-            "alignment signal is sum-of-DLAs, which lives in a different functional "
-            "space than the teacher's cached prob-deltas).  Default is to populate "
-            "real Jacobian logit-influence rows and use those for alignment."
-        ),
-    )
-    parser.add_argument(
         "--align-diagnostic",
         action="store_true",
         help=(
@@ -1115,9 +1167,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="Minimum ANOVA specificity for sum-label student supernodes.",
     )
-    parser.add_argument("--eval-max-new-tokens", type=int, default=None)
-    parser.add_argument("--eval-batch-size", type=int, default=50)
-    parser.add_argument("--eval-datasets", nargs="*", default=None, metavar="DATASET")
     parser.add_argument(
         "--save-dir",
         type=str,
@@ -1148,6 +1197,59 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=8,
         help="Number of training prompts (taken from the start of the train set) used for each label refresh.",
+    )
+    parser.add_argument("--student-computation-eps", type=float, default=1e-6)
+    parser.add_argument("--student-embedding-eps", type=float, default=0.0)
+    parser.add_argument(
+        "--student-skip-logit-attribution",
+        action="store_true",
+        help=(
+            "Skip Jacobian logit-influence rows in the student graph (saves memory "
+            "but alignment signal is sum-of-DLAs, not prob-deltas)."
+        ),
+    )
+    parser.add_argument(
+        "--ablation-batch-size",
+        type=int,
+        default=1,
+        help="Batch size for ablation experiments.",
+    )
+    parser.add_argument(
+        "--student-mlp-input-cache",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a pre-built MLP input cache (.pt file).  If provided and the "
+            "file exists it is loaded at startup.  If not provided (or file not "
+            "found) and --student-dataset is set, the cache is built from the "
+            "student model at startup."
+        ),
+    )
+    parser.add_argument(
+        "--mlp-cache-refresh-interval",
+        type=int,
+        default=0,
+        help=(
+            "Rebuild the in-memory MLP input cache every N steps. "
+            "0 = never refresh (default).  Requires --student-dataset."
+        ),
+    )
+    parser.add_argument(
+        "--student-clustering-mode",
+        type=str,
+        default="live_anova",
+        choices=["live_anova", "full_search"],
+        help="Supernode clustering algorithm for the student graph (default: live_anova).",
+    )
+    parser.add_argument(
+        "--graph-gen-batch-size",
+        type=int,
+        default=1,
+        help=(
+            "Number of prompts per graph-loss backward accumulation step "
+            "(default 1 = one prompt at a time)."
+        ),
     )
     parser.add_argument("--seed", type=int, default=42)
     return parser
@@ -1297,6 +1399,10 @@ def main() -> None:
             save_interval=args.save_interval,
             label_refresh_interval=args.label_refresh_interval,
             label_refresh_n_prompts=args.label_refresh_n_prompts,
+            student_mlp_input_cache_path=args.student_mlp_input_cache,
+            mlp_cache_refresh_interval=args.mlp_cache_refresh_interval,
+            student_clustering_mode=args.student_clustering_mode,
+            graph_gen_batch_size=args.graph_gen_batch_size,
             seed=args.seed,
             device=device,
         ),
