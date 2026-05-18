@@ -33,6 +33,7 @@ from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
 from graph_loss.precompute_mlp_inputs import build_mlp_input_cache
 from graph_loss.replacement_model import TransformerLensReplacementModel
 from graph_loss.utils import add_graph_build_args, add_graph_prune_args, resolve_torch_dtype
+from utils.config import HF_READ_TOKEN
 from utils.hf_models import load_model
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -113,6 +114,10 @@ def main() -> None:
         default=0.0,
     )
     args = parser.parse_args()
+
+    if HF_READ_TOKEN:
+        from huggingface_hub import login
+        login(HF_READ_TOKEN)
 
     dtype = resolve_torch_dtype(args.dtype)
     normal_dir = os.path.join(args.output_dir, "normal_pass")
