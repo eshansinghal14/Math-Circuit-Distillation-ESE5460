@@ -43,7 +43,6 @@ class GraphAuxConfig:
     student_anova_range_radius: int = 0
     student_anova_nodes_per_label: int = 10
     student_sum_min_specificity: float = 0.0
-    student_cluster_method: str = "live_anova"
     student_mlp_input_cache_path: str | None = None
     mlp_input_cache: dict | None = None
 
@@ -136,7 +135,6 @@ def compute_prompt_graph_loss(
             prune_result=student_prune_result,
             activation_forward_batch_size=config.student_activation_forward_batch_size,
             mlp_input_cache=student_mlp_input_cache,
-            cluster_method=config.student_cluster_method,
             anova_range_radius=config.student_anova_range_radius,
             anova_nodes_per_label=config.student_anova_nodes_per_label,
             sum_min_specificity=config.student_sum_min_specificity,

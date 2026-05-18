@@ -185,7 +185,6 @@ class DistillationConfig:
     student_mlp_input_cache_path: Optional[str] = None
     mlp_cache_refresh_interval: int = 0
     mlp_cache_batch_size: int = 64
-    student_clustering_mode: str = "live_anova"
     graph_gen_batch_size: int = 1
 
 
@@ -353,7 +352,6 @@ class DistillationTrainer:
                 student_anova_range_radius=config.student_anova_range_radius,
                 student_anova_nodes_per_label=config.student_anova_nodes_per_label,
                 student_sum_min_specificity=config.student_sum_min_specificity,
-                student_cluster_method=config.student_clustering_mode,
             )
 
             self.student_graph_adapter = HFLlamaGraphAdapter(
@@ -1251,13 +1249,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--student-clustering-mode",
-        type=str,
-        default="live_anova",
-        choices=["live_anova", "full_search"],
-        help="Supernode clustering algorithm for the student graph (default: live_anova).",
-    )
-    parser.add_argument(
         "--graph-gen-batch-size",
         type=int,
         default=1,
@@ -1417,7 +1408,6 @@ def main() -> None:
             student_mlp_input_cache_path=args.student_mlp_input_cache,
             mlp_cache_refresh_interval=args.mlp_cache_refresh_interval,
             mlp_cache_batch_size=args.mlp_cache_batch_size,
-            student_clustering_mode=args.student_clustering_mode,
             graph_gen_batch_size=args.graph_gen_batch_size,
             seed=args.seed,
             device=device,
