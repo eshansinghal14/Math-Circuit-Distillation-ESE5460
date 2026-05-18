@@ -572,18 +572,52 @@ def build_neuron_activation_write_result(
         prompt_local_indices: list[int],
         location_indices: list[int],
     ) -> None:
-        """Add a [batch, k] activation tensor into ``activation_sums``."""
-        activations_cpu = activations_per_prompt.detach().float().cpu()
-        for group_idx, location_idx in enumerate(location_indices):
-            col = activations_cpu[:, group_idx]
-            for batch_idx, local_idx in enumerate(prompt_local_indices):
-                value = float(col[batch_idx].item())
-                grid_idx = tuple(
-                    arg_to_idx[dim][arg_value]
-                    for dim, arg_value in enumerate(numeric_args_by_prompt[local_idx])
-                )
-                activation_sums[(location_idx, *grid_idx)] += value
-                activation_counts[(location_idx, *grid_idx)] += 1.0
+        """Add a [batch, k] activation tensor into ``activation_sums``.
+
+        Replaces the O(batch × locations) Python double-loop with a single
+        ``scatter_add_`` call that runs in optimised C++/CUDA.  The flat grid
+        index for each prompt is computed in O(batch × n_dims) Python
+        iterations (n_dims ≤ 3), then everything is dispatched to PyTorch.
+        """
+        n_batch = len(prompt_local_indices)
+        n_loc = len(location_indices)
+        if n_batch == 0 or n_loc == 0:
+            return
+
+        activations_cpu = activations_per_prompt.detach().float().cpu()  # [n_batch, n_loc]
+
+        # Compute flat (row-major) grid index for each prompt in O(n_batch * n_dims).
+        n_dims = len(grid_shape)
+        n_grid = 1
+        for s in grid_shape:
+            n_grid *= s
+
+        flat_grid = torch.zeros(n_batch, dtype=torch.long)
+        stride = 1
+        for dim in range(n_dims - 1, -1, -1):
+            dim_vals = torch.tensor(
+                [arg_to_idx[dim][numeric_args_by_prompt[local_idx][dim]]
+                 for local_idx in prompt_local_indices],
+                dtype=torch.long,
+            )
+            flat_grid = flat_grid + dim_vals * stride
+            stride *= grid_shape[dim]
+
+        # Build a combined flat index into the (n_total_locs × n_grid) buffer.
+        # combined[j, i] = location_indices[j] * n_grid + flat_grid[i]
+        loc_idx_t = torch.tensor(location_indices, dtype=torch.long)  # [n_loc]
+        combined_flat = loc_idx_t.unsqueeze(1) * n_grid + flat_grid.unsqueeze(0)  # [n_loc, n_batch]
+
+        # activations_cpu.T has shape [n_loc, n_batch] — aligned with combined_flat.
+        acts_t = activations_cpu.T.contiguous()  # [n_loc, n_batch]
+
+        # scatter_add_ on the flattened views (activation_sums is contiguous from torch.zeros).
+        activation_sums.view(-1).scatter_add_(0, combined_flat.view(-1), acts_t.view(-1))
+        activation_counts.view(-1).scatter_add_(
+            0,
+            combined_flat.view(-1),
+            torch.ones(n_loc * n_batch, dtype=torch.float32),
+        )
 
     # ------------------------------------------------------------------
     # Cached fast path: per-(layer, token_pos) group, slice the cache and

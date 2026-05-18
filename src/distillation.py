@@ -465,6 +465,9 @@ class DistillationTrainer:
         )
         self.student.train()
         self.graph_loss_config.mlp_input_cache = mlp_cache
+        # Invalidate the cross-step activation-write cache: the student weights
+        # have changed, so previously computed activation grids are stale.
+        self.graph_loss_config.activation_write_result_cache.clear()
         n_prompts = int(mlp_cache["meta"].get("n_prompts", 0))
         print(
             f"  [label-refresh] step={self._train_step} "
