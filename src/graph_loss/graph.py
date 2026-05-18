@@ -607,6 +607,7 @@ def build_super_graph(
     node_labels: dict[int, list[str]] = {}
     supernode_labels: list[list[str]] | None = None
     supernode_heatmap_pdf_paths: list[str] | None = None
+    supernode_heatmaps: list = []
     supernodes: list[list[int]] = []
 
     def get_activation_write_result_for_kept() -> ActivationWriteResult:
@@ -831,9 +832,31 @@ def build_super_graph(
                     if category not in node_labels[global_neuron_idx]:
                         node_labels[global_neuron_idx].append(category)
 
+                global_to_local = {int(g): l for l, g in enumerate(kept_member_list)}
                 for category, members in category_to_neurons.items():
                     supernodes.append(members)
                     supernode_labels.append([category])
+                    local_indices = [global_to_local[m] for m in members]
+                    row_indices_t = torch.tensor(local_indices, dtype=torch.long)
+                    cluster_heatmaps = activation_write_result.activations[row_indices_t].detach().float()
+                    member_specificity = {m: float(best_score[global_to_local[m]].item()) for m in members}
+                    member_plot_labels: dict[int, list[str]] = {
+                        m: [f"{category} (score={member_specificity[m]:.3f})"] for m in members
+                    }
+                    member_number_unembed = (
+                        number_token_unembed_values(members)
+                        if category in {"sum range", "sum units"}
+                        else None
+                    )
+                    supernode_heatmaps.append((
+                        cluster_heatmaps,
+                        activation_write_result.arg_values,
+                        members,
+                        category,
+                        member_plot_labels,
+                        member_number_unembed,
+                        member_specificity,
+                    ))
 
                 logger.info(
                     "[live_anova] target_args=%s: %d/%d neurons assigned to %d supernodes",
