@@ -1,13 +1,11 @@
 import argparse
 import logging
-import math
 import os
-import warnings
 
 import torch
 from huggingface_hub import login
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from graph_loss.attribution.attribute import attribute
 from graph_loss.frontend_export import (
     default_frontend_output_dir,
     export_supergraph_frontend,
@@ -17,10 +15,10 @@ from graph_loss.graph import (
     PruneResult,
     SuperGraph,
     build_super_graph,
-    compute_neuron_logit_influence,
     prune_graph,
 )
-from graph_loss.replacement_model import TransformerLensReplacementModel
+from graph_loss.hf_adapter import HFLlamaGraphAdapter
+from graph_loss.precompute_mlp_inputs import build_mlp_input_cache
 from graph_loss.utils import (
     add_graph_build_args,
     add_graph_prune_args,
@@ -266,220 +264,6 @@ def _save_supergraph(path: str, supergraph: SuperGraph) -> None:
     )
 
 
-@torch.no_grad()
-def _compute_neuron_dla_on_logit_targets(
-    graph: Graph,
-    model: TransformerLensReplacementModel,
-) -> torch.Tensor:
-    if graph.n_logits == 0:
-        return torch.empty((graph.n_neurons, 0), dtype=torch.float32)
-
-    target_token_ids = graph.logit_token_ids.to(device=graph.adjacency_device)
-    W_U_targets = model.unembed.W_U.to(device=graph.adjacency_device)[:, target_token_ids]
-    result = torch.empty(
-        graph.n_neurons,
-        graph.n_logits,
-        dtype=W_U_targets.dtype,
-        device=graph.adjacency_device,
-    )
-    w_out_cache = {}
-
-    for node_id in range(graph.n_neurons):
-        layer = int(graph.neuron_locations[node_id, 0].item())
-        neuron_id = int(graph.neuron_locations[node_id, 2].item())
-        if layer not in w_out_cache:
-            old_mlp = model.blocks[layer].mlp.old_mlp
-            w_out_cache[layer] = model._row_oriented_weight(
-                old_mlp.W_out.to(device=graph.adjacency_device, dtype=W_U_targets.dtype)
-            )
-
-        activation = graph.neuron_activations[node_id].to(
-            device=graph.adjacency_device,
-            dtype=W_U_targets.dtype,
-        )
-        result[node_id] = activation * (w_out_cache[layer][neuron_id] @ W_U_targets)
-
-    return result
-
-
-def _save_influence_calibration_plot(
-    *,
-    layers: list[int],
-    spearman_values: list[float],
-    output_path: str,
-) -> None:
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.scatter(layers, spearman_values, alpha=0.65, s=14)
-    ax.set_xlabel("Neuron layer")
-    ax.set_ylabel("Spearman rho(graph influence, ablation delta)")
-    ax.set_title("Neuron Influence Calibration")
-    ax.set_ylim(-1.05, 1.05)
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(output_path, bbox_inches="tight")
-    plt.close(fig)
-
-
-@torch.no_grad()
-def _compute_neuron_logit_prob_deltas(
-    graph: Graph,
-    model: TransformerLensReplacementModel,
-    *,
-    batch_size: int,
-    logger: logging.Logger,
-) -> torch.Tensor:
-    if graph.n_logits == 0:
-        return torch.empty((graph.n_neurons, 0), dtype=torch.float32)
-    if batch_size <= 0:
-        raise ValueError("batch_size must be positive")
-
-    input_ids = graph.input_tokens.to(model.cfg.device)
-    target_token_ids = graph.logit_token_ids.to(device=input_ids.device)
-    if target_token_ids.numel() and int(target_token_ids.max().item()) >= model.cfg.d_vocab:
-        raise ValueError("Ablation calibration only supports real vocabulary logit targets")
-
-    baseline_logits = model(input_ids)
-    baseline_probs = torch.softmax(baseline_logits[0, -1], dim=-1)[target_token_ids]
-
-    device = input_ids.device
-    dtype = baseline_logits.dtype
-    neuron_locations = graph.neuron_locations.to(device=device)
-    neuron_activations = graph.neuron_activations.to(device=device, dtype=dtype)
-    source_vectors = torch.empty(
-        graph.n_neurons,
-        model.cfg.d_model,
-        device=device,
-        dtype=dtype,
-    )
-    w_out_cache = {}
-    for node_id in range(graph.n_neurons):
-        layer = int(neuron_locations[node_id, 0].item())
-        neuron_id = int(neuron_locations[node_id, 2].item())
-        if layer not in w_out_cache:
-            old_mlp = model.blocks[layer].mlp.old_mlp
-            w_out_cache[layer] = model._row_oriented_weight(
-                old_mlp.W_out.to(device=device, dtype=dtype)
-            )
-        source_vectors[node_id] = neuron_activations[node_id] * w_out_cache[layer][neuron_id]
-
-    deltas = torch.empty(
-        graph.n_neurons,
-        graph.n_logits,
-        dtype=torch.float32,
-        device="cpu",
-    )
-    total_batches = math.ceil(graph.n_neurons / batch_size)
-
-    def make_ablation_hook(
-        batch_indices: torch.Tensor,
-        positions: torch.Tensor,
-        vectors: torch.Tensor,
-    ):
-        def hook_fn(acts: torch.Tensor, hook):
-            acts_out = acts.clone()
-            acts_out[batch_indices, positions] -= vectors.to(device=acts.device, dtype=acts.dtype)
-            return acts_out
-
-        return hook_fn
-
-    for batch_idx, start in enumerate(range(0, graph.n_neurons, batch_size), start=1):
-        end = min(start + batch_size, graph.n_neurons)
-        batch_locations = neuron_locations[start:end]
-        batch_vectors = source_vectors[start:end]
-        hooks = []
-        for layer in batch_locations[:, 0].unique().tolist():
-            layer_idx = int(layer)
-            layer_mask = batch_locations[:, 0] == layer_idx
-            batch_indices = torch.where(layer_mask)[0].to(device=device)
-            hooks.append(
-                (
-                    f"blocks.{layer_idx}.{model.feature_output_hook}",
-                    make_ablation_hook(
-                        batch_indices,
-                        batch_locations[layer_mask, 1].to(device=device),
-                        batch_vectors[layer_mask],
-                    ),
-                )
-            )
-
-        ablated_logits = model.run_with_hooks(
-            input_ids.expand(end - start, -1),
-            fwd_hooks=hooks,
-        )
-        ablated_probs = torch.softmax(ablated_logits[:, -1], dim=-1)[:, target_token_ids]
-        deltas[start:end] = (baseline_probs.unsqueeze(0) - ablated_probs).detach().float().cpu()
-
-        logger.info(
-            "  ablation calibration batch %d/%d: neurons %d-%d",
-            batch_idx,
-            total_batches,
-            start,
-            end - 1,
-        )
-
-    return deltas
-
-
-def _run_influence_calibration(
-    graph: Graph,
-    model: TransformerLensReplacementModel,
-    *,
-    batch_size: int,
-    output_path: str,
-    logger: logging.Logger,
-) -> None:
-    import importlib
-
-    try:
-        scipy_stats = importlib.import_module("scipy.stats")
-    except ImportError as exc:
-        raise ImportError("scipy is required for --test-influence-calibration") from exc
-    spearmanr = scipy_stats.spearmanr
-
-    graph_influence = compute_neuron_logit_influence(graph).detach().float().cpu()
-    ablation_delta = _compute_neuron_logit_prob_deltas(
-        graph,
-        model,
-        batch_size=batch_size,
-        logger=logger,
-    )
-    layers = [int(row[0].item()) for row in graph.neuron_locations.detach().cpu()]
-    spearman_values = []
-
-    for node_id in range(graph.n_neurons):
-        if graph.n_logits < 2:
-            spearman_values.append(float("nan"))
-            continue
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            rho = spearmanr(
-                graph_influence[node_id].numpy(),
-                ablation_delta[node_id].numpy(),
-                nan_policy="omit",
-            ).statistic
-        spearman_values.append(float(rho))
-
-    valid_values = [value for value in spearman_values if not math.isnan(value)]
-    logger.info(
-        "Influence calibration Spearman values: valid=%d/%d mean=%.6g",
-        len(valid_values),
-        len(spearman_values),
-        sum(valid_values) / len(valid_values) if valid_values else float("nan"),
-    )
-    logger.info("Saving influence calibration scatter plot to %s", output_path)
-    _save_influence_calibration_plot(
-        layers=layers,
-        spearman_values=spearman_values,
-        output_path=output_path,
-    )
-
-
 def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     logger = logging.getLogger(__name__)
@@ -490,12 +274,17 @@ def main():
     parser.add_argument(
         "--model",
         required=True,
-        help="Base model architecture name (e.g. 'gpt2'). Used by TransformerLens to build the model config.",
+        help="HuggingFace model name (e.g. 'meta-llama/Meta-Llama-3.1-8B-Instruct').",
     )
     parser.add_argument(
         "--model_path",
         default=None,
         help="Local path to a saved HuggingFace model whose weights override the base --model weights.",
+    )
+    parser.add_argument(
+        "--device",
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        help="Device to run on (default: cuda if available, else cpu).",
     )
     parser.add_argument("--prompt", required=True, help="Prompt to analyze")
     parser.add_argument(
@@ -536,26 +325,9 @@ def main():
     )
     parser.set_defaults(export_frontend=True)
     parser.add_argument(
-        "--test-influence-calibration",
-        dest="test_influence_calibration",
-        action="store_true",
-        help=(
-            "Build the graph, then compare each neuron's graph logit influence "
-            "against zero-ablation logit probability deltas with Spearman correlation "
-            "instead of building a supergraph"
-        ),
-    )
-    parser.add_argument(
-        "--influence-calibration-output-path",
-        "--influence_calibration_output_path",
-        dest="influence_calibration_output_path",
-        default="influence_calibration_spearman.png",
-        help="Path to save the influence calibration scatter plot",
-    )
-    parser.add_argument(
         "--dataset",
         help=(
-            "Optional dataset prefix, filename, or path for activation-write "
+            "Dataset prefix, filename, or path for activation-write "
             "output-neuron clustering and per-cluster PDF heatmaps"
         ),
     )
@@ -570,9 +342,9 @@ def main():
         "--mlp_cache_path",
         dest="mlp_cache_path",
         help=(
-            "Directory containing a pre-built MLP input cache (meta.pt + layer_i.pt) "
-            "for all dataset prompts.  Passed as mlp_input_cache to build_super_graph "
-            "so ANOVA activation grids are computed from cached residual-stream inputs."
+            "Directory to save/load the MLP input cache (meta.pt + layer_i.pt). "
+            "If the directory already exists it is loaded directly; otherwise the "
+            "cache is built from --dataset and saved here for reuse."
         ),
     )
     parser.add_argument(
@@ -623,27 +395,20 @@ def main():
         logger.info("Authenticating with Hugging Face token")
         login(HF_READ_TOKEN)
 
+    device = torch.device(args.device)
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
     if args.model_path:
-        from transformers import AutoModelForCausalLM
         logger.info("Loading weights from local path: %s", args.model_path)
         hf_model = AutoModelForCausalLM.from_pretrained(args.model_path, torch_dtype=dtype)
-        logger.info("Building TransformerLens model with architecture: %s", args.model)
-        model = TransformerLensReplacementModel.from_pretrained(
-            args.model,
-            dtype=dtype,
-            hf_model=hf_model,
-        )
     else:
         logger.info("Loading model: %s", args.model)
-        model = TransformerLensReplacementModel.from_pretrained(
-            args.model,
-            dtype=dtype,
-        )
+        hf_model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=dtype)
+    hf_model = hf_model.to(device).eval()
+    adapter = HFLlamaGraphAdapter(hf_model, tokenizer, device)
 
     logger.info("Running attribution graph build")
-    graph = attribute(
-        prompt=args.prompt,
-        model=model,
+    graph = adapter.build_graph(
+        args.prompt,
         top_k_logits=args.top_k_logits,
         prop_neurons_per_layer=args.prop_neurons_per_layer,
         batch_size=args.attribution_batch_size,
@@ -673,32 +438,33 @@ def main():
         if args.prune_output_path:
             logger.info("Saving prune result to %s", args.prune_output_path)
             _save_prune_result(args.prune_output_path, prune_result)
-            
+
         logger.info("Applying prune masks to graph")
         graph = graph.apply_prune_result(prune_result)
 
-    if args.test_influence_calibration:
-        logger.info("Running influence calibration test")
-        _run_influence_calibration(
-            graph,
-            model,
-            batch_size=args.activation_forward_batch_size,
-            output_path=args.influence_calibration_output_path,
-            logger=logger,
-        )
-        logger.info("Done")
-        return
-
     mlp_input_cache = None
-    if args.mlp_cache_path and os.path.isdir(args.mlp_cache_path):
-        from graph_loss.precompute_mlp_inputs import load_mlp_cache_dir
-
-        logger.info("Loading MLP input cache from %s", args.mlp_cache_path)
-        mlp_input_cache = load_mlp_cache_dir(args.mlp_cache_path)
-        n_prompts = int(mlp_input_cache.get("meta", {}).get("n_prompts", 0))
-        logger.info("  Loaded MLP cache: %d prompts", n_prompts)
+    if args.dataset:
+        from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
+        dataset_path = _resolve_dataset_path(args.dataset)
+        if args.mlp_cache_path and os.path.isdir(args.mlp_cache_path):
+            logger.info("Loading MLP input cache from %s", args.mlp_cache_path)
+            from graph_loss.precompute_mlp_inputs import load_mlp_cache_dir
+            mlp_input_cache = load_mlp_cache_dir(args.mlp_cache_path)
+            n_prompts = int(mlp_input_cache.get("meta", {}).get("n_prompts", 0))
+            logger.info("  Loaded MLP cache: %d prompts", n_prompts)
+        else:
+            logger.info("Building MLP input cache for dataset: %s", args.dataset)
+            mlp_input_cache = build_mlp_input_cache(
+                adapter,
+                dataset_path,
+                args.model,
+                cache_dir=args.mlp_cache_path if args.mlp_cache_path else None,
+                batch_size=args.activation_forward_batch_size,
+            )
+            n_prompts = int(mlp_input_cache.get("meta", {}).get("n_prompts", 0))
+            logger.info("  Built MLP cache: %d prompts", n_prompts)
     elif args.mlp_cache_path:
-        logger.warning("--mlp-cache-path %r is not a directory; ignoring", args.mlp_cache_path)
+        logger.warning("--mlp-cache-path provided without --dataset; ignoring")
 
     logger.info("Running build_super_graph")
     logger.info(
@@ -707,7 +473,7 @@ def main():
     )
     supergraph = build_super_graph(
         graph,
-        model,
+        adapter,
         prune_result=prune_result,
         dataset=args.dataset,
         activation_forward_batch_size=args.activation_forward_batch_size,
@@ -735,7 +501,7 @@ def main():
             output_dir=args.frontend_output_dir,
             slug=args.frontend_slug,
             model_name=args.model,
-            tokenizer=getattr(model, "tokenizer", None),
+            tokenizer=adapter.tokenizer,
         )
         logger.info("Saved frontend graph data: %s", graph_data_path)
         logger.info("Open %s to view the visualization", os.path.join(args.frontend_output_dir, "index.html"))
