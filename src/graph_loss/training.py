@@ -217,11 +217,17 @@ def _load_cached_teacher(
             f"prompt={prompt!r}, answer={answer!r}. Regenerate the cache for this "
             "dataset/tokenizer or remove --teacher-data-cache."
         ) from e
+    if "supernode_labels" not in sg_data:
+        raise RuntimeError(
+            f"Teacher cache file for prompt={prompt!r}, answer={answer!r} is missing "
+            "'supernode_labels'. Regenerate the teacher cache with the current "
+            "generate_teacher_data.py."
+        )
     logit_token_ids: torch.Tensor | None = sg_data.get("logit_token_ids")
     supergraph = SuperGraph(
         supernode_adjacency_matrix=sg_data["supernode_adjacency_matrix"].to(device),
         supernodes=sg_data["supernodes"],
-        supernode_labels=sg_data.get("supernode_labels"),
+        supernode_labels=sg_data["supernode_labels"],
     )
     return CachedTeacherPromptData(
         supergraph=supergraph,
