@@ -176,8 +176,7 @@ class DistillationConfig:
     student_skip_logit_attribution: bool = False
     align_diagnostic: bool = False
     graph_focus_weight: float = 0.0
-    graph_grad_mode: str = "approx"
-    graph_true_grad_chunk_size: int = 4
+
     fast_student_graph: bool = False
     ablation_batch_size: int = 1
     align_by_label: bool = False
@@ -560,7 +559,7 @@ class DistillationTrainer:
             device=self.device,
             loss_scale=1.0 if use_grad_norm_scale else self.config.lambda_graph,
             teacher_cache=self.teacher_data_cache,
-            answers=graph_answers,
+            answers=batch["answers"],
         )
 
         if use_grad_norm_scale:
@@ -1058,31 +1057,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--graph-similarity-threshold", type=float, default=0.7)
     parser.add_argument("--graph-max-fan-out", type=int, default=4)
     parser.add_argument("--fast-teacher-graph", action="store_true")
-    parser.add_argument(
-        "--graph-grad-mode",
-        type=str,
-        default="approx",
-        choices=["approx", "true"],
-        help=(
-            "Gradient pathway for per-supernode prob-delta loss.  "
-            "'approx' (default): cheap differentiable DLA-approximation, "
-            "one forward + per-supernode (norm/lm_head/softmax).  Fast, "
-            "~95%% directionally faithful.  "
-            "'true': full hook-based ablation with chunked sequential "
-            "backward, 100%% faithful to teacher's operational space at "
-            "~3-5x training cost.  Tune chunk size with --graph-true-grad-chunk-size."
-        ),
-    )
-    parser.add_argument(
-        "--graph-true-grad-chunk-size",
-        type=int,
-        default=4,
-        help=(
-            "In --graph-grad-mode true, # of supernodes per batched "
-            "ablation forward+backward.  Higher = more parallelism, "
-            "more peak memory.  Default 4."
-        ),
-    )
+
     parser.add_argument(
         "--fast-student-graph",
         action="store_true",
@@ -1309,11 +1284,7 @@ def main() -> None:
     print(f"  graph node weight:  {args.graph_node_weight}")
     print(f"  graph edge weight:  {args.graph_edge_weight}")
     print(f"  graph focus weight: {args.graph_focus_weight}")
-    print(f"  graph grad mode:    {args.graph_grad_mode}", end="")
-    if args.graph_grad_mode == "true":
-        print(f" (chunk_size={args.graph_true_grad_chunk_size})")
-    else:
-        print()
+
     if args.fast_student_graph:
         print(f"  fast student graph: True (node-loss-only fast path)")
     print(f"  graph dtype:        {args.dtype}")
@@ -1374,8 +1345,7 @@ def main() -> None:
             student_skip_logit_attribution=args.student_skip_logit_attribution,
             align_diagnostic=args.align_diagnostic,
             graph_focus_weight=args.graph_focus_weight,
-            graph_grad_mode=args.graph_grad_mode,
-            graph_true_grad_chunk_size=args.graph_true_grad_chunk_size,
+
             fast_student_graph=args.fast_student_graph,
             ablation_batch_size=args.ablation_batch_size,
             graph_grad_norm_scale=args.graph_grad_norm_scale,
