@@ -112,6 +112,11 @@ class HFLlamaGraphAdapter:
             raise TypeError(f"Unsupported prompt type: {type(prompt)}")
         if tokens.ndim != 1:
             raise ValueError(f"Prompt tokens must be 1-D, got {tuple(tokens.shape)}")
+        if tokens.numel() == 0:
+            raise ValueError(
+                "Tokenizer produced 0 tokens from the prompt. "
+                "Ensure the prompt is non-empty and contains tokenizable text."
+            )
         return tokens.to(self.device)
 
     @staticmethod
