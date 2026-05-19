@@ -145,6 +145,17 @@ def compute_prompt_graph_loss(
             sum_min_specificity=config.student_sum_min_specificity,
             activation_write_result_cache=config.activation_write_result_cache,
         )
+    for i, members in enumerate(student_supergraph_structure.supernodes):
+        if not members:
+            label = (
+                (student_supergraph_structure.supernode_labels or [])[i]
+                if i < len(student_supergraph_structure.supernode_labels or [])
+                else "unknown"
+            )
+            raise RuntimeError(
+                f"Student supernode {i} (label={label!r}) has no member nodes "
+                f"for prompt={prompt!r}."
+            )
     student_supergraph = _aggregate_supergraph_adjacency(
         student_graph,
         student_supergraph_structure.supernodes,
