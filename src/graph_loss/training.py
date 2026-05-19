@@ -151,8 +151,6 @@ def compute_prompt_graph_loss(
         ) from e
         
     for i, members in enumerate(student_supergraph_structure.supernodes):
-        if prompt == '49+9=':
-            print(f"supernode {i}: {len(members)}")
         if not members:
             label = (
                 (student_supergraph_structure.supernode_labels or [])[i]

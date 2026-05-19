@@ -406,7 +406,7 @@ def build_super_graph(
     anova_nodes_per_label: int = 10,
     anova_range_radius: int = 0,
     sum_min_specificity: float = 0.0,
-    strict: bool = False,
+    strict: bool = True,
 ) -> SuperGraph:
     """Cluster kept neurons into supernodes via per-category top-K ANOVA labeling.
 
