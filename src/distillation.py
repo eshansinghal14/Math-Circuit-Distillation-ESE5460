@@ -185,7 +185,7 @@ class DistillationConfig:
     student_mlp_input_cache_path: Optional[str] = None
     mlp_cache_refresh_interval: int = 0
     mlp_cache_batch_size: int = 64
-    graph_gen_batch_size: int = 1
+
 
 
 def resolve_distillation_run_dir(
@@ -553,11 +553,8 @@ class DistillationTrainer:
                 for n, p in self.student.named_parameters()
             }
 
-        n_graph = self.config.graph_gen_batch_size
-        graph_prompts = batch["prompts"][:n_graph]
-        graph_answers = batch["answers"][:n_graph]
         graph_loss, graph_metrics = backward_batch_graph_loss(
-            prompts=graph_prompts,
+            prompts=batch["prompts"],
             student_adapter=self.student_graph_adapter,
             config=self.graph_loss_config,
             device=self.device,
@@ -1254,13 +1251,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--graph-gen-batch-size",
-        type=int,
-        default=1,
-        help=(
-            "Number of prompts per graph-loss backward accumulation step "
-            "(default 1 = one prompt at a time)."
-        ),
     )
     parser.add_argument("--seed", type=int, default=42)
     return parser
@@ -1413,7 +1403,7 @@ def main() -> None:
             student_mlp_input_cache_path=args.student_mlp_input_cache,
             mlp_cache_refresh_interval=args.mlp_cache_refresh_interval,
             mlp_cache_batch_size=args.mlp_cache_batch_size,
-            graph_gen_batch_size=args.graph_gen_batch_size,
+
             seed=args.seed,
             device=device,
         ),
