@@ -408,6 +408,7 @@ def build_super_graph(
     anova_range_radius: int = 0,
     sum_min_specificity: float = 0.0,
     activation_write_result_cache: dict | None = None,
+    strict: bool = False,
 ) -> SuperGraph:
     """Cluster kept neurons into supernodes via per-category top-K ANOVA labeling.
 
@@ -763,6 +764,15 @@ def build_super_graph(
             sorted_all_rows = sorted(all_scored_rows, key=lambda item: item[1], reverse=True)
             scored_rows = sorted_all_rows
             if not scored_rows:
+                if strict:
+                    if category in {"sum range", "sum units"}:
+                        raise ValueError(
+                            f"Student ANOVA category {category!r} has no nodes "
+                            f"(sum_min_specificity={sum_min_specificity})."
+                        )
+                    raise ValueError(
+                        f"Student ANOVA category {category!r} has no positive-variance nodes."
+                    )
                 if category in {"sum range", "sum units"}:
                     logger.info(
                         "  ANOVA label %s: no positive-variance nodes above sum_min_specificity=%.6g",
