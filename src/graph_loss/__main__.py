@@ -566,12 +566,13 @@ def main():
         help="Batch size for dataset activation-write forward passes",
     )
     parser.add_argument(
-        "--activation-write-cache-path",
-        "--activation_write_cache_path",
-        dest="activation_write_cache_path",
+        "--mlp-cache-path",
+        "--mlp_cache_path",
+        dest="mlp_cache_path",
         help=(
-            "Optional cache root for dataset activation-write results. "
-            "A model-name folder is created inside this path."
+            "Directory containing a pre-built MLP input cache (meta.pt + layer_i.pt) "
+            "for all dataset prompts.  Passed as mlp_input_cache to build_super_graph "
+            "so ANOVA activation grids are computed from cached residual-stream inputs."
         ),
     )
     parser.add_argument(
@@ -688,6 +689,17 @@ def main():
         logger.info("Done")
         return
 
+    mlp_input_cache = None
+    if args.mlp_cache_path and os.path.isdir(args.mlp_cache_path):
+        from graph_loss.precompute_mlp_inputs import load_mlp_cache_dir
+
+        logger.info("Loading MLP input cache from %s", args.mlp_cache_path)
+        mlp_input_cache = load_mlp_cache_dir(args.mlp_cache_path)
+        n_prompts = int(mlp_input_cache.get("meta", {}).get("n_prompts", 0))
+        logger.info("  Loaded MLP cache: %d prompts", n_prompts)
+    elif args.mlp_cache_path:
+        logger.warning("--mlp-cache-path %r is not a directory; ignoring", args.mlp_cache_path)
+
     logger.info("Running build_super_graph")
     logger.info(
         "Supernode heatmap output directory: %s",
@@ -699,7 +711,7 @@ def main():
         prune_result=prune_result,
         dataset=args.dataset,
         activation_forward_batch_size=args.activation_forward_batch_size,
-        activation_write_cache_path=args.activation_write_cache_path,
+        mlp_input_cache=mlp_input_cache,
         model_name=args.model,
         supernode_heatmap_output_dir=args.supernode_heatmap_output_dir,
         anova_nodes_per_label=args.anova_nodes_per_label,

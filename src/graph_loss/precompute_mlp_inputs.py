@@ -63,6 +63,21 @@ def mlp_input_cache_exists(cache_root: str, model_name: str, dataset_path: str) 
     return os.path.isfile(os.path.join(d, "meta.pt"))
 
 
+def load_mlp_cache_dir(cache_dir: str) -> dict:
+    """Load an MLP input cache directly from its directory (contains meta.pt + layer_i.pt).
+
+    Use this when you have the exact cache directory path rather than the
+    (cache_root, model_name, dataset_path) triple used by load_mlp_input_cache.
+    """
+    meta = torch.load(os.path.join(cache_dir, "meta.pt"), map_location="cpu", weights_only=True)
+    n_layers = meta["n_layers"]
+    layer_inputs = [
+        torch.load(os.path.join(cache_dir, f"layer_{i}.pt"), map_location="cpu", weights_only=True)
+        for i in range(n_layers)
+    ]
+    return {"meta": meta, "layer_inputs": layer_inputs}
+
+
 def load_mlp_input_cache(cache_root: str, model_name: str, dataset_path: str) -> dict:
     """Load the full cache.  Returns a dict with keys:
 
@@ -86,6 +101,7 @@ def build_mlp_input_cache(
     dataset_path: str,
     model_name: str,
     *,
+    cache_dir: str | None = None,
     data_dict: dict | None = None,
     cache_root: str | None = None,
     batch_size: int = 64,
@@ -120,8 +136,11 @@ def build_mlp_input_cache(
             provided the prompts are taken from here instead of loading from
             ``dataset_path``.  Prefer passing ``None`` (default) so the full
             dataset is used for ANOVA coverage.
-        cache_root: Root directory for the on-disk cache.  If ``None``, a
-            temporary directory is created automatically.
+        cache_dir: Exact directory to save/load the cache (meta.pt + layer_i.pt).
+            When provided, ``cache_root`` and the model/dataset slug sub-path are
+            ignored.  Use this to save to a caller-controlled persistent path.
+        cache_root: Root directory for the on-disk cache.  If ``None`` and
+            ``cache_dir`` is also ``None``, a temporary directory is created.
         batch_size: Prompts per batched forward pass (default 64, fast on GPU).
         overwrite: Rebuild even if a valid cache already exists (default
             ``True`` — caller knows the model weights have changed).
@@ -130,15 +149,16 @@ def build_mlp_input_cache(
         Cache dict with keys ``"meta"`` and ``"layer_inputs"`` (same format
         as ``load_mlp_input_cache``).
     """
-    _tmp_dir: str | None = None
-    if cache_root is None:
-        _tmp_dir = tempfile.mkdtemp(prefix="mlp_cache_")
-        cache_root = _tmp_dir
+    if cache_dir is None:
+        _tmp_dir: str | None = None
+        if cache_root is None:
+            _tmp_dir = tempfile.mkdtemp(prefix="mlp_cache_")
+            cache_root = _tmp_dir
+        cache_dir = mlp_input_cache_dir(cache_root, model_name, dataset_path)
 
-    cache_dir = mlp_input_cache_dir(cache_root, model_name, dataset_path)
     meta_path = os.path.join(cache_dir, "meta.pt")
     if os.path.isfile(meta_path) and not overwrite:
-        return load_mlp_input_cache(cache_root, model_name, dataset_path)
+        return load_mlp_cache_dir(cache_dir)
 
     os.makedirs(cache_dir, exist_ok=True)
     if data_dict is not None:
