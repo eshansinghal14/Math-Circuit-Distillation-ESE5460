@@ -1250,8 +1250,6 @@ def build_parser() -> argparse.ArgumentParser:
             "The full dataset (~10k prompts) is always used for ANOVA coverage."
         ),
     )
-    parser.add_argument(
-    )
     parser.add_argument("--seed", type=int, default=42)
     return parser
 
