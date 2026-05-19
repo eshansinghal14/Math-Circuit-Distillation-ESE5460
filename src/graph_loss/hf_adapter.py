@@ -117,7 +117,15 @@ class HFLlamaGraphAdapter:
                 "Tokenizer produced 0 tokens from the prompt. "
                 "Ensure the prompt is non-empty and contains tokenizable text."
             )
-        return tokens.to(self.device)
+        tokens = tokens.to(self.device)
+        bos_token_id = self.tokenizer.bos_token_id
+        if bos_token_id is None:
+            raise ValueError("LLaMA tokenizer must define bos_token_id.")
+        if int(tokens[0].item()) != int(bos_token_id):
+            tokens = torch.cat(
+                [torch.tensor([bos_token_id], device=self.device, dtype=tokens.dtype), tokens]
+            )
+        return tokens
 
     @staticmethod
     def _row_oriented_weight(
@@ -194,6 +202,9 @@ class HFLlamaGraphAdapter:
             + (up_pre * gate_grad).unsqueeze(-1) * gate_rows.unsqueeze(0)
         )
         source_vectors = neuron_activations.unsqueeze(-1) * out_rows.unsqueeze(0)
+        neuron_activations[0] = 0
+        target_encoders[0] = 0
+        source_vectors[0] = 0
         return neuron_activations, target_encoders, source_vectors
 
     def build_graph(
