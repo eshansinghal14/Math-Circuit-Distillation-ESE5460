@@ -63,7 +63,7 @@ class TeacherDataConfig:
     activation_write_cache_path: str | None = None
     anova_nodes_per_label: int = 10
     anova_range_radius: int = 0
-    sum_min_specificity: float = 0.0
+    min_specificity: float = 0.0
 
 
 def _resolve_dataset_file(dataset_file: str) -> str:
@@ -273,7 +273,7 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
                 model_name=config.teacher_model,
                 anova_nodes_per_label=config.anova_nodes_per_label,
                 anova_range_radius=config.anova_range_radius,
-                sum_min_specificity=config.sum_min_specificity,
+                min_specificity=config.min_specificity,
             )
         _log_supergraph_summary(
             graph_for_supergraph,
@@ -477,12 +477,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--sum-min-specificity",
-        "--sum_min_specificity",
-        dest="sum_min_specificity",
+        "--min-specificity",
+        "--min_specificity",
+        dest="min_specificity",
         type=float,
         default=0.0,
-        help="Minimum ANOVA specificity required for sum-label supernodes ranked by DLA cosine",
+        help="Minimum ANOVA specificity required for a neuron to be included in any supernode",
     )
     add_graph_build_args(parser)
     add_graph_prune_args(parser)
@@ -531,7 +531,7 @@ def main() -> None:
         activation_write_cache_path=args.activation_write_cache_path,
         anova_nodes_per_label=args.anova_nodes_per_label,
         anova_range_radius=args.anova_range_radius,
-        sum_min_specificity=args.sum_min_specificity,
+        min_specificity=args.min_specificity,
     )
     generate_teacher_data(config)
 

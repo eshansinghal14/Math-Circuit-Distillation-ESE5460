@@ -108,8 +108,8 @@ def main() -> None:
         default=0,
     )
     parser.add_argument(
-        "--sum-min-specificity",
-        dest="sum_min_specificity",
+        "--min-specificity",
+        dest="min_specificity",
         type=float,
         default=0.0,
     )
@@ -186,7 +186,7 @@ def main() -> None:
         supernode_heatmap_output_dir=normal_dir,
         anova_nodes_per_label=args.anova_nodes_per_label,
         anova_range_radius=args.anova_range_radius,
-        sum_min_specificity=args.sum_min_specificity,
+        min_specificity=args.min_specificity,
     )
 
     # Pass 2: cached — original base model's residual-stream inputs + checkpoint weights.
@@ -203,7 +203,7 @@ def main() -> None:
         supernode_heatmap_output_dir=cached_dir,
         anova_nodes_per_label=args.anova_nodes_per_label,
         anova_range_radius=args.anova_range_radius,
-        sum_min_specificity=args.sum_min_specificity,
+        min_specificity=args.min_specificity,
     )
 
     logger.info("Done. Heatmaps saved to:\n  %s\n  %s", normal_dir, cached_dir)

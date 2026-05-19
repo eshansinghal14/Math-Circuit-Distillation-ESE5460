@@ -152,7 +152,7 @@ class DistillationConfig:
     student_dataset: Optional[str] = None
     student_anova_range_radius: int = 0
     student_anova_nodes_per_label: int = 10
-    student_sum_min_specificity: float = 0.0
+    student_min_specificity: float = 0.0
     graph_grad_norm_scale: bool = False
     graph_start_step: int = 1
     eval_batch_size: int = 50
@@ -351,7 +351,7 @@ class DistillationTrainer:
                 ),
                 student_anova_range_radius=config.student_anova_range_radius,
                 student_anova_nodes_per_label=config.student_anova_nodes_per_label,
-                student_sum_min_specificity=config.student_sum_min_specificity,
+                student_min_specificity=config.student_min_specificity,
             )
 
             self.student_graph_adapter = HFLlamaGraphAdapter(
@@ -1166,10 +1166,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Cap on neurons per labelled student supernode (default 10).",
     )
     parser.add_argument(
-        "--student-sum-min-specificity",
+        "--student-min-specificity",
         type=float,
         default=0.0,
-        help="Minimum ANOVA specificity for sum-label student supernodes.",
+        help="Minimum ANOVA specificity for student supernodes.",
     )
     parser.add_argument(
         "--save-dir",
@@ -1400,7 +1400,7 @@ def main() -> None:
             student_activation_write_cache_path=args.student_activation_write_cache,
             student_anova_range_radius=args.student_anova_range_radius,
             student_anova_nodes_per_label=args.student_anova_nodes_per_label,
-            student_sum_min_specificity=args.student_sum_min_specificity,
+            student_min_specificity=args.student_min_specificity,
             step_log_interval=args.step_log_interval,
             save_interval=args.save_interval,
             label_refresh_interval=args.label_refresh_interval,

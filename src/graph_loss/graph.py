@@ -406,7 +406,7 @@ def build_super_graph(
     supernode_heatmap_output_dir: str | None = None,
     anova_nodes_per_label: int = 10,
     anova_range_radius: int = 0,
-    sum_min_specificity: float = 0.0,
+    min_specificity: float = 0.0,
 ) -> SuperGraph:
     """Cluster kept neurons into supernodes via per-category top-K ANOVA labeling.
 
@@ -729,7 +729,7 @@ def build_super_graph(
                     if category in label_result.category_scores
                     and label_result.category_scores[category] > 0.0
                     and label_result.category_specificity.get(category, float("-inf"))
-                    > sum_min_specificity
+                    > min_specificity
                 ]
             else:
                 all_scored_rows = [
@@ -737,18 +737,16 @@ def build_super_graph(
                     for row_idx, label_result in enumerate(label_results)
                     if category in label_result.category_specificity
                     and label_result.category_scores.get(category, 0.0) > 0.0
+                    and label_result.category_specificity[category] > min_specificity
                 ]
             sorted_all_rows = sorted(all_scored_rows, key=lambda item: item[1], reverse=True)
             scored_rows = sorted_all_rows
             if not scored_rows:
-                if category in {"sum range", "sum units"}:
-                    logger.info(
-                        "  ANOVA label %s: no positive-variance nodes above sum_min_specificity=%.6g",
-                        category,
-                        sum_min_specificity,
-                    )
-                else:
-                    logger.info("  ANOVA label %s: no positive-variance nodes", category)
+                logger.info(
+                    "  ANOVA label %s: no positive-variance nodes above min_specificity=%.6g",
+                    category,
+                    min_specificity,
+                )
                 continue
             keep_count = min(int(anova_nodes_per_label), len(scored_rows))
             top_rows = scored_rows[:keep_count]

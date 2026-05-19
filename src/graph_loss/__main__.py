@@ -604,12 +604,12 @@ def main():
         ),
     )
     parser.add_argument(
-        "--sum-min-specificity",
-        "--sum_min_specificity",
-        dest="sum_min_specificity",
+        "--min-specificity",
+        "--min_specificity",
+        dest="min_specificity",
         type=float,
         default=0.0,
-        help="Minimum ANOVA specificity required for sum-label supernodes ranked by DLA cosine",
+        help="Minimum ANOVA specificity required for a neuron to be included in any supernode",
     )
 
     args = parser.parse_args()
@@ -704,7 +704,7 @@ def main():
         supernode_heatmap_output_dir=args.supernode_heatmap_output_dir,
         anova_nodes_per_label=args.anova_nodes_per_label,
         anova_range_radius=args.anova_range_radius,
-        sum_min_specificity=args.sum_min_specificity,
+        min_specificity=args.min_specificity,
     )
     _log_supergraph_summary(
         graph,
