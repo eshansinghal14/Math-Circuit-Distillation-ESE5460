@@ -137,12 +137,12 @@ def compute_prompt_graph_loss(
             student_adapter,
             prune_result=student_prune_result,
             dataset=config.dataset,
-            mlp_input_cache=student_mlp_input_cache,
             activation_forward_batch_size=config.student_activation_forward_batch_size,
+            mlp_input_cache=student_mlp_input_cache,
+            model_name=config.student_model,
             anova_range_radius=config.student_anova_range_radius,
             anova_nodes_per_label=config.student_anova_nodes_per_label,
-            min_specificity=config.student_sum_min_specificity,
-            fixed_labels=config.fixed_labels,
+            sum_min_specificity=config.student_sum_min_specificity,
         )
     student_supergraph = _aggregate_supergraph_adjacency(
         student_graph,
