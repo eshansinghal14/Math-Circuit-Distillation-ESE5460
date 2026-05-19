@@ -482,7 +482,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="sum_min_specificity",
         type=float,
         default=0.0,
-        help="Minimum ANOVA specificity required for a neuron to be included in any supernode",
+        help="Minimum ANOVA specificity for a neuron to be included in a sum range/sum units supernode (neurons are ranked by DLA cosine similarity).",
     )
     add_graph_build_args(parser)
     add_graph_prune_args(parser)

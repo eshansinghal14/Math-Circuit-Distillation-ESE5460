@@ -609,7 +609,7 @@ def main():
         dest="sum_min_specificity",
         type=float,
         default=0.0,
-        help="Minimum ANOVA specificity required for a neuron to be included in any supernode",
+        help="Minimum ANOVA specificity for a neuron to be included in a sum range/sum units supernode (neurons are ranked by DLA cosine similarity).",
     )
 
     args = parser.parse_args()
