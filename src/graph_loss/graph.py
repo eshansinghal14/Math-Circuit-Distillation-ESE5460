@@ -766,9 +766,19 @@ def build_super_graph(
             if not scored_rows:
                 if strict:
                     if category in {"sum range", "sum units"}:
+                        pre_filter = [
+                            (row_idx, sum_cosine_scores[int(kept_neuron_indices[row_idx].item())],
+                             label_result.category_specificity.get(category, float("-inf")))
+                            for row_idx, label_result in enumerate(label_results)
+                            if category in label_result.category_scores
+                            and label_result.category_scores[category] > 0.0
+                        ]
+                        top_spec = sorted(pre_filter, key=lambda x: x[2], reverse=True)[:5]
                         raise ValueError(
                             f"Student ANOVA category {category!r} has no nodes "
-                            f"(sum_min_specificity={sum_min_specificity})."
+                            f"(sum_min_specificity={sum_min_specificity}). "
+                            f"Candidates before specificity filter: {len(pre_filter)}. "
+                            f"Top specificities: {[(round(s,6), round(c,4)) for _,c,s in top_spec]}"
                         )
                     raise ValueError(
                         f"Student ANOVA category {category!r} has no positive-variance nodes."
