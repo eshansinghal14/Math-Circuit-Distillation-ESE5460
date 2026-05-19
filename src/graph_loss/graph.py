@@ -759,16 +759,18 @@ def build_super_graph(
                     for row_idx, label_result in enumerate(label_results)
                     if category in label_result.category_specificity
                     and label_result.category_scores.get(category, 0.0) > 0.0
-                    and label_result.category_specificity[category] > sum_min_specificity
                 ]
             sorted_all_rows = sorted(all_scored_rows, key=lambda item: item[1], reverse=True)
             scored_rows = sorted_all_rows
             if not scored_rows:
-                logger.info(
-                    "  ANOVA label %s: no positive-variance nodes above sum_min_specificity=%.6g",
-                    category,
-                    sum_min_specificity,
-                )
+                if category in {"sum range", "sum units"}:
+                    logger.info(
+                        "  ANOVA label %s: no positive-variance nodes above sum_min_specificity=%.6g",
+                        category,
+                        sum_min_specificity,
+                    )
+                else:
+                    logger.info("  ANOVA label %s: no positive-variance nodes", category)
                 continue
             keep_count = min(int(anova_nodes_per_label), len(scored_rows))
             top_rows = scored_rows[:keep_count]
