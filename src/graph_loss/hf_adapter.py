@@ -202,9 +202,16 @@ class HFLlamaGraphAdapter:
             + (up_pre * gate_grad).unsqueeze(-1) * gate_rows.unsqueeze(0)
         )
         source_vectors = neuron_activations.unsqueeze(-1) * out_rows.unsqueeze(0)
-        neuron_activations[0] = 0
-        target_encoders[0] = 0
-        source_vectors[0] = 0
+        # Zero BOS position (index 0) without inplace ops: inplace would corrupt
+        # the saved neuron_activations.unsqueeze(-1) view ([n_pos, d_mlp, 1]) that
+        # autograd holds for the grad w.r.t. out_rows, triggering AsStridedBackward0 error.
+        n_pos = neuron_activations.shape[0]
+        if n_pos > 0:
+            bos_mask = torch.ones(n_pos, dtype=neuron_activations.dtype, device=neuron_activations.device)
+            bos_mask[0] = 0.0
+            neuron_activations = neuron_activations * bos_mask.view(-1, 1)
+            target_encoders = target_encoders * bos_mask.view(-1, 1, 1)
+            source_vectors = source_vectors * bos_mask.view(-1, 1, 1)
         return neuron_activations, target_encoders, source_vectors
 
     def build_graph(
