@@ -552,6 +552,7 @@ class DistillationTrainer:
                 for n, p in self.student.named_parameters()
             }
 
+        self.graph_loss_config.activation_write_result_cache.clear()
         n = self.config.graph_prompt_batch_size or len(batch["prompts"])
         graph_loss, graph_metrics = backward_batch_graph_loss(
             prompts=batch["prompts"][:n],
