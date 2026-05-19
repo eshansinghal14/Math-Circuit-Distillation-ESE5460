@@ -351,7 +351,13 @@ class DistillationTrainer:
                 ),
                 student_anova_range_radius=config.student_anova_range_radius,
                 student_anova_nodes_per_label=config.student_anova_nodes_per_label,
+<<<<<<< HEAD
                 student_min_specificity=config.student_min_specificity,
+=======
+                student_sum_min_specificity=config.student_sum_min_specificity,
+                dataset=config.student_dataset,
+                student_activation_write_cache_path=config.student_activation_write_cache_path,
+>>>>>>> 30565ddf7784f241c70182d70ad3c99cb39bb709
             )
 
             self.student_graph_adapter = HFLlamaGraphAdapter(
@@ -463,6 +469,9 @@ class DistillationTrainer:
         )
         self.student.train()
         self.graph_loss_config.mlp_input_cache = mlp_cache
+        # Invalidate the cross-step activation-write cache: the student weights
+        # have changed, so previously computed activation grids are stale.
+        self.graph_loss_config.activation_write_result_cache.clear()
         n_prompts = int(mlp_cache["meta"].get("n_prompts", 0))
         print(
             f"  [label-refresh] step={self._train_step} "

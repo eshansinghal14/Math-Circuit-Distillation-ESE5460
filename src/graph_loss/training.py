@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
@@ -45,6 +45,9 @@ class GraphAuxConfig:
     student_min_specificity: float = 0.0
     student_mlp_input_cache_path: str | None = None
     mlp_input_cache: dict | None = None
+    dataset: str | None = None
+    student_activation_write_cache_path: str | None = None
+    activation_write_result_cache: dict = field(default_factory=dict)
 
 
 def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
@@ -133,11 +136,18 @@ def compute_prompt_graph_loss(
             student_graph,
             student_adapter,
             prune_result=student_prune_result,
+            dataset=config.dataset,
+            activation_write_cache_path=config.student_activation_write_cache_path,
             activation_forward_batch_size=config.student_activation_forward_batch_size,
             mlp_input_cache=student_mlp_input_cache,
             anova_range_radius=config.student_anova_range_radius,
             anova_nodes_per_label=config.student_anova_nodes_per_label,
+<<<<<<< HEAD
             min_specificity=config.student_min_specificity,
+=======
+            sum_min_specificity=config.student_sum_min_specificity,
+            activation_write_result_cache=config.activation_write_result_cache,
+>>>>>>> 30565ddf7784f241c70182d70ad3c99cb39bb709
         )
     student_supergraph = _aggregate_supergraph_adjacency(
         student_graph,

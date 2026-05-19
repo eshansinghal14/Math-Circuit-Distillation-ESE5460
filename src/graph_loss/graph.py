@@ -407,6 +407,7 @@ def build_super_graph(
     anova_nodes_per_label: int = 10,
     anova_range_radius: int = 0,
     min_specificity: float = 0.0,
+    activation_write_result_cache: dict | None = None,
 ) -> SuperGraph:
     """Cluster kept neurons into supernodes via per-category top-K ANOVA labeling.
 
@@ -602,6 +603,21 @@ def build_super_graph(
             return activation_write_result_for_kept
 
         kept_neuron_locations = graph.neuron_locations[kept_neuron_indices_device].detach().cpu()
+
+        # Check the cross-step in-memory cache (keyed by exact neuron-set fingerprint).
+        # This avoids rebuilding the activation-write grid on every training step when the
+        # same set of kept neurons reappears (common for addition problems where the same
+        # top-influence neurons fire consistently across prompts).
+        if activation_write_result_cache is not None:
+            cache_key = kept_neuron_locations.numpy().tobytes()
+            if cache_key in activation_write_result_cache:
+                activation_write_result_for_kept = activation_write_result_cache[cache_key]
+                logger.info(
+                    "  Reusing cached activation-write result for %d kept neurons (cross-step cache hit)",
+                    int(kept_neuron_locations.shape[0]),
+                )
+                return activation_write_result_for_kept
+
         resolved_model_name = model_name or getattr(model.cfg, "model_name", "model")
         if activation_write_cache_path:
             if dataset is not None:
@@ -695,6 +711,12 @@ def build_super_graph(
                 forward_batch_size=activation_forward_batch_size,
                 mlp_input_cache=mlp_input_cache,
             )
+
+        # Store in the cross-step cache so the same neuron set is instant next time.
+        if activation_write_result_cache is not None:
+            cache_key = kept_neuron_locations.numpy().tobytes()
+            activation_write_result_cache[cache_key] = activation_write_result_for_kept
+
         return activation_write_result_for_kept
 
     if kept_neuron_indices.numel():
