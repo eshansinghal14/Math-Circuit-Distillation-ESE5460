@@ -805,10 +805,13 @@ def build_super_graph(
             for member in members:
                 row_idx = int(torch.where(kept_neuron_indices == member)[0][0].item())
                 label = label_results[row_idx].categories[category]
-                variance_score = label_results[row_idx].category_scores[category]
                 ranking_score = member_specificity[member]
-                score_name = "cos" if category in {"sum range", "sum units"} else "spec"
-                member_plot_labels[member] = [f"{label} (var={variance_score:.3f}, {score_name}={ranking_score:.3f})"]
+                if category in {"sum range", "sum units"}:
+                    specificity_score = label_results[row_idx].category_specificity.get(category, 0.0)
+                    member_plot_labels[member] = [f"{label} (spec={specificity_score:.3f}, cos={ranking_score:.3f})"]
+                else:
+                    variance_score = label_results[row_idx].category_scores[category]
+                    member_plot_labels[member] = [f"{label} (var={variance_score:.3f}, spec={ranking_score:.3f})"]
                 node_labels.setdefault(member, [])
                 if label not in node_labels[member]:
                     node_labels[member].append(label)
