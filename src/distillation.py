@@ -166,6 +166,7 @@ class DistillationConfig:
     save_interval: int = 0
     label_refresh_interval: int = 0
     label_refresh_n_prompts: int = 8
+    graph_prompt_batch_size: int = 0
 
     graph_similarity_threshold: float = 0.7
     graph_max_fan_out: int = 4
@@ -551,14 +552,15 @@ class DistillationTrainer:
                 for n, p in self.student.named_parameters()
             }
 
+        n = self.config.graph_prompt_batch_size or len(batch["prompts"])
         graph_loss, graph_metrics = backward_batch_graph_loss(
-            prompts=batch["prompts"],
+            prompts=batch["prompts"][:n],
             student_adapter=self.student_graph_adapter,
             config=self.graph_loss_config,
             device=self.device,
             loss_scale=1.0 if use_grad_norm_scale else self.config.lambda_graph,
             teacher_cache=self.teacher_data_cache,
-            answers=batch["answers"],
+            answers=batch["answers"][:n],
         )
 
         if use_grad_norm_scale:
@@ -1030,6 +1032,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--teacher-graph-batch-size", type=int, default=512)
     parser.add_argument("--student-graph-batch-size", type=int, default=1)
     parser.add_argument(
+        "--graph-prompt-batch-size",
+        type=int,
+        default=0,
+        help="Number of prompts per step to run graph loss on (0 = all prompts in the batch).",
+    )
+    parser.add_argument(
         "--student-activation-forward-batch-size",
         type=int,
         default=32,
@@ -1361,6 +1369,7 @@ def main() -> None:
             save_interval=args.save_interval,
             label_refresh_interval=args.label_refresh_interval,
             label_refresh_n_prompts=args.label_refresh_n_prompts,
+            graph_prompt_batch_size=args.graph_prompt_batch_size,
             student_mlp_input_cache_path=args.student_mlp_input_cache,
             mlp_cache_refresh_interval=args.mlp_cache_refresh_interval,
             mlp_cache_batch_size=args.mlp_cache_batch_size,
