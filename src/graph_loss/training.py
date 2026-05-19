@@ -42,7 +42,7 @@ class GraphAuxConfig:
     student_activation_forward_batch_size: int = 32
     student_anova_range_radius: int = 0
     student_anova_nodes_per_label: int = 10
-    student_min_specificity: float = 0.0
+    student_sum_min_specificity: float = 0.0
     student_mlp_input_cache_path: str | None = None
     mlp_input_cache: dict | None = None
     dataset: str | None = None
