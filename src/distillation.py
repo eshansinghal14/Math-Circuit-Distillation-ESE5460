@@ -166,8 +166,7 @@ class DistillationConfig:
     save_interval: int = 0
     label_refresh_interval: int = 0
     label_refresh_n_prompts: int = 8
-    graph_node_weight: float = 1.0
-    graph_edge_weight: float = 0.0
+
     graph_similarity_threshold: float = 0.7
     graph_max_fan_out: int = 4
     fast_teacher_graph: bool = False
@@ -1040,8 +1039,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--graph-prune", action="store_true")
     parser.add_argument("--graph-node-threshold", type=float, default=0.8)
     parser.add_argument("--graph-edge-threshold", type=float, default=0.98)
-    parser.add_argument("--graph-node-weight", type=float, default=1.0)
-    parser.add_argument("--graph-edge-weight", type=float, default=0.0)
+
     parser.add_argument(
         "--graph-focus-weight",
         type=float,
@@ -1050,8 +1048,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Weight for Phase-3 logit-focus distribution loss "
             "(KL(teacher_focus || student_focus), no alignment required). "
             "Set >0 to enable, e.g. --graph-focus-weight 1.0. "
-            "When this is the only active graph loss term, also set "
-            "--graph-node-weight 0 --graph-edge-weight 0."
+            "When this is the only active graph loss term, set --lambda-graph >0."
         ),
     )
     parser.add_argument("--graph-similarity-threshold", type=float, default=0.7)
@@ -1064,9 +1061,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Skip the [neurons, neurons] Jacobian backward passes when "
             "building the student graph.  Selects neurons + builds a "
-            "DLA-only adjacency, then clusters via real ablation.  "
-            "Required when running node-loss-only (much faster).  "
-            "Must be combined with --graph-edge-weight 0."
+            "DLA-only adjacency, then clusters via real ablation."
         ),
     )
     parser.add_argument(
@@ -1281,8 +1276,7 @@ def main() -> None:
     print(f"  train_path:         {train_path}")
     print(f"  test_path:          {test_path}")
     print(f"  lambda_graph:       {args.lambda_graph}")
-    print(f"  graph node weight:  {args.graph_node_weight}")
-    print(f"  graph edge weight:  {args.graph_edge_weight}")
+
     print(f"  graph focus weight: {args.graph_focus_weight}")
 
     if args.fast_student_graph:
@@ -1334,8 +1328,7 @@ def main() -> None:
             graph_prune=args.graph_prune,
             graph_node_threshold=args.graph_node_threshold,
             graph_edge_threshold=args.graph_edge_threshold,
-            graph_node_weight=args.graph_node_weight,
-            graph_edge_weight=args.graph_edge_weight,
+
             graph_similarity_threshold=args.graph_similarity_threshold,
             graph_max_fan_out=args.graph_max_fan_out,
             fast_teacher_graph=args.fast_teacher_graph,
