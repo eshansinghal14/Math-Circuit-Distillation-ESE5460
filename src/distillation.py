@@ -565,7 +565,7 @@ class DistillationTrainer:
                 answers=batch["answers"][:n],
             )
         except RuntimeError:
-            self._save_checkpoint()
+            self._save_checkpoint(folder="exception_checkpoint")
             raise
 
         if use_grad_norm_scale:
@@ -923,21 +923,20 @@ class DistillationTrainer:
         print(f"Results saved to: {cfg.save_dir}")
         return dict(self.history)
 
-    def _save_checkpoint(self) -> None:
-        path = os.path.join(self.config.save_dir, STUDENT_MODEL_DIR)
+    def _save_checkpoint(self, folder: str = STUDENT_MODEL_DIR) -> None:
+        path = os.path.join(self.config.save_dir, folder)
         rm_dir_tree(path)
         os.makedirs(path, exist_ok=True)
         self.student.save_pretrained(path)
         self.tokenizer.save_pretrained(path)
 
     def _save_checkpoint_at_step(self, step: int) -> None:
-        step_dir = os.path.join(self.config.save_dir, f"checkpoint_step_{step:04d}")
-        path = os.path.join(step_dir, STUDENT_MODEL_DIR)
+        path = os.path.join(self.config.save_dir, f"step_{step}_checkpoint")
         rm_dir_tree(path)
         os.makedirs(path, exist_ok=True)
         self.student.save_pretrained(path)
         self.tokenizer.save_pretrained(path)
-        print(f"  [checkpoint] Saved step {step:04d} → {path}")
+        print(f"  [checkpoint] Saved step {step} → {path}")
 
     def _save_history(self) -> None:
         os.makedirs(self.config.save_dir, exist_ok=True)
