@@ -131,18 +131,37 @@ def compute_prompt_graph_loss(
 
     student_mlp_input_cache = config.mlp_input_cache
 
-    with torch.no_grad():
-        student_supergraph_structure = build_super_graph(
-            student_graph,
-            student_adapter,
-            prune_result=student_prune_result,
-            dataset=config.dataset,
-            activation_forward_batch_size=config.student_activation_forward_batch_size,
-            mlp_input_cache=student_mlp_input_cache,
-            anova_range_radius=config.student_anova_range_radius,
-            anova_nodes_per_label=config.student_anova_nodes_per_label,
-            sum_min_specificity=config.student_sum_min_specificity,
-        )
+    try:
+        with torch.no_grad():
+            student_supergraph_structure = build_super_graph(
+                student_graph,
+                student_adapter,
+                prune_result=student_prune_result,
+                dataset=config.dataset,
+                activation_forward_batch_size=config.student_activation_forward_batch_size,
+                mlp_input_cache=student_mlp_input_cache,
+                anova_range_radius=config.student_anova_range_radius,
+                anova_nodes_per_label=config.student_anova_nodes_per_label,
+                sum_min_specificity=config.student_sum_min_specificity,
+            )
+        
+    except ValueError as e:
+        raise RuntimeError(
+            f"Student supergraph build failed for prompt={prompt!r}: {e}"
+        ) from e
+        
+    for i, members in enumerate(student_supergraph_structure.supernodes):
+        if not members:
+            label = (
+                (student_supergraph_structure.supernode_labels or [])[i]
+                if i < len(student_supergraph_structure.supernode_labels or [])
+                else "unknown"
+            )
+            raise RuntimeError(
+                f"Student supernode {i} (label={label!r}) has no member nodes "
+                f"for prompt={prompt!r}."
+            )
+    
     student_supergraph = _aggregate_supergraph_adjacency(
         student_graph,
         student_supergraph_structure.supernodes,
@@ -215,6 +234,14 @@ def _load_cached_teacher(
             f"prompt={prompt!r}, answer={answer!r}. Regenerate the cache for this "
             "dataset/tokenizer or remove --teacher-data-cache."
         ) from e
+    
+    if "supernode_labels" not in sg_data:
+        raise RuntimeError(
+            f"Teacher cache file for prompt={prompt!r}, answer={answer!r} is missing "
+            "'supernode_labels'. Regenerate the teacher cache with the current "
+            "generate_teacher_data.py."
+        )
+        
     logit_token_ids: torch.Tensor | None = sg_data.get("logit_token_ids")
     supergraph = SuperGraph(
         supernode_adjacency_matrix=sg_data["supernode_adjacency_matrix"].to(device),
