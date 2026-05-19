@@ -152,7 +152,7 @@ class DistillationConfig:
     student_dataset: Optional[str] = None
     student_anova_range_radius: int = 0
     student_anova_nodes_per_label: int = 10
-    student_min_specificity: float = 0.0
+    student_sum_min_specificity: float = 0.0
     graph_grad_norm_scale: bool = False
     graph_start_step: int = 1
     eval_batch_size: int = 50
@@ -175,7 +175,7 @@ class DistillationConfig:
     student_embedding_eps: float = 0.0
     student_skip_logit_attribution: bool = False
     align_diagnostic: bool = False
-    graph_focus_weight: float = 0.0
+
 
     fast_student_graph: bool = False
     ablation_batch_size: int = 1
@@ -350,7 +350,7 @@ class DistillationTrainer:
                 ),
                 student_anova_range_radius=config.student_anova_range_radius,
                 student_anova_nodes_per_label=config.student_anova_nodes_per_label,
-                student_min_specificity=config.student_min_specificity,
+                student_sum_min_specificity=config.student_sum_min_specificity,
                 dataset=config.student_dataset,
                 student_activation_write_cache_path=config.student_activation_write_cache_path,
             )
@@ -1048,17 +1048,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--graph-node-threshold", type=float, default=0.8)
     parser.add_argument("--graph-edge-threshold", type=float, default=0.98)
 
-    parser.add_argument(
-        "--graph-focus-weight",
-        type=float,
-        default=0.0,
-        help=(
-            "Weight for Phase-3 logit-focus distribution loss "
-            "(KL(teacher_focus || student_focus), no alignment required). "
-            "Set >0 to enable, e.g. --graph-focus-weight 1.0. "
-            "When this is the only active graph loss term, set --lambda-graph >0."
-        ),
-    )
     parser.add_argument("--graph-similarity-threshold", type=float, default=0.7)
     parser.add_argument("--graph-max-fan-out", type=int, default=4)
     parser.add_argument("--fast-teacher-graph", action="store_true")
@@ -1146,7 +1135,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Cap on neurons per labelled student supernode (default 10).",
     )
     parser.add_argument(
-        "--student-min-specificity",
+        "--student-sum-min-specificity",
         type=float,
         default=0.0,
         help="Minimum ANOVA specificity for student supernodes.",
@@ -1285,7 +1274,6 @@ def main() -> None:
     print(f"  test_path:          {test_path}")
     print(f"  lambda_graph:       {args.lambda_graph}")
 
-    print(f"  graph focus weight: {args.graph_focus_weight}")
 
     if args.fast_student_graph:
         print(f"  fast student graph: True (node-loss-only fast path)")
@@ -1345,7 +1333,6 @@ def main() -> None:
             student_activation_forward_batch_size=args.student_activation_forward_batch_size,
             student_skip_logit_attribution=args.student_skip_logit_attribution,
             align_diagnostic=args.align_diagnostic,
-            graph_focus_weight=args.graph_focus_weight,
 
             fast_student_graph=args.fast_student_graph,
             ablation_batch_size=args.ablation_batch_size,
@@ -1364,7 +1351,7 @@ def main() -> None:
             student_activation_write_cache_path=args.student_activation_write_cache,
             student_anova_range_radius=args.student_anova_range_radius,
             student_anova_nodes_per_label=args.student_anova_nodes_per_label,
-            student_min_specificity=args.student_min_specificity,
+            student_sum_min_specificity=args.student_sum_min_specificity,
             step_log_interval=args.step_log_interval,
             save_interval=args.save_interval,
             label_refresh_interval=args.label_refresh_interval,

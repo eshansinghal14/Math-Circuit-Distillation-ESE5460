@@ -42,7 +42,7 @@ class GraphAuxConfig:
     student_activation_forward_batch_size: int = 32
     student_anova_range_radius: int = 0
     student_anova_nodes_per_label: int = 10
-    student_min_specificity: float = 0.0
+    student_sum_min_specificity: float = 0.0
     student_mlp_input_cache_path: str | None = None
     mlp_input_cache: dict | None = None
     dataset: str | None = None
@@ -142,7 +142,7 @@ def compute_prompt_graph_loss(
             mlp_input_cache=student_mlp_input_cache,
             anova_range_radius=config.student_anova_range_radius,
             anova_nodes_per_label=config.student_anova_nodes_per_label,
-            min_specificity=config.student_min_specificity,
+            min_specificity=config.student_sum_min_specificity,
             activation_write_result_cache=config.activation_write_result_cache,
         )
     student_supergraph = _aggregate_supergraph_adjacency(
