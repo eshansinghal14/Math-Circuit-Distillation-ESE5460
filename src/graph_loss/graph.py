@@ -400,7 +400,6 @@ def build_super_graph(
     prune_result: PruneResult | None = None,
     dataset: str | None = None,
     activation_forward_batch_size: int = 32,
-    activation_write_cache_path: str | None = None,
     mlp_input_cache: dict | None = None,
     model_name: str | None = None,
     supernode_heatmap_output_dir: str | None = None,
@@ -605,98 +604,23 @@ def build_super_graph(
         kept_neuron_locations = graph.neuron_locations[kept_neuron_indices_device].detach().cpu()
 
         resolved_model_name = model_name or getattr(model.cfg, "model_name", "model")
-        if activation_write_cache_path:
-            if dataset is not None:
-                cache_file = activation_write_cache_file(
-                    activation_write_cache_path,
-                    str(resolved_model_name),
-                    dataset,
-                    n_layers=int(model.cfg.n_layers),
-                    n_pos=int(graph.n_pos),
-                    d_mlp=int(model.cfg.d_mlp),
-                    neuron_locations=kept_neuron_locations,
-                )
-            else:
-                cache_file = None
-                model_cache_dir = os.path.join(
-                    activation_write_cache_path,
-                    safe_cache_segment(str(resolved_model_name)),
-                )
-                if os.path.isdir(model_cache_dir):
-                    for filename in sorted(os.listdir(model_cache_dir)):
-                        if not filename.startswith("activation_write_") or not filename.endswith(".pt"):
-                            continue
-                        candidate = os.path.join(model_cache_dir, filename)
-                        try:
-                            load_activation_write_cache(
-                                candidate,
-                                expected_neuron_count=int(kept_neuron_locations.shape[0]),
-                            )
-                        except (KeyError, ValueError, RuntimeError):
-                            continue
-                        cache_file = candidate
-                        break
-
-            if cache_file is not None and os.path.isfile(cache_file):
-                logger.info(
-                    "  Loading cached activation-write grids for %d kept neurons: %s",
-                    int(kept_neuron_locations.shape[0]),
-                    cache_file,
-                )
-                kept_activation_write_result = load_activation_write_cache(
-                    cache_file,
-                    expected_neuron_count=int(kept_neuron_locations.shape[0]),
-                )
-                kept_activations = kept_activation_write_result.activations
-                kept_arg_values = kept_activation_write_result.arg_values
-            else:
-                if dataset is None:
-                    raise ValueError(
-                        "A dataset is required to build activation-write grids when no matching "
-                        "cache file is found. Pass --dataset or provide --activation-write-cache-path "
-                        "containing a compatible activation_write_*.pt file."
-                    )
-                logger.info(
-                    "  Building activation-write cache for %d kept neurons from dataset: %s",
-                    int(kept_neuron_locations.shape[0]),
-                    dataset,
-                )
-                kept_activation_write_result = build_neuron_activation_write_result(
-                    model,
-                    dataset,
-                    kept_neuron_locations,
-                    forward_batch_size=activation_forward_batch_size,
-                    include_w_down_vectors=False,
-                    mlp_input_cache=mlp_input_cache,
-                )
-                kept_activations = kept_activation_write_result.activations
-                kept_arg_values = kept_activation_write_result.arg_values
-                logger.info("  Saving kept-neuron activation-write cache: %s", cache_file)
-                save_activation_write_cache(cache_file, kept_activation_write_result)
-
-            activation_write_result_for_kept = ActivationWriteResult(
-                activations=kept_activations,
-                w_down_vectors=torch.empty((int(kept_neuron_locations.shape[0]), 0), dtype=torch.float32),
-                arg_values=kept_arg_values,
+        if dataset is None:
+            raise ValueError(
+                "A dataset is required to build activation-write matrices. "
+                "Pass --dataset or --activation-write-cache-path."
             )
-        else:
-            if dataset is None:
-                raise ValueError(
-                    "A dataset is required to build activation-write matrices. "
-                    "Pass --dataset or --activation-write-cache-path."
-                )
-            logger.info(
-                "  Building activation-write matrices for %d kept graph neurons from dataset: %s",
-                int(kept_neuron_locations.shape[0]),
-                dataset,
-            )
-            activation_write_result_for_kept = build_neuron_activation_write_result(
-                model,
-                dataset,
-                kept_neuron_locations,
-                forward_batch_size=activation_forward_batch_size,
-                mlp_input_cache=mlp_input_cache,
-            )
+        logger.info(
+            "  Building activation-write matrices for %d kept graph neurons from dataset: %s",
+            int(kept_neuron_locations.shape[0]),
+            dataset,
+        )
+        activation_write_result_for_kept = build_neuron_activation_write_result(
+            model,
+            dataset,
+            kept_neuron_locations,
+            forward_batch_size=activation_forward_batch_size,
+            mlp_input_cache=mlp_input_cache,
+        )
 
         return activation_write_result_for_kept
 
