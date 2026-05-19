@@ -554,15 +554,19 @@ class DistillationTrainer:
 
         self.graph_loss_config.activation_write_result_cache.clear()
         n = self.config.graph_prompt_batch_size or len(batch["prompts"])
-        graph_loss, graph_metrics = backward_batch_graph_loss(
-            prompts=batch["prompts"][:n],
-            student_adapter=self.student_graph_adapter,
-            config=self.graph_loss_config,
-            device=self.device,
-            loss_scale=1.0 if use_grad_norm_scale else self.config.lambda_graph,
-            teacher_cache=self.teacher_data_cache,
-            answers=batch["answers"][:n],
-        )
+        try:
+            graph_loss, graph_metrics = backward_batch_graph_loss(
+                prompts=batch["prompts"][:n],
+                student_adapter=self.student_graph_adapter,
+                config=self.graph_loss_config,
+                device=self.device,
+                loss_scale=1.0 if use_grad_norm_scale else self.config.lambda_graph,
+                teacher_cache=self.teacher_data_cache,
+                answers=batch["answers"][:n],
+            )
+        except RuntimeError:
+            self._save_checkpoint()
+            raise
 
         if use_grad_norm_scale:
             graph_grad_sq = 0.0
