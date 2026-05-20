@@ -254,6 +254,10 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
         _write_json(manifest_path, manifest)
         logger.info("Completed teacher data for sample %d", sample_idx)
 
+        del result, distill_tensors, logits
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     return manifest
 
 

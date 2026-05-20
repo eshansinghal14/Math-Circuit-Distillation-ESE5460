@@ -241,8 +241,12 @@ def label_neurons_layer_by_layer(
     for batch_start in range(0, len(sorted_layers), labelling_layer_batch_size):
         batch_layers = sorted_layers[batch_start : batch_start + labelling_layer_batch_size]
 
-        # Accumulate per-layer grids and their loc_indices across the batch.
-        batch_grids: list[torch.Tensor] = []
+        # Per-layer extracted tensors; catted into one bmm after the inner loop.
+        inputs_list: list[torch.Tensor] = []   # each [n_layer, n_prompts, hidden_dim]
+        gate_w_list: list[torch.Tensor] = []   # each [n_layer, hidden_dim]
+        up_w_list: list[torch.Tensor] = []
+        gate_b_list: list[torch.Tensor] = []   # each [n_layer]
+        up_b_list: list[torch.Tensor] = []
         batch_loc_indices: list[int] = []
 
         for layer in batch_layers:
@@ -258,54 +262,67 @@ def label_neurons_layer_by_layer(
             if not layer_members:
                 continue
 
+            hf_mlp = model.layers[layer].mlp
             layer_tensor_gpu = layer_tensor.to(device=device)
             dtype = layer_tensor_gpu.dtype
             n_layer = len(layer_members)
 
-            hf_mlp = model.layers[layer].mlp
-            all_neuron_ids = torch.tensor(
-                [nid for _, _, nid in layer_members], dtype=torch.long, device=device
-            )
-            token_pos_idx = torch.tensor(
-                [tp for _, tp, _ in layer_members], dtype=torch.long, device=device
-            )
-            gate_w = hf_mlp.gate_proj.weight[all_neuron_ids].to(dtype=dtype)
-            up_w = hf_mlp.up_proj.weight[all_neuron_ids].to(dtype=dtype)
+            nids = torch.tensor([nid for _, _, nid in layer_members], dtype=torch.long, device=device)
+            tps = torch.tensor([tp for _, tp, _ in layer_members], dtype=torch.long, device=device)
+
+            # Extract only the relevant token positions: [n_layer, n_prompts, hidden_dim].
+            # Clone so layer_tensor_gpu can be freed immediately.
+            extracted = layer_tensor_gpu[:, tps, :].permute(1, 0, 2).clone()
+            del layer_tensor_gpu
+
+            gate_w = hf_mlp.gate_proj.weight[nids].to(dtype=dtype)  # [n_layer, hidden_dim]
+            up_w = hf_mlp.up_proj.weight[nids].to(dtype=dtype)
             gate_bias_full = getattr(hf_mlp.gate_proj, "bias", None)
             up_bias_full = getattr(hf_mlp.up_proj, "bias", None)
             gate_b = (
-                gate_bias_full[all_neuron_ids].to(dtype=dtype)
+                gate_bias_full[nids].to(dtype=dtype)
                 if gate_bias_full is not None
                 else torch.zeros(n_layer, device=device, dtype=dtype)
             )
             up_b = (
-                up_bias_full[all_neuron_ids].to(dtype=dtype)
+                up_bias_full[nids].to(dtype=dtype)
                 if up_bias_full is not None
                 else torch.zeros(n_layer, device=device, dtype=dtype)
             )
 
-            gate_out = layer_tensor_gpu @ gate_w.T + gate_b  # [n_prompts, n_positions, n_layer]
-            up_out = layer_tensor_gpu @ up_w.T + up_b
-
-            j_idx = torch.arange(n_layer, device=device)
-            neuron_acts = F.silu(gate_out[:, token_pos_idx, j_idx]) * up_out[:, token_pos_idx, j_idx]
-            # [n_prompts, n_layer]
-
-            layer_grid = torch.full((n_layer, grid_cells), float("nan"), dtype=torch.float32)
-            layer_grid[torch.arange(n_layer)[:, None], flat_indices[None, :]] = (
-                neuron_acts.detach().float().cpu().T
-            )
-            batch_grids.append(layer_grid)
+            inputs_list.append(extracted)
+            gate_w_list.append(gate_w)
+            up_w_list.append(up_w)
+            gate_b_list.append(gate_b)
+            up_b_list.append(up_b)
             batch_loc_indices.extend(li for li, _, _ in layer_members)
 
-            del layer_tensor_gpu, gate_out, up_out, neuron_acts, layer_grid
-
-        if not batch_grids:
+        if not inputs_list:
             continue
 
-        # Label all neurons across the batch in one vectorized call.
-        batch_grid = torch.cat(batch_grids, dim=0)  # [total_batch_neurons, grid_cells]
-        del batch_grids
+        # Single batched matmul across all neurons in this layer batch.
+        X = torch.cat(inputs_list, dim=0)       # [n_total, n_prompts, hidden_dim]
+        W_gate = torch.cat(gate_w_list, dim=0)  # [n_total, hidden_dim]
+        W_up = torch.cat(up_w_list, dim=0)
+        b_gate = torch.cat(gate_b_list, dim=0)  # [n_total]
+        b_up = torch.cat(up_b_list, dim=0)
+        del inputs_list, gate_w_list, up_w_list, gate_b_list, up_b_list
+
+        # bmm: [n_total, n_prompts, hidden_dim] x [n_total, hidden_dim, 1] -> [n_total, n_prompts]
+        gate_out = torch.bmm(X, W_gate.unsqueeze(-1)).squeeze(-1) + b_gate.unsqueeze(-1)
+        up_out = torch.bmm(X, W_up.unsqueeze(-1)).squeeze(-1) + b_up.unsqueeze(-1)
+        del X, W_gate, W_up, b_gate, b_up
+
+        neuron_acts = F.silu(gate_out) * up_out  # [n_total, n_prompts]
+        del gate_out, up_out
+
+        neuron_acts_cpu = neuron_acts.detach().float().cpu()
+        del neuron_acts
+
+        batch_grid = torch.full((len(batch_loc_indices), grid_cells), float("nan"), dtype=torch.float32)
+        batch_grid[:, flat_indices] = neuron_acts_cpu  # [n_total, n_prompts] -> grid positions
+        del neuron_acts_cpu
+
         batch_labels = label_activation_heatmaps(
             batch_grid.reshape(len(batch_loc_indices), *grid_shape),
             arg_values,
