@@ -678,34 +678,47 @@ def build_super_graph(
                             if category in label_result.category_scores
                             and label_result.category_scores[category] > 0.0
                         ]
-                        top_spec = sorted(pre_filter, key=lambda x: x[2], reverse=True)[:5]
-                        if category == "sum range":
-                            raise ValueError(
-                                f"Student ANOVA category {category!r} has no nodes "
-                                f"(sum_min_specificity={sum_min_specificity}). "
-                                f"Candidates before specificity filter: {len(pre_filter)}. "
-                                f"Top specificities: {[(round(s,6), round(c,4)) for _,c,s in top_spec]}"
-                            )
-                        else:
-                            raise ValueError(
-                                f"Student ANOVA category {category!r} has no nodes with positive specificity. "
-                                f"Candidates before specificity filter: {len(pre_filter)}. "
-                                f"Top specificities: {[(round(s,6), round(c,4)) for _,c,s in top_spec]}"
-                            )
-                    raise ValueError(
-                        f"Student ANOVA category {category!r} has no positive-variance nodes."
-                    )
-                if category == "sum range":
-                    logger.info(
-                        "  ANOVA label %s: no positive-variance nodes above sum_min_specificity=%.6g",
-                        category,
-                        sum_min_specificity,
-                    )
-                elif category == "sum units":
-                    logger.info("  ANOVA label %s: no positive-variance nodes with positive specificity", category)
+                        all_by_spec = sorted(pre_filter, key=lambda x: x[2], reverse=True)
+                        top_spec = all_by_spec[:5]
+                        if not pre_filter:
+                            if category == "sum range":
+                                logger.warning(
+                                    "  ANOVA label %s: no candidates before specificity filter, skipping",
+                                    category,
+                                )
+                            else:
+                                logger.warning(
+                                    "  ANOVA label %s: no candidates with positive specificity, skipping",
+                                    category,
+                                )
+                            continue
+                        logger.warning(
+                            "  ANOVA label %s: no nodes above specificity threshold"
+                            " (sum_min_specificity=%.6g); falling back to top-%d neurons by"
+                            " specificity. Top specificities: %s",
+                            category,
+                            sum_min_specificity,
+                            anova_nodes_per_label,
+                            [(round(s, 6), round(c, 4)) for _, c, s in top_spec],
+                        )
+                        scored_rows = [(row_idx, cos_score) for row_idx, cos_score, _spec in all_by_spec]
+                        sorted_all_rows = scored_rows
+                    else:
+                        raise ValueError(
+                            f"Student ANOVA category {category!r} has no positive-variance nodes."
+                        )
                 else:
-                    logger.info("  ANOVA label %s: no positive-variance nodes", category)
-                continue
+                    if category == "sum range":
+                        logger.info(
+                            "  ANOVA label %s: no positive-variance nodes above sum_min_specificity=%.6g",
+                            category,
+                            sum_min_specificity,
+                        )
+                    elif category == "sum units":
+                        logger.info("  ANOVA label %s: no positive-variance nodes with positive specificity", category)
+                    else:
+                        logger.info("  ANOVA label %s: no positive-variance nodes", category)
+                    continue
             keep_count = min(int(anova_nodes_per_label), len(scored_rows))
             top_rows = scored_rows[:keep_count]
             row_indices = torch.tensor([row_idx for row_idx, _score in top_rows], dtype=torch.long)
