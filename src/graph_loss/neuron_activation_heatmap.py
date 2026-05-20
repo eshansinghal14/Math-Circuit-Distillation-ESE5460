@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from collections import defaultdict
+
+logger = logging.getLogger(__name__)
 
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
@@ -287,6 +290,7 @@ def label_neurons_layer_by_layer(
         for local_j, (loc_idx, _, _) in enumerate(layer_members):
             label_results[loc_idx] = layer_labels[local_j]
 
+        logger.info("  ANOVA labeled layer %d (%d neurons)", layer, n_layer)
         del layer_tensor_gpu, gate_out, up_out, neuron_acts, layer_grid
 
     return [lbl if lbl is not None else empty for lbl in label_results]
