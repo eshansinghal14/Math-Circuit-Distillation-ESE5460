@@ -211,6 +211,7 @@ def create_graph(
     anova_nodes_per_label: int = 10,
     anova_range_radius: int = 0,
     sum_min_specificity: float = 0.0,
+    labelling_layer_batch_size: int = 1,
     no_grad_supergraph: bool = False,
     logger: logging.Logger | None = None,
 ) -> GraphPipelineResult:
@@ -286,12 +287,13 @@ def create_graph(
         mlp_input_cache,
         target_args=target_args,
         anova_range_radius=anova_range_radius,
+        labelling_layer_batch_size=labelling_layer_batch_size,
     )
 
     # Step 4: Select top-K neurons per ANOVA label.
     # Sum categories use DLA-KL scoring (source_vectors @ W_U) rather than graph influence.
     _logger.info("Selecting ANOVA supernodes (top-%d per label)", anova_nodes_per_label)
-    selected_row_indices, raw_supernodes, supernode_labels, raw_node_labels = (
+    selected_row_indices, raw_supernodes, supernode_labels, raw_node_labels, raw_sum_member_scores = (
         select_anova_supernodes(
             label_results,
             anova_nodes_per_label=anova_nodes_per_label,
@@ -314,6 +316,10 @@ def create_graph(
     old_to_new = {old: new for new, old in enumerate(selected_row_indices)}
     supernodes = [[old_to_new[idx] for idx in sn] for sn in raw_supernodes]
     node_labels = {old_to_new[old]: labels for old, labels in raw_node_labels.items()}
+    sum_member_scores = {
+        cat: {old_to_new[old]: scores for old, scores in cat_scores.items() if old in old_to_new}
+        for cat, cat_scores in raw_sum_member_scores.items()
+    }
 
     # Step 6: Filter the attribution context to ANOVA-selected neurons only.
     filtered_ctx = ctx.filter(keep_mask)
@@ -357,6 +363,7 @@ def create_graph(
             node_labels=node_labels,
             supernode_heatmap_output_dir=supernode_heatmap_output_dir,
             activation_write_result=filtered_awr,
+            sum_member_scores=sum_member_scores,
         )
 
     if no_grad_supergraph:

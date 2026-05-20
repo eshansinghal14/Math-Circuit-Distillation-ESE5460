@@ -235,12 +235,13 @@ def select_anova_supernodes(
     W_U: torch.Tensor | None = None,
     tokenizer=None,
     target_args: list[int] | None = None,
-) -> tuple[list[int], list[list[int]], list[list[str]], dict[int, list[str]]]:
+) -> tuple[list[int], list[list[int]], list[list[str]], dict[int, list[str]], dict[str, dict[int, tuple[float, float, float]]]]:
     """Select ANOVA supernodes from pre-computed label results.
 
-    For non-sum categories ranks by ANOVA variance score.
-    For sum categories uses DLA-KL scoring if source_vectors/W_U/tokenizer/target_args
-    are all provided; otherwise falls back to ANOVA variance.
+    For non-sum categories ranks by ANOVA specificity score.
+    For sum categories filters by sum_min_specificity and ranks by DLA-KL if
+    source_vectors/W_U/tokenizer/target_args are all provided; otherwise falls
+    back to ANOVA variance.
 
     Args:
         label_results: Output of label_activation_heatmaps(). Entry i corresponds
@@ -259,6 +260,8 @@ def select_anova_supernodes(
         supernodes: list of supernodes; each is a list of row indices into label_results.
         supernode_labels: list of [category_name] per supernode.
         node_labels: dict from row_index -> list of label strings.
+        sum_member_scores: dict from category -> {row_idx -> (var, spec, dla_cossim)}
+            for sum-category supernodes only.
     """
     logger = logging.getLogger(__name__)
     use_dla = (
@@ -274,6 +277,7 @@ def select_anova_supernodes(
     supernodes: list[list[int]] = []
     supernode_labels_out: list[list[str]] = []
     node_labels: dict[int, list[str]] = {}
+    sum_member_scores: dict[str, dict[int, tuple[float, float, float]]] = {}
 
     for category in ANOVA_LABEL_CATEGORIES:
         is_sum_category = category in {"sum range", "sum units"}
@@ -296,13 +300,14 @@ def select_anova_supernodes(
                 )
                 all_scored_rows = [(row_idx, kl_all[row_idx]) for row_idx in candidates]
             else:
+                kl_all = None
                 all_scored_rows = [
                     (row_idx, label_results[row_idx].category_scores[category])
                     for row_idx in candidates
                 ]
         else:
             all_scored_rows = [
-                (row_idx, lr.category_scores[category])
+                (row_idx, lr.category_specificity.get(category, 0.0))
                 for row_idx, lr in enumerate(label_results)
                 if category in lr.category_scores
                 and lr.category_scores[category] > 0.0
@@ -335,6 +340,16 @@ def select_anova_supernodes(
                 node_labels[row_idx].append(label)
             selected_member_ids.add(row_idx)
 
+        if is_sum_category:
+            sum_member_scores[category] = {
+                row_idx: (
+                    float(label_results[row_idx].category_scores.get(category, 0.0)),
+                    float(label_results[row_idx].category_specificity.get(category, 0.0)),
+                    float(kl_all[row_idx]) if kl_all is not None else 0.0,
+                )
+                for row_idx, _ in top_rows
+            }
+
         members = [row_idx for row_idx, _score in top_rows]
         supernodes.append(members)
         supernode_labels_out.append([category])
@@ -353,7 +368,7 @@ def select_anova_supernodes(
         len(selected_row_indices),
         len(label_results),
     )
-    return selected_row_indices, supernodes, supernode_labels_out, node_labels
+    return selected_row_indices, supernodes, supernode_labels_out, node_labels, sum_member_scores
 
 
 def build_super_graph(
@@ -363,6 +378,7 @@ def build_super_graph(
     node_labels: dict[int, list[str]] | None = None,
     supernode_heatmap_output_dir: str | None = None,
     activation_write_result: ActivationWriteResult | None = None,
+    sum_member_scores: dict[str, dict[int, tuple[float, float, float]]] | None = None,
 ) -> SuperGraph:
     """Aggregate the attribution adjacency matrix into a supergraph.
 
@@ -419,6 +435,7 @@ def build_super_graph(
                     if supernode_labels[supernode_idx]
                     else "none"
                 )
+                is_sum_category = category in {"sum range", "sum units"}
                 row_indices = torch.tensor(members, dtype=torch.long)
                 cluster_heatmaps = activation_write_result.activations[row_indices].detach().float()
                 member_labels = (
@@ -431,6 +448,10 @@ def build_super_graph(
                     if neuron_norm_props is not None
                     else None
                 )
+                member_sum_scores_for_sn = None
+                if is_sum_category and sum_member_scores is not None:
+                    cat_scores = sum_member_scores.get(category, {})
+                    member_sum_scores_for_sn = {m: cat_scores[m] for m in members if m in cat_scores}
                 saved_path = save_supernode_activation_heatmap_pdf(
                     cluster_heatmaps,
                     activation_write_result.arg_values,
@@ -443,6 +464,8 @@ def build_super_graph(
                     title=f"supernode {supernode_idx}: {category}",
                     member_labels=member_labels,
                     member_norm_props=member_norm_props,
+                    is_sum_category=is_sum_category,
+                    member_sum_scores=member_sum_scores_for_sn,
                 )
                 logger.info("  Saved supernode heatmap PDF: %s", saved_path)
                 supernode_heatmap_pdf_paths.append(saved_path)

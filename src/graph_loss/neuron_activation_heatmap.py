@@ -189,10 +189,13 @@ def label_neurons_layer_by_layer(
     *,
     target_args: tuple[int, ...] | None = None,
     anova_range_radius: int = 0,
+    labelling_layer_batch_size: int = 1,
 ) -> list:
-    """ANOVA-label N neurons one layer at a time, discarding activations after each layer.
+    """ANOVA-label N neurons in batches of layers, discarding activations after each batch.
 
-    Peak memory is O(n_layer_neurons × grid_cells) instead of O(N × grid_cells).
+    labelling_layer_batch_size controls how many layers are processed together before
+    calling label_activation_heatmaps. Larger values amortize the ANOVA call overhead
+    across more neurons at the cost of holding more activation grids in memory at once.
     Returns a list[NodeLabel] in the same order as neuron_locations.
     """
     from graph_loss.anova_node_labels import label_activation_heatmaps, NodeLabel
@@ -233,65 +236,90 @@ def label_neurons_layer_by_layer(
 
     device = model.cfg.device
     empty = NodeLabel(labels=[], scores={}, categories={}, category_scores={}, category_specificity={})
+    sorted_layers = sorted(layer_to_neurons.keys())
 
-    for layer, layer_members in layer_to_neurons.items():
-        if layer >= len(layer_inputs):
+    for batch_start in range(0, len(sorted_layers), labelling_layer_batch_size):
+        batch_layers = sorted_layers[batch_start : batch_start + labelling_layer_batch_size]
+
+        # Accumulate per-layer grids and their loc_indices across the batch.
+        batch_grids: list[torch.Tensor] = []
+        batch_loc_indices: list[int] = []
+
+        for layer in batch_layers:
+            if layer >= len(layer_inputs):
+                continue
+            layer_tensor = layer_inputs[layer]
+            n_positions = int(layer_tensor.shape[1])
+            layer_members = [
+                (li, tp, nid)
+                for li, tp, nid in layer_to_neurons[layer]
+                if tp < n_positions
+            ]
+            if not layer_members:
+                continue
+
+            layer_tensor_gpu = layer_tensor.to(device=device)
+            dtype = layer_tensor_gpu.dtype
+            n_layer = len(layer_members)
+
+            hf_mlp = model.layers[layer].mlp
+            all_neuron_ids = torch.tensor(
+                [nid for _, _, nid in layer_members], dtype=torch.long, device=device
+            )
+            token_pos_idx = torch.tensor(
+                [tp for _, tp, _ in layer_members], dtype=torch.long, device=device
+            )
+            gate_w = hf_mlp.gate_proj.weight[all_neuron_ids].to(dtype=dtype)
+            up_w = hf_mlp.up_proj.weight[all_neuron_ids].to(dtype=dtype)
+            gate_bias_full = getattr(hf_mlp.gate_proj, "bias", None)
+            up_bias_full = getattr(hf_mlp.up_proj, "bias", None)
+            gate_b = (
+                gate_bias_full[all_neuron_ids].to(dtype=dtype)
+                if gate_bias_full is not None
+                else torch.zeros(n_layer, device=device, dtype=dtype)
+            )
+            up_b = (
+                up_bias_full[all_neuron_ids].to(dtype=dtype)
+                if up_bias_full is not None
+                else torch.zeros(n_layer, device=device, dtype=dtype)
+            )
+
+            gate_out = layer_tensor_gpu @ gate_w.T + gate_b  # [n_prompts, n_positions, n_layer]
+            up_out = layer_tensor_gpu @ up_w.T + up_b
+
+            j_idx = torch.arange(n_layer, device=device)
+            neuron_acts = F.silu(gate_out[:, token_pos_idx, j_idx]) * up_out[:, token_pos_idx, j_idx]
+            # [n_prompts, n_layer]
+
+            layer_grid = torch.full((n_layer, grid_cells), float("nan"), dtype=torch.float32)
+            layer_grid[torch.arange(n_layer)[:, None], flat_indices[None, :]] = (
+                neuron_acts.detach().float().cpu().T
+            )
+            batch_grids.append(layer_grid)
+            batch_loc_indices.extend(li for li, _, _ in layer_members)
+
+            del layer_tensor_gpu, gate_out, up_out, neuron_acts, layer_grid
+
+        if not batch_grids:
             continue
-        layer_tensor = layer_inputs[layer]
-        n_positions = int(layer_tensor.shape[1])
-        layer_members = [(li, tp, nid) for li, tp, nid in layer_members if tp < n_positions]
-        if not layer_members:
-            continue
 
-        layer_tensor_gpu = layer_tensor.to(device=device)
-        dtype = layer_tensor_gpu.dtype
-        n_layer = len(layer_members)
-
-        hf_mlp = model.layers[layer].mlp
-        all_neuron_ids = torch.tensor(
-            [nid for _, _, nid in layer_members], dtype=torch.long, device=device
-        )
-        token_pos_idx = torch.tensor(
-            [tp for _, tp, _ in layer_members], dtype=torch.long, device=device
-        )
-        gate_w = hf_mlp.gate_proj.weight[all_neuron_ids].to(dtype=dtype)
-        up_w = hf_mlp.up_proj.weight[all_neuron_ids].to(dtype=dtype)
-        gate_bias_full = getattr(hf_mlp.gate_proj, "bias", None)
-        up_bias_full = getattr(hf_mlp.up_proj, "bias", None)
-        gate_b = (
-            gate_bias_full[all_neuron_ids].to(dtype=dtype)
-            if gate_bias_full is not None
-            else torch.zeros(n_layer, device=device, dtype=dtype)
-        )
-        up_b = (
-            up_bias_full[all_neuron_ids].to(dtype=dtype)
-            if up_bias_full is not None
-            else torch.zeros(n_layer, device=device, dtype=dtype)
-        )
-
-        gate_out = layer_tensor_gpu @ gate_w.T + gate_b  # [n_prompts, n_positions, n_layer]
-        up_out = layer_tensor_gpu @ up_w.T + up_b
-
-        j_idx = torch.arange(n_layer, device=device)
-        neuron_acts = F.silu(gate_out[:, token_pos_idx, j_idx]) * up_out[:, token_pos_idx, j_idx]
-        # [n_prompts, n_layer]
-
-        # Build a small [n_layer, grid_cells] grid, label, then discard.
-        layer_grid = torch.full((n_layer, grid_cells), float("nan"), dtype=torch.float32)
-        layer_grid[torch.arange(n_layer)[:, None], flat_indices[None, :]] = (
-            neuron_acts.detach().float().cpu().T
-        )
-        layer_labels = label_activation_heatmaps(
-            layer_grid.reshape(n_layer, *grid_shape),
+        # Label all neurons across the batch in one vectorized call.
+        batch_grid = torch.cat(batch_grids, dim=0)  # [total_batch_neurons, grid_cells]
+        del batch_grids
+        batch_labels = label_activation_heatmaps(
+            batch_grid.reshape(len(batch_loc_indices), *grid_shape),
             arg_values,
             target_args=target_args,
             anova_range_radius=anova_range_radius,
         )
-        for local_j, (loc_idx, _, _) in enumerate(layer_members):
-            label_results[loc_idx] = layer_labels[local_j]
+        for label_j, loc_idx in enumerate(batch_loc_indices):
+            label_results[loc_idx] = batch_labels[label_j]
 
-        logger.info("  ANOVA labeled layer %d (%d neurons)", layer, n_layer)
-        del layer_tensor_gpu, gate_out, up_out, neuron_acts, layer_grid
+        logger.info(
+            "  ANOVA labeled layers %s (%d neurons total)",
+            batch_layers,
+            len(batch_loc_indices),
+        )
 
     return [lbl if lbl is not None else empty for lbl in label_results]
 
@@ -342,6 +370,8 @@ def save_supernode_activation_heatmap_pdf(
     member_number_unembed: dict[int, tuple[list[int], torch.Tensor]] | None = None,
     member_specificity: dict[int, float] | None = None,
     member_norm_props: dict[int, float] | None = None,
+    is_sum_category: bool = False,
+    member_sum_scores: dict[int, tuple[float, float, float]] | None = None,
 ) -> str:
     """Save one 2D activation heatmap page per neuron in a supernode, with optional 1D logit influence side panel."""
     if len(arg_values) != 2:
@@ -384,7 +414,13 @@ def save_supernode_activation_heatmap_pdf(
                 member_norm_props.get(graph_neuron_idx) if member_norm_props is not None else None
             )
             norm_text = f"  ({norm_prop * 100:.2f}% of total residual norm)" if norm_prop is not None else ""
-            page_title = f"{title}{label_text}\nNeuron {neuron_id} ({location_text}){norm_text}"
+            sum_score_text = ""
+            if is_sum_category and member_sum_scores is not None:
+                scores = member_sum_scores.get(graph_neuron_idx)
+                if scores is not None:
+                    var_val, spec_val, kl_val = scores
+                    sum_score_text = f"  var={var_val:.3f} spec={spec_val:.3f} dla_kl={kl_val:.3f}"
+            page_title = f"{title}{label_text}\nNeuron {neuron_id} ({location_text}){norm_text}{sum_score_text}"
             number_unembed = (
                 member_number_unembed.get(graph_neuron_idx)
                 if member_number_unembed is not None
