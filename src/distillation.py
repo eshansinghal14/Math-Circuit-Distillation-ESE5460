@@ -180,7 +180,6 @@ class DistillationConfig:
     fast_student_graph: bool = False
     ablation_batch_size: int = 1
     align_by_label: bool = False
-    student_mlp_input_cache_path: Optional[str] = None
     mlp_cache_refresh_interval: int = 0
     mlp_cache_batch_size: int = 64
 
@@ -359,9 +358,6 @@ class DistillationTrainer:
                 self.device,
             )
 
-            # Build MLP input cache at startup. Always overwrite so ANOVA uses
-            # current student weights. If --mlp-cache-path is given, save there
-            # (persistent, inspectable); otherwise use /tmp.
             if config.student_dataset and not config.label_refresh_interval:
                 # Only build here when label_refresh_interval==0; otherwise
                 # train() will call _refresh_student_labels() at startup.
@@ -369,28 +365,17 @@ class DistillationTrainer:
                 from graph_loss.precompute_mlp_inputs import build_mlp_input_cache
 
                 dataset_path = _resolve_dataset_path(config.student_dataset)
-                build_kwargs: dict = dict(
-                    batch_size=config.mlp_cache_batch_size,
-                    overwrite=True,
-                )
-                if config.student_mlp_input_cache_path:
-                    build_kwargs["cache_dir"] = config.student_mlp_input_cache_path
-                else:
-                    build_kwargs["cache_root"] = os.path.join("/tmp", "mlp_input_cache")
                 self.student.eval()
                 mlp_cache = build_mlp_input_cache(
                     self.student_graph_adapter,
                     dataset_path,
                     config.student_model,
-                    **build_kwargs,
+                    batch_size=config.mlp_cache_batch_size,
                 )
                 self.student.train()
                 self.graph_loss_config.mlp_input_cache = mlp_cache
                 n_prompts = int(mlp_cache.get("meta", {}).get("n_prompts", 0))
-                save_loc = config.student_mlp_input_cache_path or "/tmp/mlp_input_cache/..."
-                print(
-                    f"  Built MLP input cache: {n_prompts} prompts → {save_loc}"
-                )
+                print(f"  Built MLP input cache: {n_prompts} prompts")
 
         bnb = None
         try:
@@ -443,17 +428,12 @@ class DistillationTrainer:
         from graph_loss.precompute_mlp_inputs import build_mlp_input_cache
 
         dataset_path = _resolve_dataset_path(self.config.student_dataset)
-        build_kwargs: dict = dict(batch_size=self.config.mlp_cache_batch_size, overwrite=True)
-        if self.config.student_mlp_input_cache_path:
-            build_kwargs["cache_dir"] = self.config.student_mlp_input_cache_path
-        else:
-            build_kwargs["cache_root"] = os.path.join("/tmp", "mlp_input_cache")
         self.student.eval()
         mlp_cache = build_mlp_input_cache(
             self.student_graph_adapter,
             dataset_path,
             self.config.student_model,
-            **build_kwargs,
+            batch_size=self.config.mlp_cache_batch_size,
         )
         self.student.train()
         self.graph_loss_config.mlp_input_cache = mlp_cache
@@ -1173,18 +1153,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Batch size for ablation experiments.",
     )
     parser.add_argument(
-        "--mlp-cache-path",
-        type=str,
-        default=None,
-        metavar="PATH",
-        help=(
-            "Directory containing a pre-built MLP input cache (meta.pt + layer_i.pt). "
-            "If provided and the directory exists it is loaded at startup.  If not "
-            "provided (or directory not found) and --student-dataset is set, the cache "
-            "is built from the student model at startup."
-        ),
-    )
-    parser.add_argument(
         "--mlp-cache-refresh-interval",
         type=int,
         default=0,
@@ -1341,7 +1309,6 @@ def main() -> None:
             label_refresh_interval=args.label_refresh_interval,
             label_refresh_n_prompts=args.label_refresh_n_prompts,
             graph_prompt_batch_size=args.graph_prompt_batch_size,
-            student_mlp_input_cache_path=args.mlp_cache_path,
             mlp_cache_refresh_interval=args.mlp_cache_refresh_interval,
             mlp_cache_batch_size=args.mlp_cache_batch_size,
 

@@ -62,11 +62,6 @@ def main() -> None:
         help="Root dir; normal_pass/ and cached_pass/ subdirs are created inside it",
     )
     parser.add_argument(
-        "--cache-root",
-        default=".mlp_cache",
-        help="Root dir for on-disk MLP input cache (default: .mlp_cache)",
-    )
-    parser.add_argument(
         "--device",
         default="cuda" if torch.cuda.is_available() else "cpu",
         help="Device for base HF model during cache build",
@@ -164,8 +159,6 @@ def main() -> None:
         adapter,
         dataset_path,
         args.model_id,
-        cache_root=args.cache_root,
-        overwrite=False,
     )
     del base_hf, adapter
 

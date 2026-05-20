@@ -55,21 +55,8 @@ def _dataset_slug(dataset_path: str) -> str:
     return safe
 
 
-def mlp_input_cache_dir(cache_root: str, model_name: str, dataset_path: str) -> str:
-    return os.path.join(cache_root, _model_slug(model_name), _dataset_slug(dataset_path))
-
-
-def mlp_input_cache_exists(cache_root: str, model_name: str, dataset_path: str) -> bool:
-    d = mlp_input_cache_dir(cache_root, model_name, dataset_path)
-    return os.path.isfile(os.path.join(d, "meta.pt"))
-
-
 def load_mlp_cache_dir(cache_dir: str) -> dict:
-    """Load an MLP input cache directly from its directory (contains meta.pt + layer_i.pt).
-
-    Use this when you have the exact cache directory path rather than the
-    (cache_root, model_name, dataset_path) triple used by load_mlp_input_cache.
-    """
+    """Load an MLP input cache from a directory containing meta.pt + layer_i.pt."""
     meta = torch.load(os.path.join(cache_dir, "meta.pt"), map_location="cpu", weights_only=True)
     n_layers = meta["n_layers"]
     layer_inputs = [
@@ -79,85 +66,38 @@ def load_mlp_cache_dir(cache_dir: str) -> dict:
     return {"meta": meta, "layer_inputs": layer_inputs}
 
 
-def load_mlp_input_cache(cache_root: str, model_name: str, dataset_path: str) -> dict:
-    """Load the full cache.  Returns a dict with keys:
-
-    - ``meta``: dict with n_prompts, n_layers, d_model, d_mlp, arg_values, positions
-    - ``layer_inputs``: list of [n_prompts, n_positions, d_model] tensors (one per layer)
-    """
-    d = mlp_input_cache_dir(cache_root, model_name, dataset_path)
-    meta = torch.load(os.path.join(d, "meta.pt"), map_location="cpu", weights_only=True)
-    n_layers = meta["n_layers"]
-    layer_inputs = []
-    for i in range(n_layers):
-        layer_inputs.append(
-            torch.load(os.path.join(d, f"layer_{i}.pt"), map_location="cpu", weights_only=True)
-        )
-    return {"meta": meta, "layer_inputs": layer_inputs}
-
-
 @torch.no_grad()
 def build_mlp_input_cache(
     adapter,
     dataset_path: str,
     model_name: str,
     *,
-    cache_dir: str | None = None,
     data_dict: dict | None = None,
-    cache_root: str | None = None,
     batch_size: int = 64,
-    overwrite: bool = True,
 ) -> dict:
-    """Build an MLP-input cache from a live HF model (via ``HFLlamaGraphAdapter``).
+    """Build or load an MLP-input cache stored under the system temp directory.
 
-    Uses PyTorch forward pre-hooks to capture the residual-stream input
-    entering each MLP layer, accumulates results directly in RAM (bfloat16),
-    writes ``.pt`` files to disk once for optional reuse, then returns the
-    in-memory cache dict.
-
-    The full dataset (all ~10k prompts) should be used so that ANOVA neuron
-    labels have sufficient statistical coverage and match the teacher's labels.
-    On an A100 GPU, processing 10k prompts at batch_size=64 takes ~3 seconds.
-
-    The previous implementation wrote to numpy memmaps then flushed, read them
-    back with ``np.array()``, converted to bfloat16, saved as ``.pt``, and
-    finally reloaded via ``load_mlp_input_cache`` — roughly 50 GB of
-    unnecessary disk I/O that caused a 3.5-minute delay on typical NVMe disks.
-    This version pre-allocates bfloat16 tensors in RAM and eliminates that
-    round-trip entirely.
+    Checks for an existing cache keyed by model and dataset.  If found, loads
+    and returns it immediately.  Otherwise captures residual-stream inputs
+    entering each MLP layer via forward pre-hooks, saves the result to temp,
+    and returns it.
 
     Args:
-        adapter: ``HFLlamaGraphAdapter`` wrapping the current student model.
-        dataset_path: Resolved absolute path to the dataset JSON (also used as
-            the cache directory key).  The full dataset should be passed here —
-            NOT just a training subset.
+        adapter: ``HFLlamaGraphAdapter`` wrapping the current model.
+        dataset_path: Resolved path to the dataset JSON (cache key).
         model_name: HuggingFace model name string (cache key).
-        data_dict: Optional pre-loaded ``{prompt: answer}`` dict.  When
-            provided the prompts are taken from here instead of loading from
-            ``dataset_path``.  Prefer passing ``None`` (default) so the full
-            dataset is used for ANOVA coverage.
-        cache_dir: Exact directory to save/load the cache (meta.pt + layer_i.pt).
-            When provided, ``cache_root`` and the model/dataset slug sub-path are
-            ignored.  Use this to save to a caller-controlled persistent path.
-        cache_root: Root directory for the on-disk cache.  If ``None`` and
-            ``cache_dir`` is also ``None``, a temporary directory is created.
-        batch_size: Prompts per batched forward pass (default 64, fast on GPU).
-        overwrite: Rebuild even if a valid cache already exists (default
-            ``True`` — caller knows the model weights have changed).
+        data_dict: Optional pre-loaded ``{prompt: answer}`` dict.
+        batch_size: Prompts per batched forward pass (default 64).
 
     Returns:
-        Cache dict with keys ``"meta"`` and ``"layer_inputs"`` (same format
-        as ``load_mlp_input_cache``).
+        Cache dict with keys ``"meta"`` and ``"layer_inputs"``.
     """
-    if cache_dir is None:
-        _tmp_dir: str | None = None
-        if cache_root is None:
-            _tmp_dir = tempfile.mkdtemp(prefix="mlp_cache_")
-            cache_root = _tmp_dir
-        cache_dir = mlp_input_cache_dir(cache_root, model_name, dataset_path)
-
+    cache_dir = os.path.join(
+        tempfile.gettempdir(), "mlp_cache",
+        _model_slug(model_name), _dataset_slug(dataset_path),
+    )
     meta_path = os.path.join(cache_dir, "meta.pt")
-    if os.path.isfile(meta_path) and not overwrite:
+    if os.path.isfile(meta_path):
         return load_mlp_cache_dir(cache_dir)
 
     os.makedirs(cache_dir, exist_ok=True)
@@ -194,9 +134,7 @@ def build_mlp_input_cache(
     first_ids, _ = _tokenize_prompt_batch(adapter, prompts[:1])
     n_positions = first_ids.shape[1]
 
-    # Pre-allocate in-RAM bfloat16 buffers.  Avoids the old memmap flush →
-    # np.array read → torch.save → load_mlp_input_cache reload cycle that
-    # produced ~50 GB of disk I/O (≈ 3.5 min on typical NVMe).
+    # Pre-allocate in-RAM bfloat16 buffers.
     # Memory cost: n_layers × n_prompts × n_positions × d_model × 2 B.
     # For a 1B student: 16 × 10k × 20 × 2048 × 2 ≈ 12.8 GB — fine on A100.
     layer_inputs: list[torch.Tensor] = [
@@ -278,10 +216,8 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Dataset JSON filename under datasets/ or an explicit path",
     )
-    parser.add_argument("--cache-dir", required=True, help="Root directory for the cache")
     parser.add_argument("--dtype", default="bfloat16", choices=DTYPE_CHOICES)
     parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--overwrite", action="store_true")
     return parser
 
 
@@ -307,9 +243,7 @@ def main() -> None:
         adapter,
         dataset_path,
         args.model,
-        cache_root=args.cache_dir,
         batch_size=args.batch_size,
-        overwrite=args.overwrite,
     )
 
 

@@ -338,16 +338,6 @@ def main():
         help="Batch size for dataset activation-write forward passes",
     )
     parser.add_argument(
-        "--mlp-cache-path",
-        "--mlp_cache_path",
-        dest="mlp_cache_path",
-        help=(
-            "Directory to save/load the MLP input cache (meta.pt + layer_i.pt). "
-            "If the directory already exists it is loaded directly; otherwise the "
-            "cache is built from --dataset and saved here for reuse."
-        ),
-    )
-    parser.add_argument(
         "--supernode-heatmap-output-dir",
         "--supernode_heatmap_output_dir",
         dest="supernode_heatmap_output_dir",
@@ -446,25 +436,15 @@ def main():
     if args.dataset:
         from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
         dataset_path = _resolve_dataset_path(args.dataset)
-        if args.mlp_cache_path and os.path.isdir(args.mlp_cache_path):
-            logger.info("Loading MLP input cache from %s", args.mlp_cache_path)
-            from graph_loss.precompute_mlp_inputs import load_mlp_cache_dir
-            mlp_input_cache = load_mlp_cache_dir(args.mlp_cache_path)
-            n_prompts = int(mlp_input_cache.get("meta", {}).get("n_prompts", 0))
-            logger.info("  Loaded MLP cache: %d prompts", n_prompts)
-        else:
-            logger.info("Building MLP input cache for dataset: %s", args.dataset)
-            mlp_input_cache = build_mlp_input_cache(
-                adapter,
-                dataset_path,
-                args.model,
-                cache_dir=args.mlp_cache_path if args.mlp_cache_path else None,
-                batch_size=args.activation_forward_batch_size,
-            )
-            n_prompts = int(mlp_input_cache.get("meta", {}).get("n_prompts", 0))
-            logger.info("  Built MLP cache: %d prompts", n_prompts)
-    elif args.mlp_cache_path:
-        logger.warning("--mlp-cache-path provided without --dataset; ignoring")
+        logger.info("Building MLP input cache for dataset: %s", args.dataset)
+        mlp_input_cache = build_mlp_input_cache(
+            adapter,
+            dataset_path,
+            args.model,
+            batch_size=args.activation_forward_batch_size,
+        )
+        n_prompts = int(mlp_input_cache.get("meta", {}).get("n_prompts", 0))
+        logger.info("  Built MLP cache: %d prompts", n_prompts)
 
     logger.info("Running build_super_graph")
     logger.info(

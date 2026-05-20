@@ -1,38 +1,18 @@
-"""Plot a specific MLP neuron's activations over a numeric dataset."""
+"""Neuron activation heatmaps (2D) and logit influence heatmaps (1D) for MLP neurons."""
 
 from __future__ import annotations
 
-import argparse
-import logging
 import os
 import re
 from collections import defaultdict
-from dataclasses import dataclass
 
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 import torch
 import torch.nn.functional as F
-from huggingface_hub import login
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from graph_loss.hf_adapter import HFLlamaGraphAdapter
-from graph_loss.utils import ActivationWriteResult, DTYPE_CHOICES, resolve_torch_dtype
-from utils import HF_READ_TOKEN, default_datasets_dir, load_prompt_answer_json
-
-
-@dataclass
-class ActivationAccumulator:
-    total: float = 0.0
-    count: int = 0
-
-    def add(self, value: float) -> None:
-        self.total += value
-        self.count += 1
-
-    @property
-    def mean(self) -> float:
-        return self.total / self.count
+from graph_loss.utils import ActivationWriteResult
+from utils import default_datasets_dir
 
 
 def _resolve_dataset_path(dataset_name: str) -> str:
@@ -72,45 +52,6 @@ def _parse_numeric_args(prompt: str) -> tuple[int, ...]:
     return tuple(int(value) for value in values)
 
 
-def _validate_neuron_location(
-    model,
-    *,
-    layer: int,
-    token_pos: int,
-    neuron_id: int,
-) -> tuple[int, int, int]:
-    if not (0 <= layer < model.cfg.n_layers):
-        raise ValueError(f"--layer must be in [0, {model.cfg.n_layers}), got {layer}")
-    if token_pos < 0:
-        raise ValueError(f"--token-pos must be non-negative, got {token_pos}")
-    if not (0 <= neuron_id < model.cfg.d_mlp):
-        raise ValueError(f"--neuron-id must be in [0, {model.cfg.d_mlp}), got {neuron_id}")
-    return layer, token_pos, neuron_id
-
-
-def _select_mlp_neuron_weight(
-    model,
-    weight: torch.Tensor,
-    neuron_id: int,
-    *,
-    device: torch.device,
-    dtype: torch.dtype,
-) -> torch.Tensor:
-    d_model = model.cfg.d_model
-    d_mlp = model.cfg.d_mlp
-
-    if weight.shape == (d_mlp, d_model):
-        row = weight[neuron_id]
-    elif weight.shape == (d_model, d_mlp):
-        row = weight[:, neuron_id]
-    else:
-        raise ValueError(
-            f"Unsupported MLP weight shape {tuple(weight.shape)} for model dims "
-            f"(d_model={d_model}, d_mlp={d_mlp})",
-        )
-    return row.to(device=device, dtype=dtype)
-
-
 def _select_mlp_neuron_weights(
     model,
     weight: torch.Tensor,
@@ -135,20 +76,6 @@ def _select_mlp_neuron_weights(
     return rows.to(device=device, dtype=dtype)
 
 
-def _select_mlp_neuron_bias(
-    module,
-    name: str,
-    neuron_id: int,
-    *,
-    device: torch.device,
-    dtype: torch.dtype,
-) -> torch.Tensor:
-    bias = getattr(module, name, None)
-    if bias is None:
-        return torch.zeros((), device=device, dtype=dtype)
-    return bias[neuron_id].to(device=device, dtype=dtype)
-
-
 def _select_mlp_neuron_biases(
     module,
     name: str,
@@ -164,126 +91,13 @@ def _select_mlp_neuron_biases(
     return bias.index_select(0, neuron_ids).to(device=device, dtype=dtype)
 
 
-
-def _tokenize_prompt_batch(model, prompts: list[str]) -> tuple[torch.Tensor, list[int]]:
-    tokenizer = model.tokenizer
-    tokenized = [
-        tokenizer(prompt, return_tensors="pt", add_special_tokens=False).input_ids.squeeze(0)
-        for prompt in prompts
-    ]
-    bos_token_id = tokenizer.bos_token_id
-    if bos_token_id is None:
-        raise ValueError("LLaMA tokenizer must define bos_token_id.")
-
-    tokenized = [
-        ids
-        if int(ids[0].item()) == int(bos_token_id)
-        else torch.cat([torch.tensor([bos_token_id], dtype=ids.dtype), ids])
-        for ids in tokenized
-    ]
-    lengths = [int(ids.numel()) for ids in tokenized]
-    max_len = max(lengths)
-
-    pad_token_id = (
-        tokenizer.pad_token_id
-        if tokenizer.pad_token_id is not None
-        else tokenizer.eos_token_id
-    )
-    if pad_token_id is None:
-        pad_token_id = bos_token_id
-
-    input_ids = torch.full(
-        (len(tokenized), max_len),
-        int(pad_token_id),
-        dtype=tokenized[0].dtype,
-        device=model.cfg.device,
-    )
-    for row_idx, ids in enumerate(tokenized):
-        input_ids[row_idx, : ids.numel()] = ids.to(model.cfg.device)
-    return input_ids, lengths
-
-
-@torch.no_grad()
-def _activations_for_location_batch(
-    model,
-    prompts: list[str],
-    *,
-    layer: int,
-    token_pos: int,
-    neuron_id: int,
-) -> list[float]:
-    if not prompts:
-        return []
-
-    input_ids, lengths = _tokenize_prompt_batch(model, prompts)
-    max_len = input_ids.shape[1]
-    if token_pos >= max_len:
-        return [float("nan")] * len(prompts)
-    valid_at_pos = [token_pos < length for length in lengths]
-
-    mlp_input_at_pos = None
-
-    def _pre_hook(module, args):
-        nonlocal mlp_input_at_pos
-        mlp_input_at_pos = args[0][:, token_pos, :].detach()
-
-    hook_handle = model.layers[layer].mlp.register_forward_pre_hook(_pre_hook)
-    try:
-        model.model(input_ids)
-    finally:
-        hook_handle.remove()
-    if mlp_input_at_pos is None:
-        raise RuntimeError(f"Did not cache MLP input for layer {layer}")
-
-    old_mlp = model.blocks[layer].mlp.old_mlp
-    gate_weight = _select_mlp_neuron_weight(
-        model,
-        old_mlp.W_gate,
-        neuron_id,
-        device=input_ids.device,
-        dtype=mlp_input_at_pos.dtype,
-    )
-    up_weight = _select_mlp_neuron_weight(
-        model,
-        old_mlp.W_in,
-        neuron_id,
-        device=input_ids.device,
-        dtype=mlp_input_at_pos.dtype,
-    )
-    gate_bias = _select_mlp_neuron_bias(
-        old_mlp,
-        "b_gate",
-        neuron_id,
-        device=input_ids.device,
-        dtype=mlp_input_at_pos.dtype,
-    )
-    up_bias = _select_mlp_neuron_bias(
-        old_mlp,
-        "b_in",
-        neuron_id,
-        device=input_ids.device,
-        dtype=mlp_input_at_pos.dtype,
-    )
-    gate_pre = mlp_input_at_pos @ gate_weight + gate_bias
-    up_pre = mlp_input_at_pos @ up_weight + up_bias
-    activations = F.silu(gate_pre) * up_pre
-    if token_pos == 0:
-        activations.zero_()
-
-    out = activations.detach().float().cpu().tolist()
-    return [
-        float(value) if is_valid else float("nan")
-        for value, is_valid in zip(out, valid_at_pos, strict=True)
-    ]
-
-
 @torch.no_grad()
 def compute_activation_grid_from_mlp_cache(
     model,
     kept_neuron_locations: torch.Tensor,
     mlp_input_cache: dict,
 ) -> ActivationWriteResult:
-    """Build activation grid from in-memory MLP cache — no disk I/O, fully vectorized.
+    """Build a 2D activation grid from an in-memory MLP cache — no disk I/O, fully vectorized.
 
     Neurons are grouped by *layer* so that each layer's CPU tensor is transferred
     to the GPU exactly once per call.  The previous (layer, token_pos) grouping
@@ -321,9 +135,7 @@ def compute_activation_grid_from_mlp_cache(
         stride *= grid_shape[dim]
 
     n_kept = int(kept_neuron_locations.shape[0])
-    activation_sums = torch.zeros((n_kept, grid_cells), dtype=torch.float32)
-    activation_counts = torch.zeros((n_kept, grid_cells), dtype=torch.float32)
-    ones = torch.ones(n_cache_prompts, dtype=torch.float32)
+    activation_grid = torch.full((n_kept, grid_cells), float("nan"), dtype=torch.float32)
 
     # Group by LAYER only.  This lets us load each layer's CPU tensor to the GPU
     # once (one contiguous DMA transfer) instead of once per (layer, token_pos)
@@ -383,33 +195,18 @@ def compute_activation_grid_from_mlp_cache(
 
             # [n_cache_prompts, n_group_neurons]
             acts = F.silu(mlp_input_at_pos @ gate_w.T + gate_b) * (mlp_input_at_pos @ up_w.T + up_b)
-            acts = acts.detach().float().cpu()
+            acts = acts.detach().float().cpu()  # [n_prompts, n_group_neurons]
 
-            flat_idx_expanded = flat_indices.unsqueeze(1).expand(-1, len(loc_indices))
-            acts_T = acts.T.contiguous()            # [n_group, n_prompts]
-            flat_idx_T = flat_idx_expanded.T.contiguous()  # [n_group, n_prompts]
-
-            sums_group = torch.zeros((len(loc_indices), grid_cells), dtype=torch.float32)
-            counts_group = torch.zeros((len(loc_indices), grid_cells), dtype=torch.float32)
-            sums_group.scatter_add_(1, flat_idx_T, acts_T)
-            counts_group.scatter_add_(1, flat_idx_T, ones.unsqueeze(0).expand(len(loc_indices), -1))
-
-            for i, loc_idx in enumerate(loc_indices):
-                activation_sums[loc_idx] += sums_group[i]
-                activation_counts[loc_idx] += counts_group[i]
+            # Each prompt maps 1-to-1 to a grid cell; write directly without averaging.
+            for group_i, loc_idx in enumerate(loc_indices):
+                activation_grid[loc_idx, flat_indices] = acts[:, group_i]
 
         del layer_tensor_gpu  # free GPU memory before loading the next layer
 
-    activations_flat = torch.where(
-        activation_counts > 0,
-        activation_sums / activation_counts.clamp(min=1e-10),
-        torch.zeros_like(activation_sums),
-    )
-    activations = activations_flat.reshape(n_kept, *grid_shape)
+    activations = activation_grid.reshape(n_kept, *grid_shape)
 
     return ActivationWriteResult(
         activations=activations,
-        w_down_vectors=torch.empty((n_kept, 0), dtype=torch.float32),
         arg_values=arg_values,
     )
 
@@ -420,557 +217,32 @@ def build_neuron_activation_write_result(
     dataset_name: str,
     neuron_locations: list[tuple[int, int, int]] | torch.Tensor,
     *,
-    forward_batch_size: int = 32,
-    limit: int | None = None,
-    log_interval: int = 100,
-    include_w_down_vectors: bool = True,
     mlp_input_cache: dict | None = None,
 ) -> ActivationWriteResult:
-    """Return activation grids and down-projection vectors for the requested neurons.
+    """Return a 2D activation grid for each requested neuron.
 
-    When ``mlp_input_cache`` is provided (as built by
-    ``graph_loss.precompute_mlp_inputs``) and covers a prompt's
-    ``numeric_args``, we skip the forward pass for that prompt entirely and
-    recompute the SwiGLU activation directly from the cached residual-stream
-    input via ``silu(x @ W_gate.T) * (x @ W_up.T)`` using the *current* model
-    weights.  Prompts not represented in the cache fall back to the original
-    forward-pass path.
+    If ``mlp_input_cache`` is provided it is used directly.  Otherwise a
+    temporary MLP input cache is built from the dataset and discarded after use.
     """
-    logger = logging.getLogger(__name__)
-    if forward_batch_size <= 0:
-        raise ValueError("forward_batch_size must be positive")
+    dataset_path = _resolve_dataset_path(dataset_name)
 
     if isinstance(neuron_locations, torch.Tensor):
-        locations = [
-            (int(row[0].item()), int(row[1].item()), int(row[2].item()))
-            for row in neuron_locations.detach().cpu()
-        ]
+        kept_neuron_locations = neuron_locations.detach().cpu()
     else:
-        locations = [
-            (int(layer), int(token_pos), int(neuron_id))
-            for layer, token_pos, neuron_id in neuron_locations
-        ]
+        kept_neuron_locations = torch.tensor(neuron_locations, dtype=torch.long)
 
-    for layer, token_pos, neuron_id in locations:
-        _validate_neuron_location(
-            model,
-            layer=layer,
-            token_pos=token_pos,
-            neuron_id=neuron_id,
-        )
+    if mlp_input_cache is None:
+        from graph_loss.precompute_mlp_inputs import build_mlp_input_cache
+        model_name = getattr(model.cfg, "model_name", "model")
+        mlp_input_cache = build_mlp_input_cache(model, dataset_path, model_name)
 
-    dataset_path = _resolve_dataset_path(dataset_name)
-    samples = list(load_prompt_answer_json(dataset_path).items())
-    if limit is not None:
-        samples = samples[:limit]
-
-    prompts = []
-    numeric_args_by_prompt = []
-    skipped = 0
-    expected_n_args = None
-    for prompt, _answer in samples:
-        try:
-            numeric_args = _parse_numeric_args(prompt)
-        except ValueError:
-            skipped += 1
-            continue
-        if expected_n_args is None:
-            expected_n_args = len(numeric_args)
-            if expected_n_args not in (1, 2, 3):
-                raise ValueError(
-                    "Only 1D, 2D, and 3D activation heatmaps are supported; "
-                    f"first parsed prompt has {expected_n_args} numeric args: {prompt!r}",
-                )
-        if len(numeric_args) != expected_n_args:
-            skipped += 1
-            continue
-        prompts.append(prompt)
-        numeric_args_by_prompt.append(numeric_args)
-
-    if not prompts:
-        raise ValueError(f"Dataset has no samples: {dataset_path}")
-
-    arg_values = [
-        sorted({numeric_args[dim] for numeric_args in numeric_args_by_prompt})
-        for dim in range(len(numeric_args_by_prompt[0]))
-    ]
-    arg_to_idx = [
-        {value: idx for idx, value in enumerate(values)}
-        for values in arg_values
-    ]
-    grid_shape = tuple(len(values) for values in arg_values)
-    d_model = int(model.cfg.d_model)
-    activation_sums = torch.zeros((len(locations), *grid_shape), dtype=torch.float32)
-    activation_counts = torch.zeros((len(locations), *grid_shape), dtype=torch.float32)
-    w_down_vectors = torch.empty(
-        (len(locations), d_model if include_w_down_vectors else 0),
-        dtype=torch.float32,
-    )
-    if not locations:
-        return ActivationWriteResult(
-            activations=torch.full((0, *grid_shape), float("nan"), dtype=torch.float32),
-            w_down_vectors=w_down_vectors,
-            arg_values=arg_values,
-        )
-
-    location_groups: dict[tuple[int, int], list[tuple[int, int]]] = defaultdict(list)
-    w_out_cache: dict[int, torch.Tensor] = {}
-    for location_idx, (layer, token_pos, neuron_id) in enumerate(locations):
-        location_groups[(layer, token_pos)].append((location_idx, neuron_id))
-        if include_w_down_vectors and layer not in w_out_cache:
-            old_mlp = model.blocks[layer].mlp.old_mlp
-            w_out_cache[layer] = model._row_oriented_weight(old_mlp.W_out.to(device=model.cfg.device))
-        if include_w_down_vectors:
-            w_down_vectors[location_idx] = w_out_cache[layer][neuron_id].detach().float().cpu()
-
-    # ------------------------------------------------------------------
-    # Split prompts into "covered by MLP-input cache" vs "needs forward
-    # pass".  For covered prompts we skip the model forward entirely and
-    # recompute the SwiGLU activation directly from the cached residual-
-    # stream input — orders of magnitude cheaper per prompt.
-    # ------------------------------------------------------------------
-    cache_prompt_idx_for_local: list[int | None] = [None] * len(prompts)
-    cache_meta: dict | None = None
-    cache_layer_inputs = None
-    cache_n_positions = 0
-    if mlp_input_cache is not None:
-        cache_meta = mlp_input_cache.get("meta") if isinstance(mlp_input_cache, dict) else None
-        cache_layer_inputs = (
-            mlp_input_cache.get("layer_inputs") if isinstance(mlp_input_cache, dict) else None
-        )
-        if cache_meta is not None and cache_layer_inputs is not None:
-            cache_args_list = cache_meta.get("numeric_args_by_prompt", [])
-            cache_args_to_idx: dict[tuple[int, ...], int] = {}
-            for cache_idx, args in enumerate(cache_args_list):
-                cache_args_to_idx[tuple(int(value) for value in args)] = cache_idx
-            cache_n_positions = int(cache_meta.get("n_positions", 0))
-            for local_idx, args in enumerate(numeric_args_by_prompt):
-                cache_idx = cache_args_to_idx.get(tuple(int(value) for value in args))
-                if cache_idx is not None:
-                    cache_prompt_idx_for_local[local_idx] = cache_idx
-            covered = sum(1 for idx in cache_prompt_idx_for_local if idx is not None)
-            logger.info(
-                "MLP-input cache covers %d / %d prompts (n_positions=%d, falling back for the rest)",
-                covered,
-                len(prompts),
-                cache_n_positions,
-            )
-        else:
-            logger.warning(
-                "mlp_input_cache supplied but missing meta/layer_inputs; ignoring cache"
-            )
-
-    cached_local_indices = [
-        local_idx
-        for local_idx, cache_idx in enumerate(cache_prompt_idx_for_local)
-        if cache_idx is not None
-    ]
-    fallback_local_indices = [
-        local_idx
-        for local_idx, cache_idx in enumerate(cache_prompt_idx_for_local)
-        if cache_idx is None
-    ]
-
-    def _scatter_activations(
-        activations_per_prompt: torch.Tensor,
-        prompt_local_indices: list[int],
-        location_indices: list[int],
-    ) -> None:
-        """Add a [batch, k] activation tensor into ``activation_sums``.
-
-        Replaces the O(batch × locations) Python double-loop with a single
-        ``scatter_add_`` call that runs in optimised C++/CUDA.  The flat grid
-        index for each prompt is computed in O(batch × n_dims) Python
-        iterations (n_dims ≤ 3), then everything is dispatched to PyTorch.
-        """
-        n_batch = len(prompt_local_indices)
-        n_loc = len(location_indices)
-        if n_batch == 0 or n_loc == 0:
-            return
-
-        activations_cpu = activations_per_prompt.detach().float().cpu()  # [n_batch, n_loc]
-
-        # Compute flat (row-major) grid index for each prompt in O(n_batch * n_dims).
-        n_dims = len(grid_shape)
-        n_grid = 1
-        for s in grid_shape:
-            n_grid *= s
-
-        flat_grid = torch.zeros(n_batch, dtype=torch.long)
-        stride = 1
-        for dim in range(n_dims - 1, -1, -1):
-            dim_vals = torch.tensor(
-                [arg_to_idx[dim][numeric_args_by_prompt[local_idx][dim]]
-                 for local_idx in prompt_local_indices],
-                dtype=torch.long,
-            )
-            flat_grid = flat_grid + dim_vals * stride
-            stride *= grid_shape[dim]
-
-        # Build a combined flat index into the (n_total_locs × n_grid) buffer.
-        # combined[j, i] = location_indices[j] * n_grid + flat_grid[i]
-        loc_idx_t = torch.tensor(location_indices, dtype=torch.long)  # [n_loc]
-        combined_flat = loc_idx_t.unsqueeze(1) * n_grid + flat_grid.unsqueeze(0)  # [n_loc, n_batch]
-
-        # activations_cpu.T has shape [n_loc, n_batch] — aligned with combined_flat.
-        acts_t = activations_cpu.T.contiguous()  # [n_loc, n_batch]
-
-        # scatter_add_ on the flattened views (activation_sums is contiguous from torch.zeros).
-        activation_sums.view(-1).scatter_add_(0, combined_flat.view(-1), acts_t.view(-1))
-        activation_counts.view(-1).scatter_add_(
-            0,
-            combined_flat.view(-1),
-            torch.ones(n_loc * n_batch, dtype=torch.float32),
-        )
-
-    # ------------------------------------------------------------------
-    # Cached fast path: per-(layer, token_pos) group, slice the cache and
-    # do a single matmul to compute activations across all cached prompts.
-    # ------------------------------------------------------------------
-    if cached_local_indices and cache_layer_inputs is not None:
-        cache_idx_tensor_full = torch.tensor(
-            [int(cache_prompt_idx_for_local[local_idx]) for local_idx in cached_local_indices],
-            dtype=torch.long,
-        )
-        for (layer, token_pos), group_members in location_groups.items():
-            if cache_n_positions and token_pos >= cache_n_positions:
-                continue
-            cache_idx_tensor = cache_idx_tensor_full
-            layer_input_tensor = cache_layer_inputs[layer]
-            mlp_input_at_pos = layer_input_tensor.index_select(0, cache_idx_tensor)[:, token_pos, :]
-            mlp_input_at_pos = mlp_input_at_pos.to(device=model.cfg.device)
-
-            old_mlp = model.blocks[layer].mlp.old_mlp
-            location_indices = [location_idx for location_idx, _neuron_id in group_members]
-            neuron_ids = torch.tensor(
-                [neuron_id for _location_idx, neuron_id in group_members],
-                dtype=torch.long,
-            )
-            gate_weights = _select_mlp_neuron_weights(
-                model,
-                old_mlp.W_gate,
-                neuron_ids,
-                device=mlp_input_at_pos.device,
-                dtype=mlp_input_at_pos.dtype,
-            )
-            up_weights = _select_mlp_neuron_weights(
-                model,
-                old_mlp.W_in,
-                neuron_ids,
-                device=mlp_input_at_pos.device,
-                dtype=mlp_input_at_pos.dtype,
-            )
-            gate_biases = _select_mlp_neuron_biases(
-                old_mlp,
-                "b_gate",
-                neuron_ids,
-                device=mlp_input_at_pos.device,
-                dtype=mlp_input_at_pos.dtype,
-            )
-            up_biases = _select_mlp_neuron_biases(
-                old_mlp,
-                "b_in",
-                neuron_ids,
-                device=mlp_input_at_pos.device,
-                dtype=mlp_input_at_pos.dtype,
-            )
-            activations_by_prompt = (
-                F.silu(mlp_input_at_pos @ gate_weights.T + gate_biases)
-                * (mlp_input_at_pos @ up_weights.T + up_biases)
-            )
-            if token_pos == 0:
-                activations_by_prompt.zero_()
-            _scatter_activations(activations_by_prompt, cached_local_indices, location_indices)
-
-    # ------------------------------------------------------------------
-    # Fallback / legacy path: forward-pass any prompts the cache did not
-    # cover.  Identical math to the cached path so they accumulate into
-    # the same activation grid.
-    # ------------------------------------------------------------------
-    fallback_prompts = [prompts[local_idx] for local_idx in fallback_local_indices]
-    for batch_start in range(0, len(fallback_prompts), forward_batch_size):
-        batch_local_indices = fallback_local_indices[
-            batch_start:batch_start + forward_batch_size
-        ]
-        batch_prompts = [prompts[local_idx] for local_idx in batch_local_indices]
-        input_ids, lengths = _tokenize_prompt_batch(model, batch_prompts)
-        max_len = input_ids.shape[1]
-        active_groups = {
-            group_key: group_members
-            for group_key, group_members in location_groups.items()
-            if group_key[1] < max_len
-        }
-        if not active_groups:
-            continue
-
-        cached_inputs: dict[tuple[int, int], torch.Tensor] = {}
-        hook_handles = []
-
-        def _make_pre_hook(key: tuple[int, int]):
-            def _pre_hook(module, args):
-                cached_inputs[key] = args[0][:, key[1], :].detach()
-            return _pre_hook
-
-        for layer, token_pos in active_groups:
-            handle = model.layers[layer].mlp.register_forward_pre_hook(
-                _make_pre_hook((layer, token_pos))
-            )
-            hook_handles.append(handle)
-
-        try:
-            model.model(input_ids)
-        finally:
-            for handle in hook_handles:
-                handle.remove()
-        for (layer, token_pos), group_members in active_groups.items():
-            mlp_input_at_pos = cached_inputs.get((layer, token_pos))
-            if mlp_input_at_pos is None:
-                raise RuntimeError(
-                    f"Did not cache target hook for layer={layer}, token_pos={token_pos}"
-                )
-
-            old_mlp = model.blocks[layer].mlp.old_mlp
-            valid_at_pos = torch.tensor(
-                [token_pos < length for length in lengths],
-                dtype=torch.bool,
-                device=mlp_input_at_pos.device,
-            )
-            location_indices = [location_idx for location_idx, _neuron_id in group_members]
-            neuron_ids = torch.tensor(
-                [neuron_id for _location_idx, neuron_id in group_members],
-                dtype=torch.long,
-            )
-            gate_weights = _select_mlp_neuron_weights(
-                model,
-                old_mlp.W_gate,
-                neuron_ids,
-                device=mlp_input_at_pos.device,
-                dtype=mlp_input_at_pos.dtype,
-            )
-            up_weights = _select_mlp_neuron_weights(
-                model,
-                old_mlp.W_in,
-                neuron_ids,
-                device=mlp_input_at_pos.device,
-                dtype=mlp_input_at_pos.dtype,
-            )
-            gate_biases = _select_mlp_neuron_biases(
-                old_mlp,
-                "b_gate",
-                neuron_ids,
-                device=mlp_input_at_pos.device,
-                dtype=mlp_input_at_pos.dtype,
-            )
-            up_biases = _select_mlp_neuron_biases(
-                old_mlp,
-                "b_in",
-                neuron_ids,
-                device=mlp_input_at_pos.device,
-                dtype=mlp_input_at_pos.dtype,
-            )
-            activations_by_prompt = (
-                F.silu(mlp_input_at_pos @ gate_weights.T + gate_biases)
-                * (mlp_input_at_pos @ up_weights.T + up_biases)
-            )
-            if token_pos == 0:
-                activations_by_prompt.zero_()
-
-            activations_cpu = activations_by_prompt.detach().float().cpu()
-            valid_cpu = valid_at_pos.detach().cpu()
-            valid_local_indices = [
-                local_idx
-                for local_idx, is_valid in zip(batch_local_indices, valid_cpu, strict=True)
-                if bool(is_valid.item())
-            ]
-            valid_rows = torch.tensor(
-                [bool(is_valid.item()) for is_valid in valid_cpu],
-                dtype=torch.bool,
-            )
-            if valid_local_indices:
-                _scatter_activations(
-                    activations_cpu[valid_rows],
-                    valid_local_indices,
-                    location_indices,
-                )
-
-        processed = batch_start + len(batch_prompts)
-        if log_interval and processed % log_interval == 0:
-            logger.info("Processed %d fallback activation samples", processed)
-
-    activations = activation_sums / activation_counts.clamp(min=1.0)
-    activations[activation_counts == 0] = float("nan")
-    logger.info(
-        "Built activation grid for %d neurons with arg dims %s from %s "
-        "(skipped=%d, cached_prompts=%d, fallback_prompts=%d)",
-        len(locations),
-        grid_shape,
-        dataset_path,
-        skipped,
-        len(cached_local_indices),
-        len(fallback_local_indices),
-    )
-    return ActivationWriteResult(
-        activations=activations,
-        w_down_vectors=w_down_vectors,
-        arg_values=arg_values,
-    )
-
-
-@torch.no_grad()
-def build_neuron_activation_write_matrix(
-    model,
-    dataset_name: str,
-    neuron_locations: list[tuple[int, int, int]] | torch.Tensor,
-    *,
-    forward_batch_size: int = 32,
-    limit: int | None = None,
-    log_interval: int = 100,
-) -> torch.Tensor:
-    """Return flattened activation-grid * W_down matrices with shape [neurons, grid_points, d_model]."""
-    result = build_neuron_activation_write_result(
-        model,
-        dataset_name,
-        neuron_locations,
-        forward_batch_size=forward_batch_size,
-        limit=limit,
-        log_interval=log_interval,
-    )
-    flat_activations = torch.nan_to_num(result.activations.detach().float()).flatten(start_dim=1)
-    return flat_activations[:, :, None] * result.w_down_vectors[:, None, :]
-
-
-def _abs_standard_deviation_grid(activation_grid: torch.Tensor) -> torch.Tensor:
-    """Return abs z-score values over valid cells, preserving NaNs."""
-    grid = activation_grid.detach().float().clone()
-    valid_values = grid[~torch.isnan(grid)]
-    if valid_values.numel() == 0:
-        return grid
-
-    std = valid_values.std(unbiased=False)
-    if float(std.item()) == 0.0:
-        grid[~torch.isnan(grid)] = 0.0
-        return grid
-
-    mean = valid_values.mean()
-    return (grid - mean).abs() / std.clamp(min=1e-6)
+    try:
+        return compute_activation_grid_from_mlp_cache(model, kept_neuron_locations, mlp_input_cache)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to compute activations from MLP cache: {exc}") from exc
 
 
 HEATMAP_VALUE_LABEL = "activation"
-
-
-def save_cluster_activation_heatmap_pdfs(
-    activations: torch.Tensor,
-    arg_values: list[list[int]],
-    assignments: torch.Tensor,
-    neuron_indices: torch.Tensor,
-    neuron_locations: torch.Tensor,
-    *,
-    output_dir: str = ".",
-) -> list[str]:
-    """Save one PDF per cluster with one activation heatmap page per neuron."""
-    os.makedirs(output_dir, exist_ok=True)
-    saved_paths: list[str] = []
-    if activations.numel() == 0 or assignments.numel() == 0:
-        return saved_paths
-
-    activation_values = activations.detach().float().cpu()
-    assignments_cpu = assignments.detach().cpu()
-    neuron_indices_cpu = neuron_indices.detach().cpu()
-    locations_cpu = neuron_locations.detach().cpu()
-
-    def save_activation_page(
-        pdf: PdfPages,
-        activation_grid: torch.Tensor,
-        *,
-        title: str,
-    ) -> None:
-        if torch.isnan(activation_grid).all():
-            fig, ax = plt.subplots(figsize=(8, 4))
-            ax.text(0.5, 0.5, "No valid activations", ha="center", va="center")
-            ax.set_axis_off()
-            ax.set_title(title)
-            fig.tight_layout()
-            pdf.savefig(fig)
-            plt.close(fig)
-            return
-
-        n_args = len(arg_values)
-        if n_args == 1:
-            xs = arg_values[0]
-            heatmap = activation_grid.unsqueeze(0)
-            fig, ax = plt.subplots(figsize=(8, 2.5))
-            image = ax.imshow(
-                heatmap.numpy(),
-                origin="lower",
-                aspect="auto",
-                extent=[min(xs), max(xs), 0, 1],
-            )
-            fig.colorbar(image, ax=ax, label=HEATMAP_VALUE_LABEL)
-            ax.set_xlabel("arg 1")
-            ax.set_yticks([])
-            ax.set_title(title)
-        elif n_args == 2:
-            xs = arg_values[0]
-            ys = arg_values[1]
-            heatmap = activation_grid.T.contiguous()
-            fig, ax = plt.subplots(figsize=(8, 6))
-            image = ax.imshow(
-                heatmap.numpy(),
-                origin="lower",
-                aspect="auto",
-                extent=[min(xs), max(xs), min(ys), max(ys)],
-            )
-            fig.colorbar(image, ax=ax, label=HEATMAP_VALUE_LABEL)
-            ax.set_xlabel("arg 1")
-            ax.set_ylabel("arg 2")
-            ax.set_title(title)
-        else:
-            points = []
-            for x_idx, x in enumerate(arg_values[0]):
-                for y_idx, y in enumerate(arg_values[1]):
-                    for z_idx, z in enumerate(arg_values[2]):
-                        activation = activation_grid[x_idx, y_idx, z_idx]
-                        if activation == activation:
-                            points.append((x, y, z, float(activation.item())))
-
-            fig = plt.figure(figsize=(8, 6))
-            ax = fig.add_subplot(111, projection="3d")
-            if points:
-                xs, ys, zs, activation_colors = zip(*points, strict=True)
-                scatter = ax.scatter(xs, ys, zs, c=activation_colors, cmap="viridis")
-                fig.colorbar(scatter, ax=ax, label=HEATMAP_VALUE_LABEL)
-            ax.set_xlabel("arg 1")
-            ax.set_ylabel("arg 2")
-            ax.set_zlabel("arg 3")
-            ax.set_title(title)
-
-        fig.tight_layout()
-        pdf.savefig(fig)
-        plt.close(fig)
-
-    for cluster_id in torch.unique(assignments_cpu).tolist():
-        cluster_rows = torch.where(assignments_cpu == int(cluster_id))[0].tolist()
-        output_path = os.path.join(output_dir, f"cluster_{int(cluster_id)}.pdf")
-        with PdfPages(output_path) as pdf:
-            for row_idx in cluster_rows:
-                graph_neuron_idx = int(neuron_indices_cpu[row_idx].item())
-                layer = int(locations_cpu[graph_neuron_idx, 0].item())
-                token_pos = int(locations_cpu[graph_neuron_idx, 1].item())
-                neuron_id = int(locations_cpu[graph_neuron_idx, 2].item())
-
-                title = (
-                    f"Neuron {neuron_id} activation "
-                    f"(cluster={int(cluster_id)}, graph_neuron_idx={graph_neuron_idx}, "
-                    f"layer={layer}, token={token_pos}, neuron={neuron_id})"
-                )
-                save_activation_page(
-                    pdf,
-                    activation_values[row_idx],
-                    title=title,
-                )
-        saved_paths.append(output_path)
-
-    return saved_paths
 
 
 def save_supernode_activation_heatmap_pdf(
@@ -985,7 +257,13 @@ def save_supernode_activation_heatmap_pdf(
     member_number_unembed: dict[int, tuple[list[int], torch.Tensor]] | None = None,
     member_specificity: dict[int, float] | None = None,
 ) -> str:
-    """Save one activation heatmap page per neuron in a supernode."""
+    """Save one 2D activation heatmap page per neuron in a supernode, with optional 1D logit influence side panel."""
+    if len(arg_values) != 2:
+        raise ValueError(
+            f"save_supernode_activation_heatmap_pdf expects 2D activation grids, "
+            f"got {len(arg_values)} arg dimensions"
+        )
+
     output_dir = os.path.dirname(output_path)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
@@ -1007,6 +285,9 @@ def save_supernode_activation_heatmap_pdf(
             neuron_id,
         )
 
+    xs = arg_values[0]
+    ys = arg_values[1]
+
     with PdfPages(output_path) as pdf:
         for member_idx, activation_grid in enumerate(activation_grids):
             location_text, neuron_id = member_locations[member_idx]
@@ -1019,87 +300,36 @@ def save_supernode_activation_heatmap_pdf(
                 if member_number_unembed is not None
                 else None
             )
-            side_ax = None
+
+            if number_unembed is None:
+                fig, ax = plt.subplots(figsize=(8, 6))
+                side_ax = None
+            else:
+                fig, axes = plt.subplots(
+                    1,
+                    2,
+                    figsize=(14, 6),
+                    gridspec_kw={"width_ratios": [2.0, 1.0]},
+                )
+                ax, side_ax = axes
+
             if torch.isnan(activation_grid).all():
-                if number_unembed is None:
-                    fig, ax = plt.subplots(figsize=(8, 4))
-                else:
-                    fig, axes = plt.subplots(
-                        1,
-                        2,
-                        figsize=(14, 4),
-                        gridspec_kw={"width_ratios": [2.0, 1.0]},
-                    )
-                    ax, side_ax = axes
                 ax.text(0.5, 0.5, "No valid activations", ha="center", va="center")
                 ax.set_axis_off()
             else:
-                n_args = len(arg_values)
-                if n_args == 1:
-                    xs = arg_values[0]
-                    heatmap = activation_grid.unsqueeze(0)
-                    if number_unembed is None:
-                        fig, ax = plt.subplots(figsize=(8, 2.5))
-                    else:
-                        fig, axes = plt.subplots(
-                            1,
-                            2,
-                            figsize=(14, 2.5),
-                            gridspec_kw={"width_ratios": [2.0, 1.0]},
-                        )
-                        ax, side_ax = axes
-                    image = ax.imshow(
-                        heatmap.numpy(),
-                        origin="lower",
-                        aspect="auto",
-                        extent=[min(xs), max(xs), 0, 1],
-                    )
-                    fig.colorbar(image, ax=ax, label=HEATMAP_VALUE_LABEL)
-                    ax.set_xlabel("arg 1")
-                    ax.set_yticks([])
-                elif n_args == 2:
-                    xs = arg_values[0]
-                    ys = arg_values[1]
-                    heatmap = activation_grid.T.contiguous()
-                    if number_unembed is None:
-                        fig, ax = plt.subplots(figsize=(8, 6))
-                    else:
-                        fig, axes = plt.subplots(
-                            1,
-                            2,
-                            figsize=(14, 6),
-                            gridspec_kw={"width_ratios": [2.0, 1.0]},
-                        )
-                        ax, side_ax = axes
-                    image = ax.imshow(
-                        heatmap.numpy(),
-                        origin="lower",
-                        aspect="auto",
-                        extent=[min(xs), max(xs), min(ys), max(ys)],
-                    )
-                    fig.colorbar(image, ax=ax, label=HEATMAP_VALUE_LABEL)
-                    ax.set_xlabel("arg 1")
-                    ax.set_ylabel("arg 2")
-                else:
-                    points = []
-                    for x_idx, x in enumerate(arg_values[0]):
-                        for y_idx, y in enumerate(arg_values[1]):
-                            for z_idx, z in enumerate(arg_values[2]):
-                                activation = activation_grid[x_idx, y_idx, z_idx]
-                                if activation == activation:
-                                    points.append((x, y, z, float(activation.item())))
-
-                    fig = plt.figure(figsize=(8, 6))
-                    ax = fig.add_subplot(111, projection="3d")
-                    if points:
-                        xs, ys, zs, activation_colors = zip(*points, strict=True)
-                        scatter = ax.scatter(xs, ys, zs, c=activation_colors, cmap="viridis")
-                        fig.colorbar(scatter, ax=ax, label=HEATMAP_VALUE_LABEL)
-                    ax.set_xlabel("arg 1")
-                    ax.set_ylabel("arg 2")
-                    ax.set_zlabel("arg 3")
+                heatmap = activation_grid.T.contiguous()
+                image = ax.imshow(
+                    heatmap.numpy(),
+                    origin="lower",
+                    aspect="auto",
+                    extent=[min(xs), max(xs), min(ys), max(ys)],
+                )
+                fig.colorbar(image, ax=ax, label=HEATMAP_VALUE_LABEL)
+                ax.set_xlabel("arg 1")
+                ax.set_ylabel("arg 2")
 
             ax.set_title(page_title)
+
             if side_ax is not None and number_unembed is not None:
                 number_values, unembed_values = number_unembed
                 unembed_heatmap = unembed_values.detach().float().cpu().unsqueeze(0)
@@ -1113,6 +343,7 @@ def save_supernode_activation_heatmap_pdf(
                 side_ax.set_xlabel("number token")
                 side_ax.set_yticks([])
                 side_ax.set_title("number-token unembed")
+
             fig.tight_layout()
             pdf.savefig(fig)
             plt.close(fig)
@@ -1126,9 +357,9 @@ def save_supernode_activation_heatmap_pdf(
                 specificity_members = [member for member, _value in specificity_items]
                 specificity_values = [value for _member, value in specificity_items]
                 fig, ax = plt.subplots(figsize=(10, 4))
-                xs = list(range(len(specificity_values)))
-                ax.bar(xs, specificity_values)
-                ax.set_xticks(xs)
+                xs_bar = list(range(len(specificity_values)))
+                ax.bar(xs_bar, specificity_values)
+                ax.set_xticks(xs_bar)
                 ax.set_xticklabels([str(member) for member in specificity_members], rotation=90)
                 ax.set_xlabel("graph neuron index")
                 ax.set_ylabel("ranking score")
@@ -1138,245 +369,3 @@ def save_supernode_activation_heatmap_pdf(
                 plt.close(fig)
 
     return output_path
-
-
-def _plot_1d(
-    values_by_arg: dict[tuple[int, ...], ActivationAccumulator],
-    *,
-    output_path: str,
-    title: str,
-) -> None:
-    xs = sorted(arg[0] for arg in values_by_arg)
-    heatmap = torch.tensor([[values_by_arg[(x,)].mean for x in xs]], dtype=torch.float32)
-    fig, ax = plt.subplots(figsize=(8, 2.5))
-    image = ax.imshow(
-        heatmap.numpy(),
-        origin="lower",
-        aspect="auto",
-        extent=[min(xs), max(xs), 0, 1],
-    )
-    fig.colorbar(image, ax=ax, label=HEATMAP_VALUE_LABEL)
-    ax.set_xlabel("arg 1")
-    ax.set_yticks([])
-    ax.set_title(title)
-    fig.tight_layout()
-    fig.savefig(output_path)
-    plt.close(fig)
-
-
-def _plot_2d(
-    values_by_arg: dict[tuple[int, ...], ActivationAccumulator],
-    *,
-    output_path: str,
-    title: str,
-) -> None:
-    xs = sorted({arg[0] for arg in values_by_arg})
-    ys = sorted({arg[1] for arg in values_by_arg})
-    x_to_idx = {value: idx for idx, value in enumerate(xs)}
-    y_to_idx = {value: idx for idx, value in enumerate(ys)}
-
-    heatmap = torch.full((len(ys), len(xs)), float("nan"), dtype=torch.float32)
-    for (x, y), stats in values_by_arg.items():
-        if stats.count:
-            heatmap[y_to_idx[y], x_to_idx[x]] = stats.mean
-
-    plt.figure(figsize=(8, 6))
-    plt.imshow(
-        heatmap.numpy(),
-        origin="lower",
-        aspect="auto",
-        extent=[min(xs), max(xs), min(ys), max(ys)],
-    )
-    plt.colorbar(label=HEATMAP_VALUE_LABEL)
-    plt.xlabel("arg 1")
-    plt.ylabel("arg 2")
-    plt.title(title)
-    plt.tight_layout()
-    plt.savefig(output_path)
-    plt.close()
-
-
-def _plot_3d(
-    values_by_arg: dict[tuple[int, ...], ActivationAccumulator],
-    *,
-    output_path: str,
-    title: str,
-) -> None:
-    points = []
-    for (x, y, z), stats in values_by_arg.items():
-        if stats.count:
-            points.append((x, y, z, stats.mean))
-    if not points:
-        raise ValueError("No valid 3D points to plot.")
-
-    xs, ys, zs, activations = zip(*points, strict=True)
-    activation_colors = torch.tensor(activations, dtype=torch.float32).tolist()
-    fig = plt.figure(figsize=(8, 6))
-    ax = fig.add_subplot(111, projection="3d")
-    scatter = ax.scatter(xs, ys, zs, c=activation_colors, cmap="viridis")
-    fig.colorbar(scatter, ax=ax, label=HEATMAP_VALUE_LABEL)
-    ax.set_xlabel("arg 1")
-    ax.set_ylabel("arg 2")
-    ax.set_zlabel("arg 3")
-    ax.set_title(title)
-    plt.tight_layout()
-    plt.savefig(output_path)
-    plt.close()
-
-
-def plot_neuron_activation_heatmap(args: argparse.Namespace) -> str:
-    logger = logging.getLogger(__name__)
-    if args.forward_batch_size <= 0:
-        raise ValueError("--forward-batch-size must be positive")
-
-    dataset_path = _resolve_dataset_path(args.dataset_name)
-    data = load_prompt_answer_json(dataset_path)
-    samples = list(data.items())
-    if args.limit is not None:
-        samples = samples[: args.limit]
-    if not samples:
-        raise ValueError(f"Dataset has no samples: {dataset_path}")
-
-    dtype = resolve_torch_dtype(args.dtype)
-    if HF_READ_TOKEN:
-        logger.info("Authenticating with Hugging Face token")
-        login(HF_READ_TOKEN)
-
-    weights_path = args.model_path if args.model_path else args.model
-    logger.info("Loading model weights from: %s", weights_path)
-    hf_model = AutoModelForCausalLM.from_pretrained(weights_path, torch_dtype=dtype)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    hf_model = hf_model.to(device)
-    hf_model.eval()
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
-    tokenizer.pad_token = tokenizer.eos_token
-    model = HFLlamaGraphAdapter(hf_model, tokenizer, device)
-
-    layer, token_pos, neuron_id = _validate_neuron_location(
-        model,
-        layer=args.layer,
-        token_pos=args.token_pos,
-        neuron_id=args.neuron_id,
-    )
-    logger.info(
-        "Using neuron location layer=%d token=%d neuron=%d",
-        layer,
-        token_pos,
-        neuron_id,
-    )
-
-    values_by_arg: dict[tuple[int, ...], ActivationAccumulator] = defaultdict(ActivationAccumulator)
-    skipped = 0
-    expected_n_args = None
-    processed_valid = 0
-    batch: list[tuple[str, tuple[int, ...]]] = []
-
-    def flush_batch() -> None:
-        nonlocal processed_valid, skipped, batch
-        if not batch:
-            return
-        prompts = [prompt for prompt, _numeric_args in batch]
-        activations = _activations_for_location_batch(
-            model,
-            prompts,
-            layer=layer,
-            token_pos=token_pos,
-            neuron_id=neuron_id,
-        )
-        for (_prompt, numeric_args), activation in zip(batch, activations, strict=True):
-            if activation == activation:
-                values_by_arg[numeric_args].add(activation)
-            else:
-                skipped += 1
-        processed_valid += len(batch)
-        if args.log_interval and processed_valid % args.log_interval == 0:
-            logger.info("Processed %d valid samples", processed_valid)
-        batch = []
-
-    for prompt, _answer in samples:
-        try:
-            numeric_args = _parse_numeric_args(prompt)
-        except ValueError:
-            skipped += 1
-            continue
-        if expected_n_args is None:
-            expected_n_args = len(numeric_args)
-            if expected_n_args not in (1, 2, 3):
-                raise ValueError(
-                    "Only 1D, 2D, and 3D plots are supported; "
-                    f"first parsed prompt has {expected_n_args} numeric args: {prompt!r}",
-                )
-        if len(numeric_args) != expected_n_args:
-            skipped += 1
-            continue
-        batch.append((prompt, numeric_args))
-        if len(batch) == args.forward_batch_size:
-            flush_batch()
-    flush_batch()
-
-    if not values_by_arg:
-        raise ValueError("No valid activations collected.")
-
-    output_path = args.output_path
-    if output_path is None:
-        dataset_stem = os.path.splitext(os.path.basename(dataset_path))[0]
-        output_path = (
-            f"layer_{layer}_token_{token_pos}_neuron_{neuron_id}"
-            f"_{dataset_stem}_activation_heatmap.png"
-        )
-
-    title = (
-        f"Neuron {neuron_id} activation "
-        f"(layer={layer}, token={token_pos}, neuron={neuron_id})"
-    )
-    n_args = len(next(iter(values_by_arg)))
-    if n_args == 1:
-        _plot_1d(values_by_arg, output_path=output_path, title=title)
-    elif n_args == 2:
-        _plot_2d(values_by_arg, output_path=output_path, title=title)
-    else:
-        _plot_3d(values_by_arg, output_path=output_path, title=title)
-
-    logger.info("Saved heatmap to %s (skipped=%d)", output_path, skipped)
-    return output_path
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Plot a specific MLP neuron's activations over a numeric dataset.",
-    )
-    parser.add_argument("--model", required=True, help="Base model architecture name (e.g. 'gpt2'). Used by TransformerLens to build the model config.")
-    parser.add_argument(
-        "--model_path",
-        default=None,
-        help="Local path to a saved HuggingFace model whose weights override the base --model weights.",
-    )
-    parser.add_argument("--layer", type=int, required=True, help="Layer index")
-    parser.add_argument("--token-pos", type=int, required=True, help="Token position")
-    parser.add_argument("--neuron-id", type=int, required=True, help="Per-layer MLP neuron id")
-    parser.add_argument("--dataset-name", required=True, help="Dataset prefix, filename, or path")
-    parser.add_argument("--output-path", help="Path for the output heatmap PNG")
-    parser.add_argument("--limit", type=int, default=None, help="Optional sample limit")
-    parser.add_argument("--log-interval", type=int, default=100, help="Progress log interval")
-    parser.add_argument(
-        "--forward-batch-size",
-        type=int,
-        default=32,
-        help="Batch size for activation forward passes",
-    )
-    parser.add_argument(
-        "--dtype",
-        choices=DTYPE_CHOICES,
-        default="float32",
-        help="Model dtype",
-    )
-    return parser
-
-
-def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-    plot_neuron_activation_heatmap(build_parser().parse_args())
-
-
-if __name__ == "__main__":
-    main()
