@@ -86,12 +86,7 @@ def main():
             "and per-cluster PDF heatmaps"
         ),
     )
-    parser.add_argument(
-        "--activation_forward_batch_size",
-        type=int,
-        default=32,
-        help="Batch size for dataset activation-write forward passes",
-    )
+
     parser.add_argument(
         "--supernode-heatmap-output-dir",
         "--supernode_heatmap_output_dir",
@@ -158,7 +153,7 @@ def main():
         batch_size=args.attribution_batch_size,
         verbose=args.verbose,
         dataset=args.dataset,
-        activation_forward_batch_size=args.activation_forward_batch_size,
+
         model_name=args.model,
         supernode_heatmap_output_dir=args.supernode_heatmap_output_dir,
         anova_nodes_per_label=args.anova_nodes_per_label,

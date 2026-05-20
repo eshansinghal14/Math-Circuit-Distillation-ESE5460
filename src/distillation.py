@@ -145,7 +145,7 @@ class DistillationConfig:
     teacher_graph_batch_size: int = 512
     student_graph_batch_size: int = 1
     graph_verbose: bool = False
-    student_activation_forward_batch_size: int = 32
+
     student_dataset: Optional[str] = None
     student_anova_range_radius: int = 0
     student_anova_nodes_per_label: int = 10
@@ -337,9 +337,7 @@ class DistillationTrainer:
                 teacher_graph_batch_size=config.teacher_graph_batch_size,
                 student_graph_batch_size=config.student_graph_batch_size,
                 verbose=config.graph_verbose,
-                student_activation_forward_batch_size=(
-                    config.student_activation_forward_batch_size
-                ),
+
                 student_anova_range_radius=config.student_anova_range_radius,
                 student_anova_nodes_per_label=config.student_anova_nodes_per_label,
                 student_sum_min_specificity=config.student_sum_min_specificity,
@@ -1003,12 +1001,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="Number of prompts per step to run graph loss on (0 = all prompts in the batch).",
     )
-    parser.add_argument(
-        "--student-activation-forward-batch-size",
-        type=int,
-        default=32,
-        help="Batch size for student ablation forwards during supernode clustering.",
-    )
+
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--graph-similarity-threshold", type=float, default=0.7)
     parser.add_argument("--graph-max-fan-out", type=int, default=4)
@@ -1185,8 +1178,7 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--teacher-graph-batch-size must be >= 1")
     if args.student_graph_batch_size < 1:
         raise SystemExit("--student-graph-batch-size must be >= 1")
-    if args.student_activation_forward_batch_size < 1:
-        raise SystemExit("--student-activation-forward-batch-size must be >= 1")
+
 
 
 def main() -> None:
@@ -1265,7 +1257,7 @@ def main() -> None:
             fast_teacher_graph=args.fast_teacher_graph,
             student_computation_eps=args.student_computation_eps,
             student_embedding_eps=args.student_embedding_eps,
-            student_activation_forward_batch_size=args.student_activation_forward_batch_size,
+
             student_skip_logit_attribution=args.student_skip_logit_attribution,
             align_diagnostic=args.align_diagnostic,
 

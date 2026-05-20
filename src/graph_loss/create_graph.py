@@ -234,7 +234,7 @@ def create_graph(
     skip_logit_attribution: bool = False,
     # ANOVA / supergraph params
     dataset: str | None = None,
-    activation_forward_batch_size: int = 32,
+
     mlp_input_cache: dict | None = None,
     model_name: str | None = None,
     supernode_heatmap_output_dir: str | None = None,
@@ -264,7 +264,7 @@ def create_graph(
         detach_result: Whether to detach the adjacency from the grad graph.
         skip_logit_attribution: Skip logit attribution phase.
         dataset: Dataset name/path for activation-grid ANOVA labeling.
-        activation_forward_batch_size: Batch size for dataset forward passes.
+
         mlp_input_cache: Pre-built MLP input cache.
         model_name: HuggingFace model identifier string.
         supernode_heatmap_output_dir: Directory for per-supernode PDF heatmaps.
@@ -296,7 +296,7 @@ def create_graph(
             adapter,
             dataset_path,
             model_name,
-            batch_size=activation_forward_batch_size,
+            batch_size=32,
         )
         n_prompts = int(mlp_input_cache.get("meta", {}).get("n_prompts", 0))
         _logger.info("  Built MLP cache: %d prompts", n_prompts)

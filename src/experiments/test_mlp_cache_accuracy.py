@@ -73,13 +73,7 @@ def main() -> None:
         required=True,
         help="Dataset name or path — used by build_super_graph to compute activation heatmaps",
     )
-    parser.add_argument(
-        "--activation-forward-batch-size",
-        dest="activation_forward_batch_size",
-        type=int,
-        default=32,
-        help="Batch size for activation-write forward passes",
-    )
+
     parser.add_argument(
         "--activation-write-cache-path",
         dest="activation_write_cache_path",
@@ -146,7 +140,7 @@ def main() -> None:
         batch_size=args.attribution_batch_size,
         verbose=args.verbose,
         dataset=dataset_path,
-        activation_forward_batch_size=args.activation_forward_batch_size,
+
         activation_write_cache_path=args.activation_write_cache_path,
         model_name=args.model_id,
         anova_nodes_per_label=args.anova_nodes_per_label,

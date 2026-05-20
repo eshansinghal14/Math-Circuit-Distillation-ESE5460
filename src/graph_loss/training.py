@@ -32,7 +32,7 @@ class GraphAuxConfig:
     teacher_graph_batch_size: int = 512
     student_graph_batch_size: int = 1
     verbose: bool = False
-    student_activation_forward_batch_size: int = 32
+
     student_anova_range_radius: int = 0
     student_anova_nodes_per_label: int = 10
     student_sum_min_specificity: float = 0.0
@@ -113,7 +113,7 @@ def compute_prompt_graph_loss(
             detach_result=False,
             skip_logit_attribution=False,
             dataset=config.dataset,
-            activation_forward_batch_size=config.student_activation_forward_batch_size,
+
             mlp_input_cache=config.mlp_input_cache,
             anova_range_radius=config.student_anova_range_radius,
             anova_nodes_per_label=config.student_anova_nodes_per_label,

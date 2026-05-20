@@ -46,7 +46,7 @@ class TeacherDataConfig:
     start_index: int = 0
     overwrite: bool = False
     dataset: str | None = None
-    activation_forward_batch_size: int = 32
+
     anova_nodes_per_label: int = 10
     anova_range_radius: int = 0
     sum_min_specificity: float = 0.0
@@ -183,7 +183,7 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
             batch_size=config.attribution_batch_size,
             verbose=config.verbose,
             dataset=activation_dataset,
-            activation_forward_batch_size=config.activation_forward_batch_size,
+
             model_name=config.teacher_model,
             anova_nodes_per_label=config.anova_nodes_per_label,
             anova_range_radius=config.anova_range_radius,
@@ -315,12 +315,7 @@ def build_parser() -> argparse.ArgumentParser:
             "output-neuron clustering and per-cluster PDF heatmaps"
         ),
     )
-    parser.add_argument(
-        "--activation_forward_batch_size",
-        type=int,
-        default=32,
-        help="Batch size for dataset activation-write forward passes",
-    )
+
     parser.add_argument(
         "--anova-nodes-per-label",
         "--anova_nodes_per_label",
@@ -384,7 +379,7 @@ def main() -> None:
         start_index=args.start_index,
         overwrite=args.overwrite,
         dataset=args.dataset,
-        activation_forward_batch_size=args.activation_forward_batch_size,
+
         anova_nodes_per_label=args.anova_nodes_per_label,
         anova_range_radius=args.anova_range_radius,
         sum_min_specificity=args.sum_min_specificity,
