@@ -345,7 +345,7 @@ def select_anova_supernodes(
                 row_idx: (
                     float(label_results[row_idx].category_scores.get(category, 0.0)),
                     float(label_results[row_idx].category_specificity.get(category, 0.0)),
-                    float(kl_all[row_idx]) if kl_all is not None else 0.0,
+                    float(-kl_all[row_idx]) if kl_all is not None else 0.0,
                 )
                 for row_idx, _ in top_rows
             }

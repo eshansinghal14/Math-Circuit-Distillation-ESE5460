@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
+import tempfile
 from dataclasses import dataclass
 
 import torch
@@ -27,6 +30,33 @@ from graph_loss.neuron_activation_heatmap import (
 class GraphPipelineResult:
     graph: Graph
     supergraph: SuperGraph
+
+
+# ---------------------------------------------------------------------------
+# Label cache helpers
+# ---------------------------------------------------------------------------
+
+def _label_cache_key(
+    model_name: str | None,
+    input_ids: torch.Tensor,
+    prop_neurons_per_layer: float,
+    dataset: str | None,
+    anova_range_radius: int,
+) -> str:
+    key_str = "|".join([
+        str(model_name or ""),
+        str(input_ids.detach().cpu().tolist()),
+        str(prop_neurons_per_layer),
+        str(dataset or ""),
+        str(anova_range_radius),
+    ])
+    return hashlib.sha256(key_str.encode()).hexdigest()
+
+
+def _label_cache_path(cache_key: str) -> str:
+    cache_dir = os.path.join(tempfile.gettempdir(), "ese5460_label_cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    return os.path.join(cache_dir, f"{cache_key}.pt")
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +243,7 @@ def create_graph(
     sum_min_specificity: float = 0.0,
     labelling_layer_batch_size: int = 1,
     no_grad_supergraph: bool = False,
+    force_label_refresh: bool = False,
     logger: logging.Logger | None = None,
 ) -> GraphPipelineResult:
     """Run the ANOVA-first graph creation pipeline.
@@ -280,15 +311,39 @@ def create_graph(
         )
     decoded_prompt = adapter.tokenizer.decode(input_ids.detach().cpu().tolist())
     target_args = parse_numeric_args(decoded_prompt)
-    _logger.info("ANOVA-labeling %d pre-selected neurons (layer-by-layer)", ctx.n_neurons)
-    label_results = label_neurons_layer_by_layer(
-        adapter,
-        ctx.neuron_locations,
-        mlp_input_cache,
-        target_args=target_args,
-        anova_range_radius=anova_range_radius,
-        labelling_layer_batch_size=labelling_layer_batch_size,
-    )
+
+    label_results = None
+    _cache_key = _label_cache_key(model_name, input_ids, prop_neurons_per_layer, dataset, anova_range_radius)
+    _cache_path = _label_cache_path(_cache_key)
+    if not force_label_refresh and os.path.exists(_cache_path):
+        try:
+            cached = torch.load(_cache_path, weights_only=False, map_location="cpu")
+            if torch.equal(cached["neuron_locations"], ctx.neuron_locations.cpu()):
+                label_results = cached["label_results"]
+                _logger.info("Loaded cached label results from %s", _cache_path)
+            else:
+                _logger.info("Cache neuron_locations mismatch; re-labeling")
+        except Exception as exc:
+            _logger.warning("Failed to load label cache (%s); re-labeling", exc)
+
+    if label_results is None:
+        _logger.info("ANOVA-labeling %d pre-selected neurons (layer-by-layer)", ctx.n_neurons)
+        label_results = label_neurons_layer_by_layer(
+            adapter,
+            ctx.neuron_locations,
+            mlp_input_cache,
+            target_args=target_args,
+            anova_range_radius=anova_range_radius,
+            labelling_layer_batch_size=labelling_layer_batch_size,
+        )
+        try:
+            torch.save(
+                {"label_results": label_results, "neuron_locations": ctx.neuron_locations.cpu()},
+                _cache_path,
+            )
+            _logger.info("Saved label results to cache: %s", _cache_path)
+        except Exception as exc:
+            _logger.warning("Failed to save label cache: %s", exc)
 
     # Step 4: Select top-K neurons per ANOVA label.
     # Sum categories use DLA-KL scoring (source_vectors @ W_U) rather than graph influence.
