@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import torch
 
-from graph_loss.anova_node_labels import label_activation_heatmaps, parse_numeric_args
+from graph_loss.anova_node_labels import parse_numeric_args
 from graph_loss.attribution.attribute import _attribute_from_context, setup_attribution
 from graph_loss.graph import (
     Graph,
@@ -19,6 +19,7 @@ from graph_loss.hf_adapter import HFLlamaGraphAdapter
 from graph_loss.neuron_activation_heatmap import (
     ActivationWriteResult,
     build_neuron_activation_write_result,
+    label_neurons_layer_by_layer,
 )
 
 
@@ -269,33 +270,25 @@ def create_graph(
         n_prompts = int(mlp_input_cache.get("meta", {}).get("n_prompts", 0))
         _logger.info("  Built MLP cache: %d prompts", n_prompts)
 
-    # Step 3: Build activation-write matrices for all pre-selected neurons.
+    # Step 3: ANOVA-label all pre-selected neurons, one layer at a time.
+    # Activations are computed and discarded per layer — peak memory is
+    # O(n_layer_neurons × grid_cells) instead of O(N × grid_cells).
     if dataset is None:
         raise ValueError(
             "A dataset is required for ANOVA labeling. Pass --dataset."
         )
-    _logger.info(
-        "Building activation-write matrices for %d pre-selected neurons", ctx.n_neurons
-    )
-    activation_write_result = build_neuron_activation_write_result(
-        adapter,
-        dataset,
-        ctx.neuron_locations,
-        mlp_input_cache=mlp_input_cache,
-    )
-
-    # Step 4: ANOVA-label all pre-selected neurons.
-    _logger.info("Running label_activation_heatmaps (ANOVA) on all pre-selected neurons")
     decoded_prompt = adapter.tokenizer.decode(input_ids.detach().cpu().tolist())
     target_args = parse_numeric_args(decoded_prompt)
-    label_results = label_activation_heatmaps(
-        activation_write_result.activations,
-        activation_write_result.arg_values,
+    _logger.info("ANOVA-labeling %d pre-selected neurons (layer-by-layer)", ctx.n_neurons)
+    label_results = label_neurons_layer_by_layer(
+        adapter,
+        ctx.neuron_locations,
+        mlp_input_cache,
         target_args=target_args,
         anova_range_radius=anova_range_radius,
     )
 
-    # Step 5: Select top-K neurons per ANOVA label.
+    # Step 4: Select top-K neurons per ANOVA label.
     # Sum categories use DLA-KL scoring (source_vectors @ W_U) rather than graph influence.
     _logger.info("Selecting ANOVA supernodes (top-%d per label)", anova_nodes_per_label)
     selected_row_indices, raw_supernodes, supernode_labels, raw_node_labels = (
@@ -312,7 +305,7 @@ def create_graph(
     )
     _logger.info("  ANOVA selected %d unique neurons", len(selected_row_indices))
 
-    # Step 6: Build a boolean keep_mask and remap supernode indices.
+    # Step 5: Build a boolean keep_mask and remap supernode indices.
     # After ctx.filter(keep_mask), filtered neuron j = original neuron selected_row_indices[j].
     keep_mask = torch.zeros(ctx.n_neurons, dtype=torch.bool, device=adapter.device)
     for idx in selected_row_indices:
@@ -322,11 +315,11 @@ def create_graph(
     supernodes = [[old_to_new[idx] for idx in sn] for sn in raw_supernodes]
     node_labels = {old_to_new[old]: labels for old, labels in raw_node_labels.items()}
 
-    # Step 7: Filter the attribution context to ANOVA-selected neurons only.
+    # Step 6: Filter the attribution context to ANOVA-selected neurons only.
     filtered_ctx = ctx.filter(keep_mask)
     _logger.info("  Filtered context: %d neurons", filtered_ctx.n_neurons)
 
-    # Step 8: Build the attribution graph for the ANOVA-selected neurons.
+    # Step 7: Build the attribution graph for the ANOVA-selected neurons.
     _logger.info("Running edge attribution on ANOVA-filtered neurons")
     graph = _attribute_from_context(
         filtered_ctx,
@@ -340,11 +333,15 @@ def create_graph(
     )
     _log_graph_summary(graph, logger=_logger, stage="Built (ANOVA-filtered)")
 
-    # Build a filtered activation_write_result whose rows align with the filtered graph.
-    sel_tensor = torch.tensor(selected_row_indices, dtype=torch.long)
-    filtered_awr = ActivationWriteResult(
-        activations=activation_write_result.activations[sel_tensor],
-        arg_values=activation_write_result.arg_values,
+    # Step 8: Compute activation grids only for the M supergraph neurons (M << N).
+    _logger.info(
+        "Building activation-write result for %d supergraph neurons", filtered_ctx.n_neurons
+    )
+    filtered_awr = build_neuron_activation_write_result(
+        adapter,
+        dataset,
+        filtered_ctx.neuron_locations,
+        mlp_input_cache=mlp_input_cache,
     )
 
     # Step 9: Aggregate the adjacency matrix into a supergraph.
