@@ -43,6 +43,41 @@ from utils import HF_READ_TOKEN, load_prompt_answer_json
 logger = logging.getLogger(__name__)
 
 
+def _tokenize_prompt_batch(adapter, prompts: list[str]) -> tuple[torch.Tensor, list[int]]:
+    tokenizer = adapter.tokenizer
+    tokenized = [
+        tokenizer(prompt, return_tensors="pt", add_special_tokens=False).input_ids.squeeze(0)
+        for prompt in prompts
+    ]
+    bos_token_id = tokenizer.bos_token_id
+    if bos_token_id is None:
+        raise ValueError("Tokenizer must define bos_token_id.")
+    tokenized = [
+        ids
+        if int(ids[0].item()) == int(bos_token_id)
+        else torch.cat([torch.tensor([bos_token_id], dtype=ids.dtype), ids])
+        for ids in tokenized
+    ]
+    lengths = [int(ids.numel()) for ids in tokenized]
+    max_len = max(lengths)
+    pad_token_id = (
+        tokenizer.pad_token_id
+        if tokenizer.pad_token_id is not None
+        else tokenizer.eos_token_id
+    )
+    if pad_token_id is None:
+        pad_token_id = bos_token_id
+    input_ids = torch.full(
+        (len(tokenized), max_len),
+        int(pad_token_id),
+        dtype=tokenized[0].dtype,
+        device=adapter.cfg.device,
+    )
+    for row_idx, ids in enumerate(tokenized):
+        input_ids[row_idx, : ids.numel()] = ids.to(adapter.cfg.device)
+    return input_ids, lengths
+
+
 def _model_slug(model_name: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9._-]+", "_", model_name).strip("._-")[:48]
     digest = hashlib.sha1(model_name.encode()).hexdigest()[:8]
