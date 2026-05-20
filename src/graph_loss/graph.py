@@ -379,6 +379,9 @@ def build_super_graph(
     supernode_heatmap_output_dir: str | None = None,
     activation_write_result: ActivationWriteResult | None = None,
     sum_member_scores: dict[str, dict[int, tuple[float, float, float]]] | None = None,
+    filtered_label_results: dict | None = None,
+    W_U: torch.Tensor | None = None,
+    tokenizer=None,
 ) -> SuperGraph:
     """Aggregate the attribution adjacency matrix into a supergraph.
 
@@ -429,6 +432,25 @@ def build_super_graph(
                         i: float(norms[i].item()) / total_norm
                         for i in range(len(norms))
                     }
+            # Pre-compute number-token unembed mapping once if W_U/tokenizer available.
+            number_unembed_precomputed: tuple | None = None
+            if W_U is not None and tokenizer is not None:
+                number_values = list(range(0, 201))
+                raw_token_ids: list[int | None] = []
+                for value in number_values:
+                    encoded = tokenizer(str(value), add_special_tokens=False, return_tensors=None)
+                    input_ids = encoded["input_ids"] if isinstance(encoded, dict) else encoded.input_ids
+                    if input_ids and isinstance(input_ids[0], list):
+                        input_ids = input_ids[0]
+                    raw_token_ids.append(int(input_ids[0]) if len(input_ids) == 1 else None)
+                valid_positions = [i for i, tid in enumerate(raw_token_ids) if tid is not None]
+                valid_numbers = [number_values[i] for i in valid_positions]
+                valid_vocab_ids = torch.tensor(
+                    [int(raw_token_ids[i]) for i in valid_positions], dtype=torch.long, device=W_U.device
+                )
+                W_U_numbers = W_U[:, valid_vocab_ids]  # [d_model, n_valid]
+                number_unembed_precomputed = (valid_numbers, W_U_numbers)
+
             for supernode_idx, members in enumerate(supernodes):
                 category = (
                     supernode_labels[supernode_idx][0]
@@ -448,10 +470,28 @@ def build_super_graph(
                     if neuron_norm_props is not None
                     else None
                 )
-                member_sum_scores_for_sn = None
+                member_var_spec = None
+                if filtered_label_results is not None:
+                    member_var_spec = {}
+                    for m in members:
+                        nl = filtered_label_results.get(m)
+                        if nl is not None:
+                            member_var_spec[m] = (
+                                float(nl.category_scores.get(category, 0.0)),
+                                float(nl.category_specificity.get(category, 0.0)),
+                            )
+                member_dla_kl = None
                 if is_sum_category and sum_member_scores is not None:
                     cat_scores = sum_member_scores.get(category, {})
-                    member_sum_scores_for_sn = {m: cat_scores[m] for m in members if m in cat_scores}
+                    member_dla_kl = {m: cat_scores[m][2] for m in members if m in cat_scores}
+                member_number_unembed = None
+                if is_sum_category and number_unembed_precomputed is not None and graph.neuron_write_vectors is not None:
+                    valid_numbers, W_U_numbers = number_unembed_precomputed
+                    member_number_unembed = {}
+                    for m in members:
+                        sv = graph.neuron_write_vectors[m].to(device=W_U_numbers.device, dtype=W_U_numbers.dtype)
+                        dla_vals = (sv @ W_U_numbers).detach().float().cpu()
+                        member_number_unembed[m] = (valid_numbers, dla_vals)
                 saved_path = save_supernode_activation_heatmap_pdf(
                     cluster_heatmaps,
                     activation_write_result.arg_values,
@@ -464,8 +504,9 @@ def build_super_graph(
                     title=f"supernode {supernode_idx}: {category}",
                     member_labels=member_labels,
                     member_norm_props=member_norm_props,
-                    is_sum_category=is_sum_category,
-                    member_sum_scores=member_sum_scores_for_sn,
+                    member_var_spec=member_var_spec,
+                    member_dla_kl=member_dla_kl,
+                    member_number_unembed=member_number_unembed,
                 )
                 logger.info("  Saved supernode heatmap PDF: %s", saved_path)
                 supernode_heatmap_pdf_paths.append(saved_path)

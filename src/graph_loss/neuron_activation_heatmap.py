@@ -370,8 +370,8 @@ def save_supernode_activation_heatmap_pdf(
     member_number_unembed: dict[int, tuple[list[int], torch.Tensor]] | None = None,
     member_specificity: dict[int, float] | None = None,
     member_norm_props: dict[int, float] | None = None,
-    is_sum_category: bool = False,
-    member_sum_scores: dict[int, tuple[float, float, float]] | None = None,
+    member_var_spec: dict[int, tuple[float, float]] | None = None,
+    member_dla_kl: dict[int, float] | None = None,
 ) -> str:
     """Save one 2D activation heatmap page per neuron in a supernode, with optional 1D logit influence side panel."""
     if len(arg_values) != 2:
@@ -414,13 +414,17 @@ def save_supernode_activation_heatmap_pdf(
                 member_norm_props.get(graph_neuron_idx) if member_norm_props is not None else None
             )
             norm_text = f"  ({norm_prop * 100:.2f}% of total residual norm)" if norm_prop is not None else ""
-            sum_score_text = ""
-            if is_sum_category and member_sum_scores is not None:
-                scores = member_sum_scores.get(graph_neuron_idx)
-                if scores is not None:
-                    var_val, spec_val, kl_val = scores
-                    sum_score_text = f"  var={var_val:.3f} spec={spec_val:.3f} dla_kl={kl_val:.3f}"
-            page_title = f"{title}{label_text}\nNeuron {neuron_id} ({location_text}){norm_text}{sum_score_text}"
+            score_parts = []
+            if member_var_spec is not None:
+                vs = member_var_spec.get(graph_neuron_idx)
+                if vs is not None:
+                    score_parts.append(f"var={vs[0]:.3f} spec={vs[1]:.3f}")
+            if member_dla_kl is not None:
+                kl = member_dla_kl.get(graph_neuron_idx)
+                if kl is not None:
+                    score_parts.append(f"dla_kl={kl:.3f}")
+            score_line = ("\n" + "  ".join(score_parts)) if score_parts else ""
+            page_title = f"{title}{label_text}\nNeuron {neuron_id} ({location_text}){norm_text}{score_line}"
             number_unembed = (
                 member_number_unembed.get(graph_neuron_idx)
                 if member_number_unembed is not None

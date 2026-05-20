@@ -320,6 +320,7 @@ def create_graph(
         cat: {old_to_new[old]: scores for old, scores in cat_scores.items() if old in old_to_new}
         for cat, cat_scores in raw_sum_member_scores.items()
     }
+    filtered_label_results = {old_to_new[old]: label_results[old] for old in selected_row_indices}
 
     # Step 6: Filter the attribution context to ANOVA-selected neurons only.
     filtered_ctx = ctx.filter(keep_mask)
@@ -364,6 +365,9 @@ def create_graph(
             supernode_heatmap_output_dir=supernode_heatmap_output_dir,
             activation_write_result=filtered_awr,
             sum_member_scores=sum_member_scores,
+            filtered_label_results=filtered_label_results,
+            W_U=adapter.W_U,
+            tokenizer=adapter.tokenizer,
         )
 
     if no_grad_supergraph:
