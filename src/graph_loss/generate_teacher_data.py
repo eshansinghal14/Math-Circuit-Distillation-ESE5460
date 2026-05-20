@@ -14,17 +14,11 @@ from huggingface_hub import login
 from transformers import AutoTokenizer
 
 from transformers import AutoModelForCausalLM
-from graph_loss.__main__ import (
-    _log_graph_summary,
-    _log_pipeline_comparison,
-    _log_prune_summary,
-    _log_supergraph_summary,
-)
-from graph_loss.graph import (
-    PruneResult,
-    SuperGraph,
-    build_super_graph,
-    prune_graph,
+from graph_loss.create_graph import (
+    GraphPipelineResult,
+    create_graph,
+    save_prune_result,
+    save_supergraph,
 )
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
 from graph_loss.utils import (
@@ -89,30 +83,6 @@ def _relative(path: str, root: str) -> str:
     return os.path.relpath(path, root).replace(os.sep, "/")
 
 
-def _save_prune_result(path: str, prune_result: PruneResult) -> None:
-    torch.save(
-        {
-            "node_mask": prune_result.node_mask,
-            "edge_mask": prune_result.edge_mask,
-            "cumulative_scores": prune_result.cumulative_scores,
-        },
-        path,
-    )
-
-
-def _save_supergraph(
-    path: str,
-    supergraph: SuperGraph,
-    logit_token_ids: torch.Tensor | None = None,
-) -> None:
-    data: dict[str, Any] = {
-        "supernode_adjacency_matrix": supergraph.supernode_adjacency_matrix,
-        "supernodes": supergraph.supernodes,
-        "supernode_labels": supergraph.supernode_labels,
-    }
-    if logit_token_ids is not None:
-        data["logit_token_ids"] = logit_token_ids.cpu()
-    torch.save(data, path)
 
 
 def _build_distillation_tensors(prompt: str, answer: int, tokenizer) -> dict[str, Any]:
@@ -219,81 +189,47 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
         os.makedirs(sample_dir, exist_ok=True)
 
         logger.info("Generating teacher data for sample %d: %r", sample_idx, prompt)
-        logger.info("Running attribution graph build")
-        graph = adapter.build_graph(
-            prompt=prompt,
+
+        activation_dataset = config.dataset or config.dataset_file
+        result: GraphPipelineResult = create_graph(
+            adapter,
+            prompt,
             top_k_logits=config.top_k_logits,
             prop_neurons_per_layer=config.prop_neurons_per_layer,
             batch_size=config.attribution_batch_size,
             verbose=config.verbose,
+            prune=config.prune,
+            node_threshold=config.node_threshold,
+            edge_threshold=config.edge_threshold,
+            dataset=activation_dataset,
+            activation_forward_batch_size=config.activation_forward_batch_size,
+            model_name=config.teacher_model,
+            anova_nodes_per_label=config.anova_nodes_per_label,
+            anova_range_radius=config.anova_range_radius,
+            sum_min_specificity=config.sum_min_specificity,
+            no_grad_supergraph=True,
+            logger=logger,
         )
-        _log_graph_summary(graph, logger=logger, stage="Built")
 
+        graph_path = os.path.join(sample_dir, "graph.pt")
         if not config.skip_graph_save:
-            graph_path = os.path.join(sample_dir, "graph.pt")
             logger.info("Saving graph to %s", graph_path)
-            graph.to_pt(graph_path)
+            result.raw_graph.to_pt(graph_path)
         else:
             logger.info("Skipping graph.pt save (--skip-graph-save)")
 
-        prune_result = None
-        graph_for_supergraph = graph
         prune_path = None
-        if config.prune:
-            logger.info("Running prune_graph")
-            prune_result = prune_graph(
-                graph,
-                node_threshold=config.node_threshold,
-                edge_threshold=config.edge_threshold,
-            )
-            _log_prune_summary(
-                graph,
-                prune_result,
-                node_threshold=config.node_threshold,
-                edge_threshold=config.edge_threshold,
-                logger=logger,
-            )
+        if config.prune and result.prune_result is not None:
             prune_path = os.path.join(sample_dir, "prune_result.pt")
             logger.info("Saving prune result to %s", prune_path)
-            _save_prune_result(prune_path, prune_result)
-            logger.info("Applying prune masks to graph")
-            graph_for_supergraph = graph.apply_prune_result(prune_result)
+            save_prune_result(prune_path, result.prune_result)
 
-        activation_dataset = config.dataset or config.dataset_file
-        logger.info(
-            "Running build_super_graph (activation_dataset=%s)",
-            activation_dataset,
-        )
-        with torch.no_grad():
-            supergraph = build_super_graph(
-                graph_for_supergraph,
-                adapter,
-                prune_result=prune_result,
-                dataset=activation_dataset,
-                activation_forward_batch_size=config.activation_forward_batch_size,
-                activation_write_cache_path=config.activation_write_cache_path,
-                model_name=config.teacher_model,
-                anova_nodes_per_label=config.anova_nodes_per_label,
-                anova_range_radius=config.anova_range_radius,
-                sum_min_specificity=config.sum_min_specificity,
-            )
-        _log_supergraph_summary(
-            graph_for_supergraph,
-            supergraph,
-            logger=logger,
-        )
         supergraph_path = os.path.join(sample_dir, "supergraph.pt")
         logger.info("Saving supergraph to %s", supergraph_path)
-        _save_supergraph(
+        save_supergraph(
             supergraph_path,
-            supergraph,
-            logit_token_ids=graph.logit_token_ids,
-        )
-        _log_pipeline_comparison(
-            graph_for_supergraph,
-            supergraph,
-            logger=logger,
-            prune_result=prune_result,
+            result.supergraph,
+            logit_token_ids=result.raw_graph.logit_token_ids,
         )
 
         logger.info("Computing teacher logits for distillation cache")

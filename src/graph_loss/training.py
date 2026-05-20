@@ -8,12 +8,8 @@ from typing import Any
 
 import torch
 
-from graph_loss.graph import (
-    SuperGraph,
-    build_super_graph,
-    normalize_matrix,
-    prune_graph,
-)
+from graph_loss.create_graph import create_graph
+from graph_loss.graph import SuperGraph, normalize_matrix
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
 from graph_loss.loss import compute_graph_loss
 from graph_loss.teacher_data_cache import TeacherDataCache
@@ -104,51 +100,40 @@ def compute_prompt_graph_loss(
     # ------------------------------------------------------------------
     if config.verbose:
         print(f"  [graph] building student graph for prompt: {prompt!r}")
-    student_graph = student_adapter.build_graph(
-        prompt,
-        attribution_targets=logit_token_ids.cpu() if logit_token_ids is not None else None,
-        prop_neurons_per_layer=config.prop_neurons_per_layer,
-        batch_size=config.student_graph_batch_size,
-        dtype=config.graph_dtype,
-        verbose=config.verbose,
-        create_graph=False,
-        detach_result=False,
-        skip_logit_attribution=False,
-    )
-    student_prune_result = None
-    if config.graph_prune:
-        if config.verbose:
-            print("  [graph] pruning student graph")
-        student_prune_result = prune_graph(
-            student_graph,
-            node_threshold=config.graph_node_threshold,
-            edge_threshold=config.graph_edge_threshold,
-        )
-        student_graph = student_graph.apply_prune_result(student_prune_result)
 
     supergraph_start = time.perf_counter()
 
-    student_mlp_input_cache = config.mlp_input_cache
-
     try:
-        with torch.no_grad():
-            student_supergraph_structure = build_super_graph(
-                student_graph,
-                student_adapter,
-                prune_result=student_prune_result,
-                dataset=config.dataset,
-                activation_forward_batch_size=config.student_activation_forward_batch_size,
-                mlp_input_cache=student_mlp_input_cache,
-                anova_range_radius=config.student_anova_range_radius,
-                anova_nodes_per_label=config.student_anova_nodes_per_label,
-                sum_min_specificity=config.student_sum_min_specificity,
-            )
-        
+        student_result = create_graph(
+            student_adapter,
+            prompt,
+            attribution_targets=logit_token_ids.cpu() if logit_token_ids is not None else None,
+            prop_neurons_per_layer=config.prop_neurons_per_layer,
+            batch_size=config.student_graph_batch_size,
+            dtype=config.graph_dtype,
+            verbose=config.verbose,
+            build_create_graph=False,
+            detach_result=False,
+            skip_logit_attribution=False,
+            prune=config.graph_prune,
+            node_threshold=config.graph_node_threshold,
+            edge_threshold=config.graph_edge_threshold,
+            dataset=config.dataset,
+            activation_forward_batch_size=config.student_activation_forward_batch_size,
+            mlp_input_cache=config.mlp_input_cache,
+            anova_range_radius=config.student_anova_range_radius,
+            anova_nodes_per_label=config.student_anova_nodes_per_label,
+            sum_min_specificity=config.student_sum_min_specificity,
+            no_grad_supergraph=True,
+        )
     except ValueError as e:
         raise RuntimeError(
             f"Student supergraph build failed for prompt={prompt!r}: {e}"
         ) from e
-        
+
+    student_graph = student_result.graph
+    student_supergraph_structure = student_result.supergraph
+
     for i, members in enumerate(student_supergraph_structure.supernodes):
         if not members:
             label = (
@@ -160,7 +145,7 @@ def compute_prompt_graph_loss(
                 f"Student supernode {i} (label={label!r}) has no member nodes "
                 f"for prompt={prompt!r}."
             )
-    
+
     student_supergraph = _aggregate_supergraph_adjacency(
         student_graph,
         student_supergraph_structure.supernodes,
