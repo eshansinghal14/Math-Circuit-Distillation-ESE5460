@@ -163,6 +163,24 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
         "samples": [],
     }
 
+    # Build MLP input cache once for the entire run — same across all prompts.
+    activation_dataset = config.dataset or config.dataset_file
+    if activation_dataset:
+        from graph_loss.precompute_mlp_inputs import build_mlp_input_cache
+        from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
+        activation_dataset_path = _resolve_dataset_path(activation_dataset)
+        logger.info("Building MLP input cache once for dataset: %s", activation_dataset)
+        mlp_input_cache = build_mlp_input_cache(
+            adapter,
+            activation_dataset_path,
+            config.teacher_model,
+            batch_size=32,
+        )
+        n_prompts = int(mlp_input_cache.get("meta", {}).get("n_prompts", 0))
+        logger.info("  MLP cache: %d prompts, ready for reuse across all training prompts", n_prompts)
+    else:
+        mlp_input_cache = None
+
     for local_idx, (prompt, answer) in enumerate(tqdm(samples, desc="Generating teacher data", unit="sample")):
         sample_idx = config.start_index + local_idx
         folder_name = _safe_prompt_folder(prompt, sample_idx)
@@ -175,7 +193,6 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
 
         logger.info("Generating teacher data for sample %d: %r", sample_idx, prompt)
 
-        activation_dataset = config.dataset or config.dataset_file
         result: GraphPipelineResult = create_graph(
             adapter,
             prompt,
@@ -184,7 +201,7 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
             batch_size=config.attribution_batch_size,
             verbose=config.verbose,
             dataset=activation_dataset,
-
+            mlp_input_cache=mlp_input_cache,
             model_name=config.teacher_model,
             anova_nodes_per_label=config.anova_nodes_per_label,
             anova_range_radius=config.anova_range_radius,
