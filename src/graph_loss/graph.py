@@ -647,7 +647,6 @@ def build_super_graph(
                     target_value=target_sum,
                     units=category == "sum units",
                 )
-                spec_threshold = sum_min_specificity if category == "sum range" else 0.0
                 all_scored_rows = [
                     (
                         row_idx,
@@ -655,16 +654,14 @@ def build_super_graph(
                     )
                     for row_idx, label_result in enumerate(label_results)
                     if category in label_result.category_scores
-                    and label_result.category_scores[category] > 0.0
-                    and label_result.category_specificity.get(category, float("-inf"))
-                    > spec_threshold
+                    and label_result.category_scores[category] > sum_min_specificity
                 ]
             else:
                 all_scored_rows = [
-                    (row_idx, label_result.category_specificity[category])
+                    (row_idx, label_result.category_scores[category])
                     for row_idx, label_result in enumerate(label_results)
-                    if category in label_result.category_specificity
-                    and label_result.category_scores.get(category, 0.0) > 0.0
+                    if category in label_result.category_scores
+                    and label_result.category_scores[category] > 0.0
                 ]
             sorted_all_rows = sorted(all_scored_rows, key=lambda item: item[1], reverse=True)
             scored_rows = sorted_all_rows
@@ -673,7 +670,7 @@ def build_super_graph(
                     if category in {"sum range", "sum units"}:
                         pre_filter = [
                             (row_idx, sum_cosine_scores[int(kept_neuron_indices[row_idx].item())],
-                             label_result.category_specificity.get(category, float("-inf")))
+                             label_result.category_scores.get(category, 0.0))
                             for row_idx, label_result in enumerate(label_results)
                             if category in label_result.category_scores
                             and label_result.category_scores[category] > 0.0
@@ -681,27 +678,21 @@ def build_super_graph(
                         all_by_cos = sorted(pre_filter, key=lambda x: x[1], reverse=True)
                         top_cos = all_by_cos[:5]
                         if not pre_filter:
-                            if category == "sum range":
-                                logger.warning(
-                                    "  ANOVA label %s: no candidates before specificity filter, skipping",
-                                    category,
-                                )
-                            else:
-                                logger.warning(
-                                    "  ANOVA label %s: no candidates with positive specificity, skipping",
-                                    category,
-                                )
+                            logger.warning(
+                                "  ANOVA label %s: no candidates with positive variance, skipping",
+                                category,
+                            )
                             continue
                         logger.warning(
-                            "  ANOVA label %s: no nodes above specificity threshold"
+                            "  ANOVA label %s: no nodes above variance threshold"
                             " (sum_min_specificity=%.6g); falling back to top-%d neurons by"
                             " DLA cosine similarity. Top cos scores: %s",
                             category,
                             sum_min_specificity,
                             anova_nodes_per_label,
-                            [(round(c, 4), round(s, 6)) for _, c, s in top_cos],
+                            [(round(c, 4), round(v, 6)) for _, c, v in top_cos],
                         )
-                        scored_rows = [(row_idx, cos_score) for row_idx, cos_score, _spec in all_by_cos]
+                        scored_rows = [(row_idx, cos_score) for row_idx, cos_score, _var in all_by_cos]
                         sorted_all_rows = scored_rows
                     else:
                         raise ValueError(
@@ -739,7 +730,8 @@ def build_super_graph(
                     member_plot_labels[member] = [f"{label} (var={variance_score:.3f}, spec={specificity_score:.3f}, cos={ranking_score:.3f})"]
                 else:
                     variance_score = label_results[row_idx].category_scores[category]
-                    member_plot_labels[member] = [f"{label} (var={variance_score:.3f}, spec={ranking_score:.3f})"]
+                    specificity_score = label_results[row_idx].category_specificity.get(category, 0.0)
+                    member_plot_labels[member] = [f"{label} (var={variance_score:.3f}, spec={specificity_score:.3f})"]
                 node_labels.setdefault(member, [])
                 if label not in node_labels[member]:
                     node_labels[member].append(label)
@@ -769,7 +761,7 @@ def build_super_graph(
                 len(members),
                 len(scored_rows),
                 anova_nodes_per_label,
-                "cos" if category in {"sum range", "sum units"} else "specificity",
+                "cos" if category in {"sum range", "sum units"} else "variance",
                 float(top_rows[0][1]),
             )
 
