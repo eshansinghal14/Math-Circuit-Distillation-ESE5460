@@ -38,14 +38,16 @@ class GraphPipelineResult:
 
 def _label_cache_key(
     model_name: str | None,
-    input_ids: torch.Tensor,
+    neuron_locations: torch.Tensor,
+    target_args: tuple[int, ...],
     prop_neurons_per_layer: float,
     dataset: str | None,
     anova_range_radius: int,
 ) -> str:
     key_str = "|".join([
         str(model_name or ""),
-        str(input_ids.detach().cpu().tolist()),
+        str(neuron_locations.detach().cpu().tolist()),
+        str(target_args),
         str(prop_neurons_per_layer),
         str(dataset or ""),
         str(anova_range_radius),
@@ -312,16 +314,12 @@ def create_graph(
     target_args = parse_numeric_args(decoded_prompt)
 
     label_results = None
-    _cache_key = _label_cache_key(model_name, input_ids, prop_neurons_per_layer, dataset, anova_range_radius)
+    _cache_key = _label_cache_key(model_name, ctx.neuron_locations, target_args, prop_neurons_per_layer, dataset, anova_range_radius)
     _cache_path = _label_cache_path(_cache_key)
     if not force_label_refresh and os.path.exists(_cache_path):
         try:
-            cached = torch.load(_cache_path, weights_only=False, map_location="cpu")
-            if torch.equal(cached["neuron_locations"], ctx.neuron_locations.cpu()):
-                label_results = cached["label_results"]
-                _logger.info("Loaded cached label results from %s", _cache_path)
-            else:
-                _logger.info("Cache neuron_locations mismatch; re-labeling")
+            label_results = torch.load(_cache_path, weights_only=False, map_location="cpu")
+            _logger.info("Loaded cached label results from %s", _cache_path)
         except Exception as exc:
             _logger.warning("Failed to load label cache (%s); re-labeling", exc)
 
@@ -335,10 +333,7 @@ def create_graph(
             anova_range_radius=anova_range_radius,
         )
         try:
-            torch.save(
-                {"label_results": label_results, "neuron_locations": ctx.neuron_locations.cpu()},
-                _cache_path,
-            )
+            torch.save(label_results, _cache_path)
             _logger.info("Saved label results to cache: %s", _cache_path)
         except Exception as exc:
             _logger.warning("Failed to save label cache: %s", exc)
