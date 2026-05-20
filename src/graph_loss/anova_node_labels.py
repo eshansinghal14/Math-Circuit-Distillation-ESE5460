@@ -340,6 +340,24 @@ def explained_variance_score(activation_grid: torch.Tensor, mask: torch.Tensor) 
     return float(score.clamp(min=0.0, max=1.0).item())
 
 
+def _batch_explained_variance_scores(
+    acts_flat: torch.Tensor,
+    masks_flat: torch.Tensor,
+) -> torch.Tensor:
+    """Return [N, R] explained-variance scores via a single batched matmul.
+
+    acts_flat:  [N, M]  — pre-flattened float activations (no NaNs)
+    masks_flat: [R, M]  — pre-flattened float basis masks (one per rule)
+    """
+    y_c = acts_flat - acts_flat.mean(dim=-1, keepdim=True)   # [N, M]
+    X_c = masks_flat - masks_flat.mean(dim=-1, keepdim=True)  # [R, M]
+    total_var = y_c.square().sum(dim=-1, keepdim=True)        # [N, 1]
+    basis_var = X_c.square().sum(dim=-1).unsqueeze(0)         # [1, R]
+    proj = y_c @ X_c.T                                        # [N, R]
+    denom = total_var * basis_var                             # [N, R]
+    return torch.where(denom > 0, proj.square() / denom, torch.zeros_like(proj)).clamp(0, 1)
+
+
 def label_activation_heatmaps(
     activations: torch.Tensor,
     arg_values: list[list[int]],
@@ -359,19 +377,39 @@ def label_activation_heatmaps(
         target_args=target_args,
         anova_range_radius=anova_range_radius,
     )
+
+    acts = activations.detach().float().cpu()  # [N, H, W]
+    N = acts.shape[0]
+
+    if not rules:
+        empty = NodeLabel(labels=[], scores={}, categories={}, category_scores={}, category_specificity={})
+        return [empty] * N
+
+    acts_flat = acts.flatten(1)  # [N, M]
+    masks_flat = torch.stack(
+        [rule.mask.detach().float().flatten().cpu() for rule in rules], dim=0
+    )  # [R, M]
+
+    scores_nr = _batch_explained_variance_scores(acts_flat, masks_flat)  # [N, R]
+
     out: list[NodeLabel] = []
-    for activation_grid in activations.detach().float().cpu():
-        category_labels: dict[str, str] = {}
+    for n in range(N):
+        activation_grid = acts[n]
+
+        # Find the best-scoring rule per category, then compute the dynamic
+        # range label only for that winner (avoids R z-score passes per neuron).
+        category_best_r: dict[str, int] = {}
         category_scores: dict[str, float] = {}
-        for rule in rules:
-            score = explained_variance_score(activation_grid, rule.mask)
-            label = _high_activation_range_label(
-                activation_grid,
-                rule,
-            )
+        for r, rule in enumerate(rules):
+            score = float(scores_nr[n, r].item())
             if score > category_scores.get(rule.category, float("-inf")):
                 category_scores[rule.category] = score
-                category_labels[rule.category] = label
+                category_best_r[rule.category] = r
+
+        category_labels: dict[str, str] = {
+            category: _high_activation_range_label(activation_grid, rules[r])
+            for category, r in category_best_r.items()
+        }
 
         if "arg1 units" in category_scores and "arg2 units" in category_scores:
             category = "arg1 units and arg2 units"
