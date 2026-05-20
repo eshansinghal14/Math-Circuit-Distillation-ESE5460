@@ -14,7 +14,9 @@ from matplotlib.backends.backend_pdf import PdfPages
 import torch
 import torch.nn.functional as F
 from huggingface_hub import login
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from graph_loss.hf_adapter import HFLlamaGraphAdapter
 from graph_loss.utils import ActivationWriteResult, DTYPE_CHOICES, resolve_torch_dtype
 from utils import HF_READ_TOKEN, default_datasets_dir, load_prompt_answer_json
 
@@ -219,17 +221,19 @@ def _activations_for_location_batch(
         return [float("nan")] * len(prompts)
     valid_at_pos = [token_pos < length for length in lengths]
 
-    target_hook_name = f"blocks.{layer}.{model.feature_input_hook}"
     mlp_input_at_pos = None
 
-    def cache_target_position(acts: torch.Tensor, hook) -> torch.Tensor:
+    def _pre_hook(module, args):
         nonlocal mlp_input_at_pos
-        mlp_input_at_pos = acts[:, token_pos, :].detach()
-        return acts
+        mlp_input_at_pos = args[0][:, token_pos, :].detach()
 
-    model.run_with_hooks(input_ids, fwd_hooks=[(target_hook_name, cache_target_position)])
+    hook_handle = model.layers[layer].mlp.register_forward_pre_hook(_pre_hook)
+    try:
+        model.model(input_ids)
+    finally:
+        hook_handle.remove()
     if mlp_input_at_pos is None:
-        raise RuntimeError(f"Did not cache target hook {target_hook_name!r}")
+        raise RuntimeError(f"Did not cache MLP input for layer {layer}")
 
     old_mlp = model.blocks[layer].mlp.old_mlp
     gate_weight = _select_mlp_neuron_weight(
@@ -700,22 +704,24 @@ def build_neuron_activation_write_result(
             continue
 
         cached_inputs: dict[tuple[int, int], torch.Tensor] = {}
-        hooks = []
+        hook_handles = []
+
+        def _make_pre_hook(key: tuple[int, int]):
+            def _pre_hook(module, args):
+                cached_inputs[key] = args[0][:, key[1], :].detach()
+            return _pre_hook
+
         for layer, token_pos in active_groups:
-            hook_name = f"blocks.{layer}.{model.feature_input_hook}"
+            handle = model.layers[layer].mlp.register_forward_pre_hook(
+                _make_pre_hook((layer, token_pos))
+            )
+            hook_handles.append(handle)
 
-            def cache_target_position(
-                acts: torch.Tensor,
-                hook,
-                *,
-                key: tuple[int, int] = (layer, token_pos),
-            ) -> torch.Tensor:
-                cached_inputs[key] = acts[:, key[1], :].detach()
-                return acts
-
-            hooks.append((hook_name, cache_target_position))
-
-        model.run_with_hooks(input_ids, fwd_hooks=hooks)
+        try:
+            model.model(input_ids)
+        finally:
+            for handle in hook_handles:
+                handle.remove()
         for (layer, token_pos), group_members in active_groups.items():
             mlp_input_at_pos = cached_inputs.get((layer, token_pos))
             if mlp_input_at_pos is None:
@@ -1236,18 +1242,15 @@ def plot_neuron_activation_heatmap(args: argparse.Namespace) -> str:
         logger.info("Authenticating with Hugging Face token")
         login(HF_READ_TOKEN)
 
-    from graph_loss.replacement_model import TransformerLensReplacementModel
-
-    if args.model_path:
-        from transformers import AutoModelForCausalLM
-        logger.info("Loading weights from local path: %s", args.model_path)
-        hf_model = AutoModelForCausalLM.from_pretrained(args.model_path, torch_dtype=dtype)
-        logger.info("Building TransformerLens model with architecture: %s", args.model)
-        model = TransformerLensReplacementModel.from_pretrained(args.model, dtype=dtype, hf_model=hf_model)
-    else:
-        logger.info("Loading model: %s", args.model)
-        model = TransformerLensReplacementModel.from_pretrained(args.model, dtype=dtype)
-    model.eval()
+    weights_path = args.model_path if args.model_path else args.model
+    logger.info("Loading model weights from: %s", weights_path)
+    hf_model = AutoModelForCausalLM.from_pretrained(weights_path, torch_dtype=dtype)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    hf_model = hf_model.to(device)
+    hf_model.eval()
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    tokenizer.pad_token = tokenizer.eos_token
+    model = HFLlamaGraphAdapter(hf_model, tokenizer, device)
 
     layer, token_pos, neuron_id = _validate_neuron_location(
         model,

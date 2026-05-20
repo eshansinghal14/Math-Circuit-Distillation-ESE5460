@@ -1,319 +1,271 @@
-"""Build dense-backed neuron-level attribution graphs for small prompts/models."""
+"""Neuron-level attribution graph builder for HF LLaMA models.
 
-import logging
-import math
-import time
+Mirrors the TL ``attribute`` / ``setup_attribution`` pipeline but uses
+``HFLlamaGraphAdapter`` and PyTorch native hooks instead of TransformerLens.
+
+Typical flow:
+
+    adapter = HFLlamaGraphAdapter(hf_model, tokenizer, device)
+    graph = attribute(adapter, prompt, top_k_logits=20, fast=True)
+
+``build_graph`` on the adapter is a thin wrapper around ``attribute``.
+"""
+
+from __future__ import annotations
+
+import contextlib
 from collections.abc import Sequence
-from typing import Literal
+from typing import TYPE_CHECKING
 
 import torch
-from tqdm import tqdm
 
-from graph_loss.attribution.targets import (
-    AttributionTargets,
-    TargetSpec,
-    log_attribution_target_info,
-)
+from graph_loss.attribution.context import HFAttributionContext
+from graph_loss.attribution.targets import AttributionTargets, TargetSpec
 from graph_loss.graph import Graph
-from graph_loss.replacement_model import TransformerLensReplacementModel
+
+if TYPE_CHECKING:
+    from graph_loss.hf_adapter import HFLlamaGraphAdapter
+
+
+def setup_attribution(
+    adapter: "HFLlamaGraphAdapter",
+    input_ids: torch.Tensor,
+    prop_neurons_per_layer: float,
+    dtype: torch.dtype | None,
+    fast: bool,
+) -> HFAttributionContext:
+    """Run the initial single forward pass and return an ``HFAttributionContext``.
+
+    Captures MLP inputs and token embeddings via hooks, then selects the
+    top-``prop_neurons_per_layer`` neurons per layer by source-vector norm.
+    Equivalent to ``TransformerLensReplacementModel.setup_attribution``.
+    """
+    input_batch = input_ids.unsqueeze(0)
+    mlp_inputs: dict[int, torch.Tensor] = {}
+    embed_out: torch.Tensor | None = None
+    handles = []
+
+    def embed_hook(_module, _inputs, output):
+        nonlocal embed_out
+        embed_out = output
+        return output
+
+    handles.append(adapter.embed_tokens.register_forward_hook(embed_hook))
+
+    for layer_idx, layer in enumerate(adapter.layers):
+        def _pre(m, inputs, *, idx=layer_idx):
+            mlp_inputs[idx] = inputs[0]
+
+        handles.append(layer.mlp.register_forward_pre_hook(_pre))
+
+    try:
+        fwd_ctx = torch.no_grad() if fast else contextlib.nullcontext()
+        with fwd_ctx, adapter.autocast_context(dtype):
+            out = adapter.model(
+                input_ids=input_batch,
+                attention_mask=torch.ones_like(input_batch, device=adapter.device),
+                output_hidden_states=True,
+                use_cache=False,
+            )
+    finally:
+        for h in handles:
+            h.remove()
+
+    if embed_out is None:
+        raise RuntimeError("Embedding hook did not fire.")
+    if len(mlp_inputs) != adapter.n_layers:
+        raise RuntimeError(
+            f"Expected {adapter.n_layers} MLP input captures, got {len(mlp_inputs)}."
+        )
+
+    n_pos = int(input_ids.numel())
+    positions = torch.arange(n_pos, device=adapter.device, dtype=torch.long)
+    neuron_ids = torch.arange(adapter.d_mlp, device=adapter.device, dtype=torch.long)
+
+    neuron_locations = []
+    neuron_activations = []
+    target_encoders = []
+    source_vectors = []
+    source_layer_by_node: list[int] = []
+
+    for layer_idx in range(adapter.n_layers):
+        layer_input = mlp_inputs[layer_idx].squeeze(0)
+        layer_acts, layer_target_encoders, layer_source_vectors = (
+            adapter._compute_layer_neuron_data(layer_idx, layer_input)
+        )
+        flat_norms = layer_source_vectors.norm(dim=-1).reshape(-1)
+        k = min(max(1, int(flat_norms.numel() * prop_neurons_per_layer)), flat_norms.numel())
+        keep = torch.topk(flat_norms, k, dim=0).indices
+
+        layer_locations = torch.stack(
+            [
+                torch.full((n_pos * adapter.d_mlp,), layer_idx, device=adapter.device, dtype=torch.long),
+                positions.repeat_interleave(adapter.d_mlp),
+                neuron_ids.repeat(n_pos),
+            ],
+            dim=1,
+        )
+        neuron_locations.append(layer_locations[keep])
+        neuron_activations.append(layer_acts.reshape(-1)[keep])
+        target_encoders.append(layer_target_encoders.reshape(-1, adapter.d_model)[keep])
+        source_vectors.append(layer_source_vectors.reshape(-1, adapter.d_model)[keep])
+        source_layer_by_node.extend([layer_idx] * int(keep.numel()))
+
+    return HFAttributionContext(
+        adapter=adapter,
+        input_ids=input_ids,
+        neuron_locations=torch.cat(neuron_locations, dim=0),
+        neuron_activations=torch.cat(neuron_activations, dim=0),
+        target_encoders=torch.cat(target_encoders, dim=0),
+        source_vectors=torch.cat(source_vectors, dim=0),
+        source_layer_by_node=torch.tensor(source_layer_by_node, device=adapter.device, dtype=torch.long),
+        embed_out=embed_out,
+        logits=out.logits,
+        dtype=dtype,
+    )
 
 
 def attribute(
+    adapter: "HFLlamaGraphAdapter",
     prompt: str | torch.Tensor | list[int],
-    model: TransformerLensReplacementModel,
     *,
     attribution_targets: Sequence[str] | Sequence[TargetSpec] | torch.Tensor | None = None,
-    top_k_logits: int | None = None,
+    top_k_logits: int | None = 20,
     prop_neurons_per_layer: float = 0.1,
     batch_size: int = 512,
-    max_feature_nodes: int | None = None,
-    offload: Literal["cpu", "disk", None] = None,
+    dtype: torch.dtype | None = None,
     verbose: bool = False,
-    update_interval: int = 4,
+    create_graph: bool = False,
+    detach_result: bool | None = None,
     fast: bool = False,
+    skip_logit_attribution: bool = False,
 ) -> Graph:
-    """Compute a dense-backed neuron graph for a prompt.
+    """Compute a neuron-level attribution graph for ``prompt``.
 
-    The dense adjacency layout is:
-    ``[neurons, token_embeddings, logits]``.
-    Token rows remain zero because tokens are source-only roots.
+    Equivalent to the TL ``attribute()`` function but operates on an
+    ``HFLlamaGraphAdapter`` instead of a ``TransformerLensReplacementModel``.
 
-    When ``fast`` is True, skip Phase 3 backward attribution: fill only a linear
-    logit readout block (demeaned unembed directions times residual write vectors)
-    and use ``attribution_mode='fast'`` for pruning / supergraph influence proxies.
+    Phase 0: ``setup_attribution`` — single forward pass, neuron selection.
+    Phase 1: ``AttributionTargets`` construction from the final-position logits.
+    Phase 2 (fast): linear logit readout; skip gradient phases.
+    Phase 2 (full): gradient-based edge scoring via ``HFAttributionContext``
+                    batch methods.
     """
+    from graph_loss.hf_adapter import _HFGraphConfig, detach_graph
 
-    if max_feature_nodes is not None:
-        raise ValueError("Neuron graphs always include all neurons; max_feature_nodes is unsupported.")
-    if offload is not None:
-        raise NotImplementedError("offload is not supported in the neuron graph builder.")
-    if update_interval != 4:
-        raise ValueError("update_interval is a legacy feature-selection parameter and is unsupported.")
+    if not (0.0 < prop_neurons_per_layer <= 1.0):
+        raise ValueError("prop_neurons_per_layer must be in (0, 1]")
 
-    logger = logging.getLogger("attribution")
-    logger.propagate = False
-    handler = None
-    if verbose and not logger.handlers:
-        handler = logging.StreamHandler()
-        formatter = logging.Formatter("%(message)s")
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
-        logger.setLevel(logging.INFO)
-    else:
-        logger.setLevel(logging.WARNING)
+    input_ids = adapter.ensure_tokenized(prompt)
+    ctx = setup_attribution(adapter, input_ids, prop_neurons_per_layer, dtype, fast)
 
-    try:
-        return _run_attribution(
-            model=model,
-            prompt=prompt,
-            attribution_targets=attribution_targets,
-            top_k_logits=top_k_logits,
-            prop_neurons_per_layer=prop_neurons_per_layer,
-            batch_size=batch_size,
-            logger=logger,
-            verbose=verbose,
-            fast=fast,
-        )
-    finally:
-        if handler:
-            logger.removeHandler(handler)
-
-
-def _check_dense_graph_size(total_nodes: int, dtype: torch.dtype):
-    element_size = torch.tensor([], dtype=dtype).element_size()
-    total_bytes = total_nodes * total_nodes * element_size
-    gib = total_bytes / (1024**3)
-    if gib > 4:
-        logging.getLogger("attribution").warning(
-            "Dense adjacency is estimated to require about %.2f GiB; continuing anyway.",
-            gib,
-        )
-
-
-def _run_target_batches(
-    *,
-    ctx,
-    target_rows: torch.Tensor,
-    target_layers: torch.Tensor,
-    target_positions: torch.Tensor,
-    inject_values: torch.Tensor,
-    edge_row_chunks: list[torch.Tensor],
-    edge_col_chunks: list[torch.Tensor],
-    edge_value_chunks: list[torch.Tensor],
-    batch_size: int,
-    total_batches: int,
-    processed_batches: int,
-    progress_bar: tqdm | None = None,
-) -> int:
-    source_cols = ctx.source_node_count
-
-    for start in range(0, len(target_rows), batch_size):
-        end = min(start + batch_size, len(target_rows))
-        retain_graph = processed_batches < total_batches - 1
-        rows = ctx.compute_batch(
-            layers=target_layers[start:end],
-            positions=target_positions[start:end],
-            inject_values=inject_values[start:end],
-            retain_graph=retain_graph,
-        )
-        rows = rows.cpu()
-        nonzero = rows.nonzero(as_tuple=False)
-        if len(nonzero):
-            batch_targets = target_rows[start:end].to(dtype=torch.long).cpu()
-            edge_row_chunks.append(batch_targets[nonzero[:, 0]])
-            edge_col_chunks.append(nonzero[:, 1].to(dtype=torch.long))
-            edge_value_chunks.append(rows[nonzero[:, 0], nonzero[:, 1]])
-        processed_batches += 1
-        if progress_bar is not None:
-            progress_bar.update(end - start)
-
-    return processed_batches
-
-
-def _run_attribution(
-    *,
-    model: TransformerLensReplacementModel,
-    prompt,
-    attribution_targets,
-    top_k_logits,
-    prop_neurons_per_layer,
-    batch_size,
-    logger,
-    verbose,
-    fast: bool = False,
-):
-    start_time = time.time()
-
-    logger.info("Phase 0: Precomputing neuron activations and encoders")
-    phase_start = time.time()
-    input_ids = model.ensure_tokenized(prompt)
-    ctx = model.setup_attribution(input_ids, prop_neurons_per_layer=prop_neurons_per_layer)
-
-    logger.info(f"Precomputation completed in {time.time() - phase_start:.2f}s")
-    logger.info(f"Enumerated {len(ctx.neuron_locations)} neuron nodes")
-    if ctx.layer_capture_stats:
-        avg_captured_fraction = sum(
-            float(stats["captured_fraction"]) for stats in ctx.layer_capture_stats
-        ) / len(ctx.layer_capture_stats)
-        logger.info(
-            "Average layer selection captured %.2f%% of residual write norm across the model",
-            100.0 * avg_captured_fraction,
-        )
-
-    if fast:
-        logger.info(
-            "Phase 1 (fast): Skipping second hooked forward — Phase 0 logits and writes are sufficient",
-        )
-    else:
-        phase1_expand = batch_size
-        logger.info("Phase 1: Running hooked forward pass")
-        phase_start = time.time()
-        with ctx.install_hooks(model):
-            residual = model.forward(
-                input_ids.expand(phase1_expand, -1),
-                stop_at_layer=model.cfg.n_layers,
-            )
-            ctx._resid_activations[-1] = model.ln_final(residual)
-        logger.info(f"Forward pass completed in {time.time() - phase_start:.2f}s")
-
-    logger.info("Phase 2: Building target specifications")
-    phase_start = time.time()
     targets = AttributionTargets(
         attribution_targets=attribution_targets,
         logits=ctx.logits[0, -1],
-        unembed_proj=model.unembed.W_U,
-        tokenizer=model.tokenizer,
+        unembed_proj=adapter.W_U.to(dtype=dtype) if dtype is not None else adapter.W_U,
+        tokenizer=adapter.tokenizer,
         top_k_logits=top_k_logits,
     )
-    log_attribution_target_info(targets, attribution_targets, logger)
 
-    n_neurons = len(ctx.neuron_locations)
-    n_tokens = len(input_ids)
+    n_neurons = ctx.n_neurons
+    n_tokens = ctx.n_tokens
     n_logits = len(targets)
     total_nodes = n_neurons + n_tokens + n_logits
+    source_count = ctx.source_count
     logit_start = n_neurons + n_tokens
 
-    logger.info(f"Neuron nodes: {n_neurons}, Token nodes: {n_tokens}, Logit nodes: {n_logits}")
-
-    _check_dense_graph_size(total_nodes, ctx.source_vectors.dtype)
-    logger.info(f"Target setup completed in {time.time() - phase_start:.2f}s")
-
-    neuron_write_vectors: torch.Tensor | None = None
+    cfg = _HFGraphConfig(adapter)
 
     if fast:
-        logger.info("Phase 3 (fast): Skipping backward attribution; linear logit readout only")
-        phase_start = time.time()
-        neuron_write_vectors = ctx.source_vectors.clone()
-        adjacency_matrix = torch.zeros(
-            (total_nodes, total_nodes),
+        adjacency = torch.zeros(
+            total_nodes, total_nodes,
             dtype=ctx.source_vectors.dtype,
-            device=ctx.source_vectors.device,
+            device=adapter.device,
         )
-        lv = targets.logit_vectors.to(
-            device=ctx.source_vectors.device,
-            dtype=ctx.source_vectors.dtype,
+        lv = targets.logit_vectors.to(device=adapter.device, dtype=ctx.source_vectors.dtype)
+        adjacency[logit_start : logit_start + n_logits, :n_neurons] = lv @ ctx.source_vectors.T
+        graph = Graph(
+            input_string=adapter.tokenizer.decode(input_ids.detach().cpu().tolist()),
+            input_tokens=input_ids,
+            neuron_locations=ctx.neuron_locations,
+            adjacency_matrix=adjacency,
+            cfg=cfg,
+            neuron_activations=ctx.neuron_activations,
+            logit_targets=targets.logit_targets,
+            logit_probabilities=targets.logit_probabilities,
+            vocab_size=targets.vocab_size,
+            attribution_mode="fast",
+            neuron_write_vectors=ctx.source_vectors.clone(),
         )
-        scores = lv @ ctx.source_vectors.T
-        adjacency_matrix[logit_start : logit_start + n_logits, :n_neurons] = scores
-        logger.info(f"Fast attribution completed in {time.time() - phase_start:.2f}s")
+        if detach_result is None:
+            detach_result = not create_graph
+        if detach_result:
+            graph = detach_graph(graph)
+        return graph
+
+    # Full mode: gradient-based edge attribution.
+    neuron_row_chunks = []
+    for start in range(0, n_neurons, max(1, batch_size)):
+        end = min(start + max(1, batch_size), n_neurons)
+        if verbose:
+            print(f"    [graph] neuron rows {start}:{end} / {n_neurons}")
+        neuron_row_chunks.append(ctx.compute_neuron_batch(start, end, create_graph=create_graph))
+    neuron_rows = (
+        torch.cat(neuron_row_chunks, dim=0)
+        if neuron_row_chunks
+        else torch.zeros(0, source_count, dtype=ctx.source_vectors.dtype, device=adapter.device)
+    )
+
+    if not skip_logit_attribution:
+        logit_row_chunks = []
+        for start in range(0, n_logits, max(1, batch_size)):
+            end = min(start + max(1, batch_size), n_logits)
+            if verbose:
+                print(f"    [graph] logit rows {start}:{end} / {n_logits}")
+            logit_row_chunks.append(
+                ctx.compute_logit_batch(start, end, targets.logit_vectors, create_graph=create_graph)
+            )
+        logit_rows_partial = (
+            torch.cat(logit_row_chunks, dim=0)
+            if logit_row_chunks
+            else torch.zeros(0, source_count, dtype=ctx.source_vectors.dtype, device=adapter.device)
+        )
     else:
-        edge_row_chunks: list[torch.Tensor] = []
-        edge_col_chunks: list[torch.Tensor] = []
-        edge_value_chunks: list[torch.Tensor] = []
-
-        logger.info("Phase 3: Computing neuron and logit attribution rows")
-        phase_start = time.time()
-        neuron_batches = math.ceil(n_neurons / batch_size)
-        logit_batches = math.ceil(n_logits / batch_size)
-        total_batches = neuron_batches + logit_batches
-        processed_batches = 0
-
-        neuron_rows = torch.arange(n_neurons, dtype=torch.long)
-        neuron_layers = ctx.neuron_locations[:, 0]
-        neuron_positions = ctx.neuron_locations[:, 1]
-
-        progress_bar = tqdm(
-            total=n_neurons + n_logits,
-            desc="Neuron graph attribution",
-            disable=not verbose,
+        logit_rows_partial = torch.zeros(
+            n_logits, source_count, dtype=ctx.source_vectors.dtype, device=adapter.device
         )
 
-        processed_batches = _run_target_batches(
-            ctx=ctx,
-            target_rows=neuron_rows,
-            target_layers=neuron_layers,
-            target_positions=neuron_positions,
-            inject_values=ctx.target_encoders,
-            edge_row_chunks=edge_row_chunks,
-            edge_col_chunks=edge_col_chunks,
-            edge_value_chunks=edge_value_chunks,
-            batch_size=batch_size,
-            total_batches=total_batches,
-            processed_batches=processed_batches,
-            progress_bar=progress_bar,
+    # Pad source-count columns out to total_nodes (append zero logit-target cols).
+    n_logit_cols = total_nodes - source_count
+    if n_logit_cols > 0:
+        neuron_rows = torch.cat(
+            [neuron_rows, torch.zeros(n_neurons, n_logit_cols, dtype=neuron_rows.dtype, device=adapter.device)],
+            dim=1,
         )
+        logit_rows = torch.cat(
+            [logit_rows_partial, torch.zeros(n_logits, n_logit_cols, dtype=logit_rows_partial.dtype, device=adapter.device)],
+            dim=1,
+        )
+    else:
+        logit_rows = logit_rows_partial
 
-        logit_rows = torch.arange(logit_start, logit_start + n_logits, dtype=torch.long)
-        logit_layers = torch.full((n_logits,), model.cfg.n_layers, device=input_ids.device, dtype=torch.long)
-        logit_positions = torch.full(
-            (n_logits,),
-            len(input_ids) - 1,
-            device=input_ids.device,
-            dtype=torch.long,
-        )
-        processed_batches = _run_target_batches(
-            ctx=ctx,
-            target_rows=logit_rows,
-            target_layers=logit_layers,
-            target_positions=logit_positions,
-            inject_values=targets.logit_vectors,
-            edge_row_chunks=edge_row_chunks,
-            edge_col_chunks=edge_col_chunks,
-            edge_value_chunks=edge_value_chunks,
-            batch_size=batch_size,
-            total_batches=total_batches,
-            processed_batches=processed_batches,
-            progress_bar=progress_bar,
-        )
-
-        progress_bar.close()
-        logger.info(f"Attribution rows completed in {time.time() - phase_start:.2f}s")
-
-        adjacency_matrix = torch.zeros(
-            (total_nodes, total_nodes),
-            dtype=ctx.source_vectors.dtype,
-        )
-        if edge_value_chunks:
-            adjacency_indices = torch.stack(
-                [torch.cat(edge_row_chunks), torch.cat(edge_col_chunks)],
-                dim=0,
-            )
-            adjacency_values = torch.cat(edge_value_chunks)
-            adjacency_matrix.index_put_(
-                (adjacency_indices[0], adjacency_indices[1]),
-                adjacency_values,
-                accumulate=True,
-            )
+    token_rows = torch.zeros(n_tokens, total_nodes, dtype=neuron_rows.dtype, device=adapter.device)
+    adjacency = torch.cat([neuron_rows, token_rows, logit_rows], dim=0)
 
     graph = Graph(
-        input_string=model.tokenizer.decode(input_ids.detach().cpu().tolist()),
+        input_string=adapter.tokenizer.decode(input_ids.detach().cpu().tolist()),
         input_tokens=input_ids,
         neuron_locations=ctx.neuron_locations,
-        adjacency_matrix=adjacency_matrix,
-        cfg=model.cfg,
+        adjacency_matrix=adjacency,
+        cfg=cfg,
         neuron_activations=ctx.neuron_activations,
         logit_targets=targets.logit_targets,
         logit_probabilities=targets.logit_probabilities,
         vocab_size=targets.vocab_size,
-        attribution_mode="fast" if fast else "full",
-        neuron_write_vectors=neuron_write_vectors,
+        neuron_write_vectors=ctx.source_vectors.detach().clone(),
     )
-
-    # Free memory immediately to prevent PyTorch graph accumulation
-    ctx._resid_activations.clear()
-    del ctx
-    residual = None
-
-    total_time = time.time() - start_time
-    logger.info(f"Attribution completed in {total_time:.2f}s")
+    if detach_result is None:
+        detach_result = not create_graph
+    if detach_result:
+        graph = detach_graph(graph)
     return graph

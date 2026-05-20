@@ -34,8 +34,9 @@ from collections import defaultdict
 import torch
 from huggingface_hub import login
 
-from graph_loss.neuron_activation_heatmap import _resolve_dataset_path, _tokenize_prompt_batch, _parse_numeric_args
-from graph_loss.replacement_model import TransformerLensReplacementModel
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from graph_loss.hf_adapter import HFLlamaGraphAdapter
+from graph_loss.neuron_activation_heatmap import _resolve_dataset_path, _parse_numeric_args
 from graph_loss.utils import DTYPE_CHOICES, resolve_torch_dtype
 from utils import HF_READ_TOKEN, load_prompt_answer_json
 
@@ -109,11 +110,10 @@ def build_mlp_input_cache(
 ) -> dict:
     """Build an MLP-input cache from a live HF model (via ``HFLlamaGraphAdapter``).
 
-    This is the training-time counterpart to ``precompute_mlp_inputs`` (which
-    requires a TransformerLens model).  Uses PyTorch forward pre-hooks to
-    capture the residual-stream input entering each MLP layer, accumulates
-    results directly in RAM (bfloat16), writes ``.pt`` files to disk once for
-    optional reuse, then returns the in-memory cache dict.
+    Uses PyTorch forward pre-hooks to capture the residual-stream input
+    entering each MLP layer, accumulates results directly in RAM (bfloat16),
+    writes ``.pt`` files to disk once for optional reuse, then returns the
+    in-memory cache dict.
 
     The full dataset (all ~10k prompts) should be used so that ANOVA neuron
     labels have sufficient statistical coverage and match the teacher's labels.
@@ -268,130 +268,6 @@ def build_mlp_input_cache(
     return {"meta": meta, "layer_inputs": layer_inputs}
 
 
-@torch.no_grad()
-def precompute_mlp_inputs(
-    model: TransformerLensReplacementModel,
-    dataset_path: str,
-    cache_root: str,
-    model_name: str,
-    *,
-    batch_size: int = 8,
-    limit: int | None = None,
-    overwrite: bool = False,
-) -> str:
-    """Forward-pass all prompts and cache MLP hidden-state inputs.
-
-    Returns the path to the cache directory.
-    """
-    cache_dir = mlp_input_cache_dir(cache_root, model_name, dataset_path)
-    meta_path = os.path.join(cache_dir, "meta.pt")
-
-    if os.path.isfile(meta_path) and not overwrite:
-        logger.info("MLP input cache already exists at %s — skipping (use --overwrite to rebuild)", cache_dir)
-        return cache_dir
-
-    os.makedirs(cache_dir, exist_ok=True)
-    samples = list(load_prompt_answer_json(dataset_path).items())
-    if limit is not None:
-        samples = samples[:limit]
-
-    n_layers = int(model.cfg.n_layers)
-    d_model = int(model.cfg.d_model)
-
-    # Collect numeric arg values for the heatmap grid dimensions.
-    prompts, numeric_args_by_prompt = [], []
-    expected_n_args = None
-    for prompt, _ in samples:
-        try:
-            nargs = _parse_numeric_args(prompt)
-        except ValueError:
-            continue
-        if expected_n_args is None:
-            expected_n_args = len(nargs)
-        if len(nargs) != expected_n_args:
-            continue
-        prompts.append(prompt)
-        numeric_args_by_prompt.append(nargs)
-
-    n_prompts = len(prompts)
-    logger.info("Pre-computing MLP inputs for %d prompts, %d layers, d_model=%d", n_prompts, n_layers, d_model)
-
-    import numpy as np
-
-    # Determine sequence length from first batch.
-    first_ids, _ = _tokenize_prompt_batch(model, prompts[:1])
-    n_positions = first_ids.shape[1]
-
-    # Use numpy memmaps so each layer is written directly to disk per batch —
-    # no large in-RAM buffers (32 layers × 10k × 4096 × bf16 ≈ 78 GB would OOM).
-    mmap_paths = [os.path.join(cache_dir, f"layer_{i}.npy") for i in range(n_layers)]
-    mmaps: list[np.memmap] = [
-        np.memmap(p, dtype="float16", mode="w+", shape=(n_prompts, n_positions, d_model))
-        for p in mmap_paths
-    ]
-
-    prompt_idx = 0
-    for batch_start in range(0, n_prompts, batch_size):
-        batch_prompts = prompts[batch_start:batch_start + batch_size]
-        input_ids, lengths = _tokenize_prompt_batch(model, batch_prompts)
-        batch_n_pos = input_ids.shape[1]
-
-        cached: dict[int, torch.Tensor] = {}
-
-        def make_hook(layer_idx: int):
-            def hook(acts: torch.Tensor, hook=None) -> torch.Tensor:
-                cached[layer_idx] = acts.detach().cpu().to(torch.float16)
-                return acts
-            return hook
-
-        hooks = [(f"blocks.{i}.{model.feature_input_hook}", make_hook(i)) for i in range(n_layers)]
-        model.run_with_hooks(input_ids, fwd_hooks=hooks)
-
-        store_len = min(batch_n_pos, n_positions)
-        bs = len(batch_prompts)
-        for layer_idx in range(n_layers):
-            acts = cached[layer_idx]  # [bs, batch_n_pos, d_model]
-            mmaps[layer_idx][batch_start:batch_start + bs, :store_len, :] = (
-                acts[:, :store_len, :].numpy()
-            )
-
-        prompt_idx += bs
-        if prompt_idx % max(batch_size * 10, 50) == 0 or prompt_idx == n_prompts:
-            logger.info("  Cached %d / %d prompts", prompt_idx, n_prompts)
-
-    # Flush memmaps to disk, then convert to .pt (bfloat16) for load_mlp_input_cache.
-    logger.info("Flushing memmaps and converting to .pt ...")
-    for i, (mmap, mmap_path) in enumerate(zip(mmaps, mmap_paths)):
-        mmap.flush()
-        del mmap
-        arr = np.memmap(mmap_path, dtype="float16", mode="r", shape=(n_prompts, n_positions, d_model))
-        buf = torch.from_numpy(np.array(arr)).to(torch.bfloat16)
-        torch.save(buf, os.path.join(cache_dir, f"layer_{i}.pt"))
-        del buf
-        os.remove(mmap_path)
-        logger.info("  Saved layer_%d.pt  shape=(%d, %d, %d)", i, n_prompts, n_positions, d_model)
-
-    arg_values = [
-        sorted({args[dim] for args in numeric_args_by_prompt})
-        for dim in range(expected_n_args or 0)
-    ]
-    meta = {
-        "n_prompts": n_prompts,
-        "n_layers": n_layers,
-        "d_model": d_model,
-        "d_mlp": int(model.cfg.d_mlp),
-        "n_positions": n_positions,
-        "arg_values": arg_values,
-        "numeric_args_by_prompt": numeric_args_by_prompt,
-        "model_name": model_name,
-        "dataset_path": dataset_path,
-    }
-    torch.save(meta, meta_path)
-
-    logger.info("MLP input cache written to %s", cache_dir)
-    return cache_dir
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Pre-compute MLP residual-stream inputs for all dataset prompts."
@@ -404,8 +280,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--cache-dir", required=True, help="Root directory for the cache")
     parser.add_argument("--dtype", default="bfloat16", choices=DTYPE_CHOICES)
-    parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--overwrite", action="store_true")
     return parser
 
@@ -418,18 +293,22 @@ def main() -> None:
         login(HF_READ_TOKEN)
 
     dtype = resolve_torch_dtype(args.dtype)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("Loading model: %s", args.model)
-    model = TransformerLensReplacementModel.from_pretrained(args.model, dtype=dtype)
-    model.eval()
+    hf_model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=dtype)
+    hf_model = hf_model.to(device)
+    hf_model.eval()
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    tokenizer.pad_token = tokenizer.eos_token
+    adapter = HFLlamaGraphAdapter(hf_model, tokenizer, device)
 
     dataset_path = _resolve_dataset_path(args.dataset)
-    precompute_mlp_inputs(
-        model,
+    build_mlp_input_cache(
+        adapter,
         dataset_path,
+        args.model,
         cache_root=args.cache_dir,
-        model_name=args.model,
         batch_size=args.batch_size,
-        limit=args.limit,
         overwrite=args.overwrite,
     )
 

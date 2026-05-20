@@ -13,7 +13,7 @@ import torch
 from huggingface_hub import login
 from transformers import AutoTokenizer
 
-from graph_loss.attribution.attribute import attribute
+from transformers import AutoModelForCausalLM
 from graph_loss.__main__ import (
     _log_graph_summary,
     _log_pipeline_comparison,
@@ -26,7 +26,7 @@ from graph_loss.graph import (
     build_super_graph,
     prune_graph,
 )
-from graph_loss.replacement_model import TransformerLensReplacementModel
+from graph_loss.hf_adapter import HFLlamaGraphAdapter
 from graph_loss.utils import (
     add_graph_build_args,
     add_graph_prune_args,
@@ -144,14 +144,14 @@ def _build_distillation_tensors(prompt: str, answer: int, tokenizer) -> dict[str
 
 
 @torch.no_grad()
-def _compute_teacher_logits(model, input_ids: torch.Tensor) -> torch.Tensor:
-    input_ids = input_ids.to(model.cfg.device)
-    if int(input_ids.max().item()) >= int(model.cfg.d_vocab):
+def _compute_teacher_logits(adapter: HFLlamaGraphAdapter, input_ids: torch.Tensor) -> torch.Tensor:
+    input_ids = input_ids.to(adapter.cfg.device)
+    if int(input_ids.max().item()) >= int(adapter.cfg.d_vocab):
         raise ValueError(
             "Distillation input ids exceed the teacher vocabulary. The teacher-data cache "
             "requires compatible student and teacher tokenizers."
         )
-    output = model(input_ids.unsqueeze(0))
+    output = adapter.model(input_ids.unsqueeze(0))
     logits = output.logits if hasattr(output, "logits") else output
     return logits.squeeze(0).detach().cpu()
 
@@ -181,17 +181,22 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
         login(HF_READ_TOKEN)
 
     dtype = resolve_torch_dtype(config.dtype)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("Loading teacher model: %s", config.teacher_model)
-    model = TransformerLensReplacementModel.from_pretrained(
-        config.teacher_model,
-        dtype=dtype,
-    )
-    model.eval()
+    hf_model = AutoModelForCausalLM.from_pretrained(config.teacher_model, torch_dtype=dtype)
+    hf_model = hf_model.to(device)
+    hf_model.eval()
 
-    tokenizer = patch_tokenizer_no_special_tokens(
+    teacher_tokenizer = patch_tokenizer_no_special_tokens(
+        AutoTokenizer.from_pretrained(config.teacher_model)
+    )
+    teacher_tokenizer.pad_token = teacher_tokenizer.eos_token
+    adapter = HFLlamaGraphAdapter(hf_model, teacher_tokenizer, device)
+
+    student_tokenizer = patch_tokenizer_no_special_tokens(
         AutoTokenizer.from_pretrained(config.student_model)
     )
-    tokenizer.pad_token = tokenizer.eos_token
+    student_tokenizer.pad_token = student_tokenizer.eos_token
 
     manifest: dict[str, Any] = {
         "version": 1,
@@ -199,7 +204,7 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
         "store_path": store_path,
         "teacher_model": config.teacher_model,
         "student_model": config.student_model,
-        "teacher_vocab_size": int(model.cfg.d_vocab),
+        "teacher_vocab_size": int(adapter.d_vocab),
         "hyperparameters": asdict(config),
         "samples": [],
     }
@@ -216,9 +221,8 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
 
         logger.info("Generating teacher data for sample %d: %r", sample_idx, prompt)
         logger.info("Running attribution graph build (fast=%s)", config.fast)
-        graph = attribute(
+        graph = adapter.build_graph(
             prompt=prompt,
-            model=model,
             top_k_logits=config.top_k_logits,
             prop_neurons_per_layer=config.prop_neurons_per_layer,
             batch_size=config.attribution_batch_size,
@@ -265,7 +269,7 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
         with torch.no_grad():
             supergraph = build_super_graph(
                 graph_for_supergraph,
-                model,
+                adapter,
                 prune_result=prune_result,
                 dataset=activation_dataset,
                 activation_forward_batch_size=config.activation_forward_batch_size,
@@ -295,8 +299,8 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
         )
 
         logger.info("Computing teacher logits for distillation cache")
-        distill_tensors = _build_distillation_tensors(prompt, answer, tokenizer)
-        logits = _compute_teacher_logits(model, distill_tensors["input_ids"])
+        distill_tensors = _build_distillation_tensors(prompt, answer, student_tokenizer)
+        logits = _compute_teacher_logits(adapter, distill_tensors["input_ids"])
         logits_path = os.path.join(sample_dir, "teacher_logits.pt")
         logger.info("Saving teacher logits to %s", logits_path)
         torch.save(

@@ -26,12 +26,10 @@ import os
 import torch
 from transformers import AutoModelForCausalLM
 
-from graph_loss.attribution.attribute import attribute
 from graph_loss.graph import build_super_graph, prune_graph
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
 from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
 from graph_loss.precompute_mlp_inputs import build_mlp_input_cache
-from graph_loss.replacement_model import TransformerLensReplacementModel
 from graph_loss.utils import add_graph_build_args, add_graph_prune_args, resolve_torch_dtype
 from utils.config import HF_READ_TOKEN
 from utils.hf_models import load_model
@@ -132,17 +130,15 @@ def main() -> None:
     # Load the updated checkpoint model.
     logger.info("Loading checkpoint model from %s", args.checkpoint_path)
     hf_ckpt = AutoModelForCausalLM.from_pretrained(args.checkpoint_path, torch_dtype=dtype)
-    checkpoint_model = TransformerLensReplacementModel.from_pretrained(
-        args.model_id, dtype=dtype, hf_model=hf_ckpt
-    )
-    checkpoint_model.eval()
-    del hf_ckpt
+    hf_ckpt = hf_ckpt.to(args.device)
+    hf_ckpt.eval()
+    _, ckpt_tokenizer = load_model(args.model_id)
+    checkpoint_adapter = HFLlamaGraphAdapter(hf_ckpt, ckpt_tokenizer, args.device)
 
     # Build attribution graph from the checkpoint model for the given prompt.
     logger.info("Running attribution on prompt: %r", args.prompt)
-    graph = attribute(
+    graph = checkpoint_adapter.build_graph(
         prompt=args.prompt,
-        model=checkpoint_model,
         top_k_logits=args.top_k_logits,
         prop_neurons_per_layer=args.prop_neurons_per_layer,
         batch_size=args.attribution_batch_size,
@@ -177,7 +173,7 @@ def main() -> None:
     logger.info("Pass 1: normal forward pass → %s", normal_dir)
     build_super_graph(
         graph,
-        checkpoint_model,
+        checkpoint_adapter,
         prune_result=prune_result,
         dataset=dataset_path,
         activation_forward_batch_size=args.activation_forward_batch_size,
@@ -193,7 +189,7 @@ def main() -> None:
     logger.info("Pass 2: cached pass → %s", cached_dir)
     build_super_graph(
         graph,
-        checkpoint_model,
+        checkpoint_adapter,
         prune_result=prune_result,
         dataset=dataset_path,
         activation_forward_batch_size=args.activation_forward_batch_size,
