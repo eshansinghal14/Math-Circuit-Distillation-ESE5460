@@ -281,7 +281,6 @@ def create_graph(
         adapter,
         dataset,
         ctx.neuron_locations,
-        forward_batch_size=activation_forward_batch_size,
         mlp_input_cache=mlp_input_cache,
     )
 
