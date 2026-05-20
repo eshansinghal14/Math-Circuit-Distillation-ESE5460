@@ -1,6 +1,6 @@
 """Test MLP cache accuracy: compare supernode heatmaps with and without MLP cache.
 
-Runs the full graph_loss pipeline (attribute → prune → build_super_graph) on a
+Runs the graph_loss pipeline (attribute → build_super_graph) on a
 checkpoint model twice for a single prompt:
 
   output_dir/normal_pass/  : ground-truth heatmaps via full forward pass
@@ -26,11 +26,11 @@ import os
 import torch
 from transformers import AutoModelForCausalLM
 
-from graph_loss.graph import build_super_graph, prune_graph
+from graph_loss.create_graph import create_graph
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
 from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
 from graph_loss.precompute_mlp_inputs import build_mlp_input_cache
-from graph_loss.utils import add_graph_build_args, add_graph_prune_args, resolve_torch_dtype
+from graph_loss.utils import add_graph_build_args, resolve_torch_dtype
 from utils.config import HF_READ_TOKEN
 from utils.hf_models import load_model
 
@@ -66,9 +66,7 @@ def main() -> None:
         default="cuda" if torch.cuda.is_available() else "cpu",
         help="Device for base HF model during cache build",
     )
-    # Graph build / prune args (same as graph_loss.__main__)
     add_graph_build_args(parser)
-    add_graph_prune_args(parser)
     # Supergraph / heatmap args
     parser.add_argument(
         "--dataset",
@@ -130,26 +128,6 @@ def main() -> None:
     _, ckpt_tokenizer = load_model(args.model_id)
     checkpoint_adapter = HFLlamaGraphAdapter(hf_ckpt, ckpt_tokenizer, args.device)
 
-    # Build attribution graph from the checkpoint model for the given prompt.
-    logger.info("Running attribution on prompt: %r", args.prompt)
-    graph = checkpoint_adapter.build_graph(
-        prompt=args.prompt,
-        top_k_logits=args.top_k_logits,
-        prop_neurons_per_layer=args.prop_neurons_per_layer,
-        batch_size=args.attribution_batch_size,
-        verbose=args.verbose,
-    )
-
-    prune_result = None
-    if args.prune:
-        logger.info("Pruning graph")
-        prune_result = prune_graph(
-            graph,
-            node_threshold=args.node_threshold,
-            edge_threshold=args.edge_threshold,
-        )
-        graph = graph.apply_prune_result(prune_result)
-
     # Build MLP cache from the original base HF model + the dataset.
     logger.info("Building/loading MLP cache from base model: %s", args.model_id)
     base_hf, tokenizer = load_model(args.model_id)
@@ -162,37 +140,37 @@ def main() -> None:
     )
     del base_hf, adapter
 
-    # Pass 1: ground truth — full forward pass on checkpoint, no MLP cache.
-    logger.info("Pass 1: normal forward pass → %s", normal_dir)
-    build_super_graph(
-        graph,
-        checkpoint_adapter,
-        prune_result=prune_result,
+    common_kwargs = dict(
+        top_k_logits=args.top_k_logits,
+        prop_neurons_per_layer=args.prop_neurons_per_layer,
+        batch_size=args.attribution_batch_size,
+        verbose=args.verbose,
         dataset=dataset_path,
         activation_forward_batch_size=args.activation_forward_batch_size,
         activation_write_cache_path=args.activation_write_cache_path,
         model_name=args.model_id,
-        supernode_heatmap_output_dir=normal_dir,
         anova_nodes_per_label=args.anova_nodes_per_label,
         anova_range_radius=args.anova_range_radius,
         sum_min_specificity=args.sum_min_specificity,
     )
 
+    # Pass 1: ground truth — full forward pass on checkpoint, no MLP cache.
+    logger.info("Pass 1: normal forward pass → %s", normal_dir)
+    create_graph(
+        checkpoint_adapter,
+        args.prompt,
+        supernode_heatmap_output_dir=normal_dir,
+        **common_kwargs,
+    )
+
     # Pass 2: cached — original base model's residual-stream inputs + checkpoint weights.
     logger.info("Pass 2: cached pass → %s", cached_dir)
-    build_super_graph(
-        graph,
+    create_graph(
         checkpoint_adapter,
-        prune_result=prune_result,
-        dataset=dataset_path,
-        activation_forward_batch_size=args.activation_forward_batch_size,
-        activation_write_cache_path=args.activation_write_cache_path,
+        args.prompt,
         mlp_input_cache=mlp_cache,
-        model_name=args.model_id,
         supernode_heatmap_output_dir=cached_dir,
-        anova_nodes_per_label=args.anova_nodes_per_label,
-        anova_range_radius=args.anova_range_radius,
-        sum_min_specificity=args.sum_min_specificity,
+        **common_kwargs,
     )
 
     logger.info("Done. Heatmaps saved to:\n  %s\n  %s", normal_dir, cached_dir)

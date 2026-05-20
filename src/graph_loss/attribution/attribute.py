@@ -122,41 +122,30 @@ def setup_attribution(
     )
 
 
-def attribute(
-    adapter: "HFLlamaGraphAdapter",
-    prompt: str | torch.Tensor | list[int],
+def _attribute_from_context(
+    ctx: HFAttributionContext,
     *,
     attribution_targets: Sequence[str] | Sequence[TargetSpec] | torch.Tensor | None = None,
     top_k_logits: int | None = 20,
-    prop_neurons_per_layer: float = 0.1,
     batch_size: int = 512,
-    dtype: torch.dtype | None = None,
-    verbose: bool = False,
     create_graph: bool = False,
     detach_result: bool | None = None,
     skip_logit_attribution: bool = False,
+    verbose: bool = False,
 ) -> Graph:
-    """Compute a neuron-level attribution graph for ``prompt``.
+    """Build a Graph from a pre-built HFAttributionContext (edge attribution phase only).
 
-    Equivalent to the TL ``attribute()`` function but operates on an
-    ``HFLlamaGraphAdapter`` instead of a ``TransformerLensReplacementModel``.
-
-    Phase 0: ``setup_attribution`` — single forward pass, neuron selection.
-    Phase 1: ``AttributionTargets`` construction from the final-position logits.
-    Phase 2: gradient-based edge scoring via ``HFAttributionContext`` batch methods.
+    Callers that want to run ANOVA labeling before edge attribution should call
+    setup_attribution() → select_anova_supernodes() → ctx.filter(mask) → this function.
     """
     from graph_loss.hf_adapter import _HFGraphConfig, detach_graph
 
-    if not (0.0 < prop_neurons_per_layer <= 1.0):
-        raise ValueError("prop_neurons_per_layer must be in (0, 1]")
-
-    input_ids = adapter.ensure_tokenized(prompt)
-    ctx = setup_attribution(adapter, input_ids, prop_neurons_per_layer, dtype)
+    adapter = ctx.adapter
 
     targets = AttributionTargets(
         attribution_targets=attribution_targets,
         logits=ctx.logits[0, -1],
-        unembed_proj=adapter.W_U.to(dtype=dtype) if dtype is not None else adapter.W_U,
+        unembed_proj=adapter.W_U.to(dtype=ctx.dtype) if ctx.dtype is not None else adapter.W_U,
         tokenizer=adapter.tokenizer,
         top_k_logits=top_k_logits,
     )
@@ -166,7 +155,6 @@ def attribute(
     n_logits = len(targets)
     total_nodes = n_neurons + n_tokens + n_logits
     source_count = ctx.source_count
-    logit_start = n_neurons + n_tokens
 
     cfg = _HFGraphConfig(adapter)
 
@@ -220,8 +208,8 @@ def attribute(
     adjacency = torch.cat([neuron_rows, token_rows, logit_rows], dim=0)
 
     graph = Graph(
-        input_string=adapter.tokenizer.decode(input_ids.detach().cpu().tolist()),
-        input_tokens=input_ids,
+        input_string=adapter.tokenizer.decode(ctx.input_ids.detach().cpu().tolist()),
+        input_tokens=ctx.input_ids,
         neuron_locations=ctx.neuron_locations,
         adjacency_matrix=adjacency,
         cfg=cfg,
@@ -236,3 +224,39 @@ def attribute(
     if detach_result:
         graph = detach_graph(graph)
     return graph
+
+
+def attribute(
+    adapter: "HFLlamaGraphAdapter",
+    prompt: str | torch.Tensor | list[int],
+    *,
+    attribution_targets: Sequence[str] | Sequence[TargetSpec] | torch.Tensor | None = None,
+    top_k_logits: int | None = 20,
+    prop_neurons_per_layer: float = 0.1,
+    batch_size: int = 512,
+    dtype: torch.dtype | None = None,
+    verbose: bool = False,
+    create_graph: bool = False,
+    detach_result: bool | None = None,
+    skip_logit_attribution: bool = False,
+) -> Graph:
+    """Compute a neuron-level attribution graph for ``prompt``.
+
+    Phase 0: setup_attribution — single forward pass, neuron selection.
+    Phase 1-2: _attribute_from_context — gradient-based edge scoring.
+    """
+    if not (0.0 < prop_neurons_per_layer <= 1.0):
+        raise ValueError("prop_neurons_per_layer must be in (0, 1]")
+
+    input_ids = adapter.ensure_tokenized(prompt)
+    ctx = setup_attribution(adapter, input_ids, prop_neurons_per_layer, dtype)
+    return _attribute_from_context(
+        ctx,
+        attribution_targets=attribution_targets,
+        top_k_logits=top_k_logits,
+        batch_size=batch_size,
+        create_graph=create_graph,
+        detach_result=detach_result,
+        skip_logit_attribution=skip_logit_attribution,
+        verbose=verbose,
+    )

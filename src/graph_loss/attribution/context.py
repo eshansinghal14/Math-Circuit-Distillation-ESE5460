@@ -55,6 +55,22 @@ class HFAttributionContext:
     def source_count(self) -> int:
         return self.n_neurons + self.n_tokens
 
+    def filter(self, keep_mask: torch.Tensor) -> "HFAttributionContext":
+        """Return a new context containing only neurons where keep_mask is True."""
+        keep_mask = keep_mask.to(device=self.neuron_locations.device, dtype=torch.bool)
+        return HFAttributionContext(
+            adapter=self.adapter,
+            input_ids=self.input_ids,
+            neuron_locations=self.neuron_locations[keep_mask],
+            neuron_activations=self.neuron_activations[keep_mask],
+            target_encoders=self.target_encoders[keep_mask],
+            source_vectors=self.source_vectors[keep_mask],
+            source_layer_by_node=self.source_layer_by_node[keep_mask],
+            embed_out=self.embed_out,
+            logits=self.logits,
+            dtype=self.dtype,
+        )
+
     def _expanded_forward(self, batch_len: int):
         """Run a batch-expanded forward pass for gradient-based attribution.
 

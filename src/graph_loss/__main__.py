@@ -9,7 +9,6 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from graph_loss.create_graph import (
     GraphPipelineResult,
     create_graph,
-    save_prune_result,
     save_supergraph,
 )
 from graph_loss.frontend_export import (
@@ -19,7 +18,6 @@ from graph_loss.frontend_export import (
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
 from graph_loss.utils import (
     add_graph_build_args,
-    add_graph_prune_args,
     resolve_torch_dtype,
 )
 from utils import HF_READ_TOKEN
@@ -30,7 +28,7 @@ def main():
     logger = logging.getLogger(__name__)
 
     parser = argparse.ArgumentParser(
-        description="Build, prune, and summarize neuron attribution graphs."
+        description="Build and summarize neuron attribution graphs via ANOVA-first pipeline."
     )
     parser.add_argument(
         "--model",
@@ -53,11 +51,6 @@ def main():
         help="Optional path to save the graph (.pt)",
     )
     add_graph_build_args(parser)
-    add_graph_prune_args(parser)
-    parser.add_argument(
-        "--prune_output_path",
-        help="Optional path to save prune masks and cumulative scores (.pt)",
-    )
     parser.add_argument(
         "--supergraph_output_path",
         help="Optional path to save the supergraph (.pt)",
@@ -87,9 +80,10 @@ def main():
     parser.set_defaults(export_frontend=True)
     parser.add_argument(
         "--dataset",
+        required=True,
         help=(
-            "Dataset prefix, filename, or path for activation-write "
-            "output-neuron clustering and per-cluster PDF heatmaps"
+            "Dataset prefix, filename, or path for ANOVA activation-grid labeling "
+            "and per-cluster PDF heatmaps"
         ),
     )
     parser.add_argument(
@@ -133,7 +127,7 @@ def main():
         dest="sum_min_specificity",
         type=float,
         default=0.0,
-        help="Minimum ANOVA specificity for a neuron to be included in a sum range/sum units supernode (neurons are ranked by DLA cosine similarity).",
+        help="Minimum ANOVA specificity for sum range/sum units supernodes.",
     )
 
     args = parser.parse_args()
@@ -164,9 +158,6 @@ def main():
         prop_neurons_per_layer=args.prop_neurons_per_layer,
         batch_size=args.attribution_batch_size,
         verbose=args.verbose,
-        prune=args.prune,
-        node_threshold=args.node_threshold,
-        edge_threshold=args.edge_threshold,
         dataset=args.dataset,
         activation_forward_batch_size=args.activation_forward_batch_size,
         model_name=args.model,
@@ -179,11 +170,7 @@ def main():
 
     if args.graph_output_path:
         logger.info("Saving graph to %s", args.graph_output_path)
-        result.raw_graph.to_pt(args.graph_output_path)
-
-    if args.prune and args.prune_output_path:
-        logger.info("Saving prune result to %s", args.prune_output_path)
-        save_prune_result(args.prune_output_path, result.prune_result)
+        result.graph.to_pt(args.graph_output_path)
 
     if args.supergraph_output_path:
         logger.info("Saving supergraph to %s", args.supergraph_output_path)

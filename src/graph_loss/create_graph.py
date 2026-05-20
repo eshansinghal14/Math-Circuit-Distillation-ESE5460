@@ -1,4 +1,4 @@
-"""Unified graph creation pipeline: build_graph → prune → build_super_graph."""
+"""Unified graph creation pipeline: ANOVA label → build_graph → build_super_graph."""
 
 from __future__ import annotations
 
@@ -7,21 +7,24 @@ from dataclasses import dataclass
 
 import torch
 
+from graph_loss.anova_node_labels import label_activation_heatmaps, parse_numeric_args
+from graph_loss.attribution.attribute import _attribute_from_context, setup_attribution
 from graph_loss.graph import (
     Graph,
-    PruneResult,
     SuperGraph,
     build_super_graph,
-    prune_graph,
+    select_anova_supernodes,
 )
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
+from graph_loss.neuron_activation_heatmap import (
+    ActivationWriteResult,
+    build_neuron_activation_write_result,
+)
 
 
 @dataclass
 class GraphPipelineResult:
-    raw_graph: Graph                  # original built graph (before pruning)
-    graph: Graph                      # graph used for supergraph (pruned if prune=True)
-    prune_result: PruneResult | None  # None if prune=False
+    graph: Graph
     supergraph: SuperGraph
 
 
@@ -92,70 +95,6 @@ def _log_graph_summary(graph: Graph, *, logger: logging.Logger, stage: str) -> N
     )
 
 
-def _log_prune_summary(
-    graph: Graph,
-    prune_result: PruneResult,
-    *,
-    node_threshold: float,
-    edge_threshold: float,
-    logger: logging.Logger,
-) -> None:
-    node_mask = prune_result.node_mask
-    edge_mask = prune_result.edge_mask
-    adjacency_matrix = graph.adjacency_matrix
-    adjacency_nonzero = adjacency_matrix != 0
-    effective_edge_mask = edge_mask & adjacency_nonzero & node_mask[:, None] & node_mask[None, :]
-
-    kept_neurons = int(node_mask[: graph.n_neurons].sum().item())
-    kept_tokens = int(node_mask[graph.n_neurons : graph.n_neurons + graph.n_tokens].sum().item())
-    kept_logits = int(node_mask[-graph.n_logits :].sum().item()) if graph.n_logits else 0
-    kept_total = int(node_mask.sum().item())
-    kept_edges = int(effective_edge_mask.sum().item())
-    kept_neuron_edges = int(
-        effective_edge_mask[: graph.n_neurons, : graph.n_neurons].sum().item()
-    )
-    total_edges = _count_nonzero_edges(graph.adjacency_matrix)
-
-    logger.info("Pruned graph summary")
-    logger.info(
-        "  thresholds: node_threshold=%.4f edge_threshold=%.4f",
-        node_threshold,
-        edge_threshold,
-    )
-    logger.info(
-        "  kept_nodes: neurons=%d/%d tokens=%d/%d logits=%d/%d total=%d/%d",
-        kept_neurons,
-        graph.n_neurons,
-        kept_tokens,
-        graph.n_tokens,
-        kept_logits,
-        graph.n_logits,
-        kept_total,
-        graph.n_nodes,
-    )
-    logger.info(
-        "  kept_edges: total=%d/%d density=%.6f neuron_to_neuron=%d density_neuron=%.6f",
-        kept_edges,
-        total_edges,
-        _density(kept_edges, kept_total, kept_total),
-        kept_neuron_edges,
-        _density(kept_neuron_edges, kept_neurons, kept_neurons),
-    )
-    logger.info(
-        "  reductions: neurons_removed=%d edges_removed=%d node_retention=%.2f%% edge_retention=%.2f%%",
-        graph.n_neurons - kept_neurons,
-        total_edges - kept_edges,
-        100.0 * kept_total / max(graph.n_nodes, 1),
-        100.0 * kept_edges / max(total_edges, 1),
-    )
-    logger.info(
-        "  cumulative_score_stats: min=%.6f median=%.6f max=%.6f",
-        float(prune_result.cumulative_scores.min().item()),
-        float(prune_result.cumulative_scores.median().item()),
-        float(prune_result.cumulative_scores.max().item()),
-    )
-
-
 def _log_supergraph_summary(
     graph: Graph,
     supergraph: SuperGraph,
@@ -193,7 +132,7 @@ def _log_supergraph_summary(
         )
     else:
         logger.info(
-            "  clusters: covered_neurons=0/%d omitted_neurons=%d no supernodes were formed",
+            "  clusters: covered_neurons=0/%d omitted_neurons=%d no supernodes formed",
             graph.n_neurons,
             omitted_neurons,
         )
@@ -210,29 +149,10 @@ def _log_pipeline_comparison(
     supergraph: SuperGraph,
     *,
     logger: logging.Logger,
-    prune_result: PruneResult | None = None,
 ) -> None:
     total_edges = int(graph.adjacency_matrix.count_nonzero().item())
     super_edges = _count_nonzero_edges(supergraph.supernode_adjacency_matrix)
-
     logger.info("Pipeline comparison")
-    if prune_result is not None:
-        kept_edges = int(
-            (
-                prune_result.edge_mask
-                & (graph.adjacency_matrix != 0)
-                & prune_result.node_mask[:, None]
-                & prune_result.node_mask[None, :]
-            ).sum().item()
-        )
-        kept_neurons = int(prune_result.node_mask[: graph.n_neurons].sum().item())
-        logger.info(
-            "  build_to_prune: neurons %d -> %d, edges %d -> %d",
-            graph.n_neurons,
-            kept_neurons,
-            total_edges,
-            kept_edges,
-        )
     logger.info(
         "  build_to_supergraph: neurons %d -> supernodes %d, edges %d -> %d",
         graph.n_neurons,
@@ -245,17 +165,6 @@ def _log_pipeline_comparison(
 # ---------------------------------------------------------------------------
 # Save helpers
 # ---------------------------------------------------------------------------
-
-def save_prune_result(path: str, prune_result: PruneResult) -> None:
-    torch.save(
-        {
-            "node_mask": prune_result.node_mask,
-            "edge_mask": prune_result.edge_mask,
-            "cumulative_scores": prune_result.cumulative_scores,
-        },
-        path,
-    )
-
 
 def save_supergraph(
     path: str,
@@ -282,7 +191,7 @@ def create_graph(
     adapter: HFLlamaGraphAdapter,
     prompt: str | torch.Tensor | list[int],
     *,
-    # build_graph params
+    # attribution params
     attribution_targets=None,
     top_k_logits: int | None = 20,
     prop_neurons_per_layer: float = 0.1,
@@ -292,11 +201,7 @@ def create_graph(
     build_create_graph: bool = False,
     detach_result: bool | None = None,
     skip_logit_attribution: bool = False,
-    # prune params
-    prune: bool = False,
-    node_threshold: float = 0.8,
-    edge_threshold: float = 0.98,
-    # supergraph params
+    # ANOVA / supergraph params
     dataset: str | None = None,
     activation_forward_batch_size: int = 32,
     mlp_input_cache: dict | None = None,
@@ -308,27 +213,27 @@ def create_graph(
     no_grad_supergraph: bool = False,
     logger: logging.Logger | None = None,
 ) -> GraphPipelineResult:
-    """Run the full graph creation pipeline: build_graph → [prune] → build_super_graph.
+    """Run the ANOVA-first graph creation pipeline.
+
+    New order: neuron pre-selection → ANOVA label all candidates →
+    select top-K per label → build attribution graph for selected neurons →
+    aggregate edges into supergraph.
 
     Args:
         adapter: Loaded HFLlamaGraphAdapter wrapping the model.
         prompt: Input prompt string, token tensor, or token ID list.
-        attribution_targets: Optional attribution targets for build_graph.
+        attribution_targets: Optional attribution targets.
         top_k_logits: Number of top logits to attribute to (None = all).
-        prop_neurons_per_layer: Fraction of neurons to select per layer.
+        prop_neurons_per_layer: Fraction of neurons to pre-select per layer.
         batch_size: Attribution batch size.
-        dtype: Optional dtype override for build_graph.
+        dtype: Optional dtype override.
         verbose: Verbose logging during attribution.
         build_create_graph: PyTorch autograd create_graph flag (training use).
         detach_result: Whether to detach the adjacency from the grad graph.
         skip_logit_attribution: Skip logit attribution phase.
-        prune: Whether to prune the graph before building the supergraph.
-        node_threshold: Cumulative node influence fraction to retain.
-        edge_threshold: Cumulative edge influence fraction to retain.
-        dataset: Dataset name/path for activation-write supergraph labeling.
+        dataset: Dataset name/path for activation-grid ANOVA labeling.
         activation_forward_batch_size: Batch size for dataset forward passes.
-        mlp_input_cache: Pre-built MLP input cache. Built from dataset if None
-            and both dataset and model_name are provided.
+        mlp_input_cache: Pre-built MLP input cache.
         model_name: HuggingFace model identifier string.
         supernode_heatmap_output_dir: Directory for per-supernode PDF heatmaps.
         anova_nodes_per_label: Max neurons per ANOVA label supernode.
@@ -338,44 +243,18 @@ def create_graph(
         logger: Optional logger; creates a module-level one if not provided.
 
     Returns:
-        GraphPipelineResult with raw_graph, graph, prune_result, and supergraph.
+        GraphPipelineResult with the ANOVA-filtered attribution graph and supergraph.
     """
     _logger = logger or logging.getLogger(__name__)
 
-    _logger.info("Running attribution graph build")
-    raw_graph = adapter.build_graph(
-        prompt,
-        attribution_targets=attribution_targets,
-        top_k_logits=top_k_logits,
-        prop_neurons_per_layer=prop_neurons_per_layer,
-        batch_size=batch_size,
-        dtype=dtype,
-        verbose=verbose,
-        create_graph=build_create_graph,
-        detach_result=detach_result,
-        skip_logit_attribution=skip_logit_attribution,
-    )
-    _log_graph_summary(raw_graph, logger=_logger, stage="Built")
+    # Step 1: Tokenize and run the initial forward pass to pre-select neuron candidates
+    # by gradient-norm (prop_neurons_per_layer fraction per layer).
+    input_ids = adapter.ensure_tokenized(prompt)
+    _logger.info("Running setup_attribution (neuron pre-selection by gradient norm)")
+    ctx = setup_attribution(adapter, input_ids, prop_neurons_per_layer, dtype)
+    _logger.info("  Pre-selected neurons: %d", ctx.n_neurons)
 
-    prune_result = None
-    graph = raw_graph
-    if prune:
-        _logger.info("Running prune_graph")
-        prune_result = prune_graph(
-            graph,
-            node_threshold=node_threshold,
-            edge_threshold=edge_threshold,
-        )
-        _log_prune_summary(
-            graph,
-            prune_result,
-            node_threshold=node_threshold,
-            edge_threshold=edge_threshold,
-            logger=_logger,
-        )
-        _logger.info("Applying prune masks to graph")
-        graph = graph.apply_prune_result(prune_result)
-
+    # Step 2: Build MLP input cache if not supplied.
     if mlp_input_cache is None and dataset is not None and model_name is not None:
         from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
         from graph_loss.precompute_mlp_inputs import build_mlp_input_cache as _build_mlp_cache
@@ -390,6 +269,86 @@ def create_graph(
         n_prompts = int(mlp_input_cache.get("meta", {}).get("n_prompts", 0))
         _logger.info("  Built MLP cache: %d prompts", n_prompts)
 
+    # Step 3: Build activation-write matrices for all pre-selected neurons.
+    if dataset is None:
+        raise ValueError(
+            "A dataset is required for ANOVA labeling. Pass --dataset."
+        )
+    _logger.info(
+        "Building activation-write matrices for %d pre-selected neurons", ctx.n_neurons
+    )
+    activation_write_result = build_neuron_activation_write_result(
+        adapter,
+        dataset,
+        ctx.neuron_locations,
+        forward_batch_size=activation_forward_batch_size,
+        mlp_input_cache=mlp_input_cache,
+    )
+
+    # Step 4: ANOVA-label all pre-selected neurons.
+    _logger.info("Running label_activation_heatmaps (ANOVA) on all pre-selected neurons")
+    decoded_prompt = adapter.tokenizer.decode(input_ids.detach().cpu().tolist())
+    target_args = parse_numeric_args(decoded_prompt)
+    label_results = label_activation_heatmaps(
+        activation_write_result.activations,
+        activation_write_result.arg_values,
+        target_args=target_args,
+        anova_range_radius=anova_range_radius,
+    )
+
+    # Step 5: Select top-K neurons per ANOVA label.
+    # Sum categories use DLA-KL scoring (source_vectors @ W_U) rather than graph influence.
+    _logger.info("Selecting ANOVA supernodes (top-%d per label)", anova_nodes_per_label)
+    selected_row_indices, raw_supernodes, supernode_labels, raw_node_labels = (
+        select_anova_supernodes(
+            label_results,
+            anova_nodes_per_label=anova_nodes_per_label,
+            sum_min_specificity=sum_min_specificity,
+            strict=True,
+            source_vectors=ctx.source_vectors,
+            W_U=adapter.W_U,
+            tokenizer=adapter.tokenizer,
+            target_args=target_args,
+        )
+    )
+    _logger.info("  ANOVA selected %d unique neurons", len(selected_row_indices))
+
+    # Step 6: Build a boolean keep_mask and remap supernode indices.
+    # After ctx.filter(keep_mask), filtered neuron j = original neuron selected_row_indices[j].
+    keep_mask = torch.zeros(ctx.n_neurons, dtype=torch.bool, device=adapter.device)
+    for idx in selected_row_indices:
+        keep_mask[idx] = True
+
+    old_to_new = {old: new for new, old in enumerate(selected_row_indices)}
+    supernodes = [[old_to_new[idx] for idx in sn] for sn in raw_supernodes]
+    node_labels = {old_to_new[old]: labels for old, labels in raw_node_labels.items()}
+
+    # Step 7: Filter the attribution context to ANOVA-selected neurons only.
+    filtered_ctx = ctx.filter(keep_mask)
+    _logger.info("  Filtered context: %d neurons", filtered_ctx.n_neurons)
+
+    # Step 8: Build the attribution graph for the ANOVA-selected neurons.
+    _logger.info("Running edge attribution on ANOVA-filtered neurons")
+    graph = _attribute_from_context(
+        filtered_ctx,
+        attribution_targets=attribution_targets,
+        top_k_logits=top_k_logits,
+        batch_size=batch_size,
+        create_graph=build_create_graph,
+        detach_result=detach_result,
+        skip_logit_attribution=skip_logit_attribution,
+        verbose=verbose,
+    )
+    _log_graph_summary(graph, logger=_logger, stage="Built (ANOVA-filtered)")
+
+    # Build a filtered activation_write_result whose rows align with the filtered graph.
+    sel_tensor = torch.tensor(selected_row_indices, dtype=torch.long)
+    filtered_awr = ActivationWriteResult(
+        activations=activation_write_result.activations[sel_tensor],
+        arg_values=activation_write_result.arg_values,
+    )
+
+    # Step 9: Aggregate the adjacency matrix into a supergraph.
     _logger.info("Running build_super_graph")
     if supernode_heatmap_output_dir:
         _logger.info("Supernode heatmap output directory: %s", supernode_heatmap_output_dir)
@@ -397,16 +356,11 @@ def create_graph(
     def _run_build_super_graph() -> SuperGraph:
         return build_super_graph(
             graph,
-            adapter,
-            prune_result=prune_result,
-            dataset=dataset,
-            activation_forward_batch_size=activation_forward_batch_size,
-            mlp_input_cache=mlp_input_cache,
-            model_name=model_name,
+            supernodes=supernodes,
+            supernode_labels=supernode_labels,
+            node_labels=node_labels,
             supernode_heatmap_output_dir=supernode_heatmap_output_dir,
-            anova_nodes_per_label=anova_nodes_per_label,
-            anova_range_radius=anova_range_radius,
-            sum_min_specificity=sum_min_specificity,
+            activation_write_result=filtered_awr,
         )
 
     if no_grad_supergraph:
@@ -416,11 +370,6 @@ def create_graph(
         supergraph = _run_build_super_graph()
 
     _log_supergraph_summary(graph, supergraph, logger=_logger)
-    _log_pipeline_comparison(graph, supergraph, logger=_logger, prune_result=prune_result)
+    _log_pipeline_comparison(graph, supergraph, logger=_logger)
 
-    return GraphPipelineResult(
-        raw_graph=raw_graph,
-        graph=graph,
-        prune_result=prune_result,
-        supergraph=supergraph,
-    )
+    return GraphPipelineResult(graph=graph, supergraph=supergraph)

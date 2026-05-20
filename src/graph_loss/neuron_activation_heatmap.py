@@ -256,6 +256,7 @@ def save_supernode_activation_heatmap_pdf(
     member_labels: dict[int, list[str]] | None = None,
     member_number_unembed: dict[int, tuple[list[int], torch.Tensor]] | None = None,
     member_specificity: dict[int, float] | None = None,
+    member_norm_props: dict[int, float] | None = None,
 ) -> str:
     """Save one 2D activation heatmap page per neuron in a supernode, with optional 1D logit influence side panel."""
     if len(arg_values) != 2:
@@ -294,7 +295,11 @@ def save_supernode_activation_heatmap_pdf(
             graph_neuron_idx = int(members[member_idx])
             labels = member_labels.get(graph_neuron_idx, []) if member_labels is not None else []
             label_text = f"\nANOVA labels: {', '.join(labels)}" if labels else ""
-            page_title = f"{title}{label_text}\nNeuron {neuron_id} ({location_text})"
+            norm_prop = (
+                member_norm_props.get(graph_neuron_idx) if member_norm_props is not None else None
+            )
+            norm_text = f"  ({norm_prop * 100:.2f}% of total residual norm)" if norm_prop is not None else ""
+            page_title = f"{title}{label_text}\nNeuron {neuron_id} ({location_text}){norm_text}"
             number_unembed = (
                 member_number_unembed.get(graph_neuron_idx)
                 if member_number_unembed is not None

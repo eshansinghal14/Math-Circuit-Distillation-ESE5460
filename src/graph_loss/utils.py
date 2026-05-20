@@ -10,6 +10,18 @@ import torch
 
 DTYPE_CHOICES = ["float32", "bfloat16", "float16", "fp32", "bf16", "fp16"]
 
+
+@dataclass
+class ActivationWriteResult:
+    activations: torch.Tensor  # [n_neurons, *grid_shape]
+    arg_values: list            # list[list[int]], one list per arg dimension
+
+
+def convert_nnsight_config_to_transformerlens(cfg):
+    """Identity pass-through for HFGraphConfig objects."""
+    return cfg
+
+
 @dataclass
 class UnifiedConfig:
     """Minimal LLaMA config used by the graph-loss pipeline."""
@@ -80,25 +92,6 @@ def add_graph_build_args(parser: argparse.ArgumentParser) -> None:
         help="Show attribution progress",
     )
 
-
-def add_graph_prune_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--node_threshold",
-        type=float,
-        default=0.8,
-        help="Cumulative node influence threshold for pruning",
-    )
-    parser.add_argument(
-        "--edge_threshold",
-        type=float,
-        default=0.98,
-        help="Cumulative edge influence threshold for pruning",
-    )
-    parser.add_argument(
-        "--prune",
-        action="store_true",
-        help="Whether to apply pruning before building supergraph",
-    )
 
 
 def resolve_torch_dtype(dtype: str) -> torch.dtype:

@@ -32,9 +32,6 @@ class GraphAuxConfig:
     teacher_graph_batch_size: int = 512
     student_graph_batch_size: int = 1
     verbose: bool = False
-    graph_prune: bool = False
-    graph_node_threshold: float = 0.8
-    graph_edge_threshold: float = 0.98
     student_activation_forward_batch_size: int = 32
     student_anova_range_radius: int = 0
     student_anova_nodes_per_label: int = 10
@@ -115,9 +112,6 @@ def compute_prompt_graph_loss(
             build_create_graph=False,
             detach_result=False,
             skip_logit_attribution=False,
-            prune=config.graph_prune,
-            node_threshold=config.graph_node_threshold,
-            edge_threshold=config.graph_edge_threshold,
             dataset=config.dataset,
             activation_forward_batch_size=config.student_activation_forward_batch_size,
             mlp_input_cache=config.mlp_input_cache,

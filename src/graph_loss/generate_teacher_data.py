@@ -19,6 +19,7 @@ from graph_loss.create_graph import (
     create_graph,
     save_supergraph,
 )
+
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
 from graph_loss.utils import (
     add_graph_build_args,
@@ -196,7 +197,7 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
         save_supergraph(
             supergraph_path,
             result.supergraph,
-            logit_token_ids=result.raw_graph.logit_token_ids,
+            logit_token_ids=result.graph.logit_token_ids,
         )
 
         logger.info("Computing teacher logits for distillation cache")

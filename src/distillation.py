@@ -145,9 +145,6 @@ class DistillationConfig:
     teacher_graph_batch_size: int = 512
     student_graph_batch_size: int = 1
     graph_verbose: bool = False
-    graph_prune: bool = False
-    graph_node_threshold: float = 0.8
-    graph_edge_threshold: float = 0.98
     student_activation_forward_batch_size: int = 32
     student_dataset: Optional[str] = None
     student_anova_range_radius: int = 0
@@ -340,9 +337,6 @@ class DistillationTrainer:
                 teacher_graph_batch_size=config.teacher_graph_batch_size,
                 student_graph_batch_size=config.student_graph_batch_size,
                 verbose=config.graph_verbose,
-                graph_prune=config.graph_prune,
-                graph_node_threshold=config.graph_node_threshold,
-                graph_edge_threshold=config.graph_edge_threshold,
                 student_activation_forward_batch_size=(
                     config.student_activation_forward_batch_size
                 ),
@@ -1016,10 +1010,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Batch size for student ablation forwards during supernode clustering.",
     )
     parser.add_argument("--verbose", action="store_true")
-    parser.add_argument("--graph-prune", action="store_true")
-    parser.add_argument("--graph-node-threshold", type=float, default=0.8)
-    parser.add_argument("--graph-edge-threshold", type=float, default=0.98)
-
     parser.add_argument("--graph-similarity-threshold", type=float, default=0.7)
     parser.add_argument("--graph-max-fan-out", type=int, default=4)
     parser.add_argument("--fast-teacher-graph", action="store_true")
@@ -1197,10 +1187,6 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--student-graph-batch-size must be >= 1")
     if args.student_activation_forward_batch_size < 1:
         raise SystemExit("--student-activation-forward-batch-size must be >= 1")
-    if not (0.0 <= args.graph_node_threshold <= 1.0):
-        raise SystemExit("--graph-node-threshold must be in [0, 1]")
-    if not (0.0 <= args.graph_edge_threshold <= 1.0):
-        raise SystemExit("--graph-edge-threshold must be in [0, 1]")
 
 
 def main() -> None:
@@ -1274,10 +1260,6 @@ def main() -> None:
             teacher_graph_batch_size=args.teacher_graph_batch_size,
             student_graph_batch_size=args.student_graph_batch_size,
             graph_verbose=args.verbose,
-            graph_prune=args.graph_prune,
-            graph_node_threshold=args.graph_node_threshold,
-            graph_edge_threshold=args.graph_edge_threshold,
-
             graph_similarity_threshold=args.graph_similarity_threshold,
             graph_max_fan_out=args.graph_max_fan_out,
             fast_teacher_graph=args.fast_teacher_graph,

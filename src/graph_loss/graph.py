@@ -1,34 +1,21 @@
-﻿"""Graph container and influence utilities for LLaMA neuron attribution."""
+"""Graph container and influence utilities for LLaMA neuron attribution."""
 
 from __future__ import annotations
 
 import logging
-import math
 import os
 from typing import NamedTuple
 
 import torch
 import torch.nn.functional as F
 
-from graph_loss.anova_node_labels import (
-    ANOVA_LABEL_CATEGORIES,
-    build_anova_basis_rules,
-    label_activation_heatmaps,
-    parse_numeric_args,
-)
+from graph_loss.anova_node_labels import ANOVA_LABEL_CATEGORIES
 from graph_loss.attribution.targets import LogitTarget
-from graph_loss.neuron_activation_heatmap import (
-    build_neuron_activation_write_result,
-    save_supernode_activation_heatmap_pdf,
-)
+from graph_loss.neuron_activation_heatmap import save_supernode_activation_heatmap_pdf
 from graph_loss.utils import (
     ActivationWriteResult,
     UnifiedConfig,
-    activation_write_cache_file,
     convert_nnsight_config_to_transformerlens,
-    load_activation_write_cache,
-    safe_cache_segment,
-    save_activation_write_cache,
 )
 
 
@@ -152,30 +139,6 @@ class Graph:
             neuron_write_vectors=data.get("neuron_write_vectors"),
         )
 
-    def apply_prune_result(self, prune_result: "PruneResult") -> "Graph":
-        """Returns a new Graph with edges and nodes zeroed out according to the PruneResult masks."""
-        adjacency_matrix = self.adjacency_matrix.clone()
-        
-        effective_edge_mask = (
-            prune_result.edge_mask 
-            & prune_result.node_mask[:, None] 
-            & prune_result.node_mask[None, :]
-        )
-        
-        adjacency_matrix[~effective_edge_mask] = 0.0
-        
-        return Graph(
-            input_string=self.input_string,
-            input_tokens=self.input_tokens,
-            neuron_locations=self.neuron_locations,
-            adjacency_matrix=adjacency_matrix,
-            cfg=self.cfg, # type: ignore
-            neuron_activations=self.neuron_activations,
-            logit_targets=self.logit_targets,
-            logit_probabilities=self.logit_probabilities,
-            vocab_size=self.vocab_size,
-            neuron_write_vectors=self.neuron_write_vectors,
-        )
 
 def normalize_matrix(matrix: torch.Tensor) -> torch.Tensor:
     math_dtype = (
@@ -187,51 +150,6 @@ def normalize_matrix(matrix: torch.Tensor) -> torch.Tensor:
     return normalized / normalized.sum(dim=1, keepdim=True).clamp(min=1e-10)
 
 
-def normalize_signed_matrices(matrix: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    math_dtype = (
-        torch.float32
-        if matrix.dtype in (torch.float16, torch.bfloat16)
-        else matrix.dtype
-    )
-    signed = matrix.to(dtype=math_dtype)
-    positive = signed.clamp(min=0)
-    negative = signed.clamp(max=0).abs()
-    positive = positive / positive.sum(dim=1, keepdim=True).clamp(min=1e-10)
-    negative = negative / negative.sum(dim=1, keepdim=True).clamp(min=1e-10)
-    return positive, negative
-
-
-def compute_influence(
-    A: torch.Tensor,
-    logit_weights: torch.Tensor,
-    max_iter: int = 1000,
-    atol: float | None = None,
-):
-    if atol is None:
-        atol = 1e-6 if A.dtype in (torch.float16, torch.bfloat16) else 0.0
-    logit_weights = logit_weights.to(device=A.device, dtype=A.dtype)
-    current_influence = logit_weights @ A
-    influence = current_influence
-    iterations = 0
-    while current_influence.abs().amax().item() > atol:
-        if iterations >= max_iter:
-            raise RuntimeError(
-                f"Influence computation failed to converge after {iterations} iterations "
-                f"(max residual={current_influence.abs().amax().item():.6g}, atol={atol:.6g})"
-            )
-        current_influence = current_influence @ A
-        influence += current_influence
-        iterations += 1
-    return influence
-
-
-def compute_node_influence(adjacency_matrix: torch.Tensor, logit_weights: torch.Tensor):
-    positive, negative = normalize_signed_matrices(adjacency_matrix)
-    positive_influence = compute_influence(positive, logit_weights)
-    negative_influence = compute_influence(negative, logit_weights)
-    return positive_influence - negative_influence
-
-
 def compute_neuron_logit_influence(graph: Graph) -> torch.Tensor:
     """Return direct graph attribution from each neuron to each selected logit."""
     logit_start = graph.n_neurons + graph.n_tokens
@@ -239,510 +157,223 @@ def compute_neuron_logit_influence(graph: Graph) -> torch.Tensor:
     return graph.adjacency_matrix[logit_rows, : graph.n_neurons].transpose(0, 1)
 
 
-def compute_edge_influence(pruned_matrix: torch.Tensor, logit_weights: torch.Tensor):
-    positive, negative = normalize_signed_matrices(pruned_matrix)
-    normalized_pruned = positive + negative
-    pruned_influence = compute_influence(positive, logit_weights) - compute_influence(
-        negative,
-        logit_weights,
-    )
-    pruned_influence += logit_weights
-    edge_scores = normalized_pruned * pruned_influence.abs()[:, None]
-    return edge_scores
-
-
-def find_threshold(scores: torch.Tensor, threshold: float):
-    sorted_scores = torch.sort(scores, descending=True).values
-    cumulative_score = torch.cumsum(sorted_scores, dim=0) / torch.sum(sorted_scores)
-    threshold_index = int(torch.searchsorted(cumulative_score, threshold).item())
-    threshold_index = min(threshold_index, len(cumulative_score) - 1)
-    return sorted_scores[threshold_index]
-    
-
-class PruneResult(NamedTuple):
-    node_mask: torch.Tensor
-    edge_mask: torch.Tensor
-    cumulative_scores: torch.Tensor
-
-
-def prune_graph(
-    graph: Graph,
-    node_threshold: float = 0.8,
-    edge_threshold: float = 0.98,
-) -> PruneResult:
-    """Prune low-influence neurons while always retaining token and logit nodes."""
-
-    if node_threshold > 1.0 or node_threshold < 0.0:
-        raise ValueError("node_threshold must be between 0.0 and 1.0")
-    if edge_threshold > 1.0 or edge_threshold < 0.0:
-        raise ValueError("edge_threshold must be between 0.0 and 1.0")
-
-    n_logits = graph.n_logits
-    n_tokens = graph.n_tokens
-    n_neurons = graph.n_neurons
-    token_start = n_neurons
-
-    adjacency_matrix = graph.adjacency_matrix
-    logit_weights = torch.zeros(
-        adjacency_matrix.shape[0],
-        dtype=adjacency_matrix.dtype,
-        device=adjacency_matrix.device,
-    )
-    logit_weights[-n_logits:] = graph.logit_probabilities.to(
-        device=adjacency_matrix.device,
-        dtype=adjacency_matrix.dtype,
-    )
-
-    node_influence = compute_node_influence(adjacency_matrix, logit_weights)
-    node_scores = node_influence.abs()
-    node_mask = node_scores >= find_threshold(node_scores, node_threshold)
-    node_mask[token_start:] = True
-
-    pruned_matrix = adjacency_matrix.clone()
-    pruned_matrix[~node_mask] = 0
-    pruned_matrix[:, ~node_mask] = 0
-
-    edge_scores = compute_edge_influence(pruned_matrix, logit_weights)
-    edge_mask = edge_scores >= find_threshold(edge_scores.flatten(), edge_threshold)
-
-    old_node_mask = node_mask.clone()
-    node_mask[:n_neurons] &= edge_mask[:, :n_neurons].any(0)
-    node_mask[:n_neurons] &= edge_mask[:n_neurons].any(1)
-
-    while not torch.all(node_mask == old_node_mask):
-        old_node_mask[:] = node_mask
-        edge_mask[~node_mask] = False
-        edge_mask[:, ~node_mask] = False
-
-        node_mask[:n_neurons] &= edge_mask[:, :n_neurons].any(0)
-        node_mask[:n_neurons] &= edge_mask[:n_neurons].any(1)
-
-    sorted_scores, sorted_indices = torch.sort(node_scores, descending=True)
-    cumulative_scores = torch.cumsum(sorted_scores, dim=0) / torch.sum(sorted_scores)
-    final_scores = torch.zeros_like(node_influence)
-    final_scores[sorted_indices] = cumulative_scores
-
-    return PruneResult(node_mask, edge_mask, final_scores)
-
-
 class SuperGraph(NamedTuple):
     supernode_adjacency_matrix: torch.Tensor
-    supernodes: list[list[int]]       # old node ids inside each new node
+    supernodes: list[list[int]]
     node_labels: dict[int, list[str]] | None = None
     supernode_labels: list[list[str]] | None = None
     supernode_heatmap_pdf_paths: list[str] | None = None
 
 
-def build_super_graph(
-    graph: Graph,
-    model,
-    prune_result: PruneResult | None = None,
-    dataset: str | None = None,
-    activation_forward_batch_size: int = 32,
-    mlp_input_cache: dict | None = None,
-    model_name: str | None = None,
-    supernode_heatmap_output_dir: str | None = None,
-    anova_nodes_per_label: int = 10,
-    anova_range_radius: int = 0,
+def _dla_kl_scores_for_sum(
+    source_vectors: torch.Tensor,
+    W_U: torch.Tensor,
+    tokenizer,
+    target_value: int,
+    units: bool,
+    min_value: int = 0,
+    max_value: int = 200,
+) -> list[float]:
+    """Compute DLA-based KL divergence scores for sum-category neurons.
+
+    Projects source_vectors (neuron write vectors from setup_attribution) onto W_U
+    to get direct logit contributions, then computes KL divergence vs the target
+    distribution over number tokens.
+
+    Returns a list of N scores where higher (less negative KL) = better match
+    to the target sum or sum-units distribution.
+    """
+    number_values = list(range(int(min_value), int(max_value) + 1))
+    token_ids: list[int | None] = []
+    for value in number_values:
+        encoded = tokenizer(str(value), add_special_tokens=False, return_tensors=None)
+        input_ids = encoded["input_ids"] if isinstance(encoded, dict) else encoded.input_ids
+        if input_ids and isinstance(input_ids[0], list):
+            input_ids = input_ids[0]
+        token_ids.append(int(input_ids[0]) if len(input_ids) == 1 else None)
+
+    valid_positions = [idx for idx, tid in enumerate(token_ids) if tid is not None]
+    if not valid_positions:
+        return [0.0] * source_vectors.shape[0]
+
+    target_unit = int(target_value) % 10
+    target_weights = torch.zeros(len(valid_positions), dtype=torch.float32)
+    for pos_in_valid, orig_pos in enumerate(valid_positions):
+        number = number_values[orig_pos]
+        match = (number % 10 == target_unit) if units else (number == int(target_value))
+        if match:
+            target_weights[pos_in_valid] = 1.0
+    if float(target_weights.sum().item()) == 0.0:
+        return [0.0] * source_vectors.shape[0]
+    Q = target_weights / target_weights.sum()
+
+    valid_vocab_ids = torch.tensor(
+        [int(token_ids[pos]) for pos in valid_positions],
+        dtype=torch.long,
+        device=W_U.device,
+    )
+    W_U_numbers = W_U[:, valid_vocab_ids]  # [d_model, n_valid]
+
+    sv = source_vectors.to(device=W_U.device, dtype=W_U.dtype)
+    dla_logits = sv @ W_U_numbers  # [N, n_valid]
+    P = F.softmax(dla_logits.float(), dim=-1)  # [N, n_valid]
+
+    Q = Q.to(device=P.device)
+    nonzero = Q > 0
+    Q_nz = Q[nonzero]
+    P_nz = P[:, nonzero].clamp(min=1e-10)
+    kl = (Q_nz * (Q_nz.log() - P_nz.log())).sum(dim=-1)  # [N]
+    return (-kl).detach().cpu().tolist()
+
+
+def select_anova_supernodes(
+    label_results: list,
+    anova_nodes_per_label: int,
     sum_min_specificity: float = 0.0,
     strict: bool = True,
-) -> SuperGraph:
-    """Cluster kept neurons into supernodes via per-category top-K ANOVA labeling.
+    source_vectors: torch.Tensor | None = None,
+    W_U: torch.Tensor | None = None,
+    tokenizer=None,
+    target_args: list[int] | None = None,
+) -> tuple[list[int], list[list[int]], list[list[str]], dict[int, list[str]]]:
+    """Select ANOVA supernodes from pre-computed label results.
 
-    Each kept neuron can appear in multiple supernodes (one per category it
-    scores well on), producing the overlapping supernode set used for heatmap
-    inspection and distillation.
+    For non-sum categories ranks by ANOVA variance score.
+    For sum categories uses DLA-KL scoring if source_vectors/W_U/tokenizer/target_args
+    are all provided; otherwise falls back to ANOVA variance.
 
-    ``mlp_input_cache`` (built via ``graph_loss.precompute_mlp_inputs``) is
-    forwarded to ``build_neuron_activation_write_result`` whenever a fresh
-    activation grid is built.  Cached prompts skip the per-step forward
-    pass; for the kept-neuron grid the SwiGLU activation is recomputed
-    directly from the cached residual-stream input via ``silu(x @ W_gate.T)
-    * (x @ W_up.T)`` using the *current* model weights (so weights that
-    have moved during distillation are still respected).
+    Args:
+        label_results: Output of label_activation_heatmaps(). Entry i corresponds
+            to neuron index i passed to build_neuron_activation_write_result.
+        anova_nodes_per_label: Max neurons per ANOVA label category.
+        sum_min_specificity: Min ANOVA specificity for sum-range/sum-units candidates.
+        strict: Raise ValueError when a non-sum category has no positive-variance nodes.
+        source_vectors: [N, d_model] neuron write vectors from setup_attribution.
+        W_U: [d_model, d_vocab] unembedding matrix.
+        tokenizer: Model tokenizer for mapping numbers to token IDs.
+        target_args: Numeric arguments from the prompt (e.g. [arg1, arg2]).
+
+    Returns:
+        selected_row_indices: sorted unique row indices into label_results that appear
+            in at least one supernode.
+        supernodes: list of supernodes; each is a list of row indices into label_results.
+        supernode_labels: list of [category_name] per supernode.
+        node_labels: dict from row_index -> list of label strings.
     """
-
-    if prune_result is not None:
-        graph = graph.apply_prune_result(prune_result)
-
-    if anova_nodes_per_label <= 0:
-        raise ValueError("anova_nodes_per_label must be positive")
-    if anova_range_radius < 0:
-        raise ValueError("anova_range_radius must be non-negative")
-
-    n_neurons = graph.n_neurons
     logger = logging.getLogger(__name__)
-    kept_neuron_mask = torch.ones(n_neurons, dtype=torch.bool, device=graph.adjacency_device)
-    if prune_result is not None:
-        kept_neuron_mask = prune_result.node_mask[:n_neurons].to(
-            device=graph.adjacency_device,
-            dtype=torch.bool,
-        )
-
-    adjacency_matrix = graph.adjacency_matrix
-    logit_weights = torch.zeros(
-        adjacency_matrix.shape[0],
-        dtype=adjacency_matrix.dtype,
-        device=adjacency_matrix.device,
+    use_dla = (
+        source_vectors is not None
+        and W_U is not None
+        and tokenizer is not None
+        and target_args is not None
+        and len(target_args) >= 2
     )
-    if graph.n_logits:
-        logit_weights[-graph.n_logits:] = graph.logit_probabilities.to(
-            device=adjacency_matrix.device,
-            dtype=adjacency_matrix.dtype,
-        )
-    node_influence = compute_node_influence(adjacency_matrix, logit_weights).detach().float().cpu()
+    target_sum = int(target_args[0] + target_args[1]) if use_dla else 0
 
-    def format_member_locations(members: list[int]) -> str:
-        locations = graph.neuron_locations.detach().cpu()
-        formatted = []
-        for graph_neuron_idx in members:
-            layer = int(locations[graph_neuron_idx, 0].item())
-            token_pos = int(locations[graph_neuron_idx, 1].item())
-            neuron_id = int(locations[graph_neuron_idx, 2].item())
-            formatted.append(
-                f"{graph_neuron_idx}:(layer={layer}, token={token_pos}, neuron={neuron_id})"
-            )
-        return ", ".join(formatted)
-
-    def supernode_influence(members: list[int]) -> float:
-        if not members:
-            return 0.0
-        return float(node_influence[torch.tensor(members, dtype=torch.long)].sum().item())
-
-    def number_token_unembed_values(
-        members: list[int],
-        *,
-        min_value: int = 0,
-        max_value: int = 200,
-    ) -> dict[int, tuple[list[int], torch.Tensor]]:
-        number_values = list(range(int(min_value), int(max_value) + 1))
-        token_ids: list[int | None] = []
-        for value in number_values:
-            encoded = model.tokenizer(
-                str(value),
-                add_special_tokens=False,
-                return_tensors=None,
-            )
-            input_ids = encoded["input_ids"] if isinstance(encoded, dict) else encoded.input_ids
-            if input_ids and isinstance(input_ids[0], list):
-                input_ids = input_ids[0]
-            token_ids.append(int(input_ids[0]) if len(input_ids) == 1 else None)
-
-        valid_positions = [idx for idx, token_id in enumerate(token_ids) if token_id is not None]
-        if not valid_positions:
-            return {
-                int(member): (
-                    number_values,
-                    torch.full((len(number_values),), float("nan"), dtype=torch.float32),
-                )
-                for member in members
-            }
-
-        valid_token_ids = torch.tensor(
-            [int(token_ids[idx]) for idx in valid_positions],
-            dtype=torch.long,
-            device=model.cfg.device,
-        )
-        W_U = model.unembed.W_U.detach().to(device=model.cfg.device)
-        W_U_numbers = W_U[:, valid_token_ids]
-        locations = graph.neuron_locations.detach().cpu().to(dtype=torch.long)
-        out: dict[int, tuple[list[int], torch.Tensor]] = {}
-        w_out_cache: dict[int, torch.Tensor] = {}
-        for member in members:
-            layer = int(locations[member, 0].item())
-            neuron_id = int(locations[member, 2].item())
-            if layer not in w_out_cache:
-                old_mlp = model.blocks[layer].mlp.old_mlp
-                w_out_cache[layer] = model._row_oriented_weight(
-                    old_mlp.W_out.to(device=model.cfg.device, dtype=W_U.dtype)
-                )
-            values = torch.full((len(number_values),), float("nan"), dtype=torch.float32)
-            projected = (w_out_cache[layer][neuron_id] @ W_U_numbers).detach().float().cpu()
-            values[torch.tensor(valid_positions, dtype=torch.long)] = projected
-            out[int(member)] = (number_values, values)
-        return out
-
-    def number_token_kl_scores(
-        members: list[int],
-        *,
-        target_value: int,
-        units: bool,
-        min_value: int = 0,
-        max_value: int = 200,
-    ) -> dict[int, float]:
-        number_values = list(range(int(min_value), int(max_value) + 1))
-        token_ids: list[int | None] = []
-        for value in number_values:
-            encoded = model.tokenizer(
-                str(value),
-                add_special_tokens=False,
-                return_tensors=None,
-            )
-            input_ids = encoded["input_ids"] if isinstance(encoded, dict) else encoded.input_ids
-            if input_ids and isinstance(input_ids[0], list):
-                input_ids = input_ids[0]
-            token_ids.append(int(input_ids[0]) if len(input_ids) == 1 else None)
-
-        valid_positions = [idx for idx, token_id in enumerate(token_ids) if token_id is not None]
-        if not valid_positions:
-            return {int(member): 0.0 for member in members}
-
-        # Build target distribution Q over all tracked logit columns.
-        target_unit = int(target_value) % 10
-        vocab_to_number: dict[int, int] = {
-            int(token_ids[pos_idx]): number_values[pos_idx]
-            for pos_idx in valid_positions
-        }
-        target_weights = torch.zeros(graph.n_logits, dtype=torch.float32)
-        for col, logit_target in enumerate(graph.logit_targets):
-            if logit_target.vocab_idx in vocab_to_number:
-                number_value = vocab_to_number[logit_target.vocab_idx]
-                if (number_value % 10 == target_unit) if units else (number_value == int(target_value)):
-                    target_weights[col] = 1.0
-        if float(target_weights.sum().item()) == 0.0:
-            return {int(member): 0.0 for member in members}
-        Q = target_weights / target_weights.sum()
-
-        neuron_logit_inf = compute_neuron_logit_influence(graph).detach().float().cpu()
-        nonzero = Q > 0
-        scores: dict[int, float] = {}
-        for member in members:
-            P = torch.softmax(neuron_logit_inf[member], dim=0)
-            # KL(Q || P) — lower means P better matches target Q
-            kl = (Q[nonzero] * (Q[nonzero].log() - P[nonzero].log())).sum().item()
-            scores[int(member)] = -float(kl)
-        return scores
-
-    kept_neuron_indices_device = torch.where(kept_neuron_mask)[0]
-    kept_neuron_indices = kept_neuron_indices_device.detach().cpu()
-    logger.info("  Kept neurons for supergraph: %d", int(kept_neuron_indices.numel()))
-    activation_write_result_for_kept: ActivationWriteResult | None = None
-    node_labels: dict[int, list[str]] = {}
-    supernode_labels: list[list[str]] | None = None
-    supernode_heatmap_pdf_paths: list[str] | None = None
+    selected_member_ids: set[int] = set()
     supernodes: list[list[int]] = []
+    supernode_labels_out: list[list[str]] = []
+    node_labels: dict[int, list[str]] = {}
 
-    def get_activation_write_result_for_kept() -> ActivationWriteResult:
-        nonlocal activation_write_result_for_kept
-        if activation_write_result_for_kept is not None:
-            return activation_write_result_for_kept
+    for category in ANOVA_LABEL_CATEGORIES:
+        is_sum_category = category in {"sum range", "sum units"}
 
-        kept_neuron_locations = graph.neuron_locations[kept_neuron_indices_device].detach().cpu()
-
-        resolved_model_name = model_name or getattr(model.cfg, "model_name", "model")
-        if dataset is None:
-            raise ValueError(
-                "A dataset is required to build activation-write matrices. "
-                "Pass --dataset or --activation-write-cache-path."
-            )
-        logger.info(
-            "  Building activation-write matrices for %d kept graph neurons from dataset: %s",
-            int(kept_neuron_locations.shape[0]),
-            dataset,
-        )
-        activation_write_result_for_kept = build_neuron_activation_write_result(
-            model,
-            dataset,
-            kept_neuron_locations,
-            forward_batch_size=activation_forward_batch_size,
-            mlp_input_cache=mlp_input_cache,
-        )
-
-        return activation_write_result_for_kept
-
-    if kept_neuron_indices.numel():
-        activation_write_result = get_activation_write_result_for_kept()
-        target_args = parse_numeric_args(graph.input_string)
-        label_results = label_activation_heatmaps(
-            activation_write_result.activations,
-            activation_write_result.arg_values,
-            target_args=target_args,
-            anova_range_radius=anova_range_radius,
-        )
-        selected_member_ids: set[int] = set()
-        supernodes = []
-        supernode_labels = []
-        supernode_heatmaps = []
-        target_sum = int(target_args[0] + target_args[1]) if len(target_args) >= 2 else 0
-        kept_member_list = [int(member) for member in kept_neuron_indices.tolist()]
-
-        for category in ANOVA_LABEL_CATEGORIES:
-            if category in {"sum range", "sum units"}:
-                sum_kl_scores = number_token_kl_scores(
-                    kept_member_list,
+        if is_sum_category:
+            candidates = [
+                row_idx
+                for row_idx, lr in enumerate(label_results)
+                if category in lr.category_scores
+                and lr.category_scores[category] > 0.0
+                and lr.category_specificity.get(category, 0.0) > sum_min_specificity
+            ]
+            if candidates and use_dla:
+                kl_all = _dla_kl_scores_for_sum(
+                    source_vectors,  # type: ignore[arg-type]
+                    W_U,             # type: ignore[arg-type]
+                    tokenizer,
                     target_value=target_sum,
-                    units=category == "sum units",
+                    units=(category == "sum units"),
                 )
-                all_scored_rows = [
-                    (
-                        row_idx,
-                        sum_kl_scores[int(kept_neuron_indices[row_idx].item())],
-                    )
-                    for row_idx, label_result in enumerate(label_results)
-                    if category in label_result.category_scores
-                    and label_result.category_scores[category] > sum_min_specificity
-                ]
+                all_scored_rows = [(row_idx, kl_all[row_idx]) for row_idx in candidates]
             else:
                 all_scored_rows = [
-                    (row_idx, label_result.category_scores[category])
-                    for row_idx, label_result in enumerate(label_results)
-                    if category in label_result.category_scores
-                    and label_result.category_scores[category] > 0.0
+                    (row_idx, label_results[row_idx].category_scores[category])
+                    for row_idx in candidates
                 ]
-            sorted_all_rows = sorted(all_scored_rows, key=lambda item: item[1], reverse=True)
-            scored_rows = sorted_all_rows
-            if not scored_rows:
-                if strict:
-                    if category in {"sum range", "sum units"}:
-                        pre_filter = [
-                            (row_idx, sum_kl_scores[int(kept_neuron_indices[row_idx].item())],
-                             label_result.category_scores.get(category, 0.0))
-                            for row_idx, label_result in enumerate(label_results)
-                            if category in label_result.category_scores
-                            and label_result.category_scores[category] > 0.0
-                        ]
-                        all_by_cos = sorted(pre_filter, key=lambda x: x[1], reverse=True)
-                        top_cos = all_by_cos[:5]
-                        if not pre_filter:
-                            logger.warning(
-                                "  ANOVA label %s: no candidates with positive variance, skipping",
-                                category,
-                            )
-                            continue
-                        logger.warning(
-                            "  ANOVA label %s: no nodes above variance threshold"
-                            " (sum_min_specificity=%.6g); falling back to top-%d neurons by"
-                            " logit influence KL. Top KL scores: %s",
-                            category,
-                            sum_min_specificity,
-                            anova_nodes_per_label,
-                            [(round(c, 4), round(v, 6)) for _, c, v in top_cos],
-                        )
-                        scored_rows = [(row_idx, cos_score) for row_idx, cos_score, _var in all_by_cos]
-                        sorted_all_rows = scored_rows
-                    else:
-                        raise ValueError(
-                            f"Student ANOVA category {category!r} has no positive-variance nodes."
-                        )
-                else:
-                    if category == "sum range":
-                        logger.info(
-                            "  ANOVA label %s: no positive-variance nodes above sum_min_specificity=%.6g",
-                            category,
-                            sum_min_specificity,
-                        )
-                    elif category == "sum units":
-                        logger.info("  ANOVA label %s: no positive-variance nodes with positive specificity", category)
-                    else:
-                        logger.info("  ANOVA label %s: no positive-variance nodes", category)
-                    continue
-            keep_count = min(int(anova_nodes_per_label), len(scored_rows))
-            top_rows = scored_rows[:keep_count]
-            row_indices = torch.tensor([row_idx for row_idx, _score in top_rows], dtype=torch.long)
-            members = [int(kept_neuron_indices[row_idx].item()) for row_idx, _score in top_rows]
-            cluster_heatmaps = activation_write_result.activations[row_indices].detach().float()
-            member_plot_labels: dict[int, list[str]] = {}
-            member_specificity = {
-                int(kept_neuron_indices[row_idx].item()): float(score)
-                for row_idx, score in sorted_all_rows
-            }
-            for member in members:
-                row_idx = int(torch.where(kept_neuron_indices == member)[0][0].item())
-                label = label_results[row_idx].categories[category]
-                ranking_score = member_specificity[member]
-                if category in {"sum range", "sum units"}:
-                    specificity_score = label_results[row_idx].category_specificity.get(category, 0.0)
-                    variance_score = label_results[row_idx].category_scores.get(category, 0.0)
-                    member_plot_labels[member] = [f"{label} (var={variance_score:.3f}, spec={specificity_score:.3f}, kl={-ranking_score:.3f})"]
-                else:
-                    variance_score = label_results[row_idx].category_scores[category]
-                    specificity_score = label_results[row_idx].category_specificity.get(category, 0.0)
-                    member_plot_labels[member] = [f"{label} (var={variance_score:.3f}, spec={specificity_score:.3f})"]
-                node_labels.setdefault(member, [])
-                if label not in node_labels[member]:
-                    node_labels[member].append(label)
-                selected_member_ids.add(member)
-            member_number_unembed = (
-                number_token_unembed_values(members)
-                if category in {"sum range", "sum units"}
-                else None
-            )
+        else:
+            all_scored_rows = [
+                (row_idx, lr.category_scores[category])
+                for row_idx, lr in enumerate(label_results)
+                if category in lr.category_scores
+                and lr.category_scores[category] > 0.0
+            ]
 
-            supernodes.append(members)
-            supernode_labels.append([category])
-            supernode_heatmaps.append(
-                (
-                    cluster_heatmaps,
-                    activation_write_result.arg_values,
-                    members,
-                    category,
-                    member_plot_labels,
-                    member_number_unembed,
-                    member_specificity,
+        sorted_rows = sorted(all_scored_rows, key=lambda item: item[1], reverse=True)
+
+        if not sorted_rows:
+            if strict and not is_sum_category:
+                raise ValueError(
+                    f"ANOVA category {category!r} has no positive-variance nodes."
                 )
-            )
-            logger.info(
-                "  ANOVA label %s: selected_nodes=%d/%d cap=%d best_%s=%.6g",
-                category,
-                len(members),
-                len(scored_rows),
-                anova_nodes_per_label,
-                "cos" if category in {"sum range", "sum units"} else "variance",
-                float(top_rows[0][1]),
-            )
+            if is_sum_category:
+                logger.info(
+                    "  ANOVA label %s: no candidates above sum_min_specificity=%.6g",
+                    category,
+                    sum_min_specificity,
+                )
+            else:
+                logger.info("  ANOVA label %s: no positive-variance nodes", category)
+            continue
 
+        keep_count = min(anova_nodes_per_label, len(sorted_rows))
+        top_rows = sorted_rows[:keep_count]
+
+        for row_idx, _score in top_rows:
+            label = label_results[row_idx].categories.get(category, category)
+            node_labels.setdefault(row_idx, [])
+            if label not in node_labels[row_idx]:
+                node_labels[row_idx].append(label)
+            selected_member_ids.add(row_idx)
+
+        members = [row_idx for row_idx, _score in top_rows]
+        supernodes.append(members)
+        supernode_labels_out.append([category])
         logger.info(
-            "  ANOVA labeling: selected_unique_neurons=%d/%d",
-            len(selected_member_ids),
-            int(kept_neuron_indices.numel()),
+            "  ANOVA label %s: selected=%d/%d cap=%d best_score=%.6g",
+            category,
+            len(members),
+            len(sorted_rows),
+            anova_nodes_per_label,
+            float(top_rows[0][1]),
         )
 
-        for supernode_idx, members in enumerate(supernodes):
-            labels = (
-                ", ".join(supernode_labels[supernode_idx])
-                if supernode_labels is not None and supernode_idx < len(supernode_labels)
-                else "none"
-            )
-            logger.info(
-                "  supernode %d labels=%s influence=%.6g neuron locations: %s",
-                supernode_idx,
-                labels,
-                supernode_influence(members),
-                format_member_locations(members),
-            )
+    selected_row_indices = sorted(selected_member_ids)
+    logger.info(
+        "  ANOVA selection: unique_neurons=%d / total_candidates=%d",
+        len(selected_row_indices),
+        len(label_results),
+    )
+    return selected_row_indices, supernodes, supernode_labels_out, node_labels
 
-        if supernode_heatmap_output_dir is not None:
-            supernode_heatmap_pdf_paths = []
-            for supernode_idx, (
-                activation_grid,
-                heatmap_arg_values,
-                members,
-                title,
-                member_plot_labels,
-                member_number_unembed,
-                member_specificity,
-            ) in enumerate(supernode_heatmaps):
-                sn_title = f"supernode {supernode_idx}: {title}"
-                saved_path = save_supernode_activation_heatmap_pdf(
-                    activation_grid,
-                    heatmap_arg_values,
-                    members,
-                    graph.neuron_locations.detach().cpu(),
-                    output_path=os.path.join(
-                        supernode_heatmap_output_dir,
-                        f"supernode_{supernode_idx}.pdf",
-                    ),
-                    title=sn_title,
-                    member_labels=member_plot_labels,
-                    member_number_unembed=member_number_unembed,
-                    member_specificity=member_specificity,
-                )
-                logger.info("  Saved supernode heatmap PDF: %s", saved_path)
-                supernode_heatmap_pdf_paths.append(saved_path)
 
-    logger.info("  Aggregating supergraph")
+def build_super_graph(
+    graph: Graph,
+    supernodes: list[list[int]],
+    supernode_labels: list[list[str]],
+    node_labels: dict[int, list[str]] | None = None,
+    supernode_heatmap_output_dir: str | None = None,
+    activation_write_result: ActivationWriteResult | None = None,
+) -> SuperGraph:
+    """Aggregate the attribution adjacency matrix into a supergraph.
+
+    Supernodes are lists of neuron row indices already remapped to the filtered
+    graph (i.e. members index graph.neuron_locations directly).
+    """
+    logger = logging.getLogger(__name__)
+    adjacency_matrix = graph.adjacency_matrix
     adj_matrix_norm = normalize_matrix(adjacency_matrix)
     num_supernodes = len(supernodes)
+
     supernode_adj_matrix = torch.zeros(
         num_supernodes,
         num_supernodes,
@@ -754,12 +385,69 @@ def build_super_graph(
         total_input = torch.abs(adj_matrix_norm[:, target_members]).sum(dim=0)
         internal_input = torch.abs(adj_matrix_norm[target_members][:, target_members]).sum(dim=0)
         frac_external = (total_input - internal_input) / total_input.clamp(min=1e-10)
-        
         for s in range(num_supernodes):
             source_members = supernodes[s]
             sum_A = adj_matrix_norm[target_members][:, source_members].sum(dim=1)
-            supernode_adj_matrix[t, s] = (frac_external * sum_A).sum(dim=0) / frac_external.sum(dim=0).clamp(min=1e-10)
+            supernode_adj_matrix[t, s] = (
+                (frac_external * sum_A).sum(dim=0)
+                / frac_external.sum(dim=0).clamp(min=1e-10)
+            )
 
+    supernode_heatmap_pdf_paths: list[str] | None = None
+    if supernode_heatmap_output_dir is not None:
+        if activation_write_result is None:
+            logger.warning(
+                "supernode_heatmap_output_dir set but activation_write_result not provided; "
+                "skipping heatmap PDF generation."
+            )
+        else:
+            supernode_heatmap_pdf_paths = []
+            neuron_locs = graph.neuron_locations.detach().cpu()
+            # Compute per-neuron proportion of total residual write-norm.
+            neuron_norm_props: dict[int, float] | None = None
+            if graph.neuron_write_vectors is not None:
+                norms = graph.neuron_write_vectors.detach().float().norm(dim=-1)
+                total_norm = norms.sum().item()
+                if total_norm > 0:
+                    neuron_norm_props = {
+                        i: float(norms[i].item()) / total_norm
+                        for i in range(len(norms))
+                    }
+            for supernode_idx, members in enumerate(supernodes):
+                category = (
+                    supernode_labels[supernode_idx][0]
+                    if supernode_labels[supernode_idx]
+                    else "none"
+                )
+                row_indices = torch.tensor(members, dtype=torch.long)
+                cluster_heatmaps = activation_write_result.activations[row_indices].detach().float()
+                member_labels = (
+                    {m: node_labels.get(m, []) for m in members}
+                    if node_labels
+                    else None
+                )
+                member_norm_props = (
+                    {m: neuron_norm_props[m] for m in members if m in neuron_norm_props}
+                    if neuron_norm_props is not None
+                    else None
+                )
+                saved_path = save_supernode_activation_heatmap_pdf(
+                    cluster_heatmaps,
+                    activation_write_result.arg_values,
+                    members,
+                    neuron_locs,
+                    output_path=os.path.join(
+                        supernode_heatmap_output_dir,
+                        f"supernode_{supernode_idx}.pdf",
+                    ),
+                    title=f"supernode {supernode_idx}: {category}",
+                    member_labels=member_labels,
+                    member_norm_props=member_norm_props,
+                )
+                logger.info("  Saved supernode heatmap PDF: %s", saved_path)
+                supernode_heatmap_pdf_paths.append(saved_path)
+
+    logger.info("  Aggregated supergraph: %d supernodes", num_supernodes)
     return SuperGraph(
         supernode_adjacency_matrix=supernode_adj_matrix,
         supernodes=supernodes,
@@ -767,5 +455,3 @@ def build_super_graph(
         supernode_labels=supernode_labels,
         supernode_heatmap_pdf_paths=supernode_heatmap_pdf_paths,
     )
-
-
