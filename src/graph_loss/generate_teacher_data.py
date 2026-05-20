@@ -17,13 +17,11 @@ from transformers import AutoModelForCausalLM
 from graph_loss.create_graph import (
     GraphPipelineResult,
     create_graph,
-    save_prune_result,
     save_supergraph,
 )
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
 from graph_loss.utils import (
     add_graph_build_args,
-    add_graph_prune_args,
     resolve_torch_dtype,
 )
 from utils import HF_READ_TOKEN, default_datasets_dir, load_prompt_answer_json, patch_tokenizer_no_special_tokens
@@ -38,22 +36,16 @@ class TeacherDataConfig:
     store_path: str
     dataset_file: str
     teacher_model: str
-    student_model: str
     dtype: str = "float32"
     top_k_logits: int | None = 20
     prop_neurons_per_layer: float = 0.1
     attribution_batch_size: int = 256
     verbose: bool = False
-    prune: bool = False
-    node_threshold: float = 0.8
-    edge_threshold: float = 0.98
     limit: int | None = None
     start_index: int = 0
     overwrite: bool = False
-    skip_graph_save: bool = True
     dataset: str | None = None
     activation_forward_batch_size: int = 32
-    activation_write_cache_path: str | None = None
     anova_nodes_per_label: int = 10
     anova_range_radius: int = 0
     sum_min_specificity: float = 0.0
@@ -81,8 +73,6 @@ def _write_json(path: str, data: dict[str, Any]) -> None:
 
 def _relative(path: str, root: str) -> str:
     return os.path.relpath(path, root).replace(os.sep, "/")
-
-
 
 
 def _build_distillation_tensors(prompt: str, answer: int, tokenizer) -> dict[str, Any]:
@@ -117,8 +107,7 @@ def _compute_teacher_logits(adapter: HFLlamaGraphAdapter, input_ids: torch.Tenso
     input_ids = input_ids.to(adapter.cfg.device)
     if int(input_ids.max().item()) >= int(adapter.cfg.d_vocab):
         raise ValueError(
-            "Distillation input ids exceed the teacher vocabulary. The teacher-data cache "
-            "requires compatible student and teacher tokenizers."
+            "Distillation input ids exceed the teacher vocabulary."
         )
     output = adapter.model(input_ids.unsqueeze(0))
     logits = output.logits if hasattr(output, "logits") else output
@@ -162,17 +151,11 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
     teacher_tokenizer.pad_token = teacher_tokenizer.eos_token
     adapter = HFLlamaGraphAdapter(hf_model, teacher_tokenizer, device)
 
-    student_tokenizer = patch_tokenizer_no_special_tokens(
-        AutoTokenizer.from_pretrained(config.student_model)
-    )
-    student_tokenizer.pad_token = student_tokenizer.eos_token
-
     manifest: dict[str, Any] = {
         "version": 1,
         "dataset_file": os.path.abspath(dataset_path),
         "store_path": store_path,
         "teacher_model": config.teacher_model,
-        "student_model": config.student_model,
         "teacher_vocab_size": int(adapter.d_vocab),
         "hyperparameters": asdict(config),
         "samples": [],
@@ -198,9 +181,6 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
             prop_neurons_per_layer=config.prop_neurons_per_layer,
             batch_size=config.attribution_batch_size,
             verbose=config.verbose,
-            prune=config.prune,
-            node_threshold=config.node_threshold,
-            edge_threshold=config.edge_threshold,
             dataset=activation_dataset,
             activation_forward_batch_size=config.activation_forward_batch_size,
             model_name=config.teacher_model,
@@ -211,19 +191,6 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
             logger=logger,
         )
 
-        graph_path = os.path.join(sample_dir, "graph.pt")
-        if not config.skip_graph_save:
-            logger.info("Saving graph to %s", graph_path)
-            result.raw_graph.to_pt(graph_path)
-        else:
-            logger.info("Skipping graph.pt save (--skip-graph-save)")
-
-        prune_path = None
-        if config.prune and result.prune_result is not None:
-            prune_path = os.path.join(sample_dir, "prune_result.pt")
-            logger.info("Saving prune result to %s", prune_path)
-            save_prune_result(prune_path, result.prune_result)
-
         supergraph_path = os.path.join(sample_dir, "supergraph.pt")
         logger.info("Saving supergraph to %s", supergraph_path)
         save_supergraph(
@@ -233,7 +200,7 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
         )
 
         logger.info("Computing teacher logits for distillation cache")
-        distill_tensors = _build_distillation_tensors(prompt, answer, student_tokenizer)
+        distill_tensors = _build_distillation_tensors(prompt, answer, teacher_tokenizer)
         logits = _compute_teacher_logits(adapter, distill_tensors["input_ids"])
         logits_path = os.path.join(sample_dir, "teacher_logits.pt")
         logger.info("Saving teacher logits to %s", logits_path)
@@ -260,8 +227,6 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
             "answer_len": distill_tensors["answer_len"],
             "sequence_len": int(distill_tensors["input_ids"].numel()),
             "artifacts": {
-                "graph": _relative(graph_path, sample_dir) if not config.skip_graph_save else None,
-                "prune_result": _relative(prune_path, sample_dir) if prune_path else None,
                 "supergraph": _relative(supergraph_path, sample_dir),
                 "teacher_logits": _relative(logits_path, sample_dir),
             },
@@ -279,8 +244,6 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
                 "metadata": _relative(metadata_path, store_path),
                 "teacher_logits": _relative(logits_path, store_path),
                 "supergraph": _relative(supergraph_path, store_path),
-                "graph": _relative(graph_path, store_path) if not config.skip_graph_save else None,
-                "prune_result": _relative(prune_path, store_path) if prune_path else None,
             }
         )
         manifest_path = os.path.join(store_path, manifest_filename)
@@ -341,11 +304,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Dataset JSON filename under datasets/ or an explicit path",
     )
     parser.add_argument("--teacher-model", required=True, help="Teacher HuggingFace model name")
-    parser.add_argument(
-        "--student-model",
-        required=True,
-        help="Student model/tokenizer name used to build distillation input ids",
-    )
     parser.add_argument("--limit", type=int, default=None, help="Optional number of samples")
     parser.add_argument("--start-index", type=int, default=0, help="Dataset index to start at")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing sample folders")
@@ -361,27 +319,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=32,
         help="Batch size for dataset activation-write forward passes",
-    )
-    parser.add_argument(
-        "--activation-write-cache-path",
-        "--activation_write_cache_path",
-        dest="activation_write_cache_path",
-        help=(
-            "Optional cache root for dataset activation-write results. "
-            "A model-name folder is created inside this path."
-        ),
-    )
-    parser.add_argument(
-        "--skip-graph-save",
-        action="store_true",
-        default=True,
-        help="Skip saving the full graph.pt file (~21MB/sample, not needed for training). Default: True.",
-    )
-    parser.add_argument(
-        "--no-skip-graph-save",
-        action="store_false",
-        dest="skip_graph_save",
-        help="Save the full graph.pt file for each sample.",
     )
     parser.add_argument(
         "--anova-nodes-per-label",
@@ -411,7 +348,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Minimum ANOVA specificity for a neuron to be included in a sum range/sum units supernode (neurons are ranked by DLA cosine similarity).",
     )
     add_graph_build_args(parser)
-    add_graph_prune_args(parser)
     parser.add_argument(
         "--merge-shards",
         action="store_true",
@@ -438,22 +374,16 @@ def main() -> None:
         store_path=args.store_path,
         dataset_file=args.dataset_file,
         teacher_model=args.teacher_model,
-        student_model=args.student_model,
         dtype=args.dtype,
         top_k_logits=args.top_k_logits,
         prop_neurons_per_layer=args.prop_neurons_per_layer,
         attribution_batch_size=args.attribution_batch_size,
         verbose=args.verbose,
-        prune=args.prune,
-        node_threshold=args.node_threshold,
-        edge_threshold=args.edge_threshold,
         limit=args.limit,
         start_index=args.start_index,
         overwrite=args.overwrite,
-        skip_graph_save=args.skip_graph_save,
         dataset=args.dataset,
         activation_forward_batch_size=args.activation_forward_batch_size,
-        activation_write_cache_path=args.activation_write_cache_path,
         anova_nodes_per_label=args.anova_nodes_per_label,
         anova_range_radius=args.anova_range_radius,
         sum_min_specificity=args.sum_min_specificity,
