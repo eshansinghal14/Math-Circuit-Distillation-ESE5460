@@ -56,7 +56,6 @@ class TeacherDataConfig:
     limit: int | None = None
     start_index: int = 0
     overwrite: bool = False
-    fast: bool = True
     skip_graph_save: bool = True
     dataset: str | None = None
     activation_forward_batch_size: int = 32
@@ -220,14 +219,13 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
         os.makedirs(sample_dir, exist_ok=True)
 
         logger.info("Generating teacher data for sample %d: %r", sample_idx, prompt)
-        logger.info("Running attribution graph build (fast=%s)", config.fast)
+        logger.info("Running attribution graph build")
         graph = adapter.build_graph(
             prompt=prompt,
             top_k_logits=config.top_k_logits,
             prop_neurons_per_layer=config.prop_neurons_per_layer,
             batch_size=config.attribution_batch_size,
             verbose=config.verbose,
-            fast=config.fast,
         )
         _log_graph_summary(graph, logger=logger, stage="Built")
 
@@ -416,18 +414,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start-index", type=int, default=0, help="Dataset index to start at")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing sample folders")
     parser.add_argument(
-        "--fast",
-        action="store_true",
-        default=True,
-        help="Use fast attribution (skip Jacobian; linear logit readout only). Default: True.",
-    )
-    parser.add_argument(
-        "--no-fast",
-        action="store_false",
-        dest="fast",
-        help="Use full Jacobian attribution instead of fast mode.",
-    )
-    parser.add_argument(
         "--dataset",
         help=(
             "Optional dataset prefix, filename, or path for activation-write "
@@ -528,7 +514,6 @@ def main() -> None:
         limit=args.limit,
         start_index=args.start_index,
         overwrite=args.overwrite,
-        fast=args.fast,
         skip_graph_save=args.skip_graph_save,
         dataset=args.dataset,
         activation_forward_batch_size=args.activation_forward_batch_size,

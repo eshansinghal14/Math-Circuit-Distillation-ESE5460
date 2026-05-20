@@ -226,7 +226,6 @@ class HFLlamaGraphAdapter:
         verbose: bool = False,
         create_graph: bool = False,
         detach_result: bool | None = None,
-        fast: bool = False,
         skip_logit_attribution: bool = False,
     ) -> Graph:
         from graph_loss.attribution.attribute import attribute
@@ -241,7 +240,6 @@ class HFLlamaGraphAdapter:
             verbose=verbose,
             create_graph=create_graph,
             detach_result=detach_result,
-            fast=fast,
             skip_logit_attribution=skip_logit_attribution,
         )
 
@@ -342,7 +340,6 @@ def detach_graph(graph: Graph) -> Graph:
         logit_targets=graph.logit_targets,
         logit_probabilities=graph.logit_probabilities.detach(),
         vocab_size=graph.vocab_size,
-        attribution_mode=graph.attribution_mode,
         neuron_write_vectors=nw,
     )
 

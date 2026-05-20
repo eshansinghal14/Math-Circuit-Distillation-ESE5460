@@ -112,7 +112,6 @@ def _build_graph_data(
         "n_neurons": graph.n_neurons,
         "n_supernodes": len(supergraph.supernodes),
         "n_links": len(links),
-        "attribution_mode": graph.attribution_mode,
     }
     return {
         "metadata": metadata,

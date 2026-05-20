@@ -113,7 +113,6 @@ def compute_prompt_graph_loss(
         verbose=config.verbose,
         create_graph=False,
         detach_result=False,
-        fast=False,
         skip_logit_attribution=False,
     )
     student_prune_result = None

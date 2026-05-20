@@ -6,14 +6,13 @@ Mirrors the TL ``attribute`` / ``setup_attribution`` pipeline but uses
 Typical flow:
 
     adapter = HFLlamaGraphAdapter(hf_model, tokenizer, device)
-    graph = attribute(adapter, prompt, top_k_logits=20, fast=True)
+    graph = attribute(adapter, prompt, top_k_logits=20)
 
 ``build_graph`` on the adapter is a thin wrapper around ``attribute``.
 """
 
 from __future__ import annotations
 
-import contextlib
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
@@ -32,7 +31,6 @@ def setup_attribution(
     input_ids: torch.Tensor,
     prop_neurons_per_layer: float,
     dtype: torch.dtype | None,
-    fast: bool,
 ) -> HFAttributionContext:
     """Run the initial single forward pass and return an ``HFAttributionContext``.
 
@@ -59,8 +57,7 @@ def setup_attribution(
         handles.append(layer.mlp.register_forward_pre_hook(_pre))
 
     try:
-        fwd_ctx = torch.no_grad() if fast else contextlib.nullcontext()
-        with fwd_ctx, adapter.autocast_context(dtype):
+        with adapter.autocast_context(dtype):
             out = adapter.model(
                 input_ids=input_batch,
                 attention_mask=torch.ones_like(input_batch, device=adapter.device),
@@ -137,7 +134,6 @@ def attribute(
     verbose: bool = False,
     create_graph: bool = False,
     detach_result: bool | None = None,
-    fast: bool = False,
     skip_logit_attribution: bool = False,
 ) -> Graph:
     """Compute a neuron-level attribution graph for ``prompt``.
@@ -147,9 +143,7 @@ def attribute(
 
     Phase 0: ``setup_attribution`` — single forward pass, neuron selection.
     Phase 1: ``AttributionTargets`` construction from the final-position logits.
-    Phase 2 (fast): linear logit readout; skip gradient phases.
-    Phase 2 (full): gradient-based edge scoring via ``HFAttributionContext``
-                    batch methods.
+    Phase 2: gradient-based edge scoring via ``HFAttributionContext`` batch methods.
     """
     from graph_loss.hf_adapter import _HFGraphConfig, detach_graph
 
@@ -157,7 +151,7 @@ def attribute(
         raise ValueError("prop_neurons_per_layer must be in (0, 1]")
 
     input_ids = adapter.ensure_tokenized(prompt)
-    ctx = setup_attribution(adapter, input_ids, prop_neurons_per_layer, dtype, fast)
+    ctx = setup_attribution(adapter, input_ids, prop_neurons_per_layer, dtype)
 
     targets = AttributionTargets(
         attribution_targets=attribution_targets,
@@ -176,34 +170,7 @@ def attribute(
 
     cfg = _HFGraphConfig(adapter)
 
-    if fast:
-        adjacency = torch.zeros(
-            total_nodes, total_nodes,
-            dtype=ctx.source_vectors.dtype,
-            device=adapter.device,
-        )
-        lv = targets.logit_vectors.to(device=adapter.device, dtype=ctx.source_vectors.dtype)
-        adjacency[logit_start : logit_start + n_logits, :n_neurons] = lv @ ctx.source_vectors.T
-        graph = Graph(
-            input_string=adapter.tokenizer.decode(input_ids.detach().cpu().tolist()),
-            input_tokens=input_ids,
-            neuron_locations=ctx.neuron_locations,
-            adjacency_matrix=adjacency,
-            cfg=cfg,
-            neuron_activations=ctx.neuron_activations,
-            logit_targets=targets.logit_targets,
-            logit_probabilities=targets.logit_probabilities,
-            vocab_size=targets.vocab_size,
-            attribution_mode="fast",
-            neuron_write_vectors=ctx.source_vectors.clone(),
-        )
-        if detach_result is None:
-            detach_result = not create_graph
-        if detach_result:
-            graph = detach_graph(graph)
-        return graph
-
-    # Full mode: gradient-based edge attribution.
+    # Gradient-based edge attribution.
     neuron_row_chunks = []
     for start in range(0, n_neurons, max(1, batch_size)):
         end = min(start + max(1, batch_size), n_neurons)

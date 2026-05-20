@@ -43,7 +43,6 @@ class Graph:
     vocab_size: int
     cfg: UnifiedConfig
     n_pos: int
-    attribution_mode: str
     neuron_write_vectors: torch.Tensor | None
 
     def __init__(
@@ -58,7 +57,6 @@ class Graph:
         logit_probabilities: torch.Tensor,
         vocab_size: int | None = None,
         *,
-        attribution_mode: str = "full",
         neuron_write_vectors: torch.Tensor | None = None,
     ):
         """Container for neuron/token/logit attribution graphs.
@@ -79,7 +77,6 @@ class Graph:
         self.neuron_locations = neuron_locations
         self.input_tokens = input_tokens
         self.neuron_activations = neuron_activations
-        self.attribution_mode = attribution_mode
         self.neuron_write_vectors = neuron_write_vectors
 
     @property
@@ -135,8 +132,6 @@ class Graph:
             "adjacency_layout": "dense",
             "adjacency_matrix": self.adjacency_matrix,
         }
-        if self.attribution_mode != "full":
-            data["attribution_mode"] = self.attribution_mode
         if self.neuron_write_vectors is not None:
             data["neuron_write_vectors"] = self.neuron_write_vectors
         torch.save(data, path)
@@ -154,7 +149,6 @@ class Graph:
             logit_targets=data["logit_targets"],
             logit_probabilities=data["logit_probabilities"],
             vocab_size=data.get("vocab_size"),
-            attribution_mode=data.get("attribution_mode", "full"),
             neuron_write_vectors=data.get("neuron_write_vectors"),
         )
 
@@ -180,7 +174,6 @@ class Graph:
             logit_targets=self.logit_targets,
             logit_probabilities=self.logit_probabilities,
             vocab_size=self.vocab_size,
-            attribution_mode=self.attribution_mode,
             neuron_write_vectors=self.neuron_write_vectors,
         )
 
@@ -239,33 +232,6 @@ def compute_node_influence(adjacency_matrix: torch.Tensor, logit_weights: torch.
     return positive_influence - negative_influence
 
 
-def compute_fast_proxy_node_influence(graph: Graph) -> torch.Tensor:
-    """Per-node scalar influence when ``attribution_mode == 'fast'`` (no full Jacobian graph).
-
-    Neurons ranked by residual write-vector norm; tokens and logits get uniform / prob weights
-    so pruning keeps them, matching ``prune_graph`` expectations.
-    """
-    device = graph.adjacency_device
-    dtype = graph.adjacency_matrix.dtype
-    n_neurons = graph.n_neurons
-    n_tokens = graph.n_tokens
-    n_logits = graph.n_logits
-    n_nodes = graph.n_nodes
-    out = torch.zeros(n_nodes, device=device, dtype=dtype)
-    nw = graph.neuron_write_vectors
-    if nw is not None and n_neurons > 0:
-        out[:n_neurons] = nw.to(device=device, dtype=dtype).norm(dim=-1)
-    token_start = n_neurons
-    logit_start = n_neurons + n_tokens
-    if n_tokens > 0:
-        out[token_start:logit_start] = torch.ones(n_tokens, device=device, dtype=dtype)
-    if n_logits > 0:
-        out[logit_start : logit_start + n_logits] = graph.logit_probabilities.to(
-            device=device, dtype=dtype,
-        ).clamp(min=torch.finfo(dtype).eps)
-    return out
-
-
 def compute_neuron_logit_influence(graph: Graph) -> torch.Tensor:
     """Return direct graph attribution from each neuron to each selected logit."""
     logit_start = graph.n_neurons + graph.n_tokens
@@ -291,28 +257,7 @@ def find_threshold(scores: torch.Tensor, threshold: float):
     threshold_index = int(torch.searchsorted(cumulative_score, threshold).item())
     threshold_index = min(threshold_index, len(cumulative_score) - 1)
     return sorted_scores[threshold_index]
-
-
-def find_elbow(values: torch.Tensor | list[float]) -> int:
-    """Return the 0-based elbow index using max distance from the endpoint line."""
-    values_t = torch.as_tensor(values, dtype=torch.float32).flatten()
-    if values_t.numel() <= 2:
-        return int(max(values_t.numel() - 1, 0))
-
-    x = torch.linspace(0.0, 1.0, steps=int(values_t.numel()))
-    y_min = values_t.min()
-    y_range = (values_t.max() - y_min).clamp(min=1e-12)
-    y = (values_t - y_min) / y_range
-    points = torch.stack([x, y], dim=1)
-    start = points[0]
-    end = points[-1]
-    line = end - start
-    line_norm = line.norm().clamp(min=1e-12)
-    distances = torch.abs(
-        line[0] * (start[1] - points[:, 1]) - (start[0] - points[:, 0]) * line[1]
-    ) / line_norm
-    return int(torch.argmax(distances).item())
-
+    
 
 class PruneResult(NamedTuple):
     node_mask: torch.Tensor
@@ -348,10 +293,7 @@ def prune_graph(
         dtype=adjacency_matrix.dtype,
     )
 
-    if getattr(graph, "attribution_mode", "full") == "fast":
-        node_influence = compute_fast_proxy_node_influence(graph)
-    else:
-        node_influence = compute_node_influence(adjacency_matrix, logit_weights)
+    node_influence = compute_node_influence(adjacency_matrix, logit_weights)
     node_scores = node_influence.abs()
     node_mask = node_scores >= find_threshold(node_scores, node_threshold)
     node_mask[token_start:] = True
@@ -360,10 +302,7 @@ def prune_graph(
     pruned_matrix[~node_mask] = 0
     pruned_matrix[:, ~node_mask] = 0
 
-    if getattr(graph, "attribution_mode", "full") == "fast":
-        edge_scores = pruned_matrix.abs()
-    else:
-        edge_scores = compute_edge_influence(pruned_matrix, logit_weights)
+    edge_scores = compute_edge_influence(pruned_matrix, logit_weights)
     edge_mask = edge_scores >= find_threshold(edge_scores.flatten(), edge_threshold)
 
     old_node_mask = node_mask.clone()
@@ -451,10 +390,7 @@ def build_super_graph(
             device=adjacency_matrix.device,
             dtype=adjacency_matrix.dtype,
         )
-    if getattr(graph, "attribution_mode", "full") == "fast":
-        node_influence = compute_fast_proxy_node_influence(graph).detach().float().cpu()
-    else:
-        node_influence = compute_node_influence(adjacency_matrix, logit_weights).detach().float().cpu()
+    node_influence = compute_node_influence(adjacency_matrix, logit_weights).detach().float().cpu()
 
     def format_member_locations(members: list[int]) -> str:
         locations = graph.neuron_locations.detach().cpu()
@@ -560,30 +496,25 @@ def build_super_graph(
         if float(basis.norm().item()) == 0.0:
             return {int(member): 0.0 for member in members}
 
-        valid_token_ids = torch.tensor(
-            [int(token_ids[idx]) for idx in valid_positions],
-            dtype=torch.long,
-            device=model.cfg.device,
-        )
-        W_U = model.unembed.W_U.detach().to(device=model.cfg.device)
-        W_U_numbers = W_U[:, valid_token_ids]
-        basis = basis.to(device=model.cfg.device, dtype=W_U.dtype)
-        locations = graph.neuron_locations.detach().cpu().to(dtype=torch.long)
-        activations = graph.neuron_activations.detach().to(device=model.cfg.device, dtype=W_U.dtype)
+        vocab_to_valid_idx: dict[int, int] = {
+            int(token_ids[pos_idx]): valid_idx
+            for valid_idx, pos_idx in enumerate(valid_positions)
+        }
+        logit_col_to_valid_idx: dict[int, int] = {
+            col: vocab_to_valid_idx[target.vocab_idx]
+            for col, target in enumerate(graph.logit_targets)
+            if target.vocab_idx in vocab_to_valid_idx
+        }
+        if not logit_col_to_valid_idx:
+            return {int(member): 0.0 for member in members}
+
+        neuron_logit_inf = compute_neuron_logit_influence(graph).detach().float().cpu()
         scores: dict[int, float] = {}
-        w_out_cache: dict[int, torch.Tensor] = {}
         for member in members:
-            layer = int(locations[member, 0].item())
-            neuron_id = int(locations[member, 2].item())
-            if layer not in w_out_cache:
-                old_mlp = model.blocks[layer].mlp.old_mlp
-                w_out_cache[layer] = model._row_oriented_weight(
-                    old_mlp.W_out.to(device=model.cfg.device, dtype=W_U.dtype)
-                )
-            neuron_activation = activations[member]
-            unembed_projection = w_out_cache[layer][neuron_id] @ W_U_numbers
-            dla = neuron_activation * unembed_projection
-            score = F.cosine_similarity(dla.unsqueeze(0), basis.unsqueeze(0), dim=1).item()
+            inf_vec = torch.zeros(len(valid_positions), dtype=torch.float32)
+            for col, valid_idx in logit_col_to_valid_idx.items():
+                inf_vec[valid_idx] = neuron_logit_inf[member, col]
+            score = F.cosine_similarity(inf_vec.unsqueeze(0), basis.unsqueeze(0), dim=1).item()
             scores[int(member)] = float(score)
         return scores
 
