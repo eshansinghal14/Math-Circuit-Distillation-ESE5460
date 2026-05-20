@@ -678,8 +678,8 @@ def build_super_graph(
                             if category in label_result.category_scores
                             and label_result.category_scores[category] > 0.0
                         ]
-                        all_by_spec = sorted(pre_filter, key=lambda x: x[2], reverse=True)
-                        top_spec = all_by_spec[:5]
+                        all_by_cos = sorted(pre_filter, key=lambda x: x[1], reverse=True)
+                        top_cos = all_by_cos[:5]
                         if not pre_filter:
                             if category == "sum range":
                                 logger.warning(
@@ -695,13 +695,13 @@ def build_super_graph(
                         logger.warning(
                             "  ANOVA label %s: no nodes above specificity threshold"
                             " (sum_min_specificity=%.6g); falling back to top-%d neurons by"
-                            " specificity. Top specificities: %s",
+                            " DLA cosine similarity. Top cos scores: %s",
                             category,
                             sum_min_specificity,
                             anova_nodes_per_label,
-                            [(round(s, 6), round(c, 4)) for _, c, s in top_spec],
+                            [(round(c, 4), round(s, 6)) for _, c, s in top_cos],
                         )
-                        scored_rows = [(row_idx, cos_score) for row_idx, cos_score, _spec in all_by_spec]
+                        scored_rows = [(row_idx, cos_score) for row_idx, cos_score, _spec in all_by_cos]
                         sorted_all_rows = scored_rows
                     else:
                         raise ValueError(
