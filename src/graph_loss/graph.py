@@ -647,6 +647,7 @@ def build_super_graph(
                     target_value=target_sum,
                     units=category == "sum units",
                 )
+                spec_threshold = sum_min_specificity if category == "sum range" else 0.0
                 all_scored_rows = [
                     (
                         row_idx,
@@ -656,7 +657,7 @@ def build_super_graph(
                     if category in label_result.category_scores
                     and label_result.category_scores[category] > 0.0
                     and label_result.category_specificity.get(category, float("-inf"))
-                    > sum_min_specificity
+                    > spec_threshold
                 ]
             else:
                 all_scored_rows = [
@@ -678,21 +679,30 @@ def build_super_graph(
                             and label_result.category_scores[category] > 0.0
                         ]
                         top_spec = sorted(pre_filter, key=lambda x: x[2], reverse=True)[:5]
-                        raise ValueError(
-                            f"Student ANOVA category {category!r} has no nodes "
-                            f"(sum_min_specificity={sum_min_specificity}). "
-                            f"Candidates before specificity filter: {len(pre_filter)}. "
-                            f"Top specificities: {[(round(s,6), round(c,4)) for _,c,s in top_spec]}"
-                        )
+                        if category == "sum range":
+                            raise ValueError(
+                                f"Student ANOVA category {category!r} has no nodes "
+                                f"(sum_min_specificity={sum_min_specificity}). "
+                                f"Candidates before specificity filter: {len(pre_filter)}. "
+                                f"Top specificities: {[(round(s,6), round(c,4)) for _,c,s in top_spec]}"
+                            )
+                        else:
+                            raise ValueError(
+                                f"Student ANOVA category {category!r} has no nodes with positive specificity. "
+                                f"Candidates before specificity filter: {len(pre_filter)}. "
+                                f"Top specificities: {[(round(s,6), round(c,4)) for _,c,s in top_spec]}"
+                            )
                     raise ValueError(
                         f"Student ANOVA category {category!r} has no positive-variance nodes."
                     )
-                if category in {"sum range", "sum units"}:
+                if category == "sum range":
                     logger.info(
                         "  ANOVA label %s: no positive-variance nodes above sum_min_specificity=%.6g",
                         category,
                         sum_min_specificity,
                     )
+                elif category == "sum units":
+                    logger.info("  ANOVA label %s: no positive-variance nodes with positive specificity", category)
                 else:
                     logger.info("  ANOVA label %s: no positive-variance nodes", category)
                 continue
