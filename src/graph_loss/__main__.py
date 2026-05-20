@@ -129,6 +129,18 @@ def main():
         default=0.0,
         help="Minimum ANOVA specificity for sum range/sum units supernodes.",
     )
+    parser.add_argument(
+        "--labelling-layer-batch-size",
+        "--labelling_layer_batch_size",
+        dest="labelling_layer_batch_size",
+        type=int,
+        default=1,
+        help=(
+            "Number of layers to batch together when computing ANOVA labels. "
+            "Larger values reduce label_activation_heatmaps call overhead at the "
+            "cost of holding more activation grids in memory simultaneously."
+        ),
+    )
 
     args = parser.parse_args()
     if args.supernode_heatmap_output_dir:
@@ -165,6 +177,7 @@ def main():
         anova_nodes_per_label=args.anova_nodes_per_label,
         anova_range_radius=args.anova_range_radius,
         sum_min_specificity=args.sum_min_specificity,
+        labelling_layer_batch_size=args.labelling_layer_batch_size,
         logger=logger,
     )
 
