@@ -288,22 +288,7 @@ def create_graph(
     ctx = setup_attribution(adapter, input_ids, prop_neurons_per_layer, dtype)
     _logger.info("  Pre-selected neurons: %d", ctx.n_neurons)
 
-    # Step 2: Build MLP input cache if not supplied.
-    if mlp_input_cache is None and dataset is not None and model_name is not None:
-        from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
-        from graph_loss.precompute_mlp_inputs import build_mlp_input_cache as _build_mlp_cache
-        dataset_path = _resolve_dataset_path(dataset)
-        _logger.info("Building MLP input cache for dataset: %s", dataset)
-        mlp_input_cache = _build_mlp_cache(
-            adapter,
-            dataset_path,
-            model_name,
-            batch_size=32,
-        )
-        n_prompts = int(mlp_input_cache.get("meta", {}).get("n_prompts", 0))
-        _logger.info("  Built MLP cache: %d prompts", n_prompts)
-
-    # Step 3: ANOVA-label all pre-selected neurons, one layer at a time.
+    # Step 2: ANOVA-label all pre-selected neurons, one layer at a time.
     # Activations are computed and discarded per layer — peak memory is
     # O(n_layer_neurons × grid_cells) instead of O(N × grid_cells).
     if dataset is None:
@@ -324,6 +309,21 @@ def create_graph(
             _logger.warning("Failed to load label cache (%s); re-labeling", exc)
 
     if label_results is None:
+        # Build MLP input cache only on a label cache miss.
+        if mlp_input_cache is None and model_name is not None:
+            from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
+            from graph_loss.precompute_mlp_inputs import build_mlp_input_cache as _build_mlp_cache
+            dataset_path = _resolve_dataset_path(dataset)
+            _logger.info("Building MLP input cache for dataset: %s", dataset)
+            mlp_input_cache = _build_mlp_cache(
+                adapter,
+                dataset_path,
+                model_name,
+                batch_size=32,
+            )
+            n_prompts = int(mlp_input_cache.get("meta", {}).get("n_prompts", 0))
+            _logger.info("  Built MLP cache: %d prompts", n_prompts)
+
         _logger.info("ANOVA-labeling %d pre-selected neurons (layer-by-layer)", ctx.n_neurons)
         label_results = label_neurons_layer_by_layer(
             adapter,
