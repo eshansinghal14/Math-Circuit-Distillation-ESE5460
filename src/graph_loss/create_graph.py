@@ -243,6 +243,7 @@ def create_graph(
     anova_nodes_per_label: int = 10,
     anova_range_radius: int = 0,
     sum_min_specificity: float = 0.0,
+    labelling_layer_batch_size: int = 4,
     no_grad_supergraph: bool = False,
     force_label_refresh: bool = False,
     logger: logging.Logger | None = None,
@@ -273,6 +274,7 @@ def create_graph(
         anova_nodes_per_label: Max neurons per ANOVA label supernode.
         anova_range_radius: Radius for target-centered ANOVA range masks.
         sum_min_specificity: Min ANOVA specificity for sum-range/sum-units supernodes.
+        labelling_layer_batch_size: Number of layers per batch during ANOVA labeling.
         no_grad_supergraph: Wrap build_super_graph in torch.no_grad() (training use).
         logger: Optional logger; creates a module-level one if not provided.
 
@@ -331,6 +333,7 @@ def create_graph(
             mlp_input_cache,
             target_args=target_args,
             anova_range_radius=anova_range_radius,
+            labelling_layer_batch_size=labelling_layer_batch_size,
         )
         try:
             torch.save(label_results, _cache_path)
