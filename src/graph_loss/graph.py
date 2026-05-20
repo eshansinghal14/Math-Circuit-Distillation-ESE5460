@@ -462,7 +462,7 @@ def build_super_graph(
             out[int(member)] = (number_values, values)
         return out
 
-    def number_token_dla_cosine_scores(
+    def number_token_kl_scores(
         members: list[int],
         *,
         target_value: int,
@@ -487,35 +487,30 @@ def build_super_graph(
         if not valid_positions:
             return {int(member): 0.0 for member in members}
 
-        basis = torch.zeros(len(valid_positions), dtype=torch.float32)
+        # Build target distribution Q over all tracked logit columns.
         target_unit = int(target_value) % 10
-        for basis_idx, number_idx in enumerate(valid_positions):
-            number_value = number_values[number_idx]
-            if (number_value % 10 == target_unit) if units else (number_value == int(target_value)):
-                basis[basis_idx] = 1.0
-        if float(basis.norm().item()) == 0.0:
-            return {int(member): 0.0 for member in members}
-
-        vocab_to_valid_idx: dict[int, int] = {
-            int(token_ids[pos_idx]): valid_idx
-            for valid_idx, pos_idx in enumerate(valid_positions)
+        vocab_to_number: dict[int, int] = {
+            int(token_ids[pos_idx]): number_values[pos_idx]
+            for pos_idx in valid_positions
         }
-        logit_col_to_valid_idx: dict[int, int] = {
-            col: vocab_to_valid_idx[target.vocab_idx]
-            for col, target in enumerate(graph.logit_targets)
-            if target.vocab_idx in vocab_to_valid_idx
-        }
-        if not logit_col_to_valid_idx:
+        target_weights = torch.zeros(graph.n_logits, dtype=torch.float32)
+        for col, logit_target in enumerate(graph.logit_targets):
+            if logit_target.vocab_idx in vocab_to_number:
+                number_value = vocab_to_number[logit_target.vocab_idx]
+                if (number_value % 10 == target_unit) if units else (number_value == int(target_value)):
+                    target_weights[col] = 1.0
+        if float(target_weights.sum().item()) == 0.0:
             return {int(member): 0.0 for member in members}
+        Q = target_weights / target_weights.sum()
 
         neuron_logit_inf = compute_neuron_logit_influence(graph).detach().float().cpu()
+        nonzero = Q > 0
         scores: dict[int, float] = {}
         for member in members:
-            inf_vec = torch.zeros(len(valid_positions), dtype=torch.float32)
-            for col, valid_idx in logit_col_to_valid_idx.items():
-                inf_vec[valid_idx] = neuron_logit_inf[member, col]
-            score = F.cosine_similarity(inf_vec.unsqueeze(0), basis.unsqueeze(0), dim=1).item()
-            scores[int(member)] = float(score)
+            P = torch.softmax(neuron_logit_inf[member], dim=0)
+            # KL(Q || P) — lower means P better matches target Q
+            kl = (Q[nonzero] * (Q[nonzero].log() - P[nonzero].log())).sum().item()
+            scores[int(member)] = -float(kl)
         return scores
 
     kept_neuron_indices_device = torch.where(kept_neuron_mask)[0]
@@ -573,7 +568,7 @@ def build_super_graph(
 
         for category in ANOVA_LABEL_CATEGORIES:
             if category in {"sum range", "sum units"}:
-                sum_cosine_scores = number_token_dla_cosine_scores(
+                sum_kl_scores = number_token_kl_scores(
                     kept_member_list,
                     target_value=target_sum,
                     units=category == "sum units",
@@ -581,7 +576,7 @@ def build_super_graph(
                 all_scored_rows = [
                     (
                         row_idx,
-                        sum_cosine_scores[int(kept_neuron_indices[row_idx].item())],
+                        sum_kl_scores[int(kept_neuron_indices[row_idx].item())],
                     )
                     for row_idx, label_result in enumerate(label_results)
                     if category in label_result.category_scores
@@ -600,7 +595,7 @@ def build_super_graph(
                 if strict:
                     if category in {"sum range", "sum units"}:
                         pre_filter = [
-                            (row_idx, sum_cosine_scores[int(kept_neuron_indices[row_idx].item())],
+                            (row_idx, sum_kl_scores[int(kept_neuron_indices[row_idx].item())],
                              label_result.category_scores.get(category, 0.0))
                             for row_idx, label_result in enumerate(label_results)
                             if category in label_result.category_scores
@@ -617,7 +612,7 @@ def build_super_graph(
                         logger.warning(
                             "  ANOVA label %s: no nodes above variance threshold"
                             " (sum_min_specificity=%.6g); falling back to top-%d neurons by"
-                            " DLA cosine similarity. Top cos scores: %s",
+                            " logit influence KL. Top KL scores: %s",
                             category,
                             sum_min_specificity,
                             anova_nodes_per_label,
@@ -658,7 +653,7 @@ def build_super_graph(
                 if category in {"sum range", "sum units"}:
                     specificity_score = label_results[row_idx].category_specificity.get(category, 0.0)
                     variance_score = label_results[row_idx].category_scores.get(category, 0.0)
-                    member_plot_labels[member] = [f"{label} (var={variance_score:.3f}, spec={specificity_score:.3f}, cos={ranking_score:.3f})"]
+                    member_plot_labels[member] = [f"{label} (var={variance_score:.3f}, spec={specificity_score:.3f}, kl={-ranking_score:.3f})"]
                 else:
                     variance_score = label_results[row_idx].category_scores[category]
                     specificity_score = label_results[row_idx].category_specificity.get(category, 0.0)
