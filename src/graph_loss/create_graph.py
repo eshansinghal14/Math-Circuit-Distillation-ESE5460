@@ -241,7 +241,6 @@ def create_graph(
     anova_nodes_per_label: int = 10,
     anova_range_radius: int = 0,
     sum_min_specificity: float = 0.0,
-    labelling_layer_batch_size: int = 1,
     no_grad_supergraph: bool = False,
     force_label_refresh: bool = False,
     logger: logging.Logger | None = None,
@@ -334,7 +333,6 @@ def create_graph(
             mlp_input_cache,
             target_args=target_args,
             anova_range_radius=anova_range_radius,
-            labelling_layer_batch_size=labelling_layer_batch_size,
         )
         try:
             torch.save(
