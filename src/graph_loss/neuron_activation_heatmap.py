@@ -198,7 +198,12 @@ def label_neurons_layer_by_layer(
     at the end of each batch, eliminating per-layer host synchronisation points.
     Returns a list[NodeLabel] in the same order as neuron_locations.
     """
-    from graph_loss.anova_node_labels import label_activation_heatmaps, NodeLabel
+    from graph_loss.anova_node_labels import (
+        NodeLabel,
+        build_anova_basis_rules,
+        build_gpu_anova_state,
+        gpu_label_activation_heatmaps,
+    )
 
     meta = mlp_input_cache.get("meta", {})
     layer_inputs = mlp_input_cache.get("layer_inputs", {})
@@ -240,6 +245,14 @@ def label_neurons_layer_by_layer(
 
     # Move flat_indices to GPU once; reused for every layer's scatter operation.
     flat_indices_gpu = flat_indices.to(device=device)
+
+    # Build ANOVA rules + GPU state once; masks and indicator matrices are reused every batch.
+    anova_rules = build_anova_basis_rules(
+        arg_values,
+        target_args=target_args,
+        anova_range_radius=anova_range_radius,
+    )
+    gpu_anova_state = build_gpu_anova_state(anova_rules, device)
 
     for batch_start in range(0, len(sorted_layers), labelling_layer_batch_size):
         batch_layers = sorted_layers[batch_start : batch_start + labelling_layer_batch_size]
@@ -327,19 +340,11 @@ def label_neurons_layer_by_layer(
 
         del neuron_acts_batch
 
-        # Single D2H transfer for the whole batch.
-        batch_grid_gpu = torch.cat(batch_grids_gpu, dim=0)
+        # Run ANOVA matmuls on GPU; only [N, R] scores are transferred to CPU.
+        batch_grid_gpu = torch.cat(batch_grids_gpu, dim=0)  # [N_batch, grid_cells]
         del batch_grids_gpu
-        batch_grid = batch_grid_gpu.cpu()
+        batch_labels = gpu_label_activation_heatmaps(batch_grid_gpu, gpu_anova_state, anova_rules)
         del batch_grid_gpu
-
-        # Label all neurons across the batch in one vectorized ANOVA call.
-        batch_labels = label_activation_heatmaps(
-            batch_grid.reshape(len(batch_loc_indices), *grid_shape),
-            arg_values,
-            target_args=target_args,
-            anova_range_radius=anova_range_radius,
-        )
         for label_j, loc_idx in enumerate(batch_loc_indices):
             label_results[loc_idx] = batch_labels[label_j]
 

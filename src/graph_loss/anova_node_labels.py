@@ -13,10 +13,6 @@ class BasisRule:
     label: str
     mask: torch.Tensor
     category: str
-    range_values: torch.Tensor | None = None
-    range_center: int | None = None
-    range_prefix: str | None = None
-    dynamic_range_label: bool = True
 
 
 @dataclass(frozen=True)
@@ -102,11 +98,7 @@ def build_anova_basis_rules(
     target_args: tuple[int, ...] | None = None,
     anova_range_radius: int = 0,
 ) -> list[BasisRule]:
-    """Build binary basis masks for argument and sum rules.
-
-    Arg range labels can be scored with a target-centered radius. Sum ranges
-    are still scored against the exact sum target.
-    """
+    """Build one binary basis mask per category."""
     if anova_range_radius < 0:
         raise ValueError("anova_range_radius must be non-negative")
     if not arg_values:
@@ -134,32 +126,14 @@ def build_anova_basis_rules(
                     values <= center + anova_range_radius
                 )
                 label = _mask_interval_label(arg_name, values, mask)
-                dynamic_range_label = False
             else:
                 mask = values == center
                 label = _format_interval_label(arg_name, center, center)
-                dynamic_range_label = True
-            rules.append(
-                BasisRule(
-                    label,
-                    mask,
-                    category=f"{arg_name} range",
-                    range_values=values,
-                    range_center=center,
-                    range_prefix=arg_name,
-                    dynamic_range_label=dynamic_range_label,
-                )
-            )
+            rules.append(BasisRule(label, mask, category=f"{arg_name} range"))
         for unit_digit in unit_digits:
             mask = torch.remainder(values, 10) == unit_digit
             if bool(mask.any().item()):
-                rules.append(
-                    BasisRule(
-                        f"{arg_name} units {unit_digit}",
-                        mask,
-                        category=f"{arg_name} units",
-                    )
-                )
+                rules.append(BasisRule(f"{arg_name} units {unit_digit}", mask, category=f"{arg_name} units"))
 
     if target_args is not None and len(target_args) >= 2 and len(arg_values) >= 2:
         arg1_values = grids[0]
@@ -177,14 +151,11 @@ def build_anova_basis_rules(
             arg1_box = arg1_values == arg1_center
             arg2_box = arg2_values == arg2_center
         mask = arg1_box & arg2_box
-        rules.append(
-            BasisRule(
-                _joint_range_label(arg1_values, arg2_values, mask),
-                mask,
-                category="arg1 range and arg2 range",
-                dynamic_range_label=False,
-            )
-        )
+        rules.append(BasisRule(
+            _joint_range_label(arg1_values, arg2_values, mask),
+            mask,
+            category="arg1 range and arg2 range",
+        ))
 
     if len(arg_values) >= 2:
         sums = grids[0] + grids[1]
@@ -199,22 +170,10 @@ def build_anova_basis_rules(
                     sums <= center + anova_range_radius
                 )
                 label = _mask_interval_label("sum", sums, mask)
-                dynamic_range_label = False
             else:
                 mask = sums == center
                 label = _format_interval_label("sum", center, center)
-                dynamic_range_label = True
-            rules.append(
-                BasisRule(
-                    label,
-                    mask,
-                    category="sum range",
-                    range_values=sums,
-                    range_center=center,
-                    range_prefix="sum",
-                    dynamic_range_label=dynamic_range_label,
-                )
-            )
+            rules.append(BasisRule(label, mask, category="sum range"))
         sum_unit_digits = (
             [int(target_args[0] + target_args[1]) % 10]
             if target_args is not None and len(target_args) >= 2
@@ -225,91 +184,13 @@ def build_anova_basis_rules(
             if bool(mask.any().item()):
                 rules.append(BasisRule(f"sum units {unit_digit}", mask, category="sum units"))
 
-        # Carry detection: (arg1 % 10) + (arg2 % 10) >= 10.  Distinguishes
-        # neurons that fire when the addition produces a carry from neurons
-        # that track units/decades.  Critical for addition circuit analysis.
         arg1_units = torch.remainder(grids[0], 10)
         arg2_units = torch.remainder(grids[1], 10)
         carry_mask = (arg1_units + arg2_units) >= 10
         if bool(carry_mask.any().item()) and bool((~carry_mask).any().item()):
-            rules.append(
-                BasisRule(
-                    label="carry",
-                    mask=carry_mask,
-                    category="carry",
-                )
-            )
+            rules.append(BasisRule(label="carry", mask=carry_mask, category="carry"))
 
     return rules
-
-
-def _abs_zscore_grid(activation_grid: torch.Tensor) -> torch.Tensor:
-    grid = activation_grid.detach().float()
-    valid_values = grid[~torch.isnan(grid)]
-    if valid_values.numel() == 0:
-        return grid
-
-    std = valid_values.std(unbiased=False)
-    if float(std.item()) == 0.0:
-        out = grid.clone()
-        out[~torch.isnan(out)] = 0.0
-        return out
-
-    mean = valid_values.mean()
-    return (grid - mean).abs() / std.clamp(min=1e-6)
-
-
-def _high_activation_range_label(
-    activation_grid: torch.Tensor,
-    rule: BasisRule,
-    *,
-    z_threshold: float = 1.0,
-) -> str:
-    if (
-        not rule.dynamic_range_label
-        or
-        rule.range_values is None
-        or rule.range_center is None
-        or rule.range_prefix is None
-    ):
-        return rule.label
-
-    zscores = _abs_zscore_grid(activation_grid)
-    values_grid = rule.range_values.to(dtype=torch.long)
-    valid = ~torch.isnan(zscores)
-    candidate_values = sorted(
-        {
-            int(value)
-            for value in values_grid[valid].flatten().tolist()
-        }
-    )
-    if int(rule.range_center) not in candidate_values:
-        return rule.label
-
-    value_scores: dict[int, float] = {}
-    for value in candidate_values:
-        value_mask = valid & (values_grid == value)
-        if bool(value_mask.any().item()):
-            value_scores[value] = float(zscores[value_mask].mean().item())
-        else:
-            value_scores[value] = float("-inf")
-
-    center_idx = candidate_values.index(int(rule.range_center))
-    left_idx = center_idx
-    right_idx = center_idx
-    while left_idx > 0 and value_scores[candidate_values[left_idx - 1]] >= z_threshold:
-        left_idx -= 1
-    while (
-        right_idx + 1 < len(candidate_values)
-        and value_scores[candidate_values[right_idx + 1]] >= z_threshold
-    ):
-        right_idx += 1
-
-    return _format_interval_label(
-        rule.range_prefix,
-        candidate_values[left_idx],
-        candidate_values[right_idx],
-    )
 
 
 def explained_variance_score(activation_grid: torch.Tensor, mask: torch.Tensor) -> float:
@@ -349,105 +230,97 @@ def _batch_explained_variance_scores(
     acts_flat:  [N, M]  — pre-flattened float activations (no NaNs)
     masks_flat: [R, M]  — pre-flattened float basis masks (one per rule)
     """
-    y_c = acts_flat - acts_flat.mean(dim=-1, keepdim=True)   # [N, M]
-    X_c = masks_flat - masks_flat.mean(dim=-1, keepdim=True)  # [R, M]
-    total_var = y_c.square().sum(dim=-1, keepdim=True)        # [N, 1]
-    basis_var = X_c.square().sum(dim=-1).unsqueeze(0)         # [1, R]
-    proj = y_c @ X_c.T                                        # [N, R]
-    denom = total_var * basis_var                             # [N, R]
+    y_c = acts_flat - acts_flat.mean(dim=-1, keepdim=True)    # [N, M]
+    X_c = masks_flat - masks_flat.mean(dim=-1, keepdim=True)   # [R, M]
+    total_var = y_c.square().sum(dim=-1, keepdim=True)         # [N, 1]
+    basis_var = X_c.square().sum(dim=-1).unsqueeze(0)          # [1, R]
+    proj = y_c @ X_c.T                                         # [N, R]
+    denom = total_var * basis_var                              # [N, R]
     return torch.where(denom > 0, proj.square() / denom, torch.zeros_like(proj)).clamp(0, 1)
 
 
-def label_activation_heatmaps(
-    activations: torch.Tensor,
-    arg_values: list[list[int]],
-    *,
-    target_args: tuple[int, ...] | None = None,
-    anova_range_radius: int = 0,
+def build_gpu_anova_state(
+    rules: list[BasisRule],
+    device: torch.device,
+) -> dict:
+    """Pre-allocate GPU tensors for the ANOVA scoring pipeline.
+    Call once before the batch loop; pass the result to gpu_label_activation_heatmaps.
+    """
+    masks_flat = torch.stack(
+        [r.mask.detach().float().flatten() for r in rules], dim=0
+    ).to(device)  # [R, M]
+    return {"masks_flat_gpu": masks_flat}
+
+
+def _make_node_labels(scores_cpu: torch.Tensor, rules: list[BasisRule]) -> list[NodeLabel]:
+    """Convert [N, R] CPU scores into NodeLabels using rule.label directly."""
+    N = int(scores_cpu.shape[0])
+    out: list[NodeLabel] = []
+    for n in range(N):
+        category_scores_n: dict[str, float] = {}
+        category_labels: dict[str, str] = {}
+        for r, rule in enumerate(rules):
+            s = float(scores_cpu[n, r].item())
+            if s > category_scores_n.get(rule.category, float("-inf")):
+                category_scores_n[rule.category] = s
+                category_labels[rule.category] = rule.label
+
+        if "arg1 units" in category_scores_n and "arg2 units" in category_scores_n:
+            combo = "arg1 units and arg2 units"
+            category_scores_n[combo] = min(
+                category_scores_n["arg1 units"], category_scores_n["arg2 units"]
+            )
+            category_labels[combo] = (
+                f"{category_labels['arg1 units']} and {category_labels['arg2 units']}"
+            )
+
+        category_specificity: dict[str, float] = {}
+        for category, target_score in category_scores_n.items():
+            excluded = {category} | CATEGORY_COMPONENTS.get(category, set())
+            competitors = [
+                category_scores_n[c]
+                for c in BASE_ANOVA_LABEL_CATEGORIES
+                if c not in excluded and c in category_scores_n
+            ]
+            category_specificity[category] = target_score - (max(competitors) if competitors else 0.0)
+
+        labels = [category_labels[c] for c in ANOVA_LABEL_CATEGORIES if c in category_labels]
+        scores = {
+            category_labels[c]: category_scores_n[c]
+            for c in ANOVA_LABEL_CATEGORIES
+            if c in category_labels
+        }
+        out.append(NodeLabel(
+            labels=labels,
+            scores=scores,
+            categories=category_labels,
+            category_scores=category_scores_n,
+            category_specificity=category_specificity,
+        ))
+    return out
+
+
+def gpu_label_activation_heatmaps(
+    acts_flat_gpu: torch.Tensor,
+    gpu_state: dict,
+    rules: list[BasisRule],
 ) -> list[NodeLabel]:
-    """Score ANOVA label categories for each activation heatmap."""
-    if activations.ndim != len(arg_values) + 1:
-        raise ValueError(
-            f"Expected activations with {len(arg_values) + 1} dims for arg_values, "
-            f"got shape {tuple(activations.shape)}"
-        )
+    """Score and label N neuron activation heatmaps with GPU-resident tensors.
 
-    rules = build_anova_basis_rules(
-        arg_values,
-        target_args=target_args,
-        anova_range_radius=anova_range_radius,
-    )
-
-    acts = activations.detach().float().cpu()  # [N, H, W]
-    N = acts.shape[0]
-
+    acts_flat_gpu: [N, M] on GPU — flattened activation grids, may contain NaN.
+    gpu_state:     dict from build_gpu_anova_state.
+    """
+    N = int(acts_flat_gpu.shape[0])
     if not rules:
         empty = NodeLabel(labels=[], scores={}, categories={}, category_scores={}, category_specificity={})
         return [empty] * N
 
-    acts_flat = acts.flatten(1)  # [N, M]
-    masks_flat = torch.stack(
-        [rule.mask.detach().float().flatten().cpu() for rule in rules], dim=0
-    )  # [R, M]
+    masks_flat_gpu = gpu_state["masks_flat_gpu"]
+    valid_mask = ~torch.isnan(acts_flat_gpu[0])
+    acts_v = acts_flat_gpu[:, valid_mask].float()
+    masks_v = masks_flat_gpu[:, valid_mask]
 
-    scores_nr = _batch_explained_variance_scores(acts_flat, masks_flat)  # [N, R]
+    scores_cpu = _batch_explained_variance_scores(acts_v, masks_v).cpu()
+    return _make_node_labels(scores_cpu, rules)
 
-    out: list[NodeLabel] = []
-    for n in range(N):
-        activation_grid = acts[n]
 
-        # Find the best-scoring rule per category, then compute the dynamic
-        # range label only for that winner (avoids R z-score passes per neuron).
-        category_best_r: dict[str, int] = {}
-        category_scores: dict[str, float] = {}
-        for r, rule in enumerate(rules):
-            score = float(scores_nr[n, r].item())
-            if score > category_scores.get(rule.category, float("-inf")):
-                category_scores[rule.category] = score
-                category_best_r[rule.category] = r
-
-        category_labels: dict[str, str] = {
-            category: _high_activation_range_label(activation_grid, rules[r])
-            for category, r in category_best_r.items()
-        }
-
-        if "arg1 units" in category_scores and "arg2 units" in category_scores:
-            category = "arg1 units and arg2 units"
-            category_scores[category] = min(
-                category_scores["arg1 units"],
-                category_scores["arg2 units"],
-            )
-            category_labels[category] = (
-                f"{category_labels['arg1 units']} and {category_labels['arg2 units']}"
-            )
-        category_specificity: dict[str, float] = {}
-        for category, target_score in category_scores.items():
-            excluded_categories = {category} | CATEGORY_COMPONENTS.get(category, set())
-            competitor_scores = [
-                category_scores[competitor]
-                for competitor in BASE_ANOVA_LABEL_CATEGORIES
-                if competitor not in excluded_categories and competitor in category_scores
-            ]
-            max_competitor_score = max(competitor_scores) if competitor_scores else 0.0
-            category_specificity[category] = target_score - max_competitor_score
-
-        labels = [
-            category_labels[category]
-            for category in ANOVA_LABEL_CATEGORIES
-            if category in category_labels
-        ]
-        scores = {
-            category_labels[category]: category_scores[category]
-            for category in ANOVA_LABEL_CATEGORIES
-            if category in category_labels
-        }
-        out.append(
-            NodeLabel(
-                labels=labels,
-                scores=scores,
-                categories=category_labels,
-                category_scores=category_scores,
-                category_specificity=category_specificity,
-            )
-        )
-    return out

@@ -244,7 +244,7 @@ def select_anova_supernodes(
     back to ANOVA variance.
 
     Args:
-        label_results: Output of label_activation_heatmaps(). Entry i corresponds
+        label_results: Output of gpu_label_activation_heatmaps(). Entry i corresponds
             to neuron index i passed to build_neuron_activation_write_result.
         anova_nodes_per_label: Max neurons per ANOVA label category.
         sum_min_specificity: Min ANOVA specificity for sum-range/sum-units candidates.
