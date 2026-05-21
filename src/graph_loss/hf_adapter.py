@@ -99,6 +99,10 @@ class HFLlamaGraphAdapter:
 
     def ensure_tokenized(self, prompt: str | torch.Tensor | list[int]) -> torch.Tensor:
         if isinstance(prompt, str):
+            if not prompt:
+                raise ValueError(
+                    "Prompt is an empty string. Pass a non-empty value to --prompt."
+                )
             tokens = self.tokenizer(
                 prompt,
                 return_tensors="pt",
@@ -114,7 +118,7 @@ class HFLlamaGraphAdapter:
             raise ValueError(f"Prompt tokens must be 1-D, got {tuple(tokens.shape)}")
         if tokens.numel() == 0:
             raise ValueError(
-                "Tokenizer produced 0 tokens from the prompt. "
+                f"Tokenizer produced 0 tokens from prompt {prompt!r:.100}. "
                 "Ensure the prompt is non-empty and contains tokenizable text."
             )
         tokens = tokens.to(self.device)
