@@ -140,7 +140,6 @@ class DistillationConfig:
     lambda_graph: float = 0.1
     lambda_kl: float = 1.0
     graph_dtype: Optional[torch.dtype] = None
-    graph_top_k_logits: Optional[int] = 20
     graph_prop_neurons_per_layer: float = 0.1
     teacher_graph_batch_size: int = 512
     student_graph_batch_size: int = 1
@@ -170,7 +169,6 @@ class DistillationConfig:
     fast_teacher_graph: bool = False
     student_computation_eps: float = 1e-6
     student_embedding_eps: float = 0.0
-    student_skip_logit_attribution: bool = False
     align_diagnostic: bool = False
 
 
@@ -332,7 +330,6 @@ class DistillationTrainer:
             self.graph_loss_config = GraphAuxConfig(
                 lambda_graph=config.lambda_graph,
                 graph_dtype=config.graph_dtype,
-                top_k_logits=config.graph_top_k_logits,
                 prop_neurons_per_layer=config.graph_prop_neurons_per_layer,
                 teacher_graph_batch_size=config.teacher_graph_batch_size,
                 student_graph_batch_size=config.student_graph_batch_size,
@@ -840,7 +837,6 @@ class DistillationTrainer:
         print(f"  Temperature:      {cfg.temperature}")
         if self._use_graph:
             print(f"  lambda_graph:     {cfg.lambda_graph}")
-            print(f"  graph top_k_logits: {cfg.graph_top_k_logits}")
             print(f"  graph prop neurons/layer: {cfg.graph_prop_neurons_per_layer}")
         print(f"  Eval every:       {cfg.step_log_interval} training batches")
         if cfg.save_interval > 0:
@@ -991,7 +987,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--dtype", choices=DTYPE_CHOICES, default="float32")
-    parser.add_argument("--graph-top-k-logits", type=int, default=20)
     parser.add_argument("--graph-prop-neurons-per-layer", type=float, default=0.1)
     parser.add_argument("--teacher-graph-batch-size", type=int, default=512)
     parser.add_argument("--student-graph-batch-size", type=int, default=1)
@@ -1122,14 +1117,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--student-computation-eps", type=float, default=1e-6)
     parser.add_argument("--student-embedding-eps", type=float, default=0.0)
     parser.add_argument(
-        "--student-skip-logit-attribution",
-        action="store_true",
-        help=(
-            "Skip Jacobian logit-influence rows in the student graph (saves memory "
-            "but alignment signal is sum-of-DLAs, not prob-deltas)."
-        ),
-    )
-    parser.add_argument(
         "--ablation-batch-size",
         type=int,
         default=1,
@@ -1170,8 +1157,6 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--step-log-interval must be >= 1")
     if args.lambda_graph < 0:
         raise SystemExit("--lambda-graph must be >= 0")
-    if args.graph_top_k_logits is not None and args.graph_top_k_logits <= 0:
-        raise SystemExit("--graph-top-k-logits must be positive")
     if not (0.0 < args.graph_prop_neurons_per_layer <= 1.0):
         raise SystemExit("--graph-prop-neurons-per-layer must be in (0, 1]")
     if args.teacher_graph_batch_size < 1:
@@ -1247,7 +1232,6 @@ def main() -> None:
             lambda_graph=args.lambda_graph,
             lambda_kl=args.lambda_kl,
             graph_dtype=resolve_torch_dtype(args.dtype),
-            graph_top_k_logits=args.graph_top_k_logits,
             graph_prop_neurons_per_layer=args.graph_prop_neurons_per_layer,
             teacher_graph_batch_size=args.teacher_graph_batch_size,
             student_graph_batch_size=args.student_graph_batch_size,
@@ -1258,7 +1242,6 @@ def main() -> None:
             student_computation_eps=args.student_computation_eps,
             student_embedding_eps=args.student_embedding_eps,
 
-            student_skip_logit_attribution=args.student_skip_logit_attribution,
             align_diagnostic=args.align_diagnostic,
 
             fast_student_graph=args.fast_student_graph,

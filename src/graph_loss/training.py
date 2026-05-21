@@ -27,7 +27,6 @@ class CachedTeacherPromptData:
 class GraphAuxConfig:
     lambda_graph: float = 0.1
     graph_dtype: torch.dtype | None = None
-    top_k_logits: int | None = 20
     prop_neurons_per_layer: float = 0.1
     teacher_graph_batch_size: int = 512
     student_graph_batch_size: int = 1
