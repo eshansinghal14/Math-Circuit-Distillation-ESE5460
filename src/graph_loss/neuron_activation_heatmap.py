@@ -233,11 +233,8 @@ def label_neurons_layer_by_layer(
     label_results: list = [None] * n_kept
 
     layer_to_neurons: dict[int, list[tuple[int, int, int]]] = defaultdict(list)
-    for loc_idx in range(n_kept):
-        layer = int(neuron_locations[loc_idx, 0].item())
-        token_pos = int(neuron_locations[loc_idx, 1].item())
-        neuron_id = int(neuron_locations[loc_idx, 2].item())
-        layer_to_neurons[layer].append((loc_idx, token_pos, neuron_id))
+    for loc_idx, (layer, token_pos, neuron_id) in enumerate(neuron_locations.tolist()):
+        layer_to_neurons[int(layer)].append((loc_idx, int(token_pos), int(neuron_id)))
 
     device = model.cfg.device
     empty = NodeLabel(labels=[], scores={}, categories={}, category_scores={}, category_specificity={})
