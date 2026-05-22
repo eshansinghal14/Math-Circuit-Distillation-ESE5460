@@ -141,6 +141,7 @@ class DistillationConfig:
     lambda_kl: float = 1.0
     graph_dtype: Optional[torch.dtype] = None
     graph_prop_neurons_per_layer: float = 0.1
+    graph_top_k_logits: int | None = 20
     teacher_graph_batch_size: int = 512
     student_graph_batch_size: int = 1
     graph_verbose: bool = False
@@ -331,6 +332,7 @@ class DistillationTrainer:
                 lambda_graph=config.lambda_graph,
                 graph_dtype=config.graph_dtype,
                 prop_neurons_per_layer=config.graph_prop_neurons_per_layer,
+                top_k_logits=config.graph_top_k_logits,
                 teacher_graph_batch_size=config.teacher_graph_batch_size,
                 student_graph_batch_size=config.student_graph_batch_size,
                 verbose=config.graph_verbose,
@@ -988,6 +990,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--dtype", choices=DTYPE_CHOICES, default="float32")
     parser.add_argument("--graph-prop-neurons-per-layer", type=float, default=0.1)
+    parser.add_argument("--graph-top-k-logits", type=int, default=20, dest="graph_top_k_logits",
+                        help="Number of top logits to attribute to (0 = all).")
     parser.add_argument("--teacher-graph-batch-size", type=int, default=512)
     parser.add_argument("--student-graph-batch-size", type=int, default=1)
     parser.add_argument(
@@ -1233,6 +1237,7 @@ def main() -> None:
             lambda_kl=args.lambda_kl,
             graph_dtype=resolve_torch_dtype(args.dtype),
             graph_prop_neurons_per_layer=args.graph_prop_neurons_per_layer,
+            graph_top_k_logits=args.graph_top_k_logits if args.graph_top_k_logits != 0 else None,
             teacher_graph_batch_size=args.teacher_graph_batch_size,
             student_graph_batch_size=args.student_graph_batch_size,
             graph_verbose=args.verbose,
