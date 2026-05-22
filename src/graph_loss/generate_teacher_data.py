@@ -50,7 +50,6 @@ class TeacherDataConfig:
     anova_nodes_per_label: int = 10
     anova_range_radius: int = 0
     sum_min_specificity: float = 0.0
-    labelling_layer_batch_size: int = 1
 
 
 def _resolve_dataset_file(dataset_file: str) -> str:
@@ -206,7 +205,6 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
             anova_nodes_per_label=config.anova_nodes_per_label,
             anova_range_radius=config.anova_range_radius,
             sum_min_specificity=config.sum_min_specificity,
-            labelling_layer_batch_size=config.labelling_layer_batch_size,
             no_grad_supergraph=True,
             logger=logger,
         )
@@ -368,14 +366,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_graph_build_args(parser)
     parser.add_argument(
-        "--labelling-layer-batch-size",
-        "--labelling_layer_batch_size",
-        dest="labelling_layer_batch_size",
-        type=int,
-        default=1,
-        help="Number of layers to process together during ANOVA labelling",
-    )
-    parser.add_argument(
         "--merge-shards",
         action="store_true",
         help=(
@@ -414,7 +404,6 @@ def main() -> None:
         anova_nodes_per_label=args.anova_nodes_per_label,
         anova_range_radius=args.anova_range_radius,
         sum_min_specificity=args.sum_min_specificity,
-        labelling_layer_batch_size=args.labelling_layer_batch_size,
     )
     generate_teacher_data(config)
 

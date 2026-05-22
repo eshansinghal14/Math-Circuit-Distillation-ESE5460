@@ -189,13 +189,12 @@ def label_neurons_layer_by_layer(
     *,
     target_args: tuple[int, ...] | None = None,
     anova_range_radius: int = 0,
-    labelling_layer_batch_size: int = 4,
 ) -> list:
-    """ANOVA-label N neurons in layer-batches with pipelined H2D transfers and one D2H flush per batch.
+    """ANOVA-label N neurons across all model layers with pipelined H2D transfers and one D2H flush.
 
-    All CPU→GPU transfers within a batch are queued simultaneously via non_blocking=True so the
+    All CPU→GPU transfers are queued simultaneously via non_blocking=True so the
     DMA engine can pipeline them.  Per-neuron activations stay on GPU until a single D2H transfer
-    at the end of each batch, eliminating per-layer host synchronisation points.
+    at the end, eliminating per-layer host synchronisation points.
     Returns a list[NodeLabel] in the same order as neuron_locations.
     """
     from graph_loss.anova_node_labels import (
@@ -251,106 +250,103 @@ def label_neurons_layer_by_layer(
     )
     gpu_anova_state = build_gpu_anova_state(anova_rules, device)
 
-    for batch_start in range(0, len(sorted_layers), labelling_layer_batch_size):
-        batch_layers = sorted_layers[batch_start : batch_start + labelling_layer_batch_size]
-        valid_batch_layers = [l for l in batch_layers if l < len(layer_inputs)]
-        if not valid_batch_layers:
-            continue
+    valid_batch_layers = [l for l in sorted_layers if l < len(layer_inputs)]
+    if not valid_batch_layers:
+        return [empty] * n_kept
 
-        # Queue ALL H2D transfers for this batch simultaneously with non_blocking=True.
-        # The DMA engine can pipeline them, hiding latency while GPU kernels run for
-        # already-transferred layers.
-        layer_tensors_gpu: dict[int, torch.Tensor] = {
-            l: layer_inputs[l].to(device=device, non_blocking=True)
-            for l in valid_batch_layers
-        }
+    # Queue ALL H2D transfers simultaneously with non_blocking=True.
+    # The DMA engine can pipeline them, hiding latency while GPU kernels run for
+    # already-transferred layers.
+    layer_tensors_gpu: dict[int, torch.Tensor] = {
+        l: layer_inputs[l].to(device=device, non_blocking=True)
+        for l in valid_batch_layers
+    }
 
-        # Group neurons by (layer, token_pos): neurons in the same group share an identical
-        # input vector X^l[:, τ, :], so all groups can be computed with one bmm.
-        # n_groups = unique (layer, tp) pairs — O(B_layers × unique_tps), not O(n_total_neurons),
-        # so X_batch: [n_groups, P, d] is tiny compared to the previous [n_neurons, P, d] attempt.
-        group_map: dict[tuple[int, int], list[tuple[int, int]]] = defaultdict(list)
-        for layer in valid_batch_layers:
-            n_positions = int(layer_tensors_gpu[layer].shape[1])
-            for li, tp, nid in layer_to_neurons[layer]:
-                if tp < n_positions:
-                    group_map[(layer, tp)].append((li, nid))
+    # Group neurons by (layer, token_pos): neurons in the same group share an identical
+    # input vector X^l[:, τ, :], so all groups can be computed with one bmm.
+    # n_groups = unique (layer, tp) pairs — O(unique_tps across all layers), not O(n_total_neurons),
+    # so X_batch: [n_groups, P, d] is tiny compared to the previous [n_neurons, P, d] attempt.
+    group_map: dict[tuple[int, int], list[tuple[int, int]]] = defaultdict(list)
+    for layer in valid_batch_layers:
+        n_positions = int(layer_tensors_gpu[layer].shape[1])
+        for li, tp, nid in layer_to_neurons[layer]:
+            if tp < n_positions:
+                group_map[(layer, tp)].append((li, nid))
 
-        if not group_map:
-            for t in layer_tensors_gpu.values():
-                del t
-            continue
-
-        groups = list(group_map.keys())
-        n_groups = len(groups)
-        N_max = max(len(v) for v in group_map.values())
-
-        # Extract one [P, d] slice per group from the already-transferred layer tensors.
-        dtype = next(iter(layer_tensors_gpu.values())).dtype
-        d = next(iter(layer_tensors_gpu.values())).shape[-1]
-
-        X_batch = torch.stack(
-            [layer_tensors_gpu[layer][:, tp, :] for (layer, tp) in groups], dim=0
-        )  # [n_groups, P, d]
+    if not group_map:
         del layer_tensors_gpu
+        return [empty] * n_kept
 
-        # Build padded weight matrices: [n_groups, N_max, d].
-        # Padding is zero so padded outputs are silu(0)*0 = 0; sliced away before grids.
-        W_gate = torch.zeros(n_groups, N_max, d, device=device, dtype=dtype)
-        W_up   = torch.zeros(n_groups, N_max, d, device=device, dtype=dtype)
-        b_gate = torch.zeros(n_groups, N_max,    device=device, dtype=dtype)
-        b_up   = torch.zeros(n_groups, N_max,    device=device, dtype=dtype)
+    groups = list(group_map.keys())
+    n_groups = len(groups)
+    N_max = max(len(v) for v in group_map.values())
 
-        for g_idx, (layer, tp) in enumerate(groups):
-            neurons = group_map[(layer, tp)]
-            n_g = len(neurons)
-            nids = torch.tensor([nid for _, nid in neurons], dtype=torch.long, device=device)
-            hf_mlp = model.layers[layer].mlp
-            W_gate[g_idx, :n_g] = hf_mlp.gate_proj.weight[nids].to(dtype=dtype)
-            W_up[g_idx, :n_g]   = hf_mlp.up_proj.weight[nids].to(dtype=dtype)
-            gate_bias_full = getattr(hf_mlp.gate_proj, "bias", None)
-            up_bias_full   = getattr(hf_mlp.up_proj,   "bias", None)
-            if gate_bias_full is not None:
-                b_gate[g_idx, :n_g] = gate_bias_full[nids].to(dtype=dtype)
-            if up_bias_full is not None:
-                b_up[g_idx, :n_g] = up_bias_full[nids].to(dtype=dtype)
+    # Extract one [P, d] slice per group from the already-transferred layer tensors.
+    dtype = next(iter(layer_tensors_gpu.values())).dtype
+    d = next(iter(layer_tensors_gpu.values())).shape[-1]
 
-        # Single bmm: [n_groups, P, d] x [n_groups, d, N_max] -> [n_groups, P, N_max]
-        gate_out = torch.bmm(X_batch, W_gate.permute(0, 2, 1)) + b_gate.unsqueeze(1)
-        up_out   = torch.bmm(X_batch, W_up.permute(0, 2, 1))   + b_up.unsqueeze(1)
-        del X_batch, W_gate, W_up, b_gate, b_up
+    X_batch = torch.stack(
+        [layer_tensors_gpu[layer][:, tp, :] for (layer, tp) in groups], dim=0
+    )  # [n_groups, P, d]
+    del layer_tensors_gpu
 
-        neuron_acts_batch = F.silu(gate_out) * up_out  # [n_groups, P, N_max]
-        del gate_out, up_out
+    # Build padded weight matrices: [n_groups, N_max, d].
+    # Padding is zero so padded outputs are silu(0)*0 = 0; sliced away before grids.
+    W_gate = torch.zeros(n_groups, N_max, d, device=device, dtype=dtype)
+    W_up   = torch.zeros(n_groups, N_max, d, device=device, dtype=dtype)
+    b_gate = torch.zeros(n_groups, N_max,    device=device, dtype=dtype)
+    b_up   = torch.zeros(n_groups, N_max,    device=device, dtype=dtype)
 
-        # Scatter each group's activations into GPU-resident grids.
-        batch_grids_gpu: list[torch.Tensor] = []
-        batch_loc_indices: list[int] = []
-        for g_idx, g in enumerate(groups):
-            neurons = group_map[g]
-            n_g = len(neurons)
-            acts = neuron_acts_batch[g_idx, :, :n_g].float()  # [P, n_g]
-            grid = torch.full((n_g, grid_cells), float("nan"), dtype=torch.float32, device=device)
-            grid[:, flat_indices_gpu] = acts.T
-            batch_grids_gpu.append(grid)
-            batch_loc_indices.extend(li for li, _ in neurons)
+    for g_idx, (layer, tp) in enumerate(groups):
+        neurons = group_map[(layer, tp)]
+        n_g = len(neurons)
+        nids = torch.tensor([nid for _, nid in neurons], dtype=torch.long, device=device)
+        hf_mlp = model.layers[layer].mlp
+        W_gate[g_idx, :n_g] = hf_mlp.gate_proj.weight[nids].to(dtype=dtype)
+        W_up[g_idx, :n_g]   = hf_mlp.up_proj.weight[nids].to(dtype=dtype)
+        gate_bias_full = getattr(hf_mlp.gate_proj, "bias", None)
+        up_bias_full   = getattr(hf_mlp.up_proj,   "bias", None)
+        if gate_bias_full is not None:
+            b_gate[g_idx, :n_g] = gate_bias_full[nids].to(dtype=dtype)
+        if up_bias_full is not None:
+            b_up[g_idx, :n_g] = up_bias_full[nids].to(dtype=dtype)
 
-        del neuron_acts_batch
+    # Single bmm: [n_groups, P, d] x [n_groups, d, N_max] -> [n_groups, P, N_max]
+    gate_out = torch.bmm(X_batch, W_gate.permute(0, 2, 1)) + b_gate.unsqueeze(1)
+    up_out   = torch.bmm(X_batch, W_up.permute(0, 2, 1))   + b_up.unsqueeze(1)
+    del X_batch, W_gate, W_up, b_gate, b_up
 
-        # Run ANOVA matmuls on GPU; only [N, R] scores are transferred to CPU.
-        batch_grid_gpu = torch.cat(batch_grids_gpu, dim=0)  # [N_batch, grid_cells]
-        del batch_grids_gpu
-        batch_labels = gpu_label_activation_heatmaps(batch_grid_gpu, gpu_anova_state, anova_rules)
-        del batch_grid_gpu
-        for label_j, loc_idx in enumerate(batch_loc_indices):
-            label_results[loc_idx] = batch_labels[label_j]
+    neuron_acts_batch = F.silu(gate_out) * up_out  # [n_groups, P, N_max]
+    del gate_out, up_out
 
-        logger.info(
-            "  ANOVA labeled layers %s (%d groups, %d neurons)",
-            valid_batch_layers,
-            n_groups,
-            len(batch_loc_indices),
-        )
+    # Scatter each group's activations into GPU-resident grids.
+    batch_grids_gpu: list[torch.Tensor] = []
+    batch_loc_indices: list[int] = []
+    for g_idx, g in enumerate(groups):
+        neurons = group_map[g]
+        n_g = len(neurons)
+        acts = neuron_acts_batch[g_idx, :, :n_g].float()  # [P, n_g]
+        grid = torch.full((n_g, grid_cells), float("nan"), dtype=torch.float32, device=device)
+        grid[:, flat_indices_gpu] = acts.T
+        batch_grids_gpu.append(grid)
+        batch_loc_indices.extend(li for li, _ in neurons)
+
+    del neuron_acts_batch
+
+    # Run ANOVA matmuls on GPU; only [N, R] scores are transferred to CPU.
+    batch_grid_gpu = torch.cat(batch_grids_gpu, dim=0)  # [N_total, grid_cells]
+    del batch_grids_gpu
+    batch_labels = gpu_label_activation_heatmaps(batch_grid_gpu, gpu_anova_state, anova_rules)
+    del batch_grid_gpu
+    for label_j, loc_idx in enumerate(batch_loc_indices):
+        label_results[loc_idx] = batch_labels[label_j]
+
+    logger.info(
+        "  ANOVA labeled layers %s (%d groups, %d neurons)",
+        valid_batch_layers,
+        n_groups,
+        len(batch_loc_indices),
+    )
 
     return [lbl if lbl is not None else empty for lbl in label_results]
 
