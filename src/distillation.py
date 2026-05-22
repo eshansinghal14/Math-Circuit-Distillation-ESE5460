@@ -520,7 +520,7 @@ class DistillationTrainer:
                 device=self.device,
                 loss_scale=1.0 if use_grad_norm_scale else self.config.lambda_graph,
                 teacher_cache=self.teacher_data_cache,
-                answers=batch["answers"][:n],
+                answers=batch["answers"],
             )
         except RuntimeError:
             self._save_checkpoint(folder="exception_checkpoint")
