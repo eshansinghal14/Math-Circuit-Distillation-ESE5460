@@ -178,6 +178,7 @@ class DistillationConfig:
     align_by_label: bool = False
     mlp_cache_refresh_interval: int = 0
     mlp_cache_batch_size: int = 64
+    graph_loss_type: str = "jsd"
 
 
 
@@ -341,6 +342,7 @@ class DistillationTrainer:
                 student_anova_nodes_per_label=config.student_anova_nodes_per_label,
                 student_sum_min_specificity=config.student_sum_min_specificity,
                 dataset=config.student_dataset,
+                graph_loss_type=config.graph_loss_type,
             )
 
             self.student_graph_adapter = HFLlamaGraphAdapter(
@@ -1002,6 +1004,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument(
+        "--graph-loss-type",
+        choices=["jsd", "kld"],
+        default="jsd",
+        help=(
+            "Similarity function for graph loss. 'jsd' (default): symmetric "
+            "Jensen-Shannon divergence, penalizes both missing and spurious edges. "
+            "'kld': forward KL(teacher||student), only penalizes missing teacher mass."
+        ),
+    )
     parser.add_argument("--graph-similarity-threshold", type=float, default=0.7)
     parser.add_argument("--graph-max-fan-out", type=int, default=4)
     parser.add_argument("--fast-teacher-graph", action="store_true")
@@ -1273,6 +1285,7 @@ def main() -> None:
             graph_prompt_batch_size=args.graph_prompt_batch_size,
             mlp_cache_refresh_interval=args.mlp_cache_refresh_interval,
             mlp_cache_batch_size=args.mlp_cache_batch_size,
+            graph_loss_type=args.graph_loss_type,
 
             seed=args.seed,
             device=device,

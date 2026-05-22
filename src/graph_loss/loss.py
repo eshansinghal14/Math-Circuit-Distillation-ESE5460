@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Literal
+
 import torch
 import torch.nn.functional as F
 
@@ -9,6 +13,7 @@ def _compute_edge_loss(
     teacher_ids: list[int],
     student_ids: list[int],
     epsilon: float = 1e-8,
+    similarity: Literal["jsd", "kld"] = "jsd",
 ) -> torch.Tensor:
     """Edge-level structural loss: row-wise Jensen-Shannon between coarsened adjacency.
 
@@ -80,15 +85,21 @@ def _compute_edge_loss(
     t_dist = t_abs / t_abs.sum(dim=1, keepdim=True).clamp(min=epsilon)
     s_dist = s_abs / s_abs.sum(dim=1, keepdim=True).clamp(min=epsilon)
 
-    # Jensen-Shannon Divergence per row (mean over rows).  JSD = 0.5*KL(t||m) +
-    # 0.5*KL(s||m) where m = (t+s)/2.  Symmetric, bounded in [0, log 2], and
-    # well-defined even when one distribution has zero mass at indices the
-    # other has nonzero mass at.  Forward-only KL doesn't penalize student
-    # mass at indices where teacher has 0 (e.g. spurious self-loops); JSD does.
-    m_dist = 0.5 * (t_dist.detach() + s_dist)
-    log_m = (m_dist + epsilon).log()
     log_t = (t_dist.detach() + epsilon).log()
     log_s = (s_dist + epsilon).log()
+
+    if similarity == "kld":
+        # Forward KL(teacher || student): penalizes student for missing teacher
+        # mass but produces no gradient where teacher has zero (spurious student
+        # edges are not penalized).
+        kld = (t_dist.detach() * (log_t - log_s)).sum(dim=1)
+        return kld.mean().to(dtype)
+
+    # JSD = 0.5*KL(t||m) + 0.5*KL(s||m) where m = (t+s)/2.  Symmetric,
+    # bounded in [0, log 2].  Also penalizes spurious student edges (mass
+    # where teacher has zero), unlike forward-only KL.
+    m_dist = 0.5 * (t_dist.detach() + s_dist)
+    log_m = (m_dist + epsilon).log()
     kl_t_m = (t_dist.detach() * (log_t - log_m)).sum(dim=1)
     kl_s_m = (s_dist * (log_s - log_m)).sum(dim=1)
     jsd = 0.5 * (kl_t_m + kl_s_m)
@@ -102,9 +113,10 @@ def compute_graph_loss(
     teacher_ids: list[int],
     student_ids: list[int],
     epsilon: float = 1e-8,
+    similarity: Literal["jsd", "kld"] = "jsd",
 ) -> tuple[torch.Tensor, dict]:
-    """Graph loss: edge-structure JSD between aligned supernode adjacency rows."""
-    loss = _compute_edge_loss(W_T, W_S, mapping, teacher_ids, student_ids, epsilon)
+    """Graph loss: edge-structure similarity between aligned supernode adjacency rows."""
+    loss = _compute_edge_loss(W_T, W_S, mapping, teacher_ids, student_ids, epsilon, similarity)
     return loss, {"edge_loss": loss.item()}
 
 

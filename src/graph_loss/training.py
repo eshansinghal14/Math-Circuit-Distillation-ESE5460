@@ -41,6 +41,7 @@ class GraphAuxConfig:
     dataset: str | None = None
     student_activation_write_cache_path: str | None = None
     activation_write_result_cache: dict = field(default_factory=dict)
+    graph_loss_type: str = "jsd"
 
 
 def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
@@ -184,6 +185,7 @@ def compute_prompt_graph_loss(
         mapping,
         teacher_ids,
         student_ids,
+        similarity=config.graph_loss_type,
     )
 
     metrics = {
