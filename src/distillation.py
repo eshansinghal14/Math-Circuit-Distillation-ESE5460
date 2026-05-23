@@ -163,17 +163,6 @@ class DistillationConfig:
     save_interval: int = 0
     label_refresh_interval: int = 0
     label_refresh_n_prompts: int = 8
-    graph_similarity_threshold: float = 0.7
-    graph_max_fan_out: int = 4
-    fast_teacher_graph: bool = False
-    student_computation_eps: float = 1e-6
-    student_embedding_eps: float = 0.0
-    align_diagnostic: bool = False
-
-
-    fast_student_graph: bool = False
-    ablation_batch_size: int = 1
-    align_by_label: bool = False
     mlp_cache_refresh_interval: int = 0
     mlp_cache_batch_size: int = 64
     graph_loss_type: str = "jsd"
@@ -1059,19 +1048,6 @@ def build_parser() -> argparse.ArgumentParser:
             "'kld': forward KL(teacher||student), only penalizes missing teacher mass."
         ),
     )
-    parser.add_argument("--graph-similarity-threshold", type=float, default=0.7)
-    parser.add_argument("--graph-max-fan-out", type=int, default=4)
-    parser.add_argument("--fast-teacher-graph", action="store_true")
-
-    parser.add_argument(
-        "--fast-student-graph",
-        action="store_true",
-        help=(
-            "Skip the [neurons, neurons] Jacobian backward passes when "
-            "building the student graph.  Selects neurons + builds a "
-            "DLA-only adjacency, then clusters via real ablation."
-        ),
-    )
     parser.add_argument(
         "--graph-grad-norm-scale",
         action="store_true",
@@ -1092,15 +1068,6 @@ def build_parser() -> argparse.ArgumentParser:
             "Steps before this use KL loss only.  Default 1 (graph loss always on)."
         ),
     )
-    parser.add_argument(
-        "--align-diagnostic",
-        action="store_true",
-        help=(
-            "Log per-prompt teacher/student supernode cosine-matrix stats "
-            "(mean/median/max, fraction of teacher SNs with any match >= 0.3) "
-            "to verify alignment quality before/after a fix."
-        ),
-    )
     parser.add_argument("--eval-max-new-tokens", type=int, default=None)
     parser.add_argument("--eval-batch-size", type=int, default=50)
     parser.add_argument("--eval-datasets", nargs="*", default=None, metavar="DATASET")
@@ -1110,15 +1077,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Log KL and graph gradient norms plus their cosine similarity.",
     )
     parser.add_argument("--teacher-data-cache", type=str, default=None, metavar="PATH")
-    parser.add_argument(
-        "--graph-align-by-label",
-        action="store_true",
-        help=(
-            "Align teacher↔student supernodes by ANOVA label string instead of "
-            "cosine similarity of prob-delta vectors.  Requires teacher cache built "
-            "with full_search (labels saved)."
-        ),
-    )
     parser.add_argument(
         "--student-dataset",
         type=str,
@@ -1175,14 +1133,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=8,
         help="Number of training prompts (taken from the start of the train set) used for each label refresh.",
-    )
-    parser.add_argument("--student-computation-eps", type=float, default=1e-6)
-    parser.add_argument("--student-embedding-eps", type=float, default=0.0)
-    parser.add_argument(
-        "--ablation-batch-size",
-        type=int,
-        default=1,
-        help="Batch size for ablation experiments.",
     )
     parser.add_argument(
         "--mlp-cache-refresh-interval",
@@ -1258,8 +1208,6 @@ def main() -> None:
     print(f"  lambda_graph:       {args.lambda_graph}")
 
 
-    if args.fast_student_graph:
-        print(f"  fast student graph: True (node-loss-only fast path)")
     print(f"  graph dtype:        {args.dtype}")
     print(f"  teacher cache:      {args.teacher_data_cache or 'none'}")
     print(f"  save_dir:           {run_dir}")
@@ -1304,16 +1252,7 @@ def main() -> None:
             teacher_graph_batch_size=args.teacher_graph_batch_size,
             student_graph_batch_size=args.student_graph_batch_size,
             graph_verbose=args.verbose,
-            graph_similarity_threshold=args.graph_similarity_threshold,
-            graph_max_fan_out=args.graph_max_fan_out,
-            fast_teacher_graph=args.fast_teacher_graph,
-            student_computation_eps=args.student_computation_eps,
-            student_embedding_eps=args.student_embedding_eps,
 
-            align_diagnostic=args.align_diagnostic,
-
-            fast_student_graph=args.fast_student_graph,
-            ablation_batch_size=args.ablation_batch_size,
             graph_grad_norm_scale=args.graph_grad_norm_scale,
             track_loss_grads=args.track_loss_grads,
             eval_max_new_tokens=(
@@ -1324,7 +1263,6 @@ def main() -> None:
             eval_batch_size=args.eval_batch_size,
             save_dir=run_dir,
             teacher_data_cache=args.teacher_data_cache,
-            align_by_label=args.graph_align_by_label,
             student_dataset=args.student_dataset,
             student_anova_range_radius=args.student_anova_range_radius,
             student_anova_nodes_per_label=args.student_anova_nodes_per_label,
