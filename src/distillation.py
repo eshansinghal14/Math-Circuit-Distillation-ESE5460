@@ -700,6 +700,8 @@ class DistillationTrainer:
                 skipped_nonfinite += 1
                 continue
             self._record_step_metrics(epoch, step, metrics)
+            self._save_history()
+            self._save_curves()
             for key, value in metrics.items():
                 agg[key] += float(value)
                 interval[key] += float(value)
