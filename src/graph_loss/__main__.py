@@ -149,6 +149,7 @@ def main():
         adapter,
         args.prompt,
         top_k_logits=args.top_k_logits,
+        temperature=args.temperature,
         prop_neurons_per_layer=args.prop_neurons_per_layer,
         batch_size=args.attribution_batch_size,
         verbose=args.verbose,

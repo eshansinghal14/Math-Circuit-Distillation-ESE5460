@@ -39,6 +39,7 @@ class TeacherDataConfig:
     teacher_model: str
     dtype: str = "float32"
     top_k_logits: float | None = 0.95
+    temperature: float = 2.0
     prop_neurons_per_layer: float = 0.1
     attribution_batch_size: int = 256
     verbose: bool = False
@@ -196,6 +197,7 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
             adapter,
             prompt,
             top_k_logits=config.top_k_logits,
+            temperature=config.temperature,
             prop_neurons_per_layer=config.prop_neurons_per_layer,
             batch_size=config.attribution_batch_size,
             verbose=config.verbose,
@@ -393,6 +395,7 @@ def main() -> None:
         teacher_model=args.teacher_model,
         dtype=args.dtype,
         top_k_logits=args.top_k_logits,
+        temperature=args.temperature,
         prop_neurons_per_layer=args.prop_neurons_per_layer,
         attribution_batch_size=args.attribution_batch_size,
         verbose=args.verbose,

@@ -76,6 +76,12 @@ def add_graph_build_args(parser: argparse.ArgumentParser) -> None:
              "summing to this fraction, capped at 10.",
     )
     parser.add_argument(
+        "--temperature",
+        type=float,
+        default=2.0,
+        help="Softmax temperature for computing logit probabilities (default: 2.0).",
+    )
+    parser.add_argument(
         "--prop_neurons_per_layer",
         type=float,
         default=0.1,

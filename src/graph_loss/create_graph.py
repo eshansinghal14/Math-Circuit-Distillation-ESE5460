@@ -196,6 +196,7 @@ def create_graph(
     # attribution params
     attribution_targets=None,
     top_k_logits: float | None = 0.95,
+    temperature: float = 2.0,
     prop_neurons_per_layer: float = 0.1,
     batch_size: int = 512,
     dtype: torch.dtype | None = None,
@@ -227,6 +228,7 @@ def create_graph(
         attribution_targets: Optional attribution targets.
         top_k_logits: Cumulative probability threshold in (0, 1]. Selects the fewest
             top logits summing to this fraction, capped at 10.
+        temperature: Softmax temperature for computing logit probabilities.
         prop_neurons_per_layer: Fraction of neurons to pre-select per layer.
         batch_size: Attribution batch size.
         dtype: Optional dtype override.
@@ -332,6 +334,7 @@ def create_graph(
         filtered_ctx,
         attribution_targets=attribution_targets,
         top_k_logits=top_k_logits,
+        temperature=temperature,
         batch_size=batch_size,
         create_graph=build_create_graph,
         detach_result=detach_result,

@@ -127,6 +127,7 @@ def _attribute_from_context(
     *,
     attribution_targets: Sequence[str] | Sequence[TargetSpec] | torch.Tensor | None = None,
     top_k_logits: float | None = 0.95,
+    temperature: float = 2.0,
     batch_size: int = 512,
     create_graph: bool = False,
     detach_result: bool | None = None,
@@ -148,6 +149,7 @@ def _attribute_from_context(
         unembed_proj=adapter.W_U.to(dtype=ctx.dtype) if ctx.dtype is not None else adapter.W_U,
         tokenizer=adapter.tokenizer,
         top_k_logits=top_k_logits,
+        temperature=temperature,
     )
 
     n_neurons = ctx.n_neurons
@@ -232,6 +234,7 @@ def attribute(
     *,
     attribution_targets: Sequence[str] | Sequence[TargetSpec] | torch.Tensor | None = None,
     top_k_logits: float | None = 0.95,
+    temperature: float = 2.0,
     prop_neurons_per_layer: float = 0.1,
     batch_size: int = 512,
     dtype: torch.dtype | None = None,
@@ -254,6 +257,7 @@ def attribute(
         ctx,
         attribution_targets=attribution_targets,
         top_k_logits=top_k_logits,
+        temperature=temperature,
         batch_size=batch_size,
         create_graph=create_graph,
         detach_result=detach_result,

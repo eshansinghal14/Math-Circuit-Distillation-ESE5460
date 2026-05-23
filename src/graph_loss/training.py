@@ -29,6 +29,7 @@ class GraphAuxConfig:
     graph_dtype: torch.dtype | None = None
     prop_neurons_per_layer: float = 0.1
     top_k_logits: float | None = 0.95
+    temperature: float = 2.0
     teacher_graph_batch_size: int = 512
     student_graph_batch_size: int = 1
     verbose: bool = False
@@ -108,6 +109,7 @@ def compute_prompt_graph_loss(
             attribution_targets=logit_token_ids.cpu() if logit_token_ids is not None else None,
             prop_neurons_per_layer=config.prop_neurons_per_layer,
             top_k_logits=config.top_k_logits,
+            temperature=config.temperature,
             batch_size=config.student_graph_batch_size,
             dtype=config.graph_dtype,
             verbose=config.verbose,

@@ -69,6 +69,7 @@ class AttributionTargets:
         tokenizer,
         *,
         top_k_logits: float | None = None,
+        temperature: float = 2.0,
     ):
         """Build attribution targets from user specification.
 
@@ -93,16 +94,16 @@ class AttributionTargets:
 
         # Dispatch to appropriate constructor based on input type
         if attribution_targets is None:
-            salient_ctor = {"top_k_logits": top_k_logits}
+            salient_ctor = {"top_k_logits": top_k_logits, "temperature": temperature}
             attr_spec = self._from_salient(**salient_ctor, **ctor_shared)
         elif isinstance(attribution_targets, torch.Tensor):
-            attr_spec = self._from_indices(indices=attribution_targets, **ctor_shared)
+            attr_spec = self._from_indices(indices=attribution_targets, temperature=temperature, **ctor_shared)
         elif isinstance(attribution_targets, Sequence):
             if not attribution_targets:
                 raise ValueError("attribution_targets sequence cannot be empty")
             first = attribution_targets[0]
             if isinstance(first, str):
-                attr_spec = self._from_str(token_strs=attribution_targets, **ctor_shared)  # type: ignore[arg-type]
+                attr_spec = self._from_str(token_strs=attribution_targets, temperature=temperature, **ctor_shared)  # type: ignore[arg-type]
             elif isinstance(first, (tuple, CustomTarget)):
                 attr_spec = self._from_tuple(target_tuples=attribution_targets, **ctor_shared)  # type: ignore[arg-type]
             else:
@@ -187,6 +188,7 @@ class AttributionTargets:
         unembed_proj: torch.Tensor,
         top_k_logits: float | None,
         tokenizer,
+        temperature: float = 2.0,
     ) -> tuple[list[LogitTarget], torch.Tensor, torch.Tensor]:
         """Auto-select salient logits by cumulative probability threshold.
 
@@ -197,6 +199,7 @@ class AttributionTargets:
                 minimum number of highest-probability logits whose probabilities
                 sum to at least this fraction, capped at 10.
             tokenizer: Tokenizer for decoding vocab indices to strings
+            temperature: Softmax temperature for computing probabilities.
 
         Returns:
             Tuple of (logit_targets, probabilities, vectors) where logit_targets
@@ -206,7 +209,7 @@ class AttributionTargets:
             raise ValueError("top_k_logits must be provided when attribution_targets is None")
         if not (0 < top_k_logits <= 1):
             raise ValueError("top_k_logits must be in (0, 1]")
-        probs = torch.softmax(logits, dim=-1)
+        probs = torch.softmax(logits / temperature, dim=-1)
         sorted_probs, sorted_indices = torch.sort(probs, descending=True)
         cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
         # Minimum k where cumulative probability >= threshold, capped at 10
@@ -214,7 +217,7 @@ class AttributionTargets:
         k = min(k, 10, probs.numel())
         top_indices = sorted_indices[:k]
         indices, probs, vecs = AttributionTargets._compute_logit_vecs(
-            top_indices, logits, unembed_proj
+            top_indices, logits, unembed_proj, temperature=temperature
         )
         logit_targets = [
             LogitTarget(token_str=tokenizer.decode(idx), vocab_idx=idx) for idx in indices.tolist()
@@ -227,6 +230,7 @@ class AttributionTargets:
         logits: torch.Tensor,
         unembed_proj: torch.Tensor,
         tokenizer,
+        temperature: float = 2.0,
     ) -> tuple[list[LogitTarget], torch.Tensor, torch.Tensor]:
         """Construct from specific vocabulary indices.
 
@@ -235,6 +239,7 @@ class AttributionTargets:
             logits: ``(d_vocab,)`` logit vector
             unembed_proj: ``(d_model, d_vocab)`` unembedding matrix
             tokenizer: Tokenizer for decoding vocab indices to strings
+            temperature: Softmax temperature for computing probabilities.
 
         Returns:
             Tuple of (logit_targets, probabilities, vectors) where logit_targets
@@ -254,7 +259,7 @@ class AttributionTargets:
             )
 
         indices_out, probs, vecs = AttributionTargets._compute_logit_vecs(
-            indices, logits, unembed_proj
+            indices, logits, unembed_proj, temperature=temperature
         )
 
         # Create LogitTarget instances with decoded token strings
@@ -270,6 +275,7 @@ class AttributionTargets:
         logits: torch.Tensor,
         unembed_proj: torch.Tensor,
         tokenizer,
+        temperature: float = 2.0,
     ) -> tuple[list[LogitTarget], torch.Tensor, torch.Tensor]:
         """Construct from a sequence of token strings.
 
@@ -280,6 +286,7 @@ class AttributionTargets:
             logits: ``(d_vocab,)`` logit vector
             unembed_proj: Unembedding matrix
             tokenizer: Tokenizer for string→int conversion
+            temperature: Softmax temperature for computing probabilities.
 
         Returns:
             Tuple of (logit_targets, probabilities, vectors)
@@ -312,6 +319,7 @@ class AttributionTargets:
             logits=logits,
             unembed_proj=unembed_proj,
             tokenizer=tokenizer,
+            temperature=temperature,
         )
 
     @staticmethod
@@ -382,6 +390,7 @@ class AttributionTargets:
         indices: torch.Tensor,
         logits: torch.Tensor,
         unembed_proj: torch.Tensor,
+        temperature: float = 2.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Compute probabilities and demeaned vectors for indices.
 
@@ -389,6 +398,7 @@ class AttributionTargets:
             indices: ``(k,)`` vocabulary indices to compute vectors for
             logits: ``(d_vocab,)`` logit vector for single position
             unembed_proj: TransformerLens unembedding matrix with shape ``(d_model, d_vocab)``
+            temperature: Softmax temperature for computing probabilities.
 
         Returns:
             Tuple of:
@@ -396,7 +406,7 @@ class AttributionTargets:
                 * probabilities - ``(k,)`` softmax probabilities
                 * demeaned_vecs - ``(k, d_model)`` unembedding columns, demeaned
         """
-        probs = torch.softmax(logits, dim=-1)
+        probs = torch.softmax(logits / temperature, dim=-1)
         selected_probs = probs[indices]
 
         d_vocab = logits.shape[0]

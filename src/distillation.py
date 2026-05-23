@@ -333,6 +333,7 @@ class DistillationTrainer:
                 graph_dtype=config.graph_dtype,
                 prop_neurons_per_layer=config.graph_prop_neurons_per_layer,
                 top_k_logits=config.graph_top_k_logits,
+                temperature=config.temperature,
                 teacher_graph_batch_size=config.teacher_graph_batch_size,
                 student_graph_batch_size=config.student_graph_batch_size,
                 verbose=config.graph_verbose,
