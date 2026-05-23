@@ -6,7 +6,7 @@ Mirrors the TL ``attribute`` / ``setup_attribution`` pipeline but uses
 Typical flow:
 
     adapter = HFLlamaGraphAdapter(hf_model, tokenizer, device)
-    graph = attribute(adapter, prompt, top_k_logits=20)
+    graph = attribute(adapter, prompt, top_k_logits=0.95)
 
 ``build_graph`` on the adapter is a thin wrapper around ``attribute``.
 """
@@ -126,7 +126,7 @@ def _attribute_from_context(
     ctx: HFAttributionContext,
     *,
     attribution_targets: Sequence[str] | Sequence[TargetSpec] | torch.Tensor | None = None,
-    top_k_logits: int | None = 20,
+    top_k_logits: float | None = 0.95,
     batch_size: int = 512,
     create_graph: bool = False,
     detach_result: bool | None = None,
@@ -231,7 +231,7 @@ def attribute(
     prompt: str | torch.Tensor | list[int],
     *,
     attribution_targets: Sequence[str] | Sequence[TargetSpec] | torch.Tensor | None = None,
-    top_k_logits: int | None = 20,
+    top_k_logits: float | None = 0.95,
     prop_neurons_per_layer: float = 0.1,
     batch_size: int = 512,
     dtype: torch.dtype | None = None,

@@ -70,9 +70,10 @@ def add_graph_build_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--top_k_logits",
-        type=int,
-        default=20,
-        help="If set, include exactly this many highest-probability logit nodes",
+        type=float,
+        default=0.95,
+        help="Cumulative probability threshold in (0, 1]. Selects the fewest top logits "
+             "summing to this fraction, capped at 10.",
     )
     parser.add_argument(
         "--prop_neurons_per_layer",

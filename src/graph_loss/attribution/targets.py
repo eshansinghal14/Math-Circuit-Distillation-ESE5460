@@ -68,7 +68,7 @@ class AttributionTargets:
         unembed_proj: torch.Tensor,
         tokenizer,
         *,
-        top_k_logits: int | None = None,
+        top_k_logits: float | None = None,
     ):
         """Build attribution targets from user specification.
 
@@ -83,8 +83,9 @@ class AttributionTargets:
             logits: ``(d_vocab,)`` logit vector for single position
             unembed_proj: ``(d_model, d_vocab)`` unembedding matrix
             tokenizer: Tokenizer for string→int conversion
-            top_k_logits: If provided, select this many highest-probability logits
-                for salient mode.
+            top_k_logits: If provided, a cumulative probability threshold in (0, 1].
+                Selects the minimum number of highest-probability logits whose
+                probabilities sum to at least this fraction, capped at 10.
         """
         # Store tokenizer ref for decoding vocab indices to token strings
         self.tokenizer = tokenizer
@@ -184,15 +185,17 @@ class AttributionTargets:
     def _from_salient(
         logits: torch.Tensor,
         unembed_proj: torch.Tensor,
-        top_k_logits: int | None,
+        top_k_logits: float | None,
         tokenizer,
     ) -> tuple[list[LogitTarget], torch.Tensor, torch.Tensor]:
-        """Auto-select salient logits by top-k probability.
+        """Auto-select salient logits by cumulative probability threshold.
 
         Args:
             logits: ``(d_vocab,)`` logit vector
             unembed_proj: ``(d_model, d_vocab)`` unembedding matrix
-            top_k_logits: Number of highest-probability logits to include
+            top_k_logits: Cumulative probability threshold in (0, 1]. Selects the
+                minimum number of highest-probability logits whose probabilities
+                sum to at least this fraction, capped at 10.
             tokenizer: Tokenizer for decoding vocab indices to strings
 
         Returns:
@@ -201,16 +204,17 @@ class AttributionTargets:
         """
         if top_k_logits is None:
             raise ValueError("top_k_logits must be provided when attribution_targets is None")
-        if top_k_logits <= 0:
-            raise ValueError("top_k_logits must be positive")
+        if not (0 < top_k_logits <= 1):
+            raise ValueError("top_k_logits must be in (0, 1]")
         probs = torch.softmax(logits, dim=-1)
-        threshold = torch.topk(
-            probs,
-            k=min(top_k_logits, probs.numel()),
-            dim=-1,
-        ).indices
+        sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+        cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+        # Minimum k where cumulative probability >= threshold, capped at 10
+        k = int((cumulative_probs < top_k_logits).sum().item()) + 1
+        k = min(k, 10, probs.numel())
+        top_indices = sorted_indices[:k]
         indices, probs, vecs = AttributionTargets._compute_logit_vecs(
-            threshold, logits, unembed_proj
+            top_indices, logits, unembed_proj
         )
         logit_targets = [
             LogitTarget(token_str=tokenizer.decode(idx), vocab_idx=idx) for idx in indices.tolist()

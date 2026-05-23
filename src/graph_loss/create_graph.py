@@ -195,7 +195,7 @@ def create_graph(
     *,
     # attribution params
     attribution_targets=None,
-    top_k_logits: int | None = 20,
+    top_k_logits: float | None = 0.95,
     prop_neurons_per_layer: float = 0.1,
     batch_size: int = 512,
     dtype: torch.dtype | None = None,
@@ -225,7 +225,8 @@ def create_graph(
         adapter: Loaded HFLlamaGraphAdapter wrapping the model.
         prompt: Input prompt string, token tensor, or token ID list.
         attribution_targets: Optional attribution targets.
-        top_k_logits: Number of top logits to attribute to (None = all).
+        top_k_logits: Cumulative probability threshold in (0, 1]. Selects the fewest
+            top logits summing to this fraction, capped at 10.
         prop_neurons_per_layer: Fraction of neurons to pre-select per layer.
         batch_size: Attribution batch size.
         dtype: Optional dtype override.

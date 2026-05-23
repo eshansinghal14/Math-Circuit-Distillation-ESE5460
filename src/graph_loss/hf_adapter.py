@@ -223,7 +223,7 @@ class HFLlamaGraphAdapter:
         prompt: str | torch.Tensor | list[int],
         *,
         attribution_targets: list[str] | list[TargetSpec] | torch.Tensor | None = None,
-        top_k_logits: int | None = 20,
+        top_k_logits: float | None = 0.95,
         prop_neurons_per_layer: float = 0.1,
         batch_size: int = 512,
         dtype: torch.dtype | None = None,

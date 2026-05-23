@@ -141,7 +141,7 @@ class DistillationConfig:
     lambda_kl: float = 1.0
     graph_dtype: Optional[torch.dtype] = None
     graph_prop_neurons_per_layer: float = 0.1
-    graph_top_k_logits: int | None = 20
+    graph_top_k_logits: float | None = 0.955
     teacher_graph_batch_size: int = 512
     student_graph_batch_size: int = 1
     graph_verbose: bool = False
@@ -1041,8 +1041,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--dtype", choices=DTYPE_CHOICES, default="float32")
     parser.add_argument("--graph-prop-neurons-per-layer", type=float, default=0.1)
-    parser.add_argument("--graph-top-k-logits", type=int, default=20, dest="graph_top_k_logits",
-                        help="Number of top logits to attribute to (0 = all).")
+    parser.add_argument("--graph-top-k-logits", type=float, default=0.95, dest="graph_top_k_logits",
+                        help="Cumulative probability threshold in (0, 1] for logit nodes. "
+                             "Selects the fewest top logits summing to this fraction, capped at 10.")
     parser.add_argument("--teacher-graph-batch-size", type=int, default=512)
     parser.add_argument("--student-graph-batch-size", type=int, default=1)
 
@@ -1298,7 +1299,7 @@ def main() -> None:
             lambda_kl=args.lambda_kl,
             graph_dtype=resolve_torch_dtype(args.dtype),
             graph_prop_neurons_per_layer=args.graph_prop_neurons_per_layer,
-            graph_top_k_logits=args.graph_top_k_logits if args.graph_top_k_logits != 0 else None,
+            graph_top_k_logits=args.graph_top_k_logits if args.graph_top_k_logits > 0 else None,
             teacher_graph_batch_size=args.teacher_graph_batch_size,
             student_graph_batch_size=args.student_graph_batch_size,
             graph_verbose=args.verbose,

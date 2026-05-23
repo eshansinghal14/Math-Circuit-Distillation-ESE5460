@@ -28,7 +28,7 @@ class GraphAuxConfig:
     lambda_graph: float = 0.1
     graph_dtype: torch.dtype | None = None
     prop_neurons_per_layer: float = 0.1
-    top_k_logits: int | None = 20
+    top_k_logits: float | None = 0.95
     teacher_graph_batch_size: int = 512
     student_graph_batch_size: int = 1
     verbose: bool = False

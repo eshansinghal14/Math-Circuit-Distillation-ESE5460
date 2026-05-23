@@ -38,7 +38,7 @@ class TeacherDataConfig:
     dataset_file: str
     teacher_model: str
     dtype: str = "float32"
-    top_k_logits: int | None = 20
+    top_k_logits: float | None = 0.95
     prop_neurons_per_layer: float = 0.1
     attribution_batch_size: int = 256
     verbose: bool = False
