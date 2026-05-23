@@ -818,24 +818,58 @@ class DistillationTrainer:
                 batch_size=cfg.eval_batch_size,
                 max_new_tokens=cfg.eval_max_new_tokens,
             )
+            self.student.train()
             self.history["student_baseline"] = float(student_base)
-            if self.teacher is not None:
-                teacher_base = evaluate_prompt_answer_dict(
-                    self.teacher,
+            print(f"  Student baseline accuracy (train): {student_base:.4f}")
+            for prefix, data in self.extra_eval_data.items():
+                extra_acc = evaluate_prompt_answer_dict(
+                    self.student,
                     self.tokenizer,
-                    self.test_data,
+                    data,
                     batch_size=cfg.eval_batch_size,
                     max_new_tokens=cfg.eval_max_new_tokens,
                 )
+                self.student.train()
+                self.history[f"student_baseline_{prefix}"] = float(extra_acc)
+                print(f"  Student baseline accuracy ({prefix}): {float(extra_acc):.4f}")
+
+            teacher_loaded_for_baseline = False
+            if self.teacher is None:
+                print(f"  Loading teacher for baseline eval: {cfg.teacher_model}")
+                teacher_for_baseline, _ = load_model(cfg.teacher_model)
+                teacher_for_baseline = teacher_for_baseline.to(self.device)
+                teacher_for_baseline.eval()
+                for param in teacher_for_baseline.parameters():
+                    param.requires_grad = False
+                teacher_loaded_for_baseline = True
             else:
-                teacher_base = 0.0
+                teacher_for_baseline = self.teacher
+
+            teacher_base = evaluate_prompt_answer_dict(
+                teacher_for_baseline,
+                self.tokenizer,
+                self.test_data,
+                batch_size=cfg.eval_batch_size,
+                max_new_tokens=cfg.eval_max_new_tokens,
+            )
             self.history["teacher_baseline"] = float(teacher_base)
+            print(f"  Teacher baseline accuracy (train): {teacher_base:.4f}")
+            for prefix, data in self.extra_eval_data.items():
+                extra_acc = evaluate_prompt_answer_dict(
+                    teacher_for_baseline,
+                    self.tokenizer,
+                    data,
+                    batch_size=cfg.eval_batch_size,
+                    max_new_tokens=cfg.eval_max_new_tokens,
+                )
+                self.history[f"teacher_baseline_{prefix}"] = float(extra_acc)
+                print(f"  Teacher baseline accuracy ({prefix}): {float(extra_acc):.4f}")
+
+            if teacher_loaded_for_baseline:
+                del teacher_for_baseline
+                self._clear_cuda_cache()
+
             self._step_log_eval_accuracy = float(student_base)
-            print(f"  Student baseline accuracy: {student_base:.4f}")
-            if self.teacher is not None:
-                print(f"  Teacher baseline accuracy: {teacher_base:.4f}")
-            else:
-                print("  Teacher baseline accuracy: skipped")
 
         target_step = int(cfg.steps)
         print("=" * 60)
