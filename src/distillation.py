@@ -798,6 +798,16 @@ class DistillationTrainer:
                 if self.history.get("accuracy")
                 else 0.0
             )
+            if cfg.save_interval > 0:
+                last_saved_step = (self._train_step // cfg.save_interval) * cfg.save_interval
+                opt_path = os.path.join(
+                    cfg.save_dir, f"step_{last_saved_step}_checkpoint", "optimizer.pt"
+                )
+                if last_saved_step > 0 and os.path.isfile(opt_path):
+                    self.optimizer.load_state_dict(
+                        torch.load(opt_path, map_location=self.device)
+                    )
+                    print(f"Restored optimizer state from step {last_saved_step}.")
             print(f"Warm-starting from step {self._train_step + 1}.")
         else:
             print("Evaluating baselines...")
@@ -893,6 +903,7 @@ class DistillationTrainer:
         os.makedirs(path, exist_ok=True)
         self.student.save_pretrained(path)
         self.tokenizer.save_pretrained(path)
+        torch.save(self.optimizer.state_dict(), os.path.join(path, "optimizer.pt"))
         print(f"  [checkpoint] Saved step {step} → {path}")
 
     def _save_history(self) -> None:
