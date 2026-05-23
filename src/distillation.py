@@ -980,10 +980,31 @@ class DistillationTrainer:
             acc_ax = axes[1]
         acc_series = self.history.get("accuracy") or []
         acc_x = self.history.get("eval_train_step") or list(range(1, len(acc_series) + 1))
+        extra_prefixes = [p for p in self.extra_eval_data if self.history.get(self._extra_eval_history_key(p))]
+        use_legend = bool(extra_prefixes)
         if acc_series:
-            acc_ax.plot(acc_x[: len(acc_series)], acc_series, marker="o", markersize=3)
-        acc_ax.set_title("Test Accuracy")
+            acc_ax.plot(
+                acc_x[: len(acc_series)],
+                acc_series,
+                marker="o",
+                markersize=3,
+                label="test" if use_legend else None,
+            )
+        for prefix in extra_prefixes:
+            key = self._extra_eval_history_key(prefix)
+            extra_series = self.history.get(key) or []
+            if extra_series:
+                acc_ax.plot(
+                    acc_x[: len(extra_series)],
+                    extra_series,
+                    marker="o",
+                    markersize=3,
+                    label=prefix,
+                )
+        acc_ax.set_title("Accuracy")
         acc_ax.set_ylim(0, 1)
+        if use_legend:
+            acc_ax.legend(fontsize=7, loc="lower right")
         for ax in axes:
             ax.grid(True, alpha=0.3)
         fig.tight_layout()
