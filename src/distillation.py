@@ -249,13 +249,14 @@ class DistillationTrainer:
         extra_eval_data: Optional[Dict[str, Dict[str, int]]] = None,
         tokenizer=None,
         student=None,
-        resume: bool = False,
+        resume_step: Optional[int] = None,
     ) -> None:
         self.config = config
         self.test_data = test_data
         self.extra_eval_data = extra_eval_data or {}
         self.device = torch.device(config.device)
-        self._resume = resume
+        self._resume_step = resume_step
+        self._resume = resume_step is not None
         self._use_graph = config.lambda_graph > 0.0
         self._graph_start_step = config.graph_start_step
         seed_all(config.seed)
@@ -791,23 +792,27 @@ class DistillationTrainer:
             if isinstance(loaded, dict):
                 for key, value in loaded.items():
                     self.history[key] = value
+            self._train_step = self._resume_step
+            # Trim history to only the entries up to resume_step.
+            train_steps = self.history.get("train_step", [])
+            n_keep = sum(1 for s in train_steps if s <= self._resume_step)
+            for key in list(self.history.keys()):
+                if isinstance(self.history[key], list) and len(self.history[key]) == len(train_steps):
+                    self.history[key] = self.history[key][:n_keep]
             start_epoch = len(self.history.get("epoch", []))
-            self._train_step = len(self.history.get("train_step", []))
             self._step_log_eval_accuracy = (
                 float(self.history["accuracy"][-1])
                 if self.history.get("accuracy")
                 else 0.0
             )
-            if cfg.save_interval > 0:
-                last_saved_step = (self._train_step // cfg.save_interval) * cfg.save_interval
-                opt_path = os.path.join(
-                    cfg.save_dir, f"step_{last_saved_step}_checkpoint", "optimizer.pt"
+            opt_path = os.path.join(
+                cfg.save_dir, f"step_{self._resume_step}_checkpoint", "optimizer.pt"
+            )
+            if os.path.isfile(opt_path):
+                self.optimizer.load_state_dict(
+                    torch.load(opt_path, map_location=self.device)
                 )
-                if last_saved_step > 0 and os.path.isfile(opt_path):
-                    self.optimizer.load_state_dict(
-                        torch.load(opt_path, map_location=self.device)
-                    )
-                    print(f"Restored optimizer state from step {last_saved_step}.")
+                print(f"Restored optimizer state from step {self._resume_step}.")
             print(f"Warm-starting from step {self._train_step + 1}.")
         else:
             print("Evaluating baselines...")
@@ -1140,7 +1145,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default=os.path.join(os.path.dirname(__file__), "..", "results", "distillation"),
     )
-    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--resume-step", type=int, default=None, dest="resume_step",
+                        help="Resume training from a specific step checkpoint.")
     parser.add_argument("--checkpoint-run", default=None, metavar="PATH")
     parser.add_argument("--step-log-interval", type=int, default=50)
     parser.add_argument(
@@ -1229,9 +1235,14 @@ def main() -> None:
     )
     run_dir, student_source = resolve_distillation_run_dir(
         os.path.abspath(args.save_dir),
-        resume=args.resume,
+        resume=args.resume_step is not None,
         checkpoint_run=args.checkpoint_run,
     )
+    if args.resume_step is not None:
+        step_ckpt = os.path.join(run_dir, f"step_{args.resume_step}_checkpoint")
+        if not os.path.isdir(step_ckpt):
+            raise SystemExit(f"No checkpoint found at {step_ckpt}")
+        student_source = step_ckpt
     os.makedirs(run_dir, exist_ok=True)
 
     print("=" * 60)
@@ -1330,7 +1341,7 @@ def main() -> None:
         extra_eval_data=extra_eval_data,
         tokenizer=tokenizer,
         student=student,
-        resume=student_source is not None,
+        resume_step=args.resume_step,
     )
     history = trainer.train()
     if "accuracy" in history and history["accuracy"]:
