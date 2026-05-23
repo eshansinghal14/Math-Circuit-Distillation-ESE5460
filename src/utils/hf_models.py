@@ -49,8 +49,11 @@ def load_model(model_name):
         logged_in = True
 
     device = get_default_device()
-    # Bypass hub repo-id validation when given a local directory path.
-    local_kwargs = {"local_files_only": True} if os.path.isdir(model_name) else {}
+    # Bypass hub repo-id validation for local paths.  Use prefix detection
+    # rather than os.path.isdir() because FUSE mounts (e.g. Google Drive) can
+    # return False for real directories if the mount is slow to respond.
+    _is_local = model_name.startswith("/") or model_name.startswith(".") or os.path.isdir(model_name)
+    local_kwargs = {"local_files_only": True} if _is_local else {}
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         dtype=torch.float16 if device.type == "cuda" else None,
