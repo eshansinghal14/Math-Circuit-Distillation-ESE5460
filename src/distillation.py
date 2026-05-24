@@ -29,7 +29,6 @@ from utils import (
     load_model,
     load_prompt_answer_json,
     load_student_model_for_distillation,
-    most_recent_subdirectory,
     patch_tokenizer_no_special_tokens,
     resolve_test_path,
     resolve_train_test_paths,
@@ -195,39 +194,30 @@ def resolve_distillation_run_dir(
     """
     save_dir = os.path.abspath(save_dir)
     sub = (runs_subdir or "").strip().strip("/").strip("\\")
-    base = os.path.join(save_dir, sub) if sub else save_dir
+    run_dir = os.path.join(save_dir, sub) if sub else save_dir
 
     if not resume:
-        return base, None
+        return run_dir, None
 
+    # Resolve student_source independently of run_dir so that --save-dir (where
+    # outputs go) and --checkpoint-run (where weights come from) are always distinct.
     if checkpoint_run:
-        if os.path.isabs(checkpoint_run):
-            run_dir = os.path.normpath(checkpoint_run)
-        else:
-            cr = checkpoint_run.replace("\\", "/").strip("/")
-            if sub and not cr.startswith(f"{sub}/"):
-                cr = f"{sub}/{cr}"
-            run_dir = os.path.join(save_dir, cr)
-    else:
-        if find_student_source(base) is not None:
-            run_dir = base
-        else:
-            run_dir = most_recent_subdirectory(base)
-            if run_dir is None:
-                raise SystemExit(
-                    f"No checkpoints in {base} and no run subfolders.\n"
-                    "Train here first or pass --checkpoint-run <path under --save-dir>."
-                )
-            print(f"Auto-detected most recent run folder: {run_dir}")
-
-    student_source = find_student_source(run_dir)
-    if student_source is None:
-        raise SystemExit(
-            f"No student weights found in {run_dir}.\n"
-            f"Expected config.json or model.safetensors directly in that folder.\n"
-            "Train a run first."
+        src = (
+            os.path.normpath(checkpoint_run)
+            if os.path.isabs(checkpoint_run)
+            else os.path.join(save_dir, checkpoint_run)
         )
-    print(f"Loading student from {student_source}")
+        student_source = find_student_source(src)
+        if student_source is None:
+            raise SystemExit(
+                f"No student weights found in {src}.\n"
+                "Expected config.json or model.safetensors directly in that folder.\n"
+                "Train a run first."
+            )
+        print(f"Loading student from {student_source}")
+    else:
+        student_source = None  # caller fills this in via --resume-step
+
     return run_dir, student_source
 
 
