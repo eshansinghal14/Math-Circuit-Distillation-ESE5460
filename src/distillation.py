@@ -953,10 +953,9 @@ class DistillationTrainer:
         except ImportError:
             print("matplotlib not installed; skipping curve plots.")
             return
-        epochs = self.history.get("epoch", [])
-        if not epochs:
+        loss_steps = self.history.get("train_step", [])
+        if not loss_steps:
             return
-        loss_steps = self.history.get("train_step") or epochs
         kl_series = self.history.get("step_kl_loss") or self.history.get("kl_loss", [])
         graph_series = self.history.get("step_graph_loss") or self.history.get("graph_loss", [])
         if self._use_graph:
@@ -1011,7 +1010,6 @@ class DistillationTrainer:
         out = os.path.join(self.config.save_dir, "training_curves.png")
         fig.savefig(out, dpi=150)
         plt.close(fig)
-        print(f"Saved training curves to {out}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
