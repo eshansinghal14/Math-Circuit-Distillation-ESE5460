@@ -13,7 +13,7 @@ def _compute_edge_loss(
     teacher_ids: list[int],
     student_ids: list[int],
     epsilon: float = 1e-8,
-    similarity: Literal["jsd", "kld"] = "jsd",
+    similarity: Literal["jsd", "kld", "mse", "mse-norm", "mse-scale"] = "jsd",
 ) -> torch.Tensor:
     """Edge-level structural loss: row-wise Jensen-Shannon between coarsened adjacency.
 
@@ -95,6 +95,27 @@ def _compute_edge_loss(
         kld = (t_dist.detach() * (log_t - log_s)).sum(dim=1)
         return kld.mean().to(dtype)
 
+    if similarity == "mse":
+        # Raw Frobenius-style MSE on absolute coarsened adjacency values.
+        # Captures both shape and magnitude differences; gradient is simple
+        # 2*(student - teacher), no explosion risk.
+        return F.mse_loss(s_abs, t_abs.detach()).to(dtype)
+
+    if similarity == "mse-norm":
+        # MSE on L1-row-normalised distributions (same normalisation used for
+        # KLD/JSD).  Scale-invariant: only the relative routing structure is
+        # penalised, not absolute magnitudes.
+        return F.mse_loss(s_dist, t_dist.detach()).to(dtype)
+
+    if similarity == "mse-scale":
+        # Combined: shape penalty (mse-norm) + scale penalty on row sums so
+        # the student also learns to match the teacher's magnitude per row.
+        shape_loss = F.mse_loss(s_dist, t_dist.detach())
+        t_row_sums = t_abs.sum(dim=1).detach()
+        s_row_sums = s_abs.sum(dim=1)
+        scale_loss = F.mse_loss(s_row_sums, t_row_sums)
+        return (shape_loss + 0.1 * scale_loss).to(dtype)
+
     # JSD = 0.5*KL(t||m) + 0.5*KL(s||m) where m = (t+s)/2.  Symmetric,
     # bounded in [0, log 2].  Also penalizes spurious student edges (mass
     # where teacher has zero), unlike forward-only KL.
@@ -113,7 +134,7 @@ def compute_graph_loss(
     teacher_ids: list[int],
     student_ids: list[int],
     epsilon: float = 1e-8,
-    similarity: Literal["jsd", "kld"] = "jsd",
+    similarity: Literal["jsd", "kld", "mse", "mse-norm", "mse-scale"] = "jsd",
 ) -> tuple[torch.Tensor, dict]:
     """Graph loss: edge-structure similarity between aligned supernode adjacency rows."""
     loss = _compute_edge_loss(W_T, W_S, mapping, teacher_ids, student_ids, epsilon, similarity)

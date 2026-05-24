@@ -11,7 +11,7 @@ import os
 from collections import defaultdict
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -162,7 +162,7 @@ class DistillationConfig:
     label_refresh_n_prompts: int = 8
     mlp_cache_refresh_interval: int = 0
     mlp_cache_batch_size: int = 64
-    graph_loss_type: str = "jsd"
+    graph_loss_type: Literal["jsd", "kld", "mse", "mse-norm", "mse-scale"] = "jsd"
     graph_node_labels: Optional[List[str]] = None
     graph_include_token_nodes: bool = False
     graph_include_logit_nodes: bool = False
@@ -1052,12 +1052,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument(
         "--graph-loss-type",
-        choices=["jsd", "kld"],
+        choices=["jsd", "kld", "mse", "mse-norm", "mse-scale"],
         default="jsd",
         help=(
-            "Similarity function for graph loss. 'jsd' (default): symmetric "
-            "Jensen-Shannon divergence, penalizes both missing and spurious edges. "
-            "'kld': forward KL(teacher||student), only penalizes missing teacher mass."
+            "Similarity function for graph loss. "
+            "'jsd' (default): symmetric Jensen-Shannon divergence. "
+            "'kld': forward KL(teacher||student). "
+            "'mse': raw Frobenius MSE on coarsened adjacency values. "
+            "'mse-norm': MSE on L1-row-normalised distributions (scale-invariant). "
+            "'mse-scale': mse-norm + row-sum magnitude penalty."
         ),
     )
     parser.add_argument(

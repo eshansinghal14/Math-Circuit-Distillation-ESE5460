@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import torch
 
@@ -42,7 +42,7 @@ class GraphAuxConfig:
     dataset: str | None = None
     student_activation_write_cache_path: str | None = None
     activation_write_result_cache: dict = field(default_factory=dict)
-    graph_loss_type: str = "jsd"
+    graph_loss_type: Literal["jsd", "kld", "mse", "mse-norm", "mse-scale"] = "jsd"
     student_graph_labels: list[str] | None = None
     include_token_nodes: bool = False
     include_logit_nodes: bool = False
