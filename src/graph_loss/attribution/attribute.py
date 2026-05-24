@@ -133,11 +133,19 @@ def _attribute_from_context(
     detach_result: bool | None = None,
     skip_logit_attribution: bool = False,
     verbose: bool = False,
+    include_token_nodes: bool = False,
+    include_logit_nodes: bool = False,
 ) -> Graph:
     """Build a Graph from a pre-built HFAttributionContext (edge attribution phase only).
 
     Callers that want to run ANOVA labeling before edge attribution should call
     setup_attribution() → select_anova_supernodes() → ctx.filter(mask) → this function.
+
+    Args:
+        include_token_nodes: If True, include token embedding nodes in the adjacency
+            matrix (rows and columns).  Default False — neuron-only graph.
+        include_logit_nodes: If True, include logit target nodes in the adjacency
+            matrix (rows and columns).  Default False — neuron-only graph.
     """
     from graph_loss.hf_adapter import _HFGraphConfig, detach_graph
 
@@ -173,7 +181,9 @@ def _attribute_from_context(
         else torch.zeros(0, source_count, dtype=ctx.source_vectors.dtype, device=adapter.device)
     )
 
-    if not skip_logit_attribution:
+    # Skip logit attribution entirely when logit nodes won't be included anyway.
+    effective_skip_logit = skip_logit_attribution or not include_logit_nodes
+    if not effective_skip_logit:
         logit_row_chunks = []
         for start in range(0, n_logits, max(1, batch_size)):
             end = min(start + max(1, batch_size), n_logits)
@@ -209,15 +219,41 @@ def _attribute_from_context(
     token_rows = torch.zeros(n_tokens, total_nodes, dtype=neuron_rows.dtype, device=adapter.device)
     adjacency = torch.cat([neuron_rows, token_rows, logit_rows], dim=0)
 
+    # Strip token and/or logit node rows/columns when not requested.
+    # Node layout is [neurons | tokens | logits]; keep indices are built in that order.
+    if not include_token_nodes or not include_logit_nodes:
+        keep: list[int] = list(range(n_neurons))
+        if include_token_nodes:
+            keep.extend(range(n_neurons, n_neurons + n_tokens))
+        if include_logit_nodes:
+            keep.extend(range(n_neurons + n_tokens, total_nodes))
+        keep_t = torch.tensor(keep, dtype=torch.long, device=adapter.device)
+        adjacency = adjacency[keep_t][:, keep_t]
+
+    # Update Graph fields to match the actual adjacency layout.
+    # n_tokens / n_logits are inferred from input_tokens / logit_targets lengths,
+    # so zero them out when those nodes were excluded.
+    graph_input_tokens = (
+        ctx.input_ids
+        if include_token_nodes
+        else torch.zeros(0, dtype=torch.long, device=adapter.device)
+    )
+    graph_logit_targets = targets.logit_targets if include_logit_nodes else []
+    graph_logit_probs = (
+        targets.logit_probabilities
+        if include_logit_nodes
+        else torch.zeros(0, dtype=targets.logit_probabilities.dtype, device=adapter.device)
+    )
+
     graph = Graph(
         input_string=adapter.tokenizer.decode(ctx.input_ids.detach().cpu().tolist()),
-        input_tokens=ctx.input_ids,
+        input_tokens=graph_input_tokens,
         neuron_locations=ctx.neuron_locations,
         adjacency_matrix=adjacency,
         cfg=cfg,
         neuron_activations=ctx.neuron_activations,
-        logit_targets=targets.logit_targets,
-        logit_probabilities=targets.logit_probabilities,
+        logit_targets=graph_logit_targets,
+        logit_probabilities=graph_logit_probs,
         vocab_size=targets.vocab_size,
         neuron_write_vectors=ctx.source_vectors.detach().clone(),
     )
@@ -242,6 +278,8 @@ def attribute(
     create_graph: bool = False,
     detach_result: bool | None = None,
     skip_logit_attribution: bool = False,
+    include_token_nodes: bool = False,
+    include_logit_nodes: bool = False,
 ) -> Graph:
     """Compute a neuron-level attribution graph for ``prompt``.
 
@@ -263,4 +301,6 @@ def attribute(
         detach_result=detach_result,
         skip_logit_attribution=skip_logit_attribution,
         verbose=verbose,
+        include_token_nodes=include_token_nodes,
+        include_logit_nodes=include_logit_nodes,
     )

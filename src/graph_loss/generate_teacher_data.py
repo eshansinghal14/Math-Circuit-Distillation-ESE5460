@@ -51,6 +51,8 @@ class TeacherDataConfig:
     anova_nodes_per_label: int = 10
     anova_range_radius: int = 0
     sum_min_specificity: float = 0.0
+    include_token_nodes: bool = False
+    include_logit_nodes: bool = False
 
 
 def _resolve_dataset_file(dataset_file: str) -> str:
@@ -201,6 +203,8 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
             prop_neurons_per_layer=config.prop_neurons_per_layer,
             batch_size=config.attribution_batch_size,
             verbose=config.verbose,
+            include_token_nodes=config.include_token_nodes,
+            include_logit_nodes=config.include_logit_nodes,
             dataset=activation_dataset,
             mlp_input_cache=mlp_input_cache,
             model_name=config.teacher_model,
@@ -407,6 +411,8 @@ def main() -> None:
         anova_nodes_per_label=args.anova_nodes_per_label,
         anova_range_radius=args.anova_range_radius,
         sum_min_specificity=args.sum_min_specificity,
+        include_token_nodes=args.include_token_nodes,
+        include_logit_nodes=args.include_logit_nodes,
     )
     generate_teacher_data(config)
 

@@ -204,6 +204,8 @@ def create_graph(
     build_create_graph: bool = False,
     detach_result: bool | None = None,
     skip_logit_attribution: bool = False,
+    include_token_nodes: bool = False,
+    include_logit_nodes: bool = False,
     # ANOVA / supergraph params
     dataset: str | None = None,
 
@@ -246,6 +248,10 @@ def create_graph(
         sum_min_specificity: Min ANOVA specificity for sum-range/sum-units supernodes.
         no_grad_supergraph: Wrap build_super_graph in torch.no_grad() (training use).
         logger: Optional logger; creates a module-level one if not provided.
+        include_token_nodes: If True, include token embedding nodes in the adjacency
+            matrix.  Default False.
+        include_logit_nodes: If True, include logit target nodes in the adjacency
+            matrix.  Default False.
 
     Returns:
         GraphPipelineResult with the ANOVA-filtered attribution graph and supergraph.
@@ -340,6 +346,8 @@ def create_graph(
         detach_result=detach_result,
         skip_logit_attribution=skip_logit_attribution,
         verbose=verbose,
+        include_token_nodes=include_token_nodes,
+        include_logit_nodes=include_logit_nodes,
     )
     _log_graph_summary(graph, logger=_logger, stage="Built (ANOVA-filtered)")
 

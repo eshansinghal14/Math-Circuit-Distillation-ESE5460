@@ -98,6 +98,28 @@ def add_graph_build_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Show attribution progress",
     )
+    parser.add_argument(
+        "--include-token-nodes",
+        "--include_token_nodes",
+        dest="include_token_nodes",
+        action="store_true",
+        default=False,
+        help=(
+            "Include token embedding nodes in the attribution graph adjacency matrix. "
+            "By default token nodes are excluded (neuron-only graph)."
+        ),
+    )
+    parser.add_argument(
+        "--include-logit-nodes",
+        "--include_logit_nodes",
+        dest="include_logit_nodes",
+        action="store_true",
+        default=False,
+        help=(
+            "Include logit target nodes in the attribution graph adjacency matrix. "
+            "By default logit nodes are excluded (neuron-only graph)."
+        ),
+    )
 
 
 

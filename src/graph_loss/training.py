@@ -44,6 +44,8 @@ class GraphAuxConfig:
     activation_write_result_cache: dict = field(default_factory=dict)
     graph_loss_type: str = "jsd"
     student_graph_labels: list[str] | None = None
+    include_token_nodes: bool = False
+    include_logit_nodes: bool = False
 
 
 def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
@@ -117,6 +119,8 @@ def compute_prompt_graph_loss(
             build_create_graph=False,
             detach_result=False,
             skip_logit_attribution=False,
+            include_token_nodes=config.include_token_nodes,
+            include_logit_nodes=config.include_logit_nodes,
             dataset=config.dataset,
 
             mlp_input_cache=config.mlp_input_cache,
