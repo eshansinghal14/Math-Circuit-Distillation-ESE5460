@@ -23,7 +23,6 @@ from utils import (
     EVAL_MAX_NEW_TOKENS,
     LLAMA_1B_MODEL_NAME,
     LLAMA_8B_MODEL_NAME,
-    STUDENT_MODEL_DIR,
     evaluate_prompt_answer_dict,
     get_default_device,
     json_to_prompt_answer_dict,
@@ -37,7 +36,6 @@ from utils import (
     rm_dir_tree,
     seed_all,
 )
-from utils.config import STUDENT_WEIGHTS_FILE
 
 # ─────────────────────────────────────────────────────────────────────────────
 # KL loss helpers
@@ -169,6 +167,20 @@ class DistillationConfig:
 
 
 
+def find_student_source(path: str) -> Optional[str]:
+    """Return *path* if it is an HF checkpoint directory, otherwise ``None``.
+
+    Checkpoints are saved directly into their folder (``model.safetensors`` +
+    ``config.json`` at the root), matching how ``_save_checkpoint_at_step`` works.
+    """
+    if os.path.isdir(path) and (
+        os.path.isfile(os.path.join(path, "config.json"))
+        or os.path.isfile(os.path.join(path, "model.safetensors"))
+    ):
+        return path
+    return None
+
+
 def resolve_distillation_run_dir(
     save_dir: str,
     *,
@@ -197,9 +209,7 @@ def resolve_distillation_run_dir(
                 cr = f"{sub}/{cr}"
             run_dir = os.path.join(save_dir, cr)
     else:
-        hf_here = os.path.join(base, STUDENT_MODEL_DIR)
-        wt_here = os.path.join(base, STUDENT_WEIGHTS_FILE)
-        if os.path.isdir(hf_here) or os.path.isfile(wt_here):
+        if find_student_source(base) is not None:
             run_dir = base
         else:
             run_dir = most_recent_subdirectory(base)
@@ -210,19 +220,14 @@ def resolve_distillation_run_dir(
                 )
             print(f"Auto-detected most recent run folder: {run_dir}")
 
-    hf_path = os.path.join(run_dir, STUDENT_MODEL_DIR)
-    wt_path = os.path.join(run_dir, STUDENT_WEIGHTS_FILE)
-    if os.path.isdir(hf_path):
-        student_source = hf_path
-        print(f"Loading student from {student_source}")
-    elif os.path.isfile(wt_path):
-        student_source = wt_path
-        print(f"Loading student weights from {student_source} (fast checkpoint)")
-    else:
+    student_source = find_student_source(run_dir)
+    if student_source is None:
         raise SystemExit(
-            f"Resume expected saved weights at {hf_path} or {wt_path}. "
+            f"No student weights found in {run_dir}.\n"
+            f"Expected config.json or model.safetensors directly in that folder.\n"
             "Train a run first."
         )
+    print(f"Loading student from {student_source}")
     return run_dir, student_source
 
 
@@ -517,7 +522,10 @@ class DistillationTrainer:
                 answers=batch["answers"],
             )
         except RuntimeError:
-            self._save_checkpoint(folder="exception_checkpoint")
+            exc_path = os.path.join(self.config.save_dir, "exception_checkpoint")
+            os.makedirs(exc_path, exist_ok=True)
+            self.student.save_pretrained(exc_path)
+            self.tokenizer.save_pretrained(exc_path)
             raise
 
         if use_grad_norm_scale:
@@ -920,13 +928,11 @@ class DistillationTrainer:
         self._save_history()
         self._save_curves()
         self._save_checkpoint()
-        print(f"  Saved {STUDENT_MODEL_DIR}/ (final)")
         print(f"Results saved to: {cfg.save_dir}")
         return dict(self.history)
 
-    def _save_checkpoint(self, folder: str = STUDENT_MODEL_DIR) -> None:
-        path = os.path.join(self.config.save_dir, folder)
-        rm_dir_tree(path)
+    def _save_checkpoint(self) -> None:
+        path = self.config.save_dir
         os.makedirs(path, exist_ok=True)
         self.student.save_pretrained(path)
         self.tokenizer.save_pretrained(path)
@@ -1220,7 +1226,10 @@ def main() -> None:
         step_ckpt = os.path.join(run_dir, f"step_{args.resume_step}_checkpoint")
         if not os.path.isdir(step_ckpt):
             raise SystemExit(f"No checkpoint found at {step_ckpt}")
-        student_source = step_ckpt
+        student_source = find_student_source(step_ckpt)
+        if student_source is None:
+            raise SystemExit(f"No student weights found in step checkpoint {step_ckpt}")
+        print(f"Resuming from step {args.resume_step} checkpoint: {student_source}")
     os.makedirs(run_dir, exist_ok=True)
 
     print("=" * 60)
