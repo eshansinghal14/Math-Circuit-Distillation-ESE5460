@@ -183,6 +183,13 @@ def compute_prompt_graph_loss(
         for sid, labels in enumerate(student_supergraph.supernode_labels or [])
         if labels
     }
+    if config.student_graph_labels:
+        missing = [lbl for lbl in config.student_graph_labels if lbl not in s_label_to_sid]
+        if missing:
+            raise RuntimeError(
+                f"Student graph is missing supernodes for expected label(s): {missing}. "
+                f"Student supernode labels present: {sorted(s_label_to_sid.keys())}."
+            )
     mapping = {
         tid: {s_label_to_sid[labels[0]]}
         for tid, labels in enumerate(teacher_supergraph.supernode_labels or [])

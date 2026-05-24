@@ -546,12 +546,22 @@ class DistillationTrainer:
                 self.config.lambda_graph * kl_grad_norm / max(graph_grad_norm, 1e-8)
             )
 
+        _skip_metric_keys = {
+            "teacher_supernodes",
+            "student_supernodes",
+            "aligned_teacher_supernodes",
+            "graph_prompts",
+            "graph_backward_prompts",
+            "edge_loss",
+            "student_graph_neurons",
+        }
         graph_weighted = self.config.lambda_graph * graph_loss
         total = non_graph_loss.detach() + graph_weighted
         metrics["graph_loss"] = float(graph_loss.item())
-        metrics["graph_loss_weighted"] = float(graph_weighted.item())
         metrics["total_loss"] = float(total.item())
         for key, value in graph_metrics.items():
+            if key in _skip_metric_keys:
+                continue
             if isinstance(value, (int, float)):
                 metrics[f"graph_{key}"] = float(value)
         return total
@@ -559,8 +569,6 @@ class DistillationTrainer:
     def _record_step_metrics(self, epoch: int, batch_step: int, metrics: Dict[str, float]) -> None:
         self._train_step += 1
         self.history["train_step"].append(self._train_step)
-        self.history["train_epoch"].append(epoch + 1)
-        self.history["train_batch"].append(batch_step)
         for key, value in metrics.items():
             self.history[f"step_{key}"].append(float(value))
 
@@ -577,7 +585,6 @@ class DistillationTrainer:
         acc_f = float(acc)
         self._step_log_eval_accuracy = acc_f
         self.history["accuracy"].append(acc_f)
-        self.history["eval_train_step"].append(int(self._train_step))
         for prefix, data in self.extra_eval_data.items():
             extra_acc = evaluate_prompt_answer_dict(
                 self.student,
@@ -731,27 +738,11 @@ class DistillationTrainer:
                     graph_s = f" | Graph [warmup until step {self._graph_start_step}]"
                 elif self._use_graph:
                     graph_avg = interval.get("graph_loss", 0.0) / denom
-                    weighted_avg = interval.get("graph_loss_weighted", 0.0) / denom
-                    n_prompts = interval.get("graph_graph_prompts", 0.0)
-                    n_back = interval.get("graph_graph_backward_prompts", 0.0)
-                    active_pct = (100.0 * n_back / n_prompts) if n_prompts > 0 else 0.0
-                    graph_s = (
-                        f" | Graph {graph_avg:.4f}"
-                        f" | lambdaGraph {weighted_avg:.4f}"
-                        f" | GraphActive {active_pct:.0f}%"
-                    )
+                    graph_s = f" | Graph {graph_avg:.4f}"
                     if self.config.graph_grad_norm_scale:
                         eff_lam_key = "graph_grad_norm_scale_effective_lambda"
                         eff_lam_avg = interval.get(eff_lam_key, 0.0) / denom
                         graph_s += f" | effLambda {eff_lam_avg:.4f}"
-                    t_sn = interval.get("graph_teacher_supernodes", 0.0) / denom
-                    s_sn = interval.get("graph_student_supernodes", 0.0) / denom
-                    mapped = interval.get("graph_aligned_teacher_supernodes", 0.0) / denom
-                    if t_sn > 0 or s_sn > 0:
-                        graph_s += (
-                            f" | align T{t_sn:.1f}/S{s_sn:.1f}"
-                            f" mapped={mapped:.1f}"
-                        )
                 grad_s = ""
                 if self.config.track_loss_grads:
                     grad_s = (
@@ -906,10 +897,7 @@ class DistillationTrainer:
             acc_s = f"{self._step_log_eval_accuracy:.4f}"
             graph_s = ""
             if self._use_graph:
-                graph_s = (
-                    f", Graph={epoch_metrics.get('graph_loss', float('nan')):.4f}"
-                    f", lambdaGraph={epoch_metrics.get('graph_loss_weighted', float('nan')):.4f}"
-                )
+                graph_s = f", Graph={epoch_metrics.get('graph_loss', float('nan')):.4f}"
             print(
                 f"Pass {epoch + 1}: "
                 f"KL={epoch_metrics.get('kl_loss', float('nan')):.4f}"
