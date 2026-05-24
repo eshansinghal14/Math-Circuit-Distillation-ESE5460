@@ -1222,13 +1222,16 @@ def main() -> None:
         resume=args.resume_step is not None,
         checkpoint_run=args.checkpoint_run,
     )
-    if args.resume_step is not None:
+    if args.resume_step is not None and not args.checkpoint_run:
+        # checkpoint_run already resolved student_source directly; only build the
+        # step path when the user pointed at a run dir without a specific checkpoint.
         step_ckpt = os.path.join(run_dir, f"step_{args.resume_step}_checkpoint")
         if not os.path.isdir(step_ckpt):
             raise SystemExit(f"No checkpoint found at {step_ckpt}")
         student_source = find_student_source(step_ckpt)
         if student_source is None:
             raise SystemExit(f"No student weights found in step checkpoint {step_ckpt}")
+    if args.resume_step is not None:
         print(f"Resuming from step {args.resume_step} checkpoint: {student_source}")
     os.makedirs(run_dir, exist_ok=True)
 
