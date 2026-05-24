@@ -43,6 +43,7 @@ class GraphAuxConfig:
     student_activation_write_cache_path: str | None = None
     activation_write_result_cache: dict = field(default_factory=dict)
     graph_loss_type: str = "jsd"
+    student_graph_labels: list[str] | None = None
 
 
 def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
@@ -131,6 +132,19 @@ def compute_prompt_graph_loss(
 
     student_graph = student_result.graph
     student_supergraph_structure = student_result.supergraph
+
+    # Filter supernodes to only the requested labels (if specified).
+    if config.student_graph_labels is not None:
+        label_set = set(config.student_graph_labels)
+        keep_indices = [
+            i
+            for i, labels in enumerate(student_supergraph_structure.supernode_labels or [])
+            if labels and labels[0] in label_set
+        ]
+        student_supergraph_structure = student_supergraph_structure._replace(
+            supernodes=[student_supergraph_structure.supernodes[i] for i in keep_indices],
+            supernode_labels=[student_supergraph_structure.supernode_labels[i] for i in keep_indices],
+        )
 
     for i, members in enumerate(student_supergraph_structure.supernodes):
         if not members:

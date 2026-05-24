@@ -163,6 +163,7 @@ class DistillationConfig:
     mlp_cache_refresh_interval: int = 0
     mlp_cache_batch_size: int = 64
     graph_loss_type: str = "jsd"
+    graph_node_labels: Optional[List[str]] = None
 
 
 
@@ -330,6 +331,7 @@ class DistillationTrainer:
                 student_sum_min_specificity=config.student_sum_min_specificity,
                 dataset=config.student_dataset,
                 graph_loss_type=config.graph_loss_type,
+                student_graph_labels=config.graph_node_labels,
             )
 
             self.student_graph_adapter = HFLlamaGraphAdapter(
@@ -1171,6 +1173,19 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--graph-node-labels",
+        nargs="+",
+        default=None,
+        metavar="LABEL",
+        dest="graph_node_labels",
+        help=(
+            "Whitelist of ANOVA supernode label names to include when building the "
+            "student supergraph and computing graph loss. "
+            "E.g. --graph-node-labels 'arg1 range' 'sum units'. "
+            "If omitted, all labels are included."
+        ),
+    )
     return parser
 
 
@@ -1298,6 +1313,7 @@ def main() -> None:
             mlp_cache_refresh_interval=args.mlp_cache_refresh_interval,
             mlp_cache_batch_size=args.mlp_cache_batch_size,
             graph_loss_type=args.graph_loss_type,
+            graph_node_labels=args.graph_node_labels,
 
             seed=args.seed,
             device=device,
