@@ -189,10 +189,13 @@ def resolve_distillation_run_dir(
         return base, None
 
     if checkpoint_run:
-        cr = checkpoint_run.replace("\\", "/").strip("/")
-        if sub and not cr.startswith(f"{sub}/"):
-            cr = f"{sub}/{cr}"
-        run_dir = os.path.join(save_dir, cr)
+        if os.path.isabs(checkpoint_run):
+            run_dir = os.path.normpath(checkpoint_run)
+        else:
+            cr = checkpoint_run.replace("\\", "/").strip("/")
+            if sub and not cr.startswith(f"{sub}/"):
+                cr = f"{sub}/{cr}"
+            run_dir = os.path.join(save_dir, cr)
     else:
         hf_here = os.path.join(base, STUDENT_MODEL_DIR)
         wt_here = os.path.join(base, STUDENT_WEIGHTS_FILE)
