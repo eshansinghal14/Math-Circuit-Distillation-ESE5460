@@ -99,8 +99,9 @@ def _build_graph_data(
         graph,
         supergraph,
         heatmap_pdf_url_by_supernode=heatmap_pdf_url_by_supernode,
+        tokenizer=tokenizer,
     )
-    links = _supergraph_links(supergraph, nodes)
+    links = _supergraph_links(graph, supergraph, nodes)
     metadata = {
         "schema_version": 1,
         "format": "graph_loss_supergraph",
@@ -110,6 +111,8 @@ def _build_graph_data(
         "prompt": graph.input_string,
         "prompt_tokens": prompt_tokens,
         "n_neurons": graph.n_neurons,
+        "n_tokens": graph.n_tokens,
+        "n_logits": graph.n_logits,
         "n_supernodes": len(supergraph.supernodes),
         "n_links": len(links),
     }
@@ -155,12 +158,17 @@ def _supergraph_nodes(
     supergraph: SuperGraph,
     *,
     heatmap_pdf_url_by_supernode: dict[int, str] | None = None,
+    tokenizer: Any | None = None,
 ) -> list[dict[str, Any]]:
     locations = graph.neuron_locations.detach().cpu()
     activations = graph.neuron_activations.detach().float().cpu()
     delta_norms = None
 
-    nodes = []
+    max_layer = int(locations[:, 0].max().item()) if graph.n_neurons > 0 else 0
+
+    nodes: list[dict[str, Any]] = []
+
+    # ── 1. Supernode (neuron-cluster) nodes ──────────────────────────────────
     for supernode_idx, members in enumerate(supergraph.supernodes):
         member_ids = [int(member) for member in members]
         member_locations = locations[member_ids] if member_ids else torch.empty((0, 3))
@@ -194,30 +202,131 @@ def _supergraph_nodes(
         if heatmap_pdf_url_by_supernode and supernode_idx in heatmap_pdf_url_by_supernode:
             node_dict["heatmap_pdf_url"] = heatmap_pdf_url_by_supernode[supernode_idx]
         nodes.append(node_dict)
+
+    # ── 2. Token embedding nodes (present when include_token_nodes=True) ─────
+    if graph.n_tokens > 0:
+        token_ids = graph.input_tokens.detach().cpu().tolist()
+        for pos, token_id in enumerate(token_ids):
+            token_str = _decode_token(token_id, tokenizer)
+            nodes.append({
+                "node_id": f"tok_{pos}",
+                "feature": pos,
+                "feature_type": "token",
+                "layer": -1,          # embedding layer — before all MLP layers
+                "ctx_idx": pos,
+                "probe_location_idx": 0,
+                "influence": 0.0,
+                "activation": 1.0,    # token embeddings are always "active"
+                "clerp": token_str,
+                "token_id": int(token_id),
+                "is_token_node": True,
+            })
+
+    # ── 3. Logit target nodes (present when include_logit_nodes=True) ────────
+    if graph.n_logits > 0:
+        logit_probs = graph.logit_probabilities.detach().float().cpu().tolist()
+        for logit_idx, target in enumerate(graph.logit_targets):
+            prob = float(logit_probs[logit_idx]) if logit_idx < len(logit_probs) else 0.0
+            nodes.append({
+                "node_id": f"logit_{logit_idx}",
+                "feature": logit_idx,
+                "feature_type": "logit",
+                "layer": max_layer + 1,       # after all MLP layers
+                "ctx_idx": graph.n_pos - 1,   # last sequence position
+                "probe_location_idx": 0,
+                "influence": 0.0,
+                "activation": prob,
+                "clerp": target.token_str,
+                "vocab_idx": target.vocab_idx,
+                "probability": prob,
+                "is_logit_node": True,
+            })
+
     return nodes
 
 
 def _supergraph_links(
+    graph: Graph,
     supergraph: SuperGraph,
     nodes: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    adjacency = supergraph.supernode_adjacency_matrix.detach().float().cpu()
-    node_ids = [node["node_id"] for node in nodes]
+    supernode_adj = supergraph.supernode_adjacency_matrix.detach().float().cpu()
+    n_supernodes = len(supergraph.supernodes)
     links = []
-    for target_idx, source_idx in adjacency.nonzero(as_tuple=False).tolist():
+
+    # ── 1. Supernode-to-supernode edges (from the supergraph adjacency matrix) ─
+    for target_idx, source_idx in supernode_adj.nonzero(as_tuple=False).tolist():
         if target_idx == source_idx:
             continue
-        if target_idx >= len(node_ids) or source_idx >= len(node_ids):
+        if target_idx >= n_supernodes or source_idx >= n_supernodes:
             continue
-        links.append(
-            {
-                "source": node_ids[source_idx],
-                "target": node_ids[target_idx],
-                "weight": float(adjacency[target_idx, source_idx].item()),
-            }
-        )
+        links.append({
+            "source": f"sg_{source_idx}",
+            "target": f"sg_{target_idx}",
+            "weight": float(supernode_adj[target_idx, source_idx].item()),
+        })
+
+    # ── 2. Token→supernode cross-edges ───────────────────────────────────────
+    # Adjacency layout: [neurons | tokens | logits]; rows=targets, cols=sources.
+    # adjacency[neuron_row, n_neurons + token_pos] = token influence on that neuron.
+    n_neurons = graph.n_neurons
+    n_tokens = graph.n_tokens
+    n_logits = graph.n_logits
+
+    if n_tokens > 0:
+        adj = graph.adjacency_matrix.detach().float().cpu()
+        adj_cols = adj.shape[1]
+        for pos in range(n_tokens):
+            token_col = n_neurons + pos
+            if token_col >= adj_cols:
+                continue
+            for sg_idx, members in enumerate(supergraph.supernodes):
+                if not members:
+                    continue
+                member_t = torch.tensor(members, dtype=torch.long)
+                weight = float(adj[member_t, token_col].sum().item())
+                if weight != 0.0:
+                    links.append({
+                        "source": f"tok_{pos}",
+                        "target": f"sg_{sg_idx}",
+                        "weight": weight,
+                    })
+
+    # ── 3. Supernode→logit cross-edges ───────────────────────────────────────
+    # adjacency[n_neurons + n_tokens + logit_idx, neuron_col] = neuron's contribution to that logit.
+    if n_logits > 0:
+        adj = graph.adjacency_matrix.detach().float().cpu()
+        adj_rows = adj.shape[0]
+        for logit_idx in range(n_logits):
+            logit_row = n_neurons + n_tokens + logit_idx
+            if logit_row >= adj_rows:
+                continue
+            for sg_idx, members in enumerate(supergraph.supernodes):
+                if not members:
+                    continue
+                member_t = torch.tensor(members, dtype=torch.long)
+                weight = float(adj[logit_row, member_t].sum().item())
+                if weight != 0.0:
+                    links.append({
+                        "source": f"sg_{sg_idx}",
+                        "target": f"logit_{logit_idx}",
+                        "weight": weight,
+                    })
+
     links.sort(key=lambda item: abs(item["weight"]))
     return links
+
+
+def _decode_token(token_id: int, tokenizer: Any | None) -> str:
+    """Decode a single token ID to a display string."""
+    if tokenizer is None or not hasattr(tokenizer, "decode"):
+        return str(int(token_id))
+    try:
+        return str(tokenizer.decode([int(token_id)]))
+    except TypeError:
+        return str(tokenizer.decode(int(token_id)))
+    except Exception:
+        return str(int(token_id))
 
 
 def _supernode_label(
