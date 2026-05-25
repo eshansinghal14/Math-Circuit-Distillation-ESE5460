@@ -55,6 +55,13 @@ def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> Super
     """
     adj_matrix_norm = normalize_matrix(graph.adjacency_matrix)
     num_supernodes = len(supernodes)
+    if num_supernodes == 0:
+        device = graph.adjacency_matrix.device
+        dtype = graph.adjacency_matrix.dtype
+        return SuperGraph(
+            supernode_adjacency_matrix=torch.zeros((0, 0), device=device, dtype=dtype),
+            supernodes=[],
+        )
     rows = []
     for t in range(num_supernodes):
         total_input = torch.abs(adj_matrix_norm[:, supernodes[t]]).sum(dim=0)

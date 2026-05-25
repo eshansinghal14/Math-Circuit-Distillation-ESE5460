@@ -1236,8 +1236,7 @@ def main() -> None:
     print(f"  train_path:         {train_path}")
     print(f"  test_path:          {test_path}")
     print(f"  lambda_graph:       {args.lambda_graph}")
-
-
+    print(f"  graph_loss_type:    {args.graph_loss_type}")
     print(f"  graph dtype:        {args.dtype}")
     print(f"  teacher cache:      {args.teacher_data_cache or 'none'}")
     print(f"  save_dir:           {run_dir}")
