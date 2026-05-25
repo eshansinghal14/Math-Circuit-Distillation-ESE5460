@@ -329,7 +329,7 @@ def create_graph(
             W_U=adapter.W_U,
             tokenizer=adapter.tokenizer,
             target_args=target_args,
-            allowed_labels=set(node_labels) if node_labels is not None else set(),
+            allowed_labels=set(node_labels) if node_labels is not None else None,
             include_dla_node=include_dla_node,
             model_logits=ctx.logits[0, -1].detach() if include_dla_node else None,
         )

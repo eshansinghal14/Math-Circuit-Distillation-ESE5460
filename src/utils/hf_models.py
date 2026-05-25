@@ -61,12 +61,22 @@ def load_model(model_name):
     # return False for real directories if the mount is slow to respond.
     _is_local = model_name.startswith("/") or model_name.startswith(".") or os.path.isdir(model_name)
     local_kwargs = {"local_files_only": True} if _is_local else {}
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        dtype=torch.float16 if device.type == "cuda" else None,
-        **local_kwargs,
-    ).to(device)
-    tokenizer = AutoTokenizer.from_pretrained(model_name, **local_kwargs)
+    # Suppress the safetensors/tqdm loading bar that hf_logging.disable_progress_bar()
+    # does not cover (safetensors uses tqdm directly, not the HF progress-bar layer).
+    _prev_tqdm = os.environ.get("TQDM_DISABLE")
+    os.environ["TQDM_DISABLE"] = "1"
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            dtype=torch.float16 if device.type == "cuda" else None,
+            **local_kwargs,
+        ).to(device)
+        tokenizer = AutoTokenizer.from_pretrained(model_name, **local_kwargs)
+    finally:
+        if _prev_tqdm is None:
+            os.environ.pop("TQDM_DISABLE", None)
+        else:
+            os.environ["TQDM_DISABLE"] = _prev_tqdm
     tokenizer.pad_token = tokenizer.eos_token
     # Match distillation AddDataset/collate_fn (right-pad); eval/generate use same side.
     tokenizer.padding_side = "right"
