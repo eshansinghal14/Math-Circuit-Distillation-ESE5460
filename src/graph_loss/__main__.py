@@ -126,8 +126,6 @@ def main():
         prop_neurons_per_layer=args.prop_neurons_per_layer,
         batch_size=args.attribution_batch_size,
         verbose=args.verbose,
-        include_token_nodes=args.include_token_nodes,
-        include_logit_nodes=args.include_logit_nodes,
         dataset=args.dataset,
 
         model_name=args.model,

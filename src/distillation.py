@@ -164,8 +164,6 @@ class DistillationConfig:
     mlp_cache_batch_size: int = 64
     graph_loss_type: Literal["jsd", "kld", "mse", "mse-norm", "mse-scale"] = "jsd"
     graph_node_labels: Optional[List[str]] = None
-    graph_include_token_nodes: bool = False
-    graph_include_logit_nodes: bool = False
 
 
 
@@ -334,8 +332,6 @@ class DistillationTrainer:
                 dataset=config.student_dataset,
                 graph_loss_type=config.graph_loss_type,
                 student_graph_labels=config.graph_node_labels,
-                include_token_nodes=config.graph_include_token_nodes,
-                include_logit_nodes=config.graph_include_logit_nodes,
             )
 
             self.student_graph_adapter = HFLlamaGraphAdapter(
@@ -1181,28 +1177,6 @@ def build_parser() -> argparse.ArgumentParser:
             "If omitted, all labels are included."
         ),
     )
-    parser.add_argument(
-        "--include-token-nodes",
-        action="store_true",
-        default=False,
-        dest="graph_include_token_nodes",
-        help=(
-            "Include token embedding nodes in the attribution graph adjacency matrix "
-            "when building student graphs during training. "
-            "By default token nodes are excluded (neuron-only graph)."
-        ),
-    )
-    parser.add_argument(
-        "--include-logit-nodes",
-        action="store_true",
-        default=False,
-        dest="graph_include_logit_nodes",
-        help=(
-            "Include logit target nodes in the attribution graph adjacency matrix "
-            "when building student graphs during training. "
-            "By default logit nodes are excluded (neuron-only graph)."
-        ),
-    )
     return parser
 
 
@@ -1331,8 +1305,6 @@ def main() -> None:
             mlp_cache_batch_size=args.mlp_cache_batch_size,
             graph_loss_type=args.graph_loss_type,
             graph_node_labels=args.graph_node_labels,
-            graph_include_token_nodes=args.graph_include_token_nodes,
-            graph_include_logit_nodes=args.graph_include_logit_nodes,
 
             seed=args.seed,
             device=device,

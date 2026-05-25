@@ -101,7 +101,7 @@ def _build_graph_data(
         heatmap_pdf_url_by_supernode=heatmap_pdf_url_by_supernode,
         tokenizer=tokenizer,
     )
-    links = _supergraph_links(graph, supergraph, nodes)
+    links = _supergraph_links(supergraph)
     metadata = {
         "schema_version": 1,
         "format": "graph_loss_supergraph",
@@ -138,10 +138,9 @@ def _build_metadata_entry(metadata: dict[str, Any], *, title_prefix: str) -> dic
 
 
 def _prompt_tokens(graph: Graph, tokenizer: Any | None) -> list[str]:
-    # prompt_tokens is a display-only field (x-axis token labels) and must always
-    # be populated regardless of whether token embedding nodes are in the graph.
-    # When include_token_nodes=False, graph.input_tokens is empty, so we
-    # re-derive the IDs by re-encoding graph.input_string with the tokenizer.
+    # prompt_tokens is a display-only field (x-axis token labels).
+    # Token nodes are always included in graph.adjacency_matrix, so
+    # graph.input_tokens is populated; the elif branch is a defensive fallback.
     if graph.n_tokens > 0:
         token_id_list = graph.input_tokens.detach().cpu().tolist()
     elif tokenizer is not None and hasattr(tokenizer, "encode") and graph.input_string:
@@ -216,58 +215,24 @@ def _supergraph_nodes(
             node_dict["heatmap_pdf_url"] = heatmap_pdf_url_by_supernode[supernode_idx]
         nodes.append(node_dict)
 
-    # ── 2. Token embedding nodes (present when include_token_nodes=True) ─────
-    if graph.n_tokens > 0:
-        token_ids = graph.input_tokens.detach().cpu().tolist()
-        for pos, token_id in enumerate(token_ids):
-            token_str = _decode_token(token_id, tokenizer)
-            nodes.append({
-                "node_id": f"tok_{pos}",
-                "feature": pos,
-                "feature_type": "token",
-                "layer": -1,          # embedding layer — before all MLP layers
-                "ctx_idx": pos,
-                "probe_location_idx": 0,
-                "influence": 0.0,
-                "activation": 1.0,    # token embeddings are always "active"
-                "clerp": token_str,
-                "token_id": int(token_id),
-                "is_token_node": True,
-            })
-
-    # ── 3. Logit target nodes (present when include_logit_nodes=True) ────────
-    if graph.n_logits > 0:
-        logit_probs = graph.logit_probabilities.detach().float().cpu().tolist()
-        for logit_idx, target in enumerate(graph.logit_targets):
-            prob = float(logit_probs[logit_idx]) if logit_idx < len(logit_probs) else 0.0
-            nodes.append({
-                "node_id": f"logit_{logit_idx}",
-                "feature": logit_idx,
-                "feature_type": "logit",
-                "layer": max_layer + 1,       # after all MLP layers
-                "ctx_idx": graph.n_pos - 1,   # last sequence position
-                "probe_location_idx": 0,
-                "influence": 0.0,
-                "activation": prob,
-                "clerp": target.token_str,
-                "vocab_idx": target.vocab_idx,
-                "probability": prob,
-                "is_logit_node": True,
-            })
+    # Token and logit nodes are intentionally excluded from the supergraph
+    # visualization — only supernode-to-supernode edges are rendered.
+    # Token/logit nodes are present in graph.adjacency_matrix for the
+    # frac_external calculation in build_super_graph but are not surfaced here.
 
     return nodes
 
 
 def _supergraph_links(
-    graph: Graph,
     supergraph: SuperGraph,
-    nodes: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     supernode_adj = supergraph.supernode_adjacency_matrix.detach().float().cpu()
     n_supernodes = len(supergraph.supernodes)
     links = []
 
-    # ── 1. Supernode-to-supernode edges (from the supergraph adjacency matrix) ─
+    # Supernode-to-supernode edges only — token/logit nodes are excluded from
+    # the visualization even though they exist in graph.adjacency_matrix for
+    # the frac_external calculation in build_super_graph.
     for target_idx, source_idx in supernode_adj.nonzero(as_tuple=False).tolist():
         if target_idx == source_idx:
             continue
@@ -279,67 +244,9 @@ def _supergraph_links(
             "weight": float(supernode_adj[target_idx, source_idx].item()),
         })
 
-    # ── 2. Token→supernode cross-edges ───────────────────────────────────────
-    # Adjacency layout: [neurons | tokens | logits]; rows=targets, cols=sources.
-    # adjacency[neuron_row, n_neurons + token_pos] = token influence on that neuron.
-    n_neurons = graph.n_neurons
-    n_tokens = graph.n_tokens
-    n_logits = graph.n_logits
-
-    if n_tokens > 0:
-        adj = graph.adjacency_matrix.detach().float().cpu()
-        adj_cols = adj.shape[1]
-        for pos in range(n_tokens):
-            token_col = n_neurons + pos
-            if token_col >= adj_cols:
-                continue
-            for sg_idx, members in enumerate(supergraph.supernodes):
-                if not members:
-                    continue
-                member_t = torch.tensor(members, dtype=torch.long)
-                weight = float(adj[member_t, token_col].sum().item())
-                if weight != 0.0:
-                    links.append({
-                        "source": f"tok_{pos}",
-                        "target": f"sg_{sg_idx}",
-                        "weight": weight,
-                    })
-
-    # ── 3. Supernode→logit cross-edges ───────────────────────────────────────
-    # adjacency[n_neurons + n_tokens + logit_idx, neuron_col] = neuron's contribution to that logit.
-    if n_logits > 0:
-        adj = graph.adjacency_matrix.detach().float().cpu()
-        adj_rows = adj.shape[0]
-        for logit_idx in range(n_logits):
-            logit_row = n_neurons + n_tokens + logit_idx
-            if logit_row >= adj_rows:
-                continue
-            for sg_idx, members in enumerate(supergraph.supernodes):
-                if not members:
-                    continue
-                member_t = torch.tensor(members, dtype=torch.long)
-                weight = float(adj[logit_row, member_t].sum().item())
-                if weight != 0.0:
-                    links.append({
-                        "source": f"sg_{sg_idx}",
-                        "target": f"logit_{logit_idx}",
-                        "weight": weight,
-                    })
-
     links.sort(key=lambda item: abs(item["weight"]))
     return links
 
-
-def _decode_token(token_id: int, tokenizer: Any | None) -> str:
-    """Decode a single token ID to a display string."""
-    if tokenizer is None or not hasattr(tokenizer, "decode"):
-        return str(int(token_id))
-    try:
-        return str(tokenizer.decode([int(token_id)]))
-    except TypeError:
-        return str(tokenizer.decode(int(token_id)))
-    except Exception:
-        return str(int(token_id))
 
 
 def _supernode_label(
