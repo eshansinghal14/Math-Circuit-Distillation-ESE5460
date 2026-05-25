@@ -39,6 +39,13 @@ def load_model(model_name):
     from transformers.utils import logging as hf_logging
 
     hf_logging.set_verbosity_error()
+    hf_logging.disable_progress_bar()
+
+    try:
+        from huggingface_hub.utils import disable_progress_bars as _hfhub_disable
+        _hfhub_disable()
+    except Exception:
+        pass
 
     from huggingface_hub import login
     from transformers import AutoModelForCausalLM, AutoTokenizer
