@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import torch
 import torch.nn.functional as F
@@ -17,6 +17,9 @@ from graph_loss.utils import (
     UnifiedConfig,
     convert_nnsight_config_to_transformerlens,
 )
+
+if TYPE_CHECKING:
+    from graph_loss.attribution.context import HFAttributionContext
 
 
 class Graph:
@@ -469,6 +472,97 @@ def select_anova_supernodes(
         len(label_results),
     )
     return selected_row_indices, supernodes, supernode_labels_out, node_labels, sum_member_scores
+
+
+def select_arg_supernodes(
+    ctx: "HFAttributionContext",
+    tokenizer,
+    input_ids: torch.Tensor,
+    nodes_per_token: int = 10,
+    batch_size: int = 512,
+) -> tuple[list[list[int]], list[list[str]]]:
+    """Select arg-token supernodes by embedding-gradient attribution.
+
+    For each token position ``p`` in the input sequence, selects the
+    ``nodes_per_token`` neurons (from ``ctx``) whose activation is most
+    concentrated on (reads most from) the token embedding at position ``p``.
+
+    Algorithm (per neuron at layer L, index i, sequence position p_n):
+
+    1. Forward pass: record linearised activation
+       ``f = mlp_input[L][p_n] @ target_encoder``.
+    2. Backward pass with ``f`` as the scalar objective.
+    3. Read off ``∂f/∂E[q]`` for every position ``q`` (embedding gradient).
+    4. Normalise: ``d_f(q) = ‖∂f/∂E[q]‖₂ / Σ_r ‖∂f/∂E[r]‖₂``.
+    5. For each token position ``p_arg``, rank neurons by ``d_f(p_arg)``
+       (equivalently, minimising ``KL(δ_{p_arg} ‖ d_f) = −log d_f(p_arg)``).
+
+    Args:
+        ctx: Attribution context with pre-selected neurons (unfiltered).
+            Indices 0..ctx.n_neurons-1 are the row indices returned.
+        tokenizer: Tokenizer used to decode token-position labels.
+        input_ids: 1-D ``[seq_len]`` integer token IDs for the prompt.
+        nodes_per_token: Maximum neurons per token-position supernode.
+        batch_size: Batch size for expanded forward/backward passes.
+
+    Returns:
+        raw_supernodes: list of ``seq_len`` lists; each element is a list of
+            neuron row indices (into ``ctx``) that belong to that position's
+            supernode.
+        supernode_labels: list of ``seq_len`` label lists, e.g. ``["arg:43"]``.
+    """
+    logger = logging.getLogger(__name__)
+    n_neurons = ctx.n_neurons
+    n_pos = ctx.n_tokens
+    device = ctx.adapter.device
+
+    # ── Step 1: collect per-neuron per-position gradient norms ───────────────
+    # all_norms[neuron_idx, pos] = ‖∂f_{neuron}/∂E[pos]‖₂
+    all_norms = torch.zeros(n_neurons, n_pos, dtype=torch.float32, device=device)
+    for start in range(0, n_neurons, max(1, batch_size)):
+        end = min(start + batch_size, n_neurons)
+        logger.info(
+            "  [arg-nodes] embedding grad norms %d–%d / %d", start, end, n_neurons
+        )
+        norms_batch = ctx.compute_embedding_grad_norms_batch(start, end)  # [b, n_pos]
+        all_norms[start:end] = norms_batch.to(device=device, dtype=torch.float32)
+
+    # ── Step 2: normalise to distribution d_f(p) per neuron ──────────────────
+    total = all_norms.sum(dim=-1, keepdim=True).clamp(min=1e-10)  # [n_neurons, 1]
+    d_f = all_norms / total  # [n_neurons, n_pos]
+
+    # ── Step 3: for each token position pick top-K neurons by d_f(p) ─────────
+    token_ids_list = input_ids.detach().cpu().tolist()
+    raw_supernodes: list[list[int]] = []
+    supernode_labels_out: list[list[str]] = []
+
+    for pos in range(n_pos):
+        scores = d_f[:, pos]  # [n_neurons]
+        k = min(nodes_per_token, n_neurons)
+        top_indices = torch.topk(scores, k, dim=0).indices.tolist()
+        members = [int(idx) for idx in top_indices]
+
+        token_id = int(token_ids_list[pos])
+        try:
+            token_str = tokenizer.decode([token_id])
+        except Exception:
+            token_str = str(token_id)
+
+        label = f"arg:{token_str}"
+        raw_supernodes.append(members)
+        supernode_labels_out.append([label])
+
+        best_score = float(scores[int(top_indices[0])].item()) if members else 0.0
+        logger.info(
+            "  [arg-nodes] pos=%d token=%r: selected=%d cap=%d best_d_f=%.4g",
+            pos,
+            token_str,
+            len(members),
+            nodes_per_token,
+            best_score,
+        )
+
+    return raw_supernodes, supernode_labels_out
 
 
 def build_super_graph(

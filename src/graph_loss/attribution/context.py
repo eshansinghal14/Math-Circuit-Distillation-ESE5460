@@ -211,6 +211,55 @@ class HFAttributionContext:
         )
         return self._source_scores_from_grads(grads, batch_len)
 
+    def compute_embedding_grad_norms_batch(self, start: int, end: int) -> torch.Tensor:
+        """Return ``[batch_len, n_pos]`` per-position L2-norms of ∂f/∂E[p].
+
+        For each neuron ``row_idx`` in ``[start, end)``, treats the scalar
+        objective ``f = mlp_input[L][pos] @ target_encoder[row_idx]`` (the
+        neuron's linearised pre-activation), back-differentiates to the token
+        embedding output ``chunk_embed``, and returns the L2-norm of the
+        resulting gradient at each sequence position.
+
+        Each batch item's MLP inputs depend only on ``chunk_embed[batch_idx, :]``
+        (standard Transformer batching), so ``token_grad[batch_idx, q, :]`` is
+        exactly ``∂f_{neuron_{batch_idx}}/∂E[q]`` — no cross-batch contamination.
+
+        Used by ``select_arg_supernodes`` to identify which token positions most
+        drive each neuron's activation.
+        """
+        batch_len = end - start
+        _, chunk_mlp_inputs, chunk_mlp_outputs, chunk_embed = self._expanded_forward(batch_len)
+
+        terms = []
+        for batch_idx, row_idx in enumerate(range(start, end)):
+            layer_idx = int(self.neuron_locations[row_idx, 0].item())
+            pos_idx = int(self.neuron_locations[row_idx, 1].item())
+            terms.append(
+                (
+                    chunk_mlp_inputs[layer_idx][batch_idx, pos_idx].to(self.target_encoders.dtype)
+                    * self.target_encoders[row_idx].detach()
+                ).sum()
+            )
+
+        source_tensors = [chunk_mlp_outputs[i] for i in range(self.adapter.n_layers)] + [chunk_embed]
+        grads = torch.autograd.grad(
+            torch.stack(terms).sum(),
+            source_tensors,
+            retain_graph=False,
+            create_graph=False,
+            allow_unused=True,
+        )
+
+        # Embedding gradient is the last element: [batch_len, seq_len, d_model]
+        token_grad = grads[self.adapter.n_layers]
+        if token_grad is None:
+            return torch.zeros(
+                batch_len, self.n_tokens, dtype=torch.float32, device=self.adapter.device
+            )
+
+        # Per-position L2 norm: [batch_len, seq_len]
+        return token_grad.detach().float().norm(dim=-1)
+
     def compute_logit_batch(
         self,
         start: int,

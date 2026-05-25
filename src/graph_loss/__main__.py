@@ -137,6 +137,7 @@ def main():
         sum_min_specificity=args.sum_min_specificity,
         node_labels=args.graph_node_labels,
         include_dla_node=args.include_dla_node,
+        include_arg_nodes=args.include_arg_nodes,
         logger=logger,
     )
 

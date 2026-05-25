@@ -15,6 +15,7 @@ from graph_loss.graph import (
     SuperGraph,
     build_super_graph,
     select_anova_supernodes,
+    select_arg_supernodes,
 )
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
 from graph_loss.neuron_activation_heatmap import (
@@ -217,6 +218,7 @@ def create_graph(
     sum_min_specificity: float = 0.0,
     node_labels: list[str] | None = None,
     include_dla_node: bool = False,
+    include_arg_nodes: bool = False,
     no_grad_supergraph: bool = False,
     logger: logging.Logger | None = None,
 ) -> GraphPipelineResult:
@@ -255,6 +257,13 @@ def create_graph(
             top ``anova_nodes_per_label`` neurons whose DLA distribution (write vector
             projected through W_U) best matches the model's actual output distribution
             by KL divergence.
+        include_arg_nodes: If True, create one ``"arg:TOKEN"`` supernode per token
+            position in the prompt.  Each supernode contains the top
+            ``anova_nodes_per_label`` neurons (from the pre-ANOVA candidate pool)
+            whose activation is most concentrated on that token's embedding, identified
+            by back-propagating each neuron's activation to the token embeddings and
+            selecting by normalised embedding-gradient mass (= minimum KL divergence
+            from the delta distribution at that position).
         no_grad_supergraph: Wrap build_super_graph in torch.no_grad() (training use).
         logger: Optional logger; creates a module-level one if not provided.
         include_token_nodes: If True, include token embedding nodes in the adjacency
@@ -326,6 +335,46 @@ def create_graph(
         )
     )
     _logger.info("  ANOVA selected %d unique neurons", len(selected_row_indices))
+
+    # Step 4b (optional): Add arg-token supernodes via embedding gradient attribution.
+    # For each token position p in the prompt, selects the top anova_nodes_per_label
+    # neurons (from the full pre-ANOVA ctx) whose activation is most concentrated on
+    # that token's embedding (lowest KL vs delta_p).  Those neurons are merged into
+    # the selected set so they also pass through the attribution graph.
+    if include_arg_nodes:
+        _logger.info(
+            "Computing arg-token supernodes for %d token positions", ctx.n_tokens
+        )
+        arg_raw_supernodes, arg_supernode_labels = select_arg_supernodes(
+            ctx,
+            adapter.tokenizer,
+            input_ids,
+            nodes_per_token=anova_nodes_per_label,
+            batch_size=batch_size,
+        )
+        # Merge new neurons into the selected set.
+        all_selected = set(selected_row_indices)
+        for sn in arg_raw_supernodes:
+            all_selected.update(sn)
+        selected_row_indices = sorted(all_selected)
+
+        # Attach arg labels to per-neuron label dict.
+        for sn, label in zip(arg_raw_supernodes, arg_supernode_labels):
+            label_str = label[0] if label else "arg"
+            for idx in sn:
+                raw_node_labels.setdefault(idx, [])
+                if label_str not in raw_node_labels[idx]:
+                    raw_node_labels[idx].append(label_str)
+
+        # Append arg supernodes to the combined lists (indices still in ctx-space;
+        # they are remapped to filtered-ctx-space in step 5 along with ANOVA nodes).
+        raw_supernodes.extend(arg_raw_supernodes)
+        supernode_labels.extend(arg_supernode_labels)
+        _logger.info(
+            "  Arg-nodes: %d token supernodes added; total unique neurons: %d",
+            len(arg_raw_supernodes),
+            len(selected_row_indices),
+        )
 
     # Step 5: Build a boolean keep_mask and remap supernode indices.
     # After ctx.filter(keep_mask), filtered neuron j = original neuron selected_row_indices[j].
