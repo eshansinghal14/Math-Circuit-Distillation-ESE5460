@@ -247,6 +247,9 @@ def create_graph(
         anova_nodes_per_label: Max neurons per ANOVA label supernode.
         anova_range_radius: Radius for target-centered ANOVA range masks.
         sum_min_specificity: Min ANOVA specificity for sum-range/sum-units supernodes.
+        node_labels: Whitelist of ANOVA label names to include (e.g. ['arg1 range',
+            'sum units']). Only supernodes whose category is in this list are created.
+            If None (omitted), no ANOVA supernodes are created.
         no_grad_supergraph: Wrap build_super_graph in torch.no_grad() (training use).
         logger: Optional logger; creates a module-level one if not provided.
         include_token_nodes: If True, include token embedding nodes in the adjacency
@@ -312,7 +315,7 @@ def create_graph(
             W_U=adapter.W_U,
             tokenizer=adapter.tokenizer,
             target_args=target_args,
-            allowed_labels=set(node_labels) if node_labels is not None else None,
+            allowed_labels=set(node_labels) if node_labels is not None else set(),
         )
     )
     _logger.info("  ANOVA selected %d unique neurons", len(selected_row_indices))
