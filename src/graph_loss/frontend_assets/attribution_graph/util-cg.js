@@ -263,7 +263,7 @@ window.utilCg = (function(){
     var deletedFeatures = []
     var byFeatureId = d3.nestBy(nodes, d => d.featureId)
     byFeatureId.forEach(feature => {
-      if (feature.length > metadata.prompt_tokens.length*2/3){
+      if (metadata.prompt_tokens.length > 0 && feature.length > metadata.prompt_tokens.length*2/3){
         deletedFeatures.push(feature)
         feature.forEach(d => {
           delete idToNode[d.nodeId]

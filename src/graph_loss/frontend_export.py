@@ -138,12 +138,25 @@ def _build_metadata_entry(metadata: dict[str, Any], *, title_prefix: str) -> dic
 
 
 def _prompt_tokens(graph: Graph, tokenizer: Any | None) -> list[str]:
-    tokens = graph.input_tokens.detach().cpu().tolist()
+    # prompt_tokens is a display-only field (x-axis token labels) and must always
+    # be populated regardless of whether token embedding nodes are in the graph.
+    # When include_token_nodes=False, graph.input_tokens is empty, so we
+    # re-derive the IDs by re-encoding graph.input_string with the tokenizer.
+    if graph.n_tokens > 0:
+        token_id_list = graph.input_tokens.detach().cpu().tolist()
+    elif tokenizer is not None and hasattr(tokenizer, "encode") and graph.input_string:
+        try:
+            token_id_list = tokenizer.encode(graph.input_string, add_special_tokens=False)
+        except Exception:
+            return []
+    else:
+        return []
+
     if tokenizer is None or not hasattr(tokenizer, "decode"):
-        return [str(int(token_id)) for token_id in tokens]
+        return [str(int(tid)) for tid in token_id_list]
 
     decoded = []
-    for token_id in tokens:
+    for token_id in token_id_list:
         try:
             decoded.append(str(tokenizer.decode([int(token_id)])))
         except TypeError:
