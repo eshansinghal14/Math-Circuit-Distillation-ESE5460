@@ -160,6 +160,18 @@ def add_graph_build_args(parser: argparse.ArgumentParser) -> None:
             "If omitted, no ANOVA supernodes are created."
         ),
     )
+    parser.add_argument(
+        "--include-dla-node",
+        "--include_dla_node",
+        dest="include_dla_node",
+        action="store_true",
+        default=False,
+        help=(
+            "If set, add a 'dla' supernode containing the top anova_nodes_per_label "
+            "neurons whose DLA distribution (write vector projected through W_U) most "
+            "closely matches the model's actual output distribution by KL divergence."
+        ),
+    )
 
 
 def resolve_torch_dtype(dtype: str) -> torch.dtype:

@@ -52,6 +52,7 @@ class TeacherDataConfig:
     anova_range_radius: int = 0
     sum_min_specificity: float = 0.0
     graph_node_labels: list[str] | None = None
+    include_dla_node: bool = False
     include_token_nodes: bool = False
     include_logit_nodes: bool = False
 
@@ -213,6 +214,7 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
             anova_range_radius=config.anova_range_radius,
             sum_min_specificity=config.sum_min_specificity,
             node_labels=config.graph_node_labels,
+            include_dla_node=config.include_dla_node,
             no_grad_supergraph=True,
             logger=logger,
         )
@@ -387,6 +389,7 @@ def main() -> None:
         anova_range_radius=args.anova_range_radius,
         sum_min_specificity=args.sum_min_specificity,
         graph_node_labels=args.graph_node_labels,
+        include_dla_node=args.include_dla_node,
         include_token_nodes=args.include_token_nodes,
         include_logit_nodes=args.include_logit_nodes,
     )

@@ -216,6 +216,7 @@ def create_graph(
     anova_range_radius: int = 0,
     sum_min_specificity: float = 0.0,
     node_labels: list[str] | None = None,
+    include_dla_node: bool = False,
     no_grad_supergraph: bool = False,
     logger: logging.Logger | None = None,
 ) -> GraphPipelineResult:
@@ -250,6 +251,10 @@ def create_graph(
         node_labels: Whitelist of ANOVA label names to include (e.g. ['arg1 range',
             'sum units']). Only supernodes whose category is in this list are created.
             If None (omitted), no ANOVA supernodes are created.
+        include_dla_node: If True, create an additional "dla" supernode containing the
+            top ``anova_nodes_per_label`` neurons whose DLA distribution (write vector
+            projected through W_U) best matches the model's actual output distribution
+            by KL divergence.
         no_grad_supergraph: Wrap build_super_graph in torch.no_grad() (training use).
         logger: Optional logger; creates a module-level one if not provided.
         include_token_nodes: If True, include token embedding nodes in the adjacency
@@ -316,6 +321,8 @@ def create_graph(
             tokenizer=adapter.tokenizer,
             target_args=target_args,
             allowed_labels=set(node_labels) if node_labels is not None else set(),
+            include_dla_node=include_dla_node,
+            model_logits=ctx.logits[0, -1].detach() if include_dla_node else None,
         )
     )
     _logger.info("  ANOVA selected %d unique neurons", len(selected_row_indices))

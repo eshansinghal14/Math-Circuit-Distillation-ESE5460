@@ -226,6 +226,47 @@ def _dla_kl_scores_for_sum(
     return (-kl).detach().cpu().tolist()
 
 
+def _dla_kl_scores_for_output(
+    source_vectors: torch.Tensor,
+    W_U: torch.Tensor,
+    model_logits: torch.Tensor,
+    temperature: float = 2.0,
+    top_k: int = 100,
+) -> list[float]:
+    """Compute DLA-KL scores vs the model's actual output distribution.
+
+    Restricts comparison to the top-K tokens from the model output distribution
+    to avoid memory issues with large vocabularies.  Q is the renormalized model
+    output distribution over those tokens; P is the softmax of each neuron's DLA
+    logits over the same tokens.  Returns -KL(Q || P) so that higher = better.
+
+    Args:
+        source_vectors: [N, d_model] neuron write vectors from setup_attribution.
+        W_U: [d_model, d_vocab] unembedding matrix.
+        model_logits: [d_vocab] raw logits from the forward pass (last token position).
+        temperature: Softmax temperature applied to model_logits and DLA logits.
+        top_k: Number of top model-output tokens to restrict the KL comparison to.
+
+    Returns:
+        list of N floats; higher (less negative KL) = neuron DLA closer to model output.
+    """
+    model_probs = torch.softmax(model_logits.float() / temperature, dim=-1)  # [d_vocab]
+    k = min(top_k, model_probs.numel())
+    top_probs, top_indices = torch.topk(model_probs, k)  # [k]
+    Q = (top_probs / top_probs.sum()).to(device=W_U.device)  # renormalized [k]
+
+    W_U_top = W_U[:, top_indices.to(device=W_U.device)]  # [d_model, k]
+    sv = source_vectors.to(device=W_U.device, dtype=W_U.dtype)
+    dla_logits = sv @ W_U_top  # [N, k]
+    P = F.softmax(dla_logits.float(), dim=-1)  # [N, k]
+
+    nonzero = Q > 0
+    Q_nz = Q[nonzero]
+    P_nz = P[:, nonzero].clamp(min=1e-10)
+    kl = (Q_nz * (Q_nz.log() - P_nz.log())).sum(dim=-1)  # [N]
+    return (-kl).detach().cpu().tolist()
+
+
 def select_anova_supernodes(
     label_results: list,
     anova_nodes_per_label: int,
@@ -236,6 +277,10 @@ def select_anova_supernodes(
     tokenizer=None,
     target_args: list[int] | None = None,
     allowed_labels: set[str] | None = None,
+    include_dla_node: bool = False,
+    model_logits: torch.Tensor | None = None,
+    dla_temperature: float = 2.0,
+    dla_top_k_vocab: int = 100,
 ) -> tuple[list[int], list[list[int]], list[list[str]], dict[int, list[str]], dict[str, dict[int, tuple[float, float, float]]]]:
     """Select ANOVA supernodes from pre-computed label results.
 
@@ -244,16 +289,30 @@ def select_anova_supernodes(
     source_vectors/W_U/tokenizer/target_args are all provided; otherwise falls
     back to ANOVA variance.
 
+    Optionally creates one additional "dla" supernode containing the top
+    ``anova_nodes_per_label`` neurons whose DLA distribution (neuron write vector
+    projected through W_U, softmaxed) most closely matches the model's actual
+    output distribution (lowest KL divergence).
+
     Args:
         label_results: Output of gpu_label_activation_heatmaps(). Entry i corresponds
             to neuron index i passed to build_neuron_activation_write_result.
-        anova_nodes_per_label: Max neurons per ANOVA label category.
+        anova_nodes_per_label: Max neurons per ANOVA label category (also used as the
+            size cap for the DLA supernode).
         sum_min_specificity: Min ANOVA specificity for sum-range/sum-units candidates.
         strict: Raise ValueError when a non-sum category has no positive-variance nodes.
         source_vectors: [N, d_model] neuron write vectors from setup_attribution.
         W_U: [d_model, d_vocab] unembedding matrix.
         tokenizer: Model tokenizer for mapping numbers to token IDs.
         target_args: Numeric arguments from the prompt (e.g. [arg1, arg2]).
+        include_dla_node: If True, add a "dla" supernode ranked by KL divergence
+            between each neuron's DLA distribution and the model output distribution.
+            Requires source_vectors, W_U, and model_logits.
+        model_logits: [d_vocab] raw logits from the forward pass (last token position).
+            Required when include_dla_node is True.
+        dla_temperature: Softmax temperature for both model output and DLA distributions.
+        dla_top_k_vocab: Number of top model-output tokens to restrict the KL comparison
+            to (avoids O(N × d_vocab) memory usage).
 
     Returns:
         selected_row_indices: sorted unique row indices into label_results that appear
@@ -364,6 +423,44 @@ def select_anova_supernodes(
             anova_nodes_per_label,
             float(top_rows[0][1]),
         )
+
+    # DLA supernode: neurons whose write-vector DLA distribution best matches the
+    # model's actual output distribution (lowest KL divergence).
+    if include_dla_node:
+        if source_vectors is None or W_U is None or model_logits is None:
+            logger.warning(
+                "  include_dla_node=True but source_vectors/W_U/model_logits not all "
+                "provided — skipping DLA supernode."
+            )
+        else:
+            n_candidates = len(label_results)
+            kl_scores = _dla_kl_scores_for_output(
+                source_vectors,
+                W_U,
+                model_logits,
+                temperature=dla_temperature,
+                top_k=dla_top_k_vocab,
+            )
+            all_dla_rows = [(i, kl_scores[i]) for i in range(n_candidates)]
+            sorted_dla = sorted(all_dla_rows, key=lambda item: item[1], reverse=True)
+            keep_count = min(anova_nodes_per_label, len(sorted_dla))
+            top_dla = sorted_dla[:keep_count]
+            dla_members = []
+            for row_idx, _score in top_dla:
+                node_labels.setdefault(row_idx, [])
+                if "dla" not in node_labels[row_idx]:
+                    node_labels[row_idx].append("dla")
+                selected_member_ids.add(row_idx)
+                dla_members.append(row_idx)
+            supernodes.append(dla_members)
+            supernode_labels_out.append(["dla"])
+            logger.info(
+                "  DLA supernode: selected=%d/%d cap=%d best_score=%.6g",
+                len(dla_members),
+                n_candidates,
+                anova_nodes_per_label,
+                float(top_dla[0][1]) if top_dla else 0.0,
+            )
 
     selected_row_indices = sorted(selected_member_ids)
     logger.info(
