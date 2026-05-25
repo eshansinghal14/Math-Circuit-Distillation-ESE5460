@@ -235,6 +235,7 @@ def select_anova_supernodes(
     W_U: torch.Tensor | None = None,
     tokenizer=None,
     target_args: list[int] | None = None,
+    allowed_labels: set[str] | None = None,
 ) -> tuple[list[int], list[list[int]], list[list[str]], dict[int, list[str]], dict[str, dict[int, tuple[float, float, float]]]]:
     """Select ANOVA supernodes from pre-computed label results.
 
@@ -280,6 +281,8 @@ def select_anova_supernodes(
     sum_member_scores: dict[str, dict[int, tuple[float, float, float]]] = {}
 
     for category in ANOVA_LABEL_CATEGORIES:
+        if allowed_labels is not None and category not in allowed_labels:
+            continue
         is_sum_category = category in {"sum range", "sum units"}
 
         if is_sum_category:

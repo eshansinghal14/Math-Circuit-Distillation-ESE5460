@@ -215,6 +215,7 @@ def create_graph(
     anova_nodes_per_label: int = 10,
     anova_range_radius: int = 0,
     sum_min_specificity: float = 0.0,
+    node_labels: list[str] | None = None,
     no_grad_supergraph: bool = False,
     logger: logging.Logger | None = None,
 ) -> GraphPipelineResult:
@@ -311,6 +312,7 @@ def create_graph(
             W_U=adapter.W_U,
             tokenizer=adapter.tokenizer,
             target_args=target_args,
+            allowed_labels=set(node_labels) if node_labels is not None else None,
         )
     )
     _logger.info("  ANOVA selected %d unique neurons", len(selected_row_indices))

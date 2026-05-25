@@ -135,6 +135,7 @@ def main():
         anova_nodes_per_label=args.anova_nodes_per_label,
         anova_range_radius=args.anova_range_radius,
         sum_min_specificity=args.sum_min_specificity,
+        node_labels=args.graph_node_labels,
         logger=logger,
     )
 
