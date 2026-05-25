@@ -120,7 +120,46 @@ def add_graph_build_args(parser: argparse.ArgumentParser) -> None:
             "By default logit nodes are excluded (neuron-only graph)."
         ),
     )
-
+    parser.add_argument(
+        "--anova-nodes-per-label",
+        "--anova_nodes_per_label",
+        dest="anova_nodes_per_label",
+        type=int,
+        default=10,
+        help="Maximum positive-variance ANOVA nodes to include per label supernode.",
+    )
+    parser.add_argument(
+        "--anova-range-radius",
+        "--anova_range_radius",
+        dest="anova_range_radius",
+        type=int,
+        default=0,
+        help=(
+            "Radius around the target arg1/arg2 values for ANOVA range basis masks. "
+            "Use 0 for exact target-value masks."
+        ),
+    )
+    parser.add_argument(
+        "--sum-min-specificity",
+        "--sum_min_specificity",
+        dest="sum_min_specificity",
+        type=float,
+        default=0.0,
+        help="Minimum ANOVA specificity for sum range/sum units supernodes.",
+    )
+    parser.add_argument(
+        "--graph-node-labels",
+        "--graph_node_labels",
+        nargs="+",
+        default=None,
+        metavar="LABEL",
+        dest="graph_node_labels",
+        help=(
+            "Whitelist of ANOVA supernode label names to include when building the "
+            "supergraph. E.g. --graph-node-labels 'arg1 range' 'sum units'. "
+            "If omitted, all labels are included."
+        ),
+    )
 
 
 def resolve_torch_dtype(dtype: str) -> torch.dtype:

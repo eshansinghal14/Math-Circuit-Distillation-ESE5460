@@ -97,33 +97,6 @@ def main():
             "activation clustering is used"
         ),
     )
-    parser.add_argument(
-        "--anova-nodes-per-label",
-        "--anova_nodes_per_label",
-        dest="anova_nodes_per_label",
-        type=int,
-        default=10,
-        help="Maximum positive-variance ANOVA nodes to include per label supernode",
-    )
-    parser.add_argument(
-        "--anova-range-radius",
-        "--anova_range_radius",
-        dest="anova_range_radius",
-        type=int,
-        default=0,
-        help=(
-            "Radius around the target arg1/arg2 values for ANOVA range basis masks. "
-            "Use 0 for exact target-value masks."
-        ),
-    )
-    parser.add_argument(
-        "--sum-min-specificity",
-        "--sum_min_specificity",
-        dest="sum_min_specificity",
-        type=float,
-        default=0.0,
-        help="Minimum ANOVA specificity for sum range/sum units supernodes.",
-    )
     args = parser.parse_args()
     if args.supernode_heatmap_output_dir:
         args.supernode_heatmap_output_dir = os.path.abspath(args.supernode_heatmap_output_dir)

@@ -80,24 +80,6 @@ def main() -> None:
         default=None,
         help="Optional cache root for activation-write results",
     )
-    parser.add_argument(
-        "--anova-nodes-per-label",
-        dest="anova_nodes_per_label",
-        type=int,
-        default=10,
-    )
-    parser.add_argument(
-        "--anova-range-radius",
-        dest="anova_range_radius",
-        type=int,
-        default=0,
-    )
-    parser.add_argument(
-        "--sum-min-specificity",
-        dest="sum_min_specificity",
-        type=float,
-        default=0.0,
-    )
     args = parser.parse_args()
 
     if HF_READ_TOKEN:
