@@ -135,6 +135,7 @@ def add_graph_build_args(parser: argparse.ArgumentParser) -> None:
         help=(
             "Whitelist of ANOVA supernode label names to include when building the "
             "supergraph. E.g. --graph-node-labels 'arg1 range' 'sum units'. "
+            "Pass 'all' to include every ANOVA label category. "
             "If omitted, no ANOVA supernodes are created."
         ),
     )

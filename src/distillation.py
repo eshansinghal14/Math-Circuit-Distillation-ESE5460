@@ -1174,6 +1174,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Whitelist of ANOVA supernode label names to include when building the "
             "student supergraph and computing graph loss. "
             "E.g. --graph-node-labels 'arg1 range' 'sum units'. "
+            "Pass 'all' to include every ANOVA label category. "
             "If omitted, all labels are included."
         ),
     )
