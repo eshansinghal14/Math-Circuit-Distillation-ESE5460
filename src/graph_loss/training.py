@@ -129,6 +129,7 @@ def compute_prompt_graph_loss(
             dataset=config.dataset,
 
             mlp_input_cache=config.mlp_input_cache,
+            node_labels=config.student_graph_labels or [],
             anova_range_radius=config.student_anova_range_radius,
             anova_nodes_per_label=config.student_anova_nodes_per_label,
             sum_min_specificity=config.student_sum_min_specificity,
