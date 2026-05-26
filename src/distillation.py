@@ -164,6 +164,8 @@ class DistillationConfig:
     mlp_cache_batch_size: int = 64
     graph_loss_type: Literal["jsd", "kld", "mse", "mse-norm", "mse-scale"] = "jsd"
     graph_node_labels: Optional[List[str]] = None
+    student_include_dla_node: bool = False
+    student_include_arg_nodes: bool = False
 
 
 
@@ -332,6 +334,8 @@ class DistillationTrainer:
                 dataset=config.student_dataset,
                 graph_loss_type=config.graph_loss_type,
                 student_graph_labels=config.graph_node_labels,
+                student_include_dla_node=config.student_include_dla_node,
+                student_include_arg_nodes=config.student_include_arg_nodes,
             )
 
             self.student_graph_adapter = HFLlamaGraphAdapter(
@@ -1174,8 +1178,28 @@ def build_parser() -> argparse.ArgumentParser:
             "Whitelist of ANOVA supernode label names to include when building the "
             "student supergraph and computing graph loss. "
             "E.g. --graph-node-labels 'arg1 range' 'sum units'. "
-            "Pass 'all' to include every ANOVA label category. "
             "If omitted, all labels are included."
+        ),
+    )
+    parser.add_argument(
+        "--student-include-dla-node",
+        action="store_true",
+        default=False,
+        dest="student_include_dla_node",
+        help=(
+            "If set, include a DLA supernode in the student graph during distillation. "
+            "Requires the teacher cache to have been generated with --include-dla-node."
+        ),
+    )
+    parser.add_argument(
+        "--student-include-arg-nodes",
+        action="store_true",
+        default=False,
+        dest="student_include_arg_nodes",
+        help=(
+            "If set, include arg-token supernodes in the student graph during distillation. "
+            "Requires the teacher cache to have been generated with --include-arg-nodes. "
+            "Note: this runs select_arg_supernodes per prompt and adds compute cost."
         ),
     )
     return parser
@@ -1305,6 +1329,8 @@ def main() -> None:
             mlp_cache_batch_size=args.mlp_cache_batch_size,
             graph_loss_type=args.graph_loss_type,
             graph_node_labels=args.graph_node_labels,
+            student_include_dla_node=args.student_include_dla_node,
+            student_include_arg_nodes=args.student_include_arg_nodes,
 
             seed=args.seed,
             device=device,

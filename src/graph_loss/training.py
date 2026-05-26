@@ -44,6 +44,8 @@ class GraphAuxConfig:
     activation_write_result_cache: dict = field(default_factory=dict)
     graph_loss_type: Literal["jsd", "kld", "mse", "mse-norm", "mse-scale"] = "jsd"
     student_graph_labels: list[str] | None = None
+    student_include_dla_node: bool = False
+    student_include_arg_nodes: bool = False
 
 
 def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
@@ -130,6 +132,8 @@ def compute_prompt_graph_loss(
             anova_range_radius=config.student_anova_range_radius,
             anova_nodes_per_label=config.student_anova_nodes_per_label,
             sum_min_specificity=config.student_sum_min_specificity,
+            include_dla_node=config.student_include_dla_node,
+            include_arg_nodes=config.student_include_arg_nodes,
             no_grad_supergraph=True,
         )
     except ValueError as e:
