@@ -260,6 +260,67 @@ class HFAttributionContext:
         # Per-position L2 norm: [batch_len, seq_len]
         return token_grad.detach().float().norm(dim=-1)
 
+    def compute_embedding_grad_norms_fast(self) -> torch.Tensor:
+        """Single-forward grouped-VJP replacement for compute_embedding_grad_norms_batch.
+
+        Runs ``_expanded_forward(1)`` exactly once, then groups all neurons by
+        ``(layer_idx, pos_idx)`` and issues one batched ``torch.autograd.grad``
+        call per group using ``is_grads_batched=True``.  This avoids the ~26
+        redundant forward passes that the chunk loop would otherwise perform.
+
+        Returns:
+            all_norms: ``[n_neurons, n_pos]`` float32 tensor on ``adapter.device``.
+                       Numerically identical to the result of the chunked loop.
+        """
+        device = self.adapter.device
+        n_neurons = self.n_neurons
+        n_pos = self.n_tokens
+
+        _, chunk_mlp_inputs, _, chunk_embed = self._expanded_forward(1)
+
+        all_norms = torch.zeros(n_neurons, n_pos, dtype=torch.float32, device=device)
+
+        # Build groups: (layer_idx, pos_idx) -> [neuron_idx, ...]
+        groups: dict[tuple[int, int], list[int]] = {}
+        for neuron_idx in range(n_neurons):
+            layer_idx = int(self.neuron_locations[neuron_idx, 0].item())
+            pos_idx = int(self.neuron_locations[neuron_idx, 1].item())
+            key = (layer_idx, pos_idx)
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(neuron_idx)
+
+        group_list = list(groups.items())
+
+        for group_num, ((layer_idx, pos_idx), group_idxs) in enumerate(group_list):
+            is_last = group_num == len(group_list) - 1
+
+            # outputs: [d_mlp] — single vector shared by all k neurons in this group
+            outputs = chunk_mlp_inputs[layer_idx][0, pos_idx, :]
+            # grad_outputs: [k, d_mlp] — one encoder per neuron
+            grad_outputs = self.target_encoders[group_idxs].detach()
+
+            grads = torch.autograd.grad(
+                outputs,
+                chunk_embed,
+                grad_outputs=grad_outputs,
+                is_grads_batched=True,
+                retain_graph=not is_last,
+                create_graph=False,
+                allow_unused=True,
+            )
+
+            embed_grad = grads[0]
+            if embed_grad is None:
+                # rows for group_idxs remain zeros (already initialised)
+                continue
+
+            # embed_grad: [k, 1, seq_len, d_model] -> [k, seq_len, d_model] -> [k, seq_len]
+            norms = embed_grad.squeeze(1).float().norm(dim=-1)
+            all_norms[group_idxs, :] = norms.to(device=device)
+
+        return all_norms
+
     def compute_logit_batch(
         self,
         start: int,

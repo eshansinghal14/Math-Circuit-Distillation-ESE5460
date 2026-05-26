@@ -518,14 +518,11 @@ def select_arg_supernodes(
 
     # ── Step 1: collect per-neuron per-position gradient norms ───────────────
     # all_norms[neuron_idx, pos] = ‖∂f_{neuron}/∂E[pos]‖₂
-    all_norms = torch.zeros(n_neurons, n_pos, dtype=torch.float32, device=device)
-    for start in range(0, n_neurons, max(1, batch_size)):
-        end = min(start + batch_size, n_neurons)
-        logger.info(
-            "  [arg-nodes] embedding grad norms %d–%d / %d", start, end, n_neurons
-        )
-        norms_batch = ctx.compute_embedding_grad_norms_batch(start, end)  # [b, n_pos]
-        all_norms[start:end] = norms_batch.to(device=device, dtype=torch.float32)
+    logger.info(
+        "  [arg-nodes] computing embedding grad norms (fast grouped VJP) for %d neurons",
+        n_neurons,
+    )
+    all_norms = ctx.compute_embedding_grad_norms_fast()
 
     # ── Step 2: normalise to distribution d_f(p) per neuron ──────────────────
     total = all_norms.sum(dim=-1, keepdim=True).clamp(min=1e-10)  # [n_neurons, 1]
