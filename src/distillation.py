@@ -1028,6 +1028,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--steps", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--train-limit", type=int, default=None)
+    parser.add_argument("--train-start-idx", type=int, default=None, dest="train_start_idx",
+                        help="Index in the training dataset to start from (inclusive).")
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--temperature", type=float, default=2.0)
     parser.add_argument("--grad-clip", type=float, default=1.0)
@@ -1268,6 +1270,8 @@ def main() -> None:
     print("=" * 60)
 
     train_data = load_prompt_answer_json(train_path)
+    if args.train_start_idx is not None:
+        train_data = dict(list(train_data.items())[args.train_start_idx :])
     if args.train_limit is not None:
         train_data = dict(list(train_data.items())[: args.train_limit])
     test_data = load_prompt_answer_json(test_path)
