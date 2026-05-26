@@ -166,6 +166,7 @@ class DistillationConfig:
     graph_node_labels: Optional[List[str]] = None
     student_include_dla_node: bool = False
     student_include_arg_nodes: bool = False
+    skip_baseline_eval: bool = False
 
 
 
@@ -804,6 +805,8 @@ class DistillationTrainer:
                 )
                 print(f"Restored optimizer state from step {self._resume_step}.")
             print(f"Warm-starting from step {self._train_step + 1}.")
+        elif cfg.skip_baseline_eval:
+            self._step_log_eval_accuracy = 0.0
         else:
             print("Evaluating baselines...")
             student_base = evaluate_prompt_answer_dict(
@@ -1169,6 +1172,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
+        "--skip-baseline-eval",
+        action="store_true",
+        default=False,
+        dest="skip_baseline_eval",
+        help="Skip the teacher/student baseline accuracy evaluation at the start of training.",
+    )
+    parser.add_argument(
         "--graph-node-labels",
         nargs="+",
         default=None,
@@ -1331,6 +1341,7 @@ def main() -> None:
             graph_node_labels=args.graph_node_labels,
             student_include_dla_node=args.student_include_dla_node,
             student_include_arg_nodes=args.student_include_arg_nodes,
+            skip_baseline_eval=args.skip_baseline_eval,
 
             seed=args.seed,
             device=device,
