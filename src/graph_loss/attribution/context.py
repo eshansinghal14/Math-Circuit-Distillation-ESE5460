@@ -268,6 +268,12 @@ class HFAttributionContext:
         call per group using ``is_grads_batched=True``.  This avoids the ~26
         redundant forward passes that the chunk loop would otherwise perform.
 
+        When the model is in training mode (parameters require grad), we
+        temporarily freeze all parameters so the autograd graph only spans
+        the activation path (embed → mlp_inputs).  This matches the frozen-
+        teacher case and avoids retaining the full training graph across the
+        ~80 grouped VJP calls.
+
         Returns:
             all_norms: ``[n_neurons, n_pos]`` float32 tensor on ``adapter.device``.
                        Numerically identical to the result of the chunked loop.
@@ -276,7 +282,18 @@ class HFAttributionContext:
         n_neurons = self.n_neurons
         n_pos = self.n_tokens
 
-        _, chunk_mlp_inputs, _, chunk_embed = self._expanded_forward(1)
+        # Temporarily freeze model parameters so the autograd graph is thin
+        # (activation-only: embed → mlp_inputs, no weight gradient nodes).
+        params_requiring_grad = [
+            p for p in self.adapter.model.parameters() if p.requires_grad
+        ]
+        for p in params_requiring_grad:
+            p.requires_grad_(False)
+        try:
+            _, chunk_mlp_inputs, _, chunk_embed = self._expanded_forward(1)
+        finally:
+            for p in params_requiring_grad:
+                p.requires_grad_(True)
 
         all_norms = torch.zeros(n_neurons, n_pos, dtype=torch.float32, device=device)
 
