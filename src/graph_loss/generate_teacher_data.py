@@ -53,6 +53,7 @@ class TeacherDataConfig:
     sum_min_specificity: float = 0.0
     graph_node_labels: list[str] | None = None
     include_dla_node: bool = False
+    include_arg_nodes: bool = False
 
 
 def _resolve_dataset_file(dataset_file: str) -> str:
@@ -211,6 +212,7 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
             sum_min_specificity=config.sum_min_specificity,
             node_labels=config.graph_node_labels,
             include_dla_node=config.include_dla_node,
+            include_arg_nodes=config.include_arg_nodes,
             no_grad_supergraph=True,
             logger=logger,
         )
@@ -386,6 +388,7 @@ def main() -> None:
         sum_min_specificity=args.sum_min_specificity,
         graph_node_labels=args.graph_node_labels,
         include_dla_node=args.include_dla_node,
+        include_arg_nodes=args.include_arg_nodes,
     )
     generate_teacher_data(config)
 

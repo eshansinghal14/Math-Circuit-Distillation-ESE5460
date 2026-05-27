@@ -436,7 +436,6 @@ def select_anova_supernodes(
                 "provided — skipping DLA supernode."
             )
         else:
-            n_candidates = len(label_results)
             kl_scores = _dla_kl_scores_for_output(
                 source_vectors,
                 W_U,
@@ -444,6 +443,7 @@ def select_anova_supernodes(
                 temperature=dla_temperature,
                 top_k=dla_top_k_vocab,
             )
+            n_candidates = len(kl_scores)
             all_dla_rows = [(i, kl_scores[i]) for i in range(n_candidates)]
             sorted_dla = sorted(all_dla_rows, key=lambda item: item[1], reverse=True)
             keep_count = min(anova_nodes_per_label, len(sorted_dla))
