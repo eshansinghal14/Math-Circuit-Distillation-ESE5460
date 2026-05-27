@@ -372,6 +372,7 @@ def create_graph(
             input_ids,
             nodes_per_token=anova_nodes_per_label,
             batch_size=batch_size,
+            fast_inner_product=True,
         )
         # Merge new neurons into the selected set.
         all_selected = set(selected_row_indices)

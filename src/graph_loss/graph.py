@@ -480,6 +480,7 @@ def select_arg_supernodes(
     input_ids: torch.Tensor,
     nodes_per_token: int = 10,
     batch_size: int = 512,
+    fast_inner_product: bool = True,
 ) -> tuple[list[list[int]], list[list[str]]]:
     """Select arg-token supernodes by embedding-gradient attribution.
 
@@ -487,7 +488,9 @@ def select_arg_supernodes(
     ``nodes_per_token`` neurons (from ``ctx``) whose activation is most
     concentrated on (reads most from) the token embedding at position ``p``.
 
-    Algorithm (per neuron at layer L, index i, sequence position p_n):
+    Two scoring modes are available (controlled by ``fast_inner_product``):
+
+    **Exact (fast_inner_product=False)** — grouped VJP approach:
 
     1. Forward pass: record linearised activation
        ``f = mlp_input[L][p_n] @ target_encoder``.
@@ -497,13 +500,27 @@ def select_arg_supernodes(
     5. For each token position ``p_arg``, rank neurons by ``d_f(p_arg)``
        (equivalently, minimising ``KL(δ_{p_arg} ‖ d_f) = −log d_f(p_arg)``).
 
+    **Approximate (fast_inner_product=True)** — single matrix multiply:
+
+    Replaces the VJP loop with a direct inner-product proxy using tensors
+    already present in ``ctx``:
+        scores[i, q] = |target_encoders[i] · E[q]|
+    where ``E`` is the token embedding matrix (``ctx.embed_out``).  This
+    measures how aligned each neuron's read direction is with each token's
+    embedding, skipping the attention-routing Jacobian entirely.  Much
+    cheaper (one ``[n_neurons, d_model] @ [d_model, n_tokens]`` matmul)
+    but does not account for how information actually flows through attention.
+
     Args:
         ctx: Attribution context with pre-selected neurons (unfiltered).
             Indices 0..ctx.n_neurons-1 are the row indices returned.
         tokenizer: Tokenizer used to decode token-position labels.
         input_ids: 1-D ``[seq_len]`` integer token IDs for the prompt.
         nodes_per_token: Maximum neurons per token-position supernode.
-        batch_size: Batch size for expanded forward/backward passes.
+        batch_size: Batch size for expanded forward/backward passes (only
+            used when ``fast_inner_product=False``).
+        fast_inner_product: If ``True`` (default), use the approximate
+            inner-product proxy instead of the exact VJP computation.
 
     Returns:
         raw_supernodes: list of ``seq_len`` lists; each element is a list of
@@ -516,13 +533,24 @@ def select_arg_supernodes(
     n_pos = ctx.n_tokens
     device = ctx.adapter.device
 
-    # ── Step 1: collect per-neuron per-position gradient norms ───────────────
-    # all_norms[neuron_idx, pos] = ‖∂f_{neuron}/∂E[pos]‖₂
-    logger.info(
-        "  [arg-nodes] computing embedding grad norms (fast grouped VJP) for %d neurons",
-        n_neurons,
-    )
-    all_norms = ctx.compute_embedding_grad_norms_fast()
+    # ── Step 1: collect per-neuron per-position scores ────────────────────────
+    if fast_inner_product:
+        # Approximate: score[i, q] = |e_i · E[q]|
+        # target_encoders: [n_neurons, d_model], embed_out: [1, n_tokens, d_model]
+        logger.info(
+            "  [arg-nodes] computing inner-product scores (fast, no backprop) for %d neurons",
+            n_neurons,
+        )
+        E = ctx.embed_out.squeeze(0).to(ctx.target_encoders.dtype)  # [n_tokens, d_model]
+        raw_scores = (ctx.target_encoders @ E.T).abs()  # [n_neurons, n_tokens]
+        all_norms = raw_scores
+    else:
+        # Exact: all_norms[neuron_idx, pos] = ‖∂f_{neuron}/∂E[pos]‖₂
+        logger.info(
+            "  [arg-nodes] computing embedding grad norms (fast grouped VJP) for %d neurons",
+            n_neurons,
+        )
+        all_norms = ctx.compute_embedding_grad_norms_fast()
 
     # ── Step 2: normalise to distribution d_f(p) per neuron ──────────────────
     total = all_norms.sum(dim=-1, keepdim=True).clamp(min=1e-10)  # [n_neurons, 1]
