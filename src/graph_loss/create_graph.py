@@ -280,55 +280,70 @@ def create_graph(
     # Step 2: ANOVA-label all pre-selected neurons, one layer at a time.
     # Activations are computed and discarded per layer — peak memory is
     # O(n_layer_neurons × grid_cells) instead of O(N × grid_cells).
-    if dataset is None:
-        raise ValueError(
-            "A dataset is required for ANOVA labeling. Pass --dataset."
-        )
-    decoded_prompt = adapter.tokenizer.decode(input_ids.detach().cpu().tolist())
-    target_args = parse_numeric_args(decoded_prompt)
+    # Skipped entirely when no ANOVA node labels are requested.
+    need_anova = node_labels is not None
+    label_results: dict = {}
+    target_args: list = []
 
-    if mlp_input_cache is None and model_name is not None:
-        from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
-        from graph_loss.precompute_mlp_inputs import build_mlp_input_cache as _build_mlp_cache
-        dataset_path = _resolve_dataset_path(dataset)
-        _logger.info("Building MLP input cache for dataset: %s", dataset)
-        mlp_input_cache = _build_mlp_cache(
+    if need_anova:
+        if dataset is None:
+            raise ValueError(
+                "A dataset is required for ANOVA labeling. Pass --dataset."
+            )
+        decoded_prompt = adapter.tokenizer.decode(input_ids.detach().cpu().tolist())
+        target_args = parse_numeric_args(decoded_prompt)
+
+        if mlp_input_cache is None and model_name is not None:
+            from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
+            from graph_loss.precompute_mlp_inputs import build_mlp_input_cache as _build_mlp_cache
+            dataset_path = _resolve_dataset_path(dataset)
+            _logger.info("Building MLP input cache for dataset: %s", dataset)
+            mlp_input_cache = _build_mlp_cache(
+                adapter,
+                dataset_path,
+                model_name,
+                batch_size=32,
+            )
+            n_prompts = int(mlp_input_cache.get("meta", {}).get("n_prompts", 0))
+            _logger.info("  Built MLP cache: %d prompts", n_prompts)
+
+        _logger.info("ANOVA-labeling %d pre-selected neurons (layer-by-layer)", ctx.n_neurons)
+        label_results = label_neurons_layer_by_layer(
             adapter,
-            dataset_path,
-            model_name,
-            batch_size=32,
+            ctx.neuron_locations,
+            mlp_input_cache,
+            target_args=target_args,
+            anova_range_radius=anova_range_radius,
         )
-        n_prompts = int(mlp_input_cache.get("meta", {}).get("n_prompts", 0))
-        _logger.info("  Built MLP cache: %d prompts", n_prompts)
-
-    _logger.info("ANOVA-labeling %d pre-selected neurons (layer-by-layer)", ctx.n_neurons)
-    label_results = label_neurons_layer_by_layer(
-        adapter,
-        ctx.neuron_locations,
-        mlp_input_cache,
-        target_args=target_args,
-        anova_range_radius=anova_range_radius,
-    )
 
     # Step 4: Select top-K neurons per ANOVA label.
     # Sum categories use DLA-KL scoring (source_vectors @ W_U) rather than graph influence.
-    _logger.info("Selecting ANOVA supernodes (top-%d per label)", anova_nodes_per_label)
-    selected_row_indices, raw_supernodes, supernode_labels, raw_node_labels, raw_sum_member_scores = (
-        select_anova_supernodes(
-            label_results,
-            anova_nodes_per_label=anova_nodes_per_label,
-            sum_min_specificity=sum_min_specificity,
-            strict=True,
-            source_vectors=ctx.source_vectors,
-            W_U=adapter.W_U,
-            tokenizer=adapter.tokenizer,
-            target_args=target_args,
-            allowed_labels=(None if "all" in node_labels else set(node_labels)) if node_labels is not None else set(),
-            include_dla_node=include_dla_node,
-            model_logits=ctx.logits[0, -1].detach() if include_dla_node else None,
+    # Also runs when include_dla_node is set even without ANOVA labels.
+    if need_anova or include_dla_node:
+        if not need_anova:
+            # DLA node only — parse args so select_anova_supernodes has what it needs.
+            decoded_prompt = adapter.tokenizer.decode(input_ids.detach().cpu().tolist())
+            target_args = parse_numeric_args(decoded_prompt)
+        _logger.info("Selecting ANOVA supernodes (top-%d per label)", anova_nodes_per_label)
+        selected_row_indices, raw_supernodes, supernode_labels, raw_node_labels, raw_sum_member_scores = (
+            select_anova_supernodes(
+                label_results,
+                anova_nodes_per_label=anova_nodes_per_label,
+                sum_min_specificity=sum_min_specificity,
+                strict=True,
+                source_vectors=ctx.source_vectors,
+                W_U=adapter.W_U,
+                tokenizer=adapter.tokenizer,
+                target_args=target_args,
+                allowed_labels=(None if "all" in node_labels else set(node_labels)) if node_labels is not None else set(),
+                include_dla_node=include_dla_node,
+                model_logits=ctx.logits[0, -1].detach() if include_dla_node else None,
+            )
         )
-    )
-    _logger.info("  ANOVA selected %d unique neurons", len(selected_row_indices))
+        _logger.info("  ANOVA selected %d unique neurons", len(selected_row_indices))
+    else:
+        selected_row_indices, raw_supernodes, supernode_labels = [], [], []
+        raw_node_labels, raw_sum_member_scores = {}, {}
 
     # Step 4b (optional): Add arg-token supernodes via embedding gradient attribution.
     # For each token position p in the prompt, selects the top anova_nodes_per_label
@@ -383,7 +398,7 @@ def create_graph(
         cat: {old_to_new[old]: scores for old, scores in cat_scores.items() if old in old_to_new}
         for cat, cat_scores in raw_sum_member_scores.items()
     }
-    filtered_label_results = {old_to_new[old]: label_results[old] for old in selected_row_indices}
+    filtered_label_results = {old_to_new[old]: label_results[old] for old in selected_row_indices if old in label_results}
 
     # Step 6: Filter the attribution context to ANOVA-selected neurons only.
     filtered_ctx = ctx.filter(keep_mask)
