@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import TYPE_CHECKING, NamedTuple
 
 import torch
@@ -560,23 +561,35 @@ def select_arg_supernodes(
     d_f = all_norms / total  # [n_neurons, n_pos]
 
     # ── Step 3: for each token position pick top-K neurons by d_f(p) ─────────
+    # Only create supernodes for tokens that are numeric arguments (digits only).
+    # Special/structural tokens (BOS, "+", "=", whitespace, etc.) are skipped.
+    # TODO: make this configurable instead of hard-coded when needed.
     token_ids_list = input_ids.detach().cpu().tolist()
     raw_supernodes: list[list[int]] = []
     supernode_labels_out: list[list[str]] = []
 
     for pos in range(n_pos):
-        scores = d_f[:, pos]  # [n_neurons]
-        k = min(nodes_per_token, n_neurons)
-        top_indices = torch.topk(scores, k, dim=0).indices.tolist()
-        members = [int(idx) for idx in top_indices]
-
         token_id = int(token_ids_list[pos])
         try:
             token_str = tokenizer.decode([token_id])
         except Exception:
             token_str = str(token_id)
 
-        label = f"arg:{token_str}"
+        # Skip non-numeric tokens (BOS, operators, punctuation, etc.)
+        if not re.match(r"^\s*-?\d+\s*$", token_str):
+            logger.info(
+                "  [arg-nodes] pos=%d token=%r: skipped (not a numeric arg token)",
+                pos,
+                token_str,
+            )
+            continue
+
+        scores = d_f[:, pos]  # [n_neurons]
+        k = min(nodes_per_token, n_neurons)
+        top_indices = torch.topk(scores, k, dim=0).indices.tolist()
+        members = [int(idx) for idx in top_indices]
+
+        label = f"arg:{token_str.strip()}"
         raw_supernodes.append(members)
         supernode_labels_out.append([label])
 
