@@ -198,34 +198,42 @@ def compute_prompt_graph_loss(
         )
 
     # ------------------------------------------------------------------
-    # Alignment: match teacher and student supernodes by ANOVA label
+    # Alignment: match teacher and student supernodes by label (exact)
     # ------------------------------------------------------------------
     if config.verbose:
-        print("  [graph] aligning supernodes by ANOVA label")
+        print("  [graph] aligning supernodes by label")
     s_label_to_sid = {
         labels[0]: sid
         for sid, labels in enumerate(student_supergraph.supernode_labels or [])
         if labels
     }
-    if config.student_graph_labels:
-        missing = [lbl for lbl in config.student_graph_labels if lbl not in s_label_to_sid]
-        if missing:
-            raise RuntimeError(
-                f"Student graph is missing supernodes for expected label(s): {missing}. "
-                f"Student supernode labels present: {sorted(s_label_to_sid.keys())}."
-            )
     t_label_to_tid = {
         labels[0]: tid
         for tid, labels in enumerate(teacher_supergraph.supernode_labels or [])
         if labels
     }
-    if config.student_graph_labels:
-        missing_teacher = [lbl for lbl in config.student_graph_labels if lbl not in t_label_to_tid]
-        if missing_teacher:
-            raise RuntimeError(
-                f"Teacher graph is missing supernodes for expected label(s): {missing_teacher}. "
-                f"Teacher supernode labels present: {sorted(t_label_to_tid.keys())}."
-            )
+
+    # Require an exact match between teacher and student supernode label sets.
+    # Extra or missing supernodes on either side indicate a cache/flag mismatch.
+    student_label_set = set(s_label_to_sid.keys())
+    teacher_label_set = set(t_label_to_tid.keys())
+    extra_in_teacher = teacher_label_set - student_label_set
+    missing_from_teacher = student_label_set - teacher_label_set
+    if extra_in_teacher or missing_from_teacher:
+        parts = []
+        if extra_in_teacher:
+            parts.append(f"  teacher has unexpected extra supernodes: {sorted(extra_in_teacher)}")
+        if missing_from_teacher:
+            parts.append(f"  teacher is missing expected supernodes:  {sorted(missing_from_teacher)}")
+        raise RuntimeError(
+            f"Teacher/student supernode label mismatch for prompt={prompt!r}.\n"
+            + "\n".join(parts)
+            + f"\n  Student labels: {sorted(student_label_set)}"
+            + f"\n  Teacher labels: {sorted(teacher_label_set)}"
+            + "\nRegenerate the teacher cache with flags matching the current distillation args "
+            "(--include-arg-nodes / --include-dla-node)."
+        )
+
     mapping = {
         tid: {s_label_to_sid[labels[0]]}
         for tid, labels in enumerate(teacher_supergraph.supernode_labels or [])
