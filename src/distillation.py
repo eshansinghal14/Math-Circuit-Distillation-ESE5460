@@ -382,13 +382,10 @@ class DistillationTrainer:
             )
             print("Using standard AdamW optimizer.")
 
-        loader_generator = torch.Generator()
-        loader_generator.manual_seed(config.seed)
         self.loader = DataLoader(
             AddDataset(self.train_data, self.tokenizer),
             batch_size=config.batch_size,
-            shuffle=True,
-            generator=loader_generator,
+            shuffle=False,
             collate_fn=partial(collate_fn, pad_id=self.tokenizer.eos_token_id),
         )
 
