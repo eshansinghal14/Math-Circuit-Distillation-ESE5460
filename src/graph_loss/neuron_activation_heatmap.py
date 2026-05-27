@@ -526,3 +526,77 @@ def save_supernode_activation_heatmap_pdf(
                 plt.close(fig)
 
     return output_path
+
+
+def save_dla_heatmap_pdf(
+    members: list[int],
+    neuron_locations: torch.Tensor,
+    member_number_unembed: dict[int, tuple[list[int], torch.Tensor]],
+    *,
+    output_path: str,
+    title: str,
+    member_labels: dict[int, list[str]] | None = None,
+    member_norm_props: dict[int, float] | None = None,
+) -> str:
+    """Save a 1-D DLA-influence bar chart per neuron (W_out @ W_U over token IDs 0–200).
+
+    Used for DLA supernodes where no 2-D arg1×arg2 activation grid is needed.
+    Each page shows one neuron's write-vector projected through W_U for every
+    single-token number representation in [0, 200].
+    """
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+    locations_cpu = neuron_locations.detach().cpu()
+    member_locations: dict[int, tuple[str, int]] = {}
+    for member_idx, graph_neuron_idx in enumerate(members):
+        layer = int(locations_cpu[graph_neuron_idx, 0].item())
+        token_pos = int(locations_cpu[graph_neuron_idx, 1].item())
+        neuron_id = int(locations_cpu[graph_neuron_idx, 2].item())
+        member_locations[member_idx] = (
+            f"idx={graph_neuron_idx} layer={layer} token={token_pos} neuron={neuron_id}",
+            neuron_id,
+        )
+
+    with PdfPages(output_path) as pdf:
+        for member_idx, graph_neuron_idx in enumerate(members):
+            location_text, neuron_id = member_locations[member_idx]
+            labels = (
+                member_labels.get(graph_neuron_idx, []) if member_labels is not None else []
+            )
+            label_text = f"\nANOVA labels: {', '.join(labels)}" if labels else ""
+            norm_prop = (
+                member_norm_props.get(graph_neuron_idx)
+                if member_norm_props is not None
+                else None
+            )
+            norm_text = (
+                f"  ({norm_prop * 100:.2f}% of total residual norm)"
+                if norm_prop is not None
+                else ""
+            )
+            page_title = (
+                f"{title}{label_text}\nNeuron {neuron_id} ({location_text}){norm_text}"
+            )
+
+            nu = member_number_unembed.get(graph_neuron_idx)
+
+            fig, ax = plt.subplots(figsize=(12, 3))
+            if nu is not None:
+                number_values, unembed_values = nu
+                vals = unembed_values.detach().float().cpu().numpy()
+                ax.bar(number_values, vals, width=0.9, color="steelblue")
+                ax.set_xlabel("number token (0–200)")
+                ax.set_ylabel("W_out @ W_U")
+                ax.set_xlim(min(number_values) - 0.5, max(number_values) + 0.5)
+                ax.grid(True, alpha=0.3, axis="y")
+            else:
+                ax.text(0.5, 0.5, "No DLA data available", ha="center", va="center")
+                ax.set_axis_off()
+            ax.set_title(page_title)
+            fig.tight_layout()
+            pdf.savefig(fig)
+            plt.close(fig)
+
+    return output_path

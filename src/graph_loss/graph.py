@@ -11,7 +11,10 @@ import torch.nn.functional as F
 
 from graph_loss.anova_node_labels import ANOVA_LABEL_CATEGORIES
 from graph_loss.attribution.targets import LogitTarget
-from graph_loss.neuron_activation_heatmap import save_supernode_activation_heatmap_pdf
+from graph_loss.neuron_activation_heatmap import (
+    save_dla_heatmap_pdf,
+    save_supernode_activation_heatmap_pdf,
+)
 from graph_loss.utils import (
     ActivationWriteResult,
     UnifiedConfig,
@@ -633,103 +636,146 @@ def build_super_graph(
 
     supernode_heatmap_pdf_paths: list[str] | None = None
     if supernode_heatmap_output_dir is not None:
-        if activation_write_result is None:
-            logger.warning(
-                "supernode_heatmap_output_dir set but activation_write_result not provided; "
-                "skipping heatmap PDF generation."
+        supernode_heatmap_pdf_paths = []
+        neuron_locs = graph.neuron_locations.detach().cpu()
+        # Compute per-neuron proportion of total residual write-norm.
+        neuron_norm_props: dict[int, float] | None = None
+        if graph.neuron_write_vectors is not None:
+            norms = graph.neuron_write_vectors.detach().float().norm(dim=-1)
+            total_norm = norms.sum().item()
+            if total_norm > 0:
+                neuron_norm_props = {
+                    i: float(norms[i].item()) / total_norm
+                    for i in range(len(norms))
+                }
+        # Pre-compute number-token unembed mapping once if W_U/tokenizer available.
+        # Used by DLA supernodes (1-D heatmap) and sum supernodes (side panel).
+        number_unembed_precomputed: tuple | None = None
+        if W_U is not None and tokenizer is not None:
+            number_values = list(range(0, 201))
+            raw_token_ids: list[int | None] = []
+            for value in number_values:
+                encoded = tokenizer(str(value), add_special_tokens=False, return_tensors=None)
+                input_ids = encoded["input_ids"] if isinstance(encoded, dict) else encoded.input_ids
+                if input_ids and isinstance(input_ids[0], list):
+                    input_ids = input_ids[0]
+                raw_token_ids.append(int(input_ids[0]) if len(input_ids) == 1 else None)
+            valid_positions = [i for i, tid in enumerate(raw_token_ids) if tid is not None]
+            valid_numbers = [number_values[i] for i in valid_positions]
+            valid_vocab_ids = torch.tensor(
+                [int(raw_token_ids[i]) for i in valid_positions], dtype=torch.long, device=W_U.device
             )
-        else:
-            supernode_heatmap_pdf_paths = []
-            neuron_locs = graph.neuron_locations.detach().cpu()
-            # Compute per-neuron proportion of total residual write-norm.
-            neuron_norm_props: dict[int, float] | None = None
-            if graph.neuron_write_vectors is not None:
-                norms = graph.neuron_write_vectors.detach().float().norm(dim=-1)
-                total_norm = norms.sum().item()
-                if total_norm > 0:
-                    neuron_norm_props = {
-                        i: float(norms[i].item()) / total_norm
-                        for i in range(len(norms))
-                    }
-            # Pre-compute number-token unembed mapping once if W_U/tokenizer available.
-            number_unembed_precomputed: tuple | None = None
-            if W_U is not None and tokenizer is not None:
-                number_values = list(range(0, 201))
-                raw_token_ids: list[int | None] = []
-                for value in number_values:
-                    encoded = tokenizer(str(value), add_special_tokens=False, return_tensors=None)
-                    input_ids = encoded["input_ids"] if isinstance(encoded, dict) else encoded.input_ids
-                    if input_ids and isinstance(input_ids[0], list):
-                        input_ids = input_ids[0]
-                    raw_token_ids.append(int(input_ids[0]) if len(input_ids) == 1 else None)
-                valid_positions = [i for i, tid in enumerate(raw_token_ids) if tid is not None]
-                valid_numbers = [number_values[i] for i in valid_positions]
-                valid_vocab_ids = torch.tensor(
-                    [int(raw_token_ids[i]) for i in valid_positions], dtype=torch.long, device=W_U.device
-                )
-                W_U_numbers = W_U[:, valid_vocab_ids]  # [d_model, n_valid]
-                number_unembed_precomputed = (valid_numbers, W_U_numbers)
+            W_U_numbers = W_U[:, valid_vocab_ids]  # [d_model, n_valid]
+            number_unembed_precomputed = (valid_numbers, W_U_numbers)
 
-            for supernode_idx, members in enumerate(supernodes):
-                category = (
-                    supernode_labels[supernode_idx][0]
-                    if supernode_labels[supernode_idx]
-                    else "none"
-                )
-                is_sum_category = category in {"sum range", "sum units"}
-                is_dla_category = category == "dla"
-                row_indices = torch.tensor(members, dtype=torch.long)
-                cluster_heatmaps = activation_write_result.activations[row_indices].detach().float()
-                member_labels = (
-                    {m: node_labels.get(m, []) for m in members}
-                    if node_labels
-                    else None
-                )
-                member_norm_props = (
-                    {m: neuron_norm_props[m] for m in members if m in neuron_norm_props}
-                    if neuron_norm_props is not None
-                    else None
-                )
-                member_var_spec = None
-                if filtered_label_results is not None:
-                    member_var_spec = {}
-                    for m in members:
-                        nl = filtered_label_results.get(m)
-                        if nl is not None:
-                            member_var_spec[m] = (
-                                float(nl.category_scores.get(category, 0.0)),
-                                float(nl.category_specificity.get(category, 0.0)),
-                            )
-                member_dla_kl = None
-                if is_sum_category and sum_member_scores is not None:
-                    cat_scores = sum_member_scores.get(category, {})
-                    member_dla_kl = {m: cat_scores[m][2] for m in members if m in cat_scores}
-                member_number_unembed = None
-                if (is_sum_category or is_dla_category) and number_unembed_precomputed is not None and graph.neuron_write_vectors is not None:
-                    valid_numbers, W_U_numbers = number_unembed_precomputed
-                    member_number_unembed = {}
-                    for m in members:
-                        sv = graph.neuron_write_vectors[m].to(device=W_U_numbers.device, dtype=W_U_numbers.dtype)
-                        dla_vals = (sv @ W_U_numbers).detach().float().cpu()
-                        member_number_unembed[m] = (valid_numbers, dla_vals)
-                saved_path = save_supernode_activation_heatmap_pdf(
-                    cluster_heatmaps,
-                    activation_write_result.arg_values,
+        for supernode_idx, members in enumerate(supernodes):
+            category = (
+                supernode_labels[supernode_idx][0]
+                if supernode_labels[supernode_idx]
+                else "none"
+            )
+            is_sum_category = category in {"sum range", "sum units"}
+            is_dla_category = category == "dla"
+            member_labels = (
+                {m: node_labels.get(m, []) for m in members}
+                if node_labels
+                else None
+            )
+            member_norm_props = (
+                {m: neuron_norm_props[m] for m in members if m in neuron_norm_props}
+                if neuron_norm_props is not None
+                else None
+            )
+
+            if is_dla_category:
+                # --- 1-D DLA heatmap: W_out @ W_U over number tokens 0–200 ---
+                # Does not require activation_write_result (no arg1×arg2 grid needed).
+                if number_unembed_precomputed is None or graph.neuron_write_vectors is None:
+                    logger.warning(
+                        "  Cannot plot DLA heatmap for supernode %d: "
+                        "W_U or neuron_write_vectors not available.",
+                        supernode_idx,
+                    )
+                    supernode_heatmap_pdf_paths.append("")
+                    continue
+                valid_numbers, W_U_numbers = number_unembed_precomputed
+                member_number_unembed_dla: dict[int, tuple[list[int], torch.Tensor]] = {}
+                for m in members:
+                    sv = graph.neuron_write_vectors[m].to(
+                        device=W_U_numbers.device, dtype=W_U_numbers.dtype
+                    )
+                    dla_vals = (sv @ W_U_numbers).detach().float().cpu()
+                    member_number_unembed_dla[m] = (valid_numbers, dla_vals)
+                saved_path = save_dla_heatmap_pdf(
                     members,
                     neuron_locs,
+                    member_number_unembed_dla,
                     output_path=os.path.join(
                         supernode_heatmap_output_dir,
                         f"supernode_{supernode_idx}.pdf",
                     ),
-                    title=f"supernode {supernode_idx}: {category}",
+                    title=f"supernode {supernode_idx}: {category} — DLA influence over 0–200",
                     member_labels=member_labels,
                     member_norm_props=member_norm_props,
-                    member_var_spec=member_var_spec,
-                    member_dla_kl=member_dla_kl,
-                    member_number_unembed=member_number_unembed,
                 )
-                logger.info("  Saved supernode heatmap PDF: %s", saved_path)
+                logger.info("  Saved DLA heatmap PDF: %s", saved_path)
                 supernode_heatmap_pdf_paths.append(saved_path)
+                continue
+
+            # --- 2-D arg1 × arg2 activation heatmap (ANOVA / arg-token supernodes) ---
+            if activation_write_result is None:
+                logger.warning(
+                    "  Skipping heatmap for supernode %d (%s): "
+                    "activation_write_result not provided (pass --dataset when using "
+                    "--include-arg-nodes to enable arg1×arg2 heatmaps).",
+                    supernode_idx,
+                    category,
+                )
+                supernode_heatmap_pdf_paths.append("")
+                continue
+
+            row_indices = torch.tensor(members, dtype=torch.long)
+            cluster_heatmaps = activation_write_result.activations[row_indices].detach().float()
+            member_var_spec = None
+            if filtered_label_results is not None:
+                member_var_spec = {}
+                for m in members:
+                    nl = filtered_label_results.get(m)
+                    if nl is not None:
+                        member_var_spec[m] = (
+                            float(nl.category_scores.get(category, 0.0)),
+                            float(nl.category_specificity.get(category, 0.0)),
+                        )
+            member_dla_kl = None
+            if is_sum_category and sum_member_scores is not None:
+                cat_scores = sum_member_scores.get(category, {})
+                member_dla_kl = {m: cat_scores[m][2] for m in members if m in cat_scores}
+            member_number_unembed = None
+            if is_sum_category and number_unembed_precomputed is not None and graph.neuron_write_vectors is not None:
+                valid_numbers, W_U_numbers = number_unembed_precomputed
+                member_number_unembed = {}
+                for m in members:
+                    sv = graph.neuron_write_vectors[m].to(device=W_U_numbers.device, dtype=W_U_numbers.dtype)
+                    dla_vals = (sv @ W_U_numbers).detach().float().cpu()
+                    member_number_unembed[m] = (valid_numbers, dla_vals)
+            saved_path = save_supernode_activation_heatmap_pdf(
+                cluster_heatmaps,
+                activation_write_result.arg_values,
+                members,
+                neuron_locs,
+                output_path=os.path.join(
+                    supernode_heatmap_output_dir,
+                    f"supernode_{supernode_idx}.pdf",
+                ),
+                title=f"supernode {supernode_idx}: {category}",
+                member_labels=member_labels,
+                member_norm_props=member_norm_props,
+                member_var_spec=member_var_spec,
+                member_dla_kl=member_dla_kl,
+                member_number_unembed=member_number_unembed,
+            )
+            logger.info("  Saved supernode heatmap PDF: %s", saved_path)
+            supernode_heatmap_pdf_paths.append(saved_path)
 
     logger.info("  Aggregated supergraph: %d supernodes", num_supernodes)
     return SuperGraph(

@@ -435,11 +435,15 @@ def create_graph(
     )
     _log_graph_summary(graph, logger=_logger, stage="Built (ANOVA-filtered)")
 
-    # Step 8: Compute activation grids only for the M supergraph neurons (M << N).
-    # Only meaningful when ANOVA labeling was performed (need_anova); without it
-    # there are no labelled supernodes to visualise, and the MLP input cache would
-    # have to be built from scratch here at significant cost.
-    if need_anova and dataset is not None:
+    # Step 8: Compute activation grids for supergraph neurons that need 2-D arg1×arg2
+    # heatmaps.  This covers:
+    #   - ANOVA supernodes (need_anova=True): always need the activation grid.
+    #   - Arg-token supernodes (include_arg_nodes=True): each arg supernode is
+    #     visualised as a 2-D arg1×arg2 heatmap showing how that token's neurons
+    #     activate across different (arg1, arg2) pairs.
+    # DLA supernodes are rendered as 1-D DLA bar charts and do NOT need this grid.
+    need_awr = (need_anova or include_arg_nodes) and dataset is not None
+    if need_awr:
         _logger.info(
             "Building activation-write result for %d supergraph neurons", filtered_ctx.n_neurons
         )
