@@ -151,12 +151,19 @@ def compute_prompt_graph_loss(
     student_supergraph_structure = student_result.supergraph
 
     # Filter supernodes to only the requested labels (if specified).
+    # Supernodes added via explicit flags (DLA, arg-token) are always kept regardless
+    # of the ANOVA label whitelist.
     if config.student_graph_labels is not None:
         label_set = set(config.student_graph_labels)
+        if config.student_include_dla_node:
+            label_set.add("dla")
         keep_indices = [
             i
             for i, labels in enumerate(student_supergraph_structure.supernode_labels or [])
-            if labels and labels[0] in label_set
+            if labels and (
+                labels[0] in label_set
+                or (config.student_include_arg_nodes and labels[0].startswith("arg:"))
+            )
         ]
         student_supergraph_structure = student_supergraph_structure._replace(
             supernodes=[student_supergraph_structure.supernodes[i] for i in keep_indices],
