@@ -436,15 +436,21 @@ def create_graph(
     _log_graph_summary(graph, logger=_logger, stage="Built (ANOVA-filtered)")
 
     # Step 8: Compute activation grids only for the M supergraph neurons (M << N).
-    _logger.info(
-        "Building activation-write result for %d supergraph neurons", filtered_ctx.n_neurons
-    )
-    filtered_awr = build_neuron_activation_write_result(
-        adapter,
-        dataset,
-        filtered_ctx.neuron_locations,
-        mlp_input_cache=mlp_input_cache,
-    )
+    # Only meaningful when ANOVA labeling was performed (need_anova); without it
+    # there are no labelled supernodes to visualise, and the MLP input cache would
+    # have to be built from scratch here at significant cost.
+    if need_anova and dataset is not None:
+        _logger.info(
+            "Building activation-write result for %d supergraph neurons", filtered_ctx.n_neurons
+        )
+        filtered_awr = build_neuron_activation_write_result(
+            adapter,
+            dataset,
+            filtered_ctx.neuron_locations,
+            mlp_input_cache=mlp_input_cache,
+        )
+    else:
+        filtered_awr = None
 
     # Step 9: Aggregate the adjacency matrix into a supergraph.
     _logger.info("Running build_super_graph")
