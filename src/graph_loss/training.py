@@ -21,6 +21,10 @@ class CachedTeacherPromptData:
 
     supergraph: SuperGraph
     logit_token_ids: torch.Tensor | None
+    # Teacher logits at the last prompt-token position, used to select the student
+    # DLA supernode against the teacher's output distribution rather than the
+    # student's own (which is wrong early in training and shifts every step).
+    teacher_dla_logits: torch.Tensor | None = None
 
 
 @dataclass
@@ -134,6 +138,7 @@ def compute_prompt_graph_loss(
             anova_nodes_per_label=config.student_anova_nodes_per_label,
             sum_min_specificity=config.student_sum_min_specificity,
             include_dla_node=config.student_include_dla_node,
+            dla_model_logits=cached_teacher.teacher_dla_logits if config.student_include_dla_node else None,
             include_arg_nodes=config.student_include_arg_nodes,
             no_grad_supergraph=True,
         )
@@ -262,23 +267,39 @@ def _load_cached_teacher(
             f"prompt={prompt!r}, answer={answer!r}. Regenerate the cache for this "
             "dataset/tokenizer or remove --teacher-data-cache."
         ) from e
-    
+
     if "supernode_labels" not in sg_data:
         raise RuntimeError(
             f"Teacher cache file for prompt={prompt!r}, answer={answer!r} is missing "
             "'supernode_labels'. Regenerate the teacher cache with the current "
             "generate_teacher_data.py."
         )
-        
+
     logit_token_ids: torch.Tensor | None = sg_data.get("logit_token_ids")
     supergraph = SuperGraph(
         supernode_adjacency_matrix=sg_data["supernode_adjacency_matrix"].to(device),
         supernodes=sg_data["supernodes"],
         supernode_labels=sg_data.get("supernode_labels"),
     )
+
+    # Load teacher logits at the last prompt-token position so that the student's
+    # DLA supernode can be selected against the teacher's output distribution
+    # instead of the student's own (which is wrong early in training and shifts
+    # every step as the student learns).
+    teacher_dla_logits: torch.Tensor | None = None
+    try:
+        logits_record = cache._load_logits_record(prompt, answer)
+        prompt_len = int(logits_record.get("prompt_len", logits_record["input_ids"].numel()))
+        full_logits: torch.Tensor = logits_record["logits"]  # [seq_len, vocab]
+        if prompt_len > 0 and full_logits.shape[0] >= prompt_len:
+            teacher_dla_logits = full_logits[prompt_len - 1].to(device=device)
+    except Exception:
+        pass  # fall back to student logits in compute_prompt_graph_loss
+
     return CachedTeacherPromptData(
         supergraph=supergraph,
         logit_token_ids=logit_token_ids,
+        teacher_dla_logits=teacher_dla_logits,
     )
 
 

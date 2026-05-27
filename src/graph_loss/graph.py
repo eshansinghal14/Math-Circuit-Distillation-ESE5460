@@ -649,6 +649,7 @@ def build_super_graph(
                     else "none"
                 )
                 is_sum_category = category in {"sum range", "sum units"}
+                is_dla_category = category == "dla"
                 row_indices = torch.tensor(members, dtype=torch.long)
                 cluster_heatmaps = activation_write_result.activations[row_indices].detach().float()
                 member_labels = (
@@ -676,7 +677,7 @@ def build_super_graph(
                     cat_scores = sum_member_scores.get(category, {})
                     member_dla_kl = {m: cat_scores[m][2] for m in members if m in cat_scores}
                 member_number_unembed = None
-                if is_sum_category and number_unembed_precomputed is not None and graph.neuron_write_vectors is not None:
+                if (is_sum_category or is_dla_category) and number_unembed_precomputed is not None and graph.neuron_write_vectors is not None:
                     valid_numbers, W_U_numbers = number_unembed_precomputed
                     member_number_unembed = {}
                     for m in members:

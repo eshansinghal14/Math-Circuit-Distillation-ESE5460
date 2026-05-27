@@ -216,6 +216,7 @@ def create_graph(
     sum_min_specificity: float = 0.0,
     node_labels: list[str] | None = None,
     include_dla_node: bool = False,
+    dla_model_logits: torch.Tensor | None = None,
     include_arg_nodes: bool = False,
     no_grad_supergraph: bool = False,
     logger: logging.Logger | None = None,
@@ -253,8 +254,15 @@ def create_graph(
             If None (omitted), no ANOVA supernodes are created.
         include_dla_node: If True, create an additional "dla" supernode containing the
             top ``anova_nodes_per_label`` neurons whose DLA distribution (write vector
-            projected through W_U) best matches the model's actual output distribution
-            by KL divergence.
+            projected through W_U) best matches the reference output distribution by
+            KL divergence.  The reference is ``dla_model_logits`` when provided,
+            otherwise the model's own forward-pass logits.
+        dla_model_logits: Optional ``[d_vocab]`` logit vector to use as the reference
+            distribution for DLA supernode selection instead of the model's own output.
+            Pass the teacher's logits here during student training so the student's DLA
+            supernode is selected against the teacher's (correct, stable) output
+            distribution rather than the student's own (wrong early in training and
+            non-stationary across steps).
         include_arg_nodes: If True, create one ``"arg:TOKEN"`` supernode per token
             position in the prompt.  Each supernode contains the top
             ``anova_nodes_per_label`` neurons (from the pre-ANOVA candidate pool)
@@ -337,7 +345,11 @@ def create_graph(
                 target_args=target_args,
                 allowed_labels=(None if "all" in node_labels else set(node_labels)) if node_labels is not None else set(),
                 include_dla_node=include_dla_node,
-                model_logits=ctx.logits[0, -1].detach() if include_dla_node else None,
+                model_logits=(
+                    dla_model_logits
+                    if (include_dla_node and dla_model_logits is not None)
+                    else (ctx.logits[0, -1].detach() if include_dla_node else None)
+                ),
             )
         )
         _logger.info("  ANOVA selected %d unique neurons", len(selected_row_indices))
