@@ -167,8 +167,10 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
     }
 
     # Build MLP input cache once for the entire run — same across all prompts.
+    # Only needed for ANOVA neuron labeling, which is skipped when graph_node_labels
+    # is None, so skip the (expensive) cache build in that case.
     activation_dataset = config.dataset or config.dataset_file
-    if activation_dataset:
+    if activation_dataset and config.graph_node_labels is not None:
         from graph_loss.precompute_mlp_inputs import build_mlp_input_cache
         from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
         activation_dataset_path = _resolve_dataset_path(activation_dataset)
@@ -182,6 +184,8 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
         n_prompts = int(mlp_input_cache.get("meta", {}).get("n_prompts", 0))
         logger.info("  MLP cache: %d prompts, ready for reuse across all training prompts", n_prompts)
     else:
+        if activation_dataset and config.graph_node_labels is None:
+            logger.info("Skipping MLP input cache (no --graph-node-labels, ANOVA not needed)")
         mlp_input_cache = None
 
     for local_idx, (prompt, answer) in enumerate(tqdm(samples, desc="Generating teacher data", unit="sample")):
