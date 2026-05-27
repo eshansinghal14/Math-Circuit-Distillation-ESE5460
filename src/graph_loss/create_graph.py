@@ -324,6 +324,32 @@ def create_graph(
             anova_range_radius=anova_range_radius,
         )
 
+    # Build MLP cache for arg-node heatmaps when ANOVA wasn't run (no --graph-node-labels)
+    # but heatmap output is requested via __main__.  Only the CLI path sets
+    # supernode_heatmap_output_dir, so this is a no-op in training.
+    if (
+        not need_anova
+        and include_arg_nodes
+        and supernode_heatmap_output_dir is not None
+        and dataset is not None
+        and mlp_input_cache is None
+        and model_name is not None
+    ):
+        from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
+        from graph_loss.precompute_mlp_inputs import build_mlp_input_cache as _build_mlp_cache
+        dataset_path = _resolve_dataset_path(dataset)
+        _logger.info(
+            "Building MLP input cache for arg-node heatmaps (no ANOVA labels): %s", dataset
+        )
+        mlp_input_cache = _build_mlp_cache(
+            adapter,
+            dataset_path,
+            model_name,
+            batch_size=32,
+        )
+        n_prompts = int(mlp_input_cache.get("meta", {}).get("n_prompts", 0))
+        _logger.info("  Built MLP cache: %d prompts", n_prompts)
+
     # Step 4: Select top-K neurons per ANOVA label.
     # Sum categories use DLA-KL scoring (source_vectors @ W_U) rather than graph influence.
     # Also runs when include_dla_node is set even without ANOVA labels.
@@ -438,11 +464,15 @@ def create_graph(
     # Step 8: Compute activation grids for supergraph neurons that need 2-D arg1×arg2
     # heatmaps.  This covers:
     #   - ANOVA supernodes (need_anova=True): always need the activation grid.
-    #   - Arg-token supernodes (include_arg_nodes=True): each arg supernode is
-    #     visualised as a 2-D arg1×arg2 heatmap showing how that token's neurons
-    #     activate across different (arg1, arg2) pairs.
+    #   - Arg-token supernodes when heatmap output is requested (CLI path only,
+    #     detected by supernode_heatmap_output_dir being set).
     # DLA supernodes are rendered as 1-D DLA bar charts and do NOT need this grid.
-    need_awr = (need_anova or include_arg_nodes) and dataset is not None
+    # Training never sets supernode_heatmap_output_dir, so the arg-node branch is
+    # a no-op in that path.
+    need_awr = (
+        need_anova
+        or (include_arg_nodes and supernode_heatmap_output_dir is not None)
+    ) and dataset is not None
     if need_awr:
         _logger.info(
             "Building activation-write result for %d supergraph neurons", filtered_ctx.n_neurons
