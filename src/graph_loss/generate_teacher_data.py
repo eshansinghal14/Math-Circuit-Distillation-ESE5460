@@ -124,7 +124,6 @@ def _compute_teacher_logits(adapter: HFLlamaGraphAdapter, input_ids: torch.Tenso
     return logits.squeeze(0).detach().cpu()
 
 
-@torch.no_grad()
 def _generate_cot_sample(
     *,
     adapter: "HFLlamaGraphAdapter",
@@ -148,13 +147,14 @@ def _generate_cot_sample(
         add_special_tokens=False,
     )["input_ids"].to(device)
 
-    output = adapter.model.generate(
-        prompt_ids,
-        max_new_tokens=config.cot_max_new_tokens,
-        do_sample=False,
-        return_dict_in_generate=True,
-        output_logits=True,
-    )
+    with torch.no_grad():
+        output = adapter.model.generate(
+            prompt_ids,
+            max_new_tokens=config.cot_max_new_tokens,
+            do_sample=False,
+            return_dict_in_generate=True,
+            output_logits=True,
+        )
     generated_ids = output.sequences[0, prompt_ids.shape[1]:]
     # output.logits: tuple of T tensors, each [1, vocab_size] (one per generated token)
     gen_len = len(generated_ids)
