@@ -254,7 +254,7 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
                 "--test-gsm8k requires --cot-k-positions > 0 (GSM8K data is CoT format)."
             )
         from datasets import load_dataset as _load_hf_dataset
-        _ds = _load_hf_dataset("gsm8k", "main", split="train")
+        _ds = _load_hf_dataset("openai/gsm8k", "main", split="train")
         samples: list = [
             (row["question"], row["answer"])
             for row in _ds.select(range(config.test_amount))

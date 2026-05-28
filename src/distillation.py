@@ -1324,7 +1324,7 @@ def main() -> None:
             train_data = dict(list(train_data.items())[: args.train_limit])
     if args.test_gsm8k:
         from datasets import load_dataset
-        _ds = load_dataset("gsm8k", "main", split="train")
+        _ds = load_dataset("openai/gsm8k", "main", split="train")
         _samples = [
             {"question": row["question"], "answer": row["answer"]}
             for row in _ds.select(range(args.test_amount))

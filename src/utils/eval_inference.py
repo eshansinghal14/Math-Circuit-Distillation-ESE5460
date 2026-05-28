@@ -34,7 +34,7 @@ def load_hf_benchmark_rows(
     rows: List[Tuple[str, str]] = []
 
     if key == "gsm8k":
-        ds = load_dataset("gsm8k", "main", split="test")
+        ds = load_dataset("openai/gsm8k", "main", split="test")
         for ex in ds:
             q = ex["question"].strip()
             gold = _gsm8k_gold_answer_str(ex["answer"])
