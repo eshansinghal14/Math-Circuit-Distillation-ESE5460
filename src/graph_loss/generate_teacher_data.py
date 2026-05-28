@@ -37,7 +37,7 @@ class TeacherDataConfig:
     store_path: str
     dataset_file: str
     teacher_model: str
-    dtype: str = "bfloat16"
+    dtype: str = "float32"
     top_k_logits: float | None = 0.95
     temperature: float = 2.0
     prop_neurons_per_layer: float = 0.1
