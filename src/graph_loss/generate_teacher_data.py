@@ -37,7 +37,7 @@ class TeacherDataConfig:
     store_path: str
     dataset_file: str
     teacher_model: str
-    dtype: str = "float32"
+    dtype: str = "bfloat16"
     top_k_logits: float | None = 0.95
     temperature: float = 2.0
     prop_neurons_per_layer: float = 0.1
@@ -204,6 +204,7 @@ def _generate_cot_sample(
         result: GraphPipelineResult = create_graph(
             adapter,
             extended_prefix,
+            dtype=resolve_torch_dtype(config.dtype),
             top_k_logits=config.top_k_logits,
             temperature=config.temperature,
             prop_neurons_per_layer=config.prop_neurons_per_layer,
@@ -377,6 +378,7 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
             result: GraphPipelineResult = create_graph(
                 adapter,
                 prompt,
+                dtype=resolve_torch_dtype(config.dtype),
                 top_k_logits=config.top_k_logits,
                 temperature=config.temperature,
                 prop_neurons_per_layer=config.prop_neurons_per_layer,
