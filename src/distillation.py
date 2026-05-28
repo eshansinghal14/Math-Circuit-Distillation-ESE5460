@@ -171,9 +171,6 @@ class DistillationConfig:
     student_include_dla_node: bool = False
     student_include_arg_nodes: bool = False
     skip_baseline_eval: bool = False
-    cot_k_positions: int = 0
-    test_gsm8k: bool = False
-    test_amount: int = 50
 
 
 
@@ -344,7 +341,6 @@ class DistillationTrainer:
                 student_graph_labels=config.graph_node_labels,
                 student_include_dla_node=config.student_include_dla_node,
                 student_include_arg_nodes=config.student_include_arg_nodes,
-                cot_k_positions=config.cot_k_positions,
             )
 
             self.student_graph_adapter = HFLlamaGraphAdapter(
@@ -1186,16 +1182,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip the teacher/student baseline accuracy evaluation at the start of training.",
     )
     parser.add_argument(
-        "--cot-k-positions",
-        type=int,
-        default=0,
-        dest="cot_k_positions",
-        help=(
-            "Number of CoT positions used per sample when the teacher cache was built "
-            "with --cot-k-positions > 0.  0 (default) uses the arithmetic pipeline."
-        ),
-    )
-    parser.add_argument(
         "--graph-node-labels",
         nargs="+",
         default=None,
@@ -1229,25 +1215,12 @@ def build_parser() -> argparse.ArgumentParser:
             "Note: this runs select_arg_supernodes per prompt and adds compute cost."
         ),
     )
-    parser.add_argument(
-        "--test-gsm8k",
-        action="store_true",
-        dest="test_gsm8k",
-        help="Load GSM8K train split from HuggingFace instead of --dataset.",
-    )
-    parser.add_argument(
-        "--test-amount",
-        type=int,
-        default=50,
-        dest="test_amount",
-        help="Number of GSM8K examples to use when --test-gsm8k is set (default 50).",
-    )
     return parser
 
 
 def validate_args(args: argparse.Namespace) -> None:
-    if args.dataset is None and not args.test_gsm8k:
-        raise SystemExit("--dataset is required (or use --test-gsm8k).")
+    if args.dataset is None:
+        raise SystemExit("--dataset is required.")
     if args.steps < 0:
         raise SystemExit("--steps must be >= 0")
     if args.batch_size < 1:
@@ -1272,13 +1245,10 @@ def main() -> None:
     args = parser.parse_args()
     validate_args(args)
 
-    if not args.test_gsm8k:
-        train_path, test_path, dataset_prefix = resolve_train_test_paths(
-            dataset=args.dataset,
-            datasets_dir=args.datasets_dir,
-        )
-    else:
-        train_path, test_path, dataset_prefix = None, None, "gsm8k"
+    train_path, test_path, dataset_prefix = resolve_train_test_paths(
+        dataset=args.dataset,
+        datasets_dir=args.datasets_dir,
+    )
     run_dir, student_source = resolve_distillation_run_dir(
         os.path.abspath(args.save_dir),
         resume=args.resume_step is not None,
@@ -1310,27 +1280,12 @@ def main() -> None:
     print(f"  save_dir:           {run_dir}")
     print("=" * 60)
 
-    if not args.test_gsm8k:
-        if args.cot_k_positions > 0:
-            from utils.dataset_json import load_cot_json
-            train_data: Dict[str, Any] = load_cot_json(train_path)
-            test_data: Dict[str, Any] = load_cot_json(test_path)
-        else:
-            train_data = load_prompt_answer_json(train_path)
-            test_data = load_prompt_answer_json(test_path)
-        if args.train_start_idx is not None:
-            train_data = dict(list(train_data.items())[args.train_start_idx :])
-        if args.train_limit is not None:
-            train_data = dict(list(train_data.items())[: args.train_limit])
-    if args.test_gsm8k:
-        from datasets import load_dataset
-        _ds = load_dataset("openai/gsm8k", "main", split="train")
-        _samples = [
-            {"question": row["question"], "answer": row["answer"]}
-            for row in _ds.select(range(args.test_amount))
-        ]
-        train_data = {s["question"]: s["answer"] for s in _samples}
-        test_data = {s["question"]: s["answer"] for s in _samples[:max(1, args.test_amount // 10)]}
+    train_data = load_prompt_answer_json(train_path)
+    test_data = load_prompt_answer_json(test_path)
+    if args.train_start_idx is not None:
+        train_data = dict(list(train_data.items())[args.train_start_idx :])
+    if args.train_limit is not None:
+        train_data = dict(list(train_data.items())[: args.train_limit])
     extra_eval_data: Dict[str, Dict[str, int]] = {}
     if args.eval_datasets:
         for eval_dataset in args.eval_datasets:
@@ -1392,9 +1347,6 @@ def main() -> None:
             student_include_dla_node=args.student_include_dla_node,
             student_include_arg_nodes=args.student_include_arg_nodes,
             skip_baseline_eval=args.skip_baseline_eval,
-            cot_k_positions=args.cot_k_positions,
-            test_gsm8k=args.test_gsm8k,
-            test_amount=args.test_amount,
 
             seed=args.seed,
             device=device,
