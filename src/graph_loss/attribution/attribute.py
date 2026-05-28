@@ -87,12 +87,11 @@ def setup_attribution(
 
     for layer_idx in range(adapter.n_layers):
         layer_input = mlp_inputs[layer_idx].squeeze(0)
-        layer_acts, layer_target_encoders, layer_source_vectors = (
-            adapter._compute_layer_neuron_data(layer_idx, layer_input)
+        keep, layer_acts_kept, layer_te_kept, layer_sv_kept = (
+            adapter._compute_layer_neuron_data_selective(
+                layer_idx, layer_input, prop_neurons_per_layer
+            )
         )
-        flat_norms = layer_source_vectors.norm(dim=-1).reshape(-1)
-        k = min(max(1, int(flat_norms.numel() * prop_neurons_per_layer)), flat_norms.numel())
-        keep = torch.topk(flat_norms, k, dim=0).indices
 
         layer_locations = torch.stack(
             [
@@ -103,9 +102,9 @@ def setup_attribution(
             dim=1,
         )
         neuron_locations.append(layer_locations[keep])
-        neuron_activations.append(layer_acts.reshape(-1)[keep])
-        target_encoders.append(layer_target_encoders.reshape(-1, adapter.d_model)[keep])
-        source_vectors.append(layer_source_vectors.reshape(-1, adapter.d_model)[keep])
+        neuron_activations.append(layer_acts_kept)
+        target_encoders.append(layer_te_kept)
+        source_vectors.append(layer_sv_kept)
         source_layer_by_node.extend([layer_idx] * int(keep.numel()))
 
     return HFAttributionContext(
