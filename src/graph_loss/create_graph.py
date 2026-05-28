@@ -10,6 +10,7 @@ import torch
 
 from graph_loss.anova_node_labels import parse_numeric_args
 from graph_loss.attribution.attribute import _attribute_from_context, setup_attribution
+from graph_loss.attribution.context import HFAttributionContext
 from graph_loss.graph import (
     Graph,
     SuperGraph,
@@ -29,6 +30,38 @@ from graph_loss.neuron_activation_heatmap import (
 class GraphPipelineResult:
     graph: Graph
     supergraph: SuperGraph
+
+
+@dataclass
+class GraphSharedContext:
+    """Phase-1 results for a sequence, shared across multiple target positions.
+
+    Contains the attribution context and pre-computed ANOVA + token supernodes.
+    The DLA supernode is position-specific and computed per-call in
+    create_graph_at_position().
+    """
+    # Full-sequence attribution context (unfiltered, all pre-selected neurons).
+    ctx: "HFAttributionContext"
+    # ANOVA supernodes in unfiltered ctx-space neuron indices (empty if no ANOVA).
+    anova_raw_supernodes: list
+    anova_supernode_labels: list
+    # Arg-token supernodes in unfiltered ctx-space neuron indices (empty if not requested).
+    token_raw_supernodes: list
+    token_supernode_labels: list
+    # Sorted union of ANOVA + token neuron indices before DLA merge (ctx-space).
+    anova_token_selected_indices: list
+    # Per-neuron label dict in ctx-space (remapped to filtered-ctx in create_graph_at_position).
+    raw_node_labels: dict
+    # ANOVA label results passed to select_anova_supernodes in create_graph_at_position.
+    label_results: dict
+    raw_sum_member_scores: dict
+    target_args: list
+    # Pipeline params forwarded to create_graph_at_position.
+    anova_nodes_per_label: int
+    sum_min_specificity: float
+    # Precomputed activation write result (None in training, set by CLI path).
+    activation_write_result: object
+    supernode_heatmap_output_dir: str | None
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +220,346 @@ def save_supergraph(
 
 
 # ---------------------------------------------------------------------------
+# Phase-split helpers for multi-position graph loss
+# ---------------------------------------------------------------------------
+
+def build_shared_context(
+    adapter: "HFLlamaGraphAdapter",
+    input_ids: torch.Tensor,
+    *,
+    prop_neurons_per_layer: float = 0.1,
+    dtype: torch.dtype | None = None,
+    dataset: str | None = None,
+    mlp_input_cache: dict | None = None,
+    model_name: str | None = None,
+    anova_nodes_per_label: int = 10,
+    anova_range_radius: int = 0,
+    sum_min_specificity: float = 0.0,
+    node_labels: list[str] | None = None,
+    include_arg_nodes: bool = False,
+    batch_size: int = 512,
+    supernode_heatmap_output_dir: str | None = None,
+    logger: logging.Logger | None = None,
+) -> GraphSharedContext:
+    """Phase 1 of the graph pipeline: forward pass, ANOVA labeling, token supernodes.
+
+    Does NOT include DLA supernodes (position-specific). Call
+    create_graph_at_position() to add DLA and build the attribution graph at a
+    specific sequence position.
+
+    Args:
+        adapter: Loaded HFLlamaGraphAdapter wrapping the model.
+        input_ids: Tokenized input sequence (1-D tensor).
+        See create_graph() for remaining argument documentation.
+
+    Returns:
+        GraphSharedContext holding the attribution context and pre-computed
+        ANOVA + token supernodes in unfiltered ctx-space indices.
+    """
+    _logger = logger or logging.getLogger(__name__)
+
+    _logger.info("Running setup_attribution (neuron pre-selection by gradient norm)")
+    ctx = setup_attribution(adapter, input_ids, prop_neurons_per_layer, dtype)
+    _logger.info("  Pre-selected neurons: %d", ctx.n_neurons)
+
+    need_anova = node_labels is not None
+    label_results: dict = {}
+    target_args: list = []
+
+    if need_anova:
+        if dataset is None:
+            raise ValueError("A dataset is required for ANOVA labeling. Pass --dataset.")
+        decoded = adapter.tokenizer.decode(input_ids.detach().cpu().tolist())
+        target_args = parse_numeric_args(decoded)
+
+        if mlp_input_cache is None and model_name is not None:
+            from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
+            from graph_loss.precompute_mlp_inputs import build_mlp_input_cache as _build_mlp_cache
+            dataset_path = _resolve_dataset_path(dataset)
+            _logger.info("Building MLP input cache for dataset: %s", dataset)
+            mlp_input_cache = _build_mlp_cache(adapter, dataset_path, model_name, batch_size=32)
+            _logger.info("  Built MLP cache: %d prompts", int(mlp_input_cache.get("meta", {}).get("n_prompts", 0)))
+
+        _logger.info("ANOVA-labeling %d pre-selected neurons (layer-by-layer)", ctx.n_neurons)
+        label_results = label_neurons_layer_by_layer(
+            adapter,
+            ctx.neuron_locations,
+            mlp_input_cache,
+            target_args=target_args,
+            anova_range_radius=anova_range_radius,
+        )
+    else:
+        # Still parse target_args so create_graph_at_position has them for DLA calls.
+        decoded = adapter.tokenizer.decode(input_ids.detach().cpu().tolist())
+        target_args = parse_numeric_args(decoded)
+
+    # Build MLP cache for arg-node heatmaps when ANOVA wasn't run but heatmap output is
+    # requested. Only the CLI path sets supernode_heatmap_output_dir, so this is a no-op
+    # in training.
+    if (
+        not need_anova
+        and include_arg_nodes
+        and supernode_heatmap_output_dir is not None
+        and dataset is not None
+        and mlp_input_cache is None
+        and model_name is not None
+    ):
+        from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
+        from graph_loss.precompute_mlp_inputs import build_mlp_input_cache as _build_mlp_cache
+        dataset_path = _resolve_dataset_path(dataset)
+        _logger.info("Building MLP input cache for arg-node heatmaps: %s", dataset)
+        mlp_input_cache = _build_mlp_cache(adapter, dataset_path, model_name, batch_size=32)
+        _logger.info("  Built MLP cache: %d prompts", int(mlp_input_cache.get("meta", {}).get("n_prompts", 0)))
+
+    # Select ANOVA supernodes (DLA excluded here; it is position-specific).
+    if need_anova:
+        _logger.info("Selecting ANOVA supernodes (top-%d per label)", anova_nodes_per_label)
+        anova_selected, anova_raw_supernodes, anova_supernode_labels, raw_node_labels, raw_sum_member_scores = (
+            select_anova_supernodes(
+                label_results,
+                anova_nodes_per_label=anova_nodes_per_label,
+                sum_min_specificity=sum_min_specificity,
+                strict=True,
+                source_vectors=ctx.source_vectors,
+                W_U=adapter.W_U,
+                tokenizer=adapter.tokenizer,
+                target_args=target_args,
+                allowed_labels=(None if "all" in node_labels else set(node_labels)) if node_labels is not None else set(),
+                include_dla_node=False,  # DLA is position-specific; handled in create_graph_at_position
+                model_logits=None,
+            )
+        )
+        _logger.info("  ANOVA selected %d unique neurons", len(anova_selected))
+    else:
+        anova_selected: list = []
+        anova_raw_supernodes: list = []
+        anova_supernode_labels: list = []
+        raw_node_labels: dict = {}
+        raw_sum_member_scores: dict = {}
+
+    # Select arg-token supernodes (position-independent: embedding gradient norms).
+    token_raw_supernodes: list = []
+    token_supernode_labels: list = []
+    all_selected = set(anova_selected)
+
+    if include_arg_nodes:
+        _logger.info("Computing arg-token supernodes for %d token positions", ctx.n_tokens)
+        token_raw_supernodes, token_supernode_labels = select_arg_supernodes(
+            ctx,
+            adapter.tokenizer,
+            input_ids,
+            nodes_per_token=anova_nodes_per_label,
+            batch_size=batch_size,
+            fast_inner_product=True,
+        )
+        for sn in token_raw_supernodes:
+            all_selected.update(sn)
+        for sn, label in zip(token_raw_supernodes, token_supernode_labels):
+            label_str = label[0] if label else "arg"
+            for idx in sn:
+                raw_node_labels.setdefault(idx, [])
+                if label_str not in raw_node_labels[idx]:
+                    raw_node_labels[idx].append(label_str)
+        _logger.info(
+            "  Arg-nodes: %d token supernodes; total unique neurons so far: %d",
+            len(token_raw_supernodes),
+            len(all_selected),
+        )
+
+    anova_token_selected_indices = sorted(all_selected)
+
+    # Precompute activation write result if needed (CLI heatmap path only; None in training).
+    need_awr = (need_anova or (include_arg_nodes and supernode_heatmap_output_dir is not None)) and dataset is not None
+    activation_write_result = None
+    if need_awr and anova_token_selected_indices:
+        # Build a temporary filtered ctx to compute activation write results for ANOVA neurons.
+        tmp_keep_mask = torch.zeros(ctx.n_neurons, dtype=torch.bool, device=adapter.device)
+        for idx in anova_token_selected_indices:
+            tmp_keep_mask[idx] = True
+        tmp_filtered_ctx = ctx.filter(tmp_keep_mask)
+        _logger.info("Building activation-write result for %d neurons", tmp_filtered_ctx.n_neurons)
+        activation_write_result = build_neuron_activation_write_result(
+            adapter,
+            dataset,
+            tmp_filtered_ctx.neuron_locations,
+            mlp_input_cache=mlp_input_cache,
+        )
+
+    return GraphSharedContext(
+        ctx=ctx,
+        anova_raw_supernodes=anova_raw_supernodes,
+        anova_supernode_labels=anova_supernode_labels,
+        token_raw_supernodes=token_raw_supernodes,
+        token_supernode_labels=token_supernode_labels,
+        anova_token_selected_indices=anova_token_selected_indices,
+        raw_node_labels=raw_node_labels,
+        label_results=label_results,
+        raw_sum_member_scores=raw_sum_member_scores,
+        target_args=target_args,
+        anova_nodes_per_label=anova_nodes_per_label,
+        sum_min_specificity=sum_min_specificity,
+        activation_write_result=activation_write_result,
+        supernode_heatmap_output_dir=supernode_heatmap_output_dir,
+    )
+
+
+def create_graph_at_position(
+    shared: GraphSharedContext,
+    *,
+    target_position: int = -1,
+    include_dla_node: bool = False,
+    dla_model_logits: torch.Tensor | None = None,
+    attribution_targets=None,
+    top_k_logits: float | None = 0.95,
+    temperature: float = 2.0,
+    batch_size: int = 512,
+    build_create_graph: bool = False,
+    detach_result: bool | None = None,
+    skip_logit_attribution: bool = False,
+    no_grad_supergraph: bool = False,
+    verbose: bool = False,
+    logger: logging.Logger | None = None,
+) -> GraphPipelineResult:
+    """Phase 2: compute DLA supernode + attribution graph at a specific sequence position.
+
+    Reuses the shared attribution context and pre-computed ANOVA + token supernodes
+    from build_shared_context(). Only the DLA supernode and the attribution graph
+    itself are position-specific.
+
+    Args:
+        shared: Result of build_shared_context() for this sequence.
+        target_position: Sequence position to attribute from (default -1 = last token).
+        include_dla_node: Whether to compute and add the DLA supernode at target_position.
+        dla_model_logits: Optional [d_vocab] logit vector for DLA selection. If None and
+            include_dla_node is True, uses the model's own logits at target_position.
+        See create_graph() for remaining argument documentation.
+    """
+    _logger = logger or logging.getLogger(__name__)
+    ctx = shared.ctx
+    adapter = ctx.adapter
+
+    # --- Compute DLA supernode (position-specific) ---
+    dla_raw_supernodes: list = []
+    dla_supernode_labels: list = []
+    dla_raw_node_labels: dict = {}
+    dla_selected: list = []
+
+    if include_dla_node:
+        ref_logits = (
+            dla_model_logits
+            if dla_model_logits is not None
+            else ctx.logits[0, target_position].detach()
+        )
+        _logger.info("Selecting DLA supernode at position %d", target_position)
+        dla_selected, dla_raw_supernodes, dla_supernode_labels, dla_raw_node_labels, _ = (
+            select_anova_supernodes(
+                shared.label_results,
+                anova_nodes_per_label=shared.anova_nodes_per_label,
+                sum_min_specificity=shared.sum_min_specificity,
+                strict=True,
+                source_vectors=ctx.source_vectors,
+                W_U=adapter.W_U,
+                tokenizer=adapter.tokenizer,
+                target_args=shared.target_args,
+                allowed_labels=set(),  # no ANOVA supernodes, only DLA
+                include_dla_node=True,
+                model_logits=ref_logits,
+            )
+        )
+        _logger.info("  DLA selected %d neurons", len(dla_selected))
+
+    # --- Merge all neuron sets and remap to filtered-ctx indices ---
+    all_selected_set = set(shared.anova_token_selected_indices) | set(dla_selected)
+    selected_row_indices = sorted(all_selected_set)
+    old_to_new = {old: new for new, old in enumerate(selected_row_indices)}
+
+    # Combine all raw supernodes (still in ctx-space) and remap.
+    all_raw_supernodes = (
+        shared.anova_raw_supernodes
+        + shared.token_raw_supernodes
+        + dla_raw_supernodes
+    )
+    all_supernode_labels = (
+        shared.anova_supernode_labels
+        + shared.token_supernode_labels
+        + dla_supernode_labels
+    )
+    supernodes = [[old_to_new[idx] for idx in sn] for sn in all_raw_supernodes]
+
+    # Merge per-neuron label dicts.
+    merged_node_labels: dict = dict(shared.raw_node_labels)
+    for idx, labels in dla_raw_node_labels.items():
+        merged_node_labels.setdefault(idx, [])
+        for lbl in labels:
+            if lbl not in merged_node_labels[idx]:
+                merged_node_labels[idx].append(lbl)
+
+    node_labels_filtered = {
+        old_to_new[old]: labels
+        for old, labels in merged_node_labels.items()
+        if old in old_to_new
+    }
+    sum_member_scores = {
+        cat: {old_to_new[old]: scores for old, scores in cat_scores.items() if old in old_to_new}
+        for cat, cat_scores in shared.raw_sum_member_scores.items()
+    }
+    filtered_label_results = {
+        old_to_new[old]: shared.label_results[old]
+        for old in selected_row_indices
+        if old in shared.label_results
+    }
+
+    # --- Filter context and run attribution ---
+    keep_mask = torch.zeros(ctx.n_neurons, dtype=torch.bool, device=adapter.device)
+    for idx in selected_row_indices:
+        keep_mask[idx] = True
+    filtered_ctx = ctx.filter(keep_mask)
+    _logger.info("  Filtered context: %d neurons", filtered_ctx.n_neurons)
+
+    _logger.info("Running edge attribution on filtered neurons (position=%d)", target_position)
+    graph = _attribute_from_context(
+        filtered_ctx,
+        attribution_targets=attribution_targets,
+        top_k_logits=top_k_logits,
+        temperature=temperature,
+        batch_size=batch_size,
+        create_graph=build_create_graph,
+        detach_result=detach_result,
+        skip_logit_attribution=skip_logit_attribution,
+        verbose=verbose,
+        target_position=target_position,
+    )
+    _log_graph_summary(graph, logger=_logger, stage="Built (filtered)")
+
+    # --- Build supergraph ---
+    _logger.info("Running build_super_graph")
+
+    def _run_build_super_graph() -> "SuperGraph":
+        return build_super_graph(
+            graph,
+            supernodes=supernodes,
+            supernode_labels=all_supernode_labels,
+            node_labels=node_labels_filtered,
+            supernode_heatmap_output_dir=shared.supernode_heatmap_output_dir,
+            activation_write_result=shared.activation_write_result,
+            sum_member_scores=sum_member_scores,
+            filtered_label_results=filtered_label_results,
+            W_U=adapter.W_U,
+            tokenizer=adapter.tokenizer,
+        )
+
+    if no_grad_supergraph:
+        with torch.no_grad():
+            supergraph = _run_build_super_graph()
+    else:
+        supergraph = _run_build_super_graph()
+
+    _log_supergraph_summary(graph, supergraph, logger=_logger)
+    _log_pipeline_comparison(graph, supergraph, logger=_logger)
+    return GraphPipelineResult(graph=graph, supergraph=supergraph)
+
+
+# ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
 
@@ -205,9 +578,10 @@ def create_graph(
     build_create_graph: bool = False,
     detach_result: bool | None = None,
     skip_logit_attribution: bool = False,
+    # target position for attribution (default -1 = last token, existing behavior)
+    target_position: int = -1,
     # ANOVA / supergraph params
     dataset: str | None = None,
-
     mlp_input_cache: dict | None = None,
     model_name: str | None = None,
     supernode_heatmap_output_dir: str | None = None,
@@ -277,241 +651,39 @@ def create_graph(
         GraphPipelineResult with the ANOVA-filtered attribution graph and supergraph.
     """
     _logger = logger or logging.getLogger(__name__)
-
-    # Step 1: Tokenize and run the initial forward pass to pre-select neuron candidates
-    # by gradient-norm (prop_neurons_per_layer fraction per layer).
     input_ids = adapter.ensure_tokenized(prompt)
-    _logger.info("Running setup_attribution (neuron pre-selection by gradient norm)")
-    ctx = setup_attribution(adapter, input_ids, prop_neurons_per_layer, dtype)
-    _logger.info("  Pre-selected neurons: %d", ctx.n_neurons)
 
-    # Step 2: ANOVA-label all pre-selected neurons, one layer at a time.
-    # Activations are computed and discarded per layer — peak memory is
-    # O(n_layer_neurons × grid_cells) instead of O(N × grid_cells).
-    # Skipped entirely when no ANOVA node labels are requested.
-    need_anova = node_labels is not None
-    label_results: dict = {}
-    target_args: list = []
+    shared = build_shared_context(
+        adapter,
+        input_ids,
+        prop_neurons_per_layer=prop_neurons_per_layer,
+        dtype=dtype,
+        dataset=dataset,
+        mlp_input_cache=mlp_input_cache,
+        model_name=model_name,
+        anova_nodes_per_label=anova_nodes_per_label,
+        anova_range_radius=anova_range_radius,
+        sum_min_specificity=sum_min_specificity,
+        node_labels=node_labels,
+        include_arg_nodes=include_arg_nodes,
+        batch_size=batch_size,
+        supernode_heatmap_output_dir=supernode_heatmap_output_dir,
+        logger=_logger,
+    )
 
-    if need_anova:
-        if dataset is None:
-            raise ValueError(
-                "A dataset is required for ANOVA labeling. Pass --dataset."
-            )
-        decoded_prompt = adapter.tokenizer.decode(input_ids.detach().cpu().tolist())
-        target_args = parse_numeric_args(decoded_prompt)
-
-        if mlp_input_cache is None and model_name is not None:
-            from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
-            from graph_loss.precompute_mlp_inputs import build_mlp_input_cache as _build_mlp_cache
-            dataset_path = _resolve_dataset_path(dataset)
-            _logger.info("Building MLP input cache for dataset: %s", dataset)
-            mlp_input_cache = _build_mlp_cache(
-                adapter,
-                dataset_path,
-                model_name,
-                batch_size=32,
-            )
-            n_prompts = int(mlp_input_cache.get("meta", {}).get("n_prompts", 0))
-            _logger.info("  Built MLP cache: %d prompts", n_prompts)
-
-        _logger.info("ANOVA-labeling %d pre-selected neurons (layer-by-layer)", ctx.n_neurons)
-        label_results = label_neurons_layer_by_layer(
-            adapter,
-            ctx.neuron_locations,
-            mlp_input_cache,
-            target_args=target_args,
-            anova_range_radius=anova_range_radius,
-        )
-
-    # Build MLP cache for arg-node heatmaps when ANOVA wasn't run (no --graph-node-labels)
-    # but heatmap output is requested via __main__.  Only the CLI path sets
-    # supernode_heatmap_output_dir, so this is a no-op in training.
-    if (
-        not need_anova
-        and include_arg_nodes
-        and supernode_heatmap_output_dir is not None
-        and dataset is not None
-        and mlp_input_cache is None
-        and model_name is not None
-    ):
-        from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
-        from graph_loss.precompute_mlp_inputs import build_mlp_input_cache as _build_mlp_cache
-        dataset_path = _resolve_dataset_path(dataset)
-        _logger.info(
-            "Building MLP input cache for arg-node heatmaps (no ANOVA labels): %s", dataset
-        )
-        mlp_input_cache = _build_mlp_cache(
-            adapter,
-            dataset_path,
-            model_name,
-            batch_size=32,
-        )
-        n_prompts = int(mlp_input_cache.get("meta", {}).get("n_prompts", 0))
-        _logger.info("  Built MLP cache: %d prompts", n_prompts)
-
-    # Step 4: Select top-K neurons per ANOVA label.
-    # Sum categories use DLA-KL scoring (source_vectors @ W_U) rather than graph influence.
-    # Also runs when include_dla_node is set even without ANOVA labels.
-    if need_anova or include_dla_node:
-        if not need_anova:
-            # DLA node only — parse args so select_anova_supernodes has what it needs.
-            decoded_prompt = adapter.tokenizer.decode(input_ids.detach().cpu().tolist())
-            target_args = parse_numeric_args(decoded_prompt)
-        _logger.info("Selecting ANOVA supernodes (top-%d per label)", anova_nodes_per_label)
-        selected_row_indices, raw_supernodes, supernode_labels, raw_node_labels, raw_sum_member_scores = (
-            select_anova_supernodes(
-                label_results,
-                anova_nodes_per_label=anova_nodes_per_label,
-                sum_min_specificity=sum_min_specificity,
-                strict=True,
-                source_vectors=ctx.source_vectors,
-                W_U=adapter.W_U,
-                tokenizer=adapter.tokenizer,
-                target_args=target_args,
-                allowed_labels=(None if "all" in node_labels else set(node_labels)) if node_labels is not None else set(),
-                include_dla_node=include_dla_node,
-                model_logits=(
-                    dla_model_logits
-                    if (include_dla_node and dla_model_logits is not None)
-                    else (ctx.logits[0, -1].detach() if include_dla_node else None)
-                ),
-            )
-        )
-        _logger.info("  ANOVA selected %d unique neurons", len(selected_row_indices))
-    else:
-        selected_row_indices, raw_supernodes, supernode_labels = [], [], []
-        raw_node_labels, raw_sum_member_scores = {}, {}
-
-    # Step 4b (optional): Add arg-token supernodes via embedding gradient attribution.
-    # For each token position p in the prompt, selects the top anova_nodes_per_label
-    # neurons (from the full pre-ANOVA ctx) whose activation is most concentrated on
-    # that token's embedding (lowest KL vs delta_p).  Those neurons are merged into
-    # the selected set so they also pass through the attribution graph.
-    if include_arg_nodes:
-        _logger.info(
-            "Computing arg-token supernodes for %d token positions", ctx.n_tokens
-        )
-        arg_raw_supernodes, arg_supernode_labels = select_arg_supernodes(
-            ctx,
-            adapter.tokenizer,
-            input_ids,
-            nodes_per_token=anova_nodes_per_label,
-            batch_size=batch_size,
-            fast_inner_product=True,
-        )
-        # Merge new neurons into the selected set.
-        all_selected = set(selected_row_indices)
-        for sn in arg_raw_supernodes:
-            all_selected.update(sn)
-        selected_row_indices = sorted(all_selected)
-
-        # Attach arg labels to per-neuron label dict.
-        for sn, label in zip(arg_raw_supernodes, arg_supernode_labels):
-            label_str = label[0] if label else "arg"
-            for idx in sn:
-                raw_node_labels.setdefault(idx, [])
-                if label_str not in raw_node_labels[idx]:
-                    raw_node_labels[idx].append(label_str)
-
-        # Append arg supernodes to the combined lists (indices still in ctx-space;
-        # they are remapped to filtered-ctx-space in step 5 along with ANOVA nodes).
-        raw_supernodes.extend(arg_raw_supernodes)
-        supernode_labels.extend(arg_supernode_labels)
-        _logger.info(
-            "  Arg-nodes: %d token supernodes added; total unique neurons: %d",
-            len(arg_raw_supernodes),
-            len(selected_row_indices),
-        )
-
-    # Step 5: Build a boolean keep_mask and remap supernode indices.
-    # After ctx.filter(keep_mask), filtered neuron j = original neuron selected_row_indices[j].
-    keep_mask = torch.zeros(ctx.n_neurons, dtype=torch.bool, device=adapter.device)
-    for idx in selected_row_indices:
-        keep_mask[idx] = True
-
-    old_to_new = {old: new for new, old in enumerate(selected_row_indices)}
-    supernodes = [[old_to_new[idx] for idx in sn] for sn in raw_supernodes]
-    node_labels = {old_to_new[old]: labels for old, labels in raw_node_labels.items()}
-    sum_member_scores = {
-        cat: {old_to_new[old]: scores for old, scores in cat_scores.items() if old in old_to_new}
-        for cat, cat_scores in raw_sum_member_scores.items()
-    }
-    filtered_label_results = {old_to_new[old]: label_results[old] for old in selected_row_indices if old in label_results}
-
-    # Step 6: Filter the attribution context to ANOVA-selected neurons only.
-    filtered_ctx = ctx.filter(keep_mask)
-    _logger.info("  Filtered context: %d neurons", filtered_ctx.n_neurons)
-
-    # Step 7: Build the attribution graph for the ANOVA-selected neurons.
-    _logger.info("Running edge attribution on ANOVA-filtered neurons")
-    # Token and logit nodes are always included so that build_super_graph's
-    # frac_external calculation has full context (neuron→logit influence paths).
-    # They are not rendered in the frontend visualization or used in the loss.
-    graph = _attribute_from_context(
-        filtered_ctx,
+    return create_graph_at_position(
+        shared,
+        target_position=target_position,
+        include_dla_node=include_dla_node,
+        dla_model_logits=dla_model_logits,
         attribution_targets=attribution_targets,
         top_k_logits=top_k_logits,
         temperature=temperature,
         batch_size=batch_size,
-        create_graph=build_create_graph,
+        build_create_graph=build_create_graph,
         detach_result=detach_result,
         skip_logit_attribution=skip_logit_attribution,
+        no_grad_supergraph=no_grad_supergraph,
         verbose=verbose,
+        logger=_logger,
     )
-    _log_graph_summary(graph, logger=_logger, stage="Built (ANOVA-filtered)")
-
-    # Step 8: Compute activation grids for supergraph neurons that need 2-D arg1×arg2
-    # heatmaps.  This covers:
-    #   - ANOVA supernodes (need_anova=True): always need the activation grid.
-    #   - Arg-token supernodes when heatmap output is requested (CLI path only,
-    #     detected by supernode_heatmap_output_dir being set).
-    # DLA supernodes are rendered as 1-D DLA bar charts and do NOT need this grid.
-    # Training never sets supernode_heatmap_output_dir, so the arg-node branch is
-    # a no-op in that path.
-    need_awr = (
-        need_anova
-        or (include_arg_nodes and supernode_heatmap_output_dir is not None)
-    ) and dataset is not None
-    if need_awr:
-        _logger.info(
-            "Building activation-write result for %d supergraph neurons", filtered_ctx.n_neurons
-        )
-        filtered_awr = build_neuron_activation_write_result(
-            adapter,
-            dataset,
-            filtered_ctx.neuron_locations,
-            mlp_input_cache=mlp_input_cache,
-        )
-    else:
-        filtered_awr = None
-
-    # Step 9: Aggregate the adjacency matrix into a supergraph.
-    _logger.info("Running build_super_graph")
-    if supernode_heatmap_output_dir:
-        _logger.info("Supernode heatmap output directory: %s", supernode_heatmap_output_dir)
-
-    def _run_build_super_graph() -> SuperGraph:
-        return build_super_graph(
-            graph,
-            supernodes=supernodes,
-            supernode_labels=supernode_labels,
-            node_labels=node_labels,
-            supernode_heatmap_output_dir=supernode_heatmap_output_dir,
-            activation_write_result=filtered_awr,
-            sum_member_scores=sum_member_scores,
-            filtered_label_results=filtered_label_results,
-            W_U=adapter.W_U,
-            tokenizer=adapter.tokenizer,
-        )
-
-    if no_grad_supergraph:
-        with torch.no_grad():
-            supergraph = _run_build_super_graph()
-    else:
-        supergraph = _run_build_super_graph()
-
-    _log_supergraph_summary(graph, supergraph, logger=_logger)
-    _log_pipeline_comparison(graph, supergraph, logger=_logger)
-
-    return GraphPipelineResult(graph=graph, supergraph=supergraph)

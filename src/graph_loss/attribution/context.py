@@ -345,9 +345,13 @@ class HFAttributionContext:
         logit_vectors: torch.Tensor,
         *,
         create_graph: bool,
+        target_position: int = -1,
     ) -> torch.Tensor:
         """Return ``[batch_len, source_count]`` attribution rows for logit
         targets in ``[start, end)``.
+
+        target_position: which sequence position's hidden state to attribute from.
+        Defaults to -1 (last position, existing behavior).
         """
         batch_len = end - start
         chunk_out, _chunk_mlp_inputs, chunk_mlp_outputs, chunk_embed = self._expanded_forward(batch_len)
@@ -355,7 +359,7 @@ class HFAttributionContext:
             device=self.adapter.device,
             dtype=chunk_out.hidden_states[-1].dtype,
         )
-        terms = (chunk_out.hidden_states[-1][:, -1, :] * lv.detach()).sum(dim=-1)
+        terms = (chunk_out.hidden_states[-1][:, target_position, :] * lv.detach()).sum(dim=-1)
         source_tensors = [chunk_mlp_outputs[i] for i in range(self.adapter.n_layers)] + [chunk_embed]
         grads = torch.autograd.grad(
             terms.sum(),

@@ -133,6 +133,7 @@ def _attribute_from_context(
     detach_result: bool | None = None,
     skip_logit_attribution: bool = False,
     verbose: bool = False,
+    target_position: int = -1,
 ) -> Graph:
     """Build a Graph from a pre-built HFAttributionContext (edge attribution phase only).
 
@@ -143,6 +144,8 @@ def _attribute_from_context(
 
     Callers that want to run ANOVA labeling before edge attribution should call
     setup_attribution() → select_anova_supernodes() → ctx.filter(mask) → this function.
+
+    target_position: which sequence position to attribute from (default -1 = last).
     """
     from graph_loss.hf_adapter import _HFGraphConfig, detach_graph
 
@@ -150,7 +153,7 @@ def _attribute_from_context(
 
     targets = AttributionTargets(
         attribution_targets=attribution_targets,
-        logits=ctx.logits[0, -1],
+        logits=ctx.logits[0, target_position],
         unembed_proj=adapter.W_U.to(dtype=ctx.dtype) if ctx.dtype is not None else adapter.W_U,
         tokenizer=adapter.tokenizer,
         top_k_logits=top_k_logits,
@@ -188,7 +191,7 @@ def _attribute_from_context(
             if verbose:
                 print(f"    [graph] logit rows {start}:{end} / {n_logits}")
             logit_row_chunks.append(
-                ctx.compute_logit_batch(start, end, targets.logit_vectors, create_graph=create_graph)
+                ctx.compute_logit_batch(start, end, targets.logit_vectors, create_graph=create_graph, target_position=target_position)
             )
         logit_rows_partial = (
             torch.cat(logit_row_chunks, dim=0)
@@ -251,6 +254,7 @@ def attribute(
     create_graph: bool = False,
     detach_result: bool | None = None,
     skip_logit_attribution: bool = False,
+    target_position: int = -1,
 ) -> Graph:
     """Compute a neuron-level attribution graph for ``prompt``.
 
@@ -275,4 +279,5 @@ def attribute(
         detach_result=detach_result,
         skip_logit_attribution=skip_logit_attribution,
         verbose=verbose,
+        target_position=target_position,
     )
