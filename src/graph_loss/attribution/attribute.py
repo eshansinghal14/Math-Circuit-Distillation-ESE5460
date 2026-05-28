@@ -104,18 +104,27 @@ def setup_attribution(
             )
             neuron_locations.append(layer_locations[keep])
             neuron_activations.append(layer_acts_kept)
-            target_encoders.append(layer_te_kept)
-            source_vectors.append(layer_sv_kept)
+            # Offload the two large per-layer tensors to CPU as we go.
+            # For long CoT prefixes each [k, d_model] slice can be ~1 GB; with
+            # 32 layers, keeping both lists on GPU plus the cat output would
+            # require ~90 GB before del frees the lists. CPU offload keeps GPU
+            # peak bounded to one layer's worth (~1 GB) until the final move.
+            target_encoders.append(layer_te_kept.to("cpu", non_blocking=True))
+            source_vectors.append(layer_sv_kept.to("cpu", non_blocking=True))
+            del layer_te_kept, layer_sv_kept
             source_layer_by_node.extend([layer_idx] * int(keep.numel()))
 
     nloc = torch.cat(neuron_locations, dim=0)
     del neuron_locations
     nact = torch.cat(neuron_activations, dim=0)
     del neuron_activations
-    te = torch.cat(target_encoders, dim=0)
+    torch.cuda.empty_cache()
+    te = torch.cat(target_encoders, dim=0).to(adapter.device)
     del target_encoders
-    sv = torch.cat(source_vectors, dim=0)
+    torch.cuda.empty_cache()
+    sv = torch.cat(source_vectors, dim=0).to(adapter.device)
     del source_vectors
+    torch.cuda.empty_cache()
 
     return HFAttributionContext(
         adapter=adapter,
