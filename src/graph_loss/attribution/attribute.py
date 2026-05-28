@@ -57,7 +57,7 @@ def setup_attribution(
         handles.append(layer.mlp.register_forward_pre_hook(_pre))
 
     try:
-        with adapter.autocast_context(dtype):
+        with torch.no_grad(), adapter.autocast_context(dtype):
             out = adapter.model(
                 input_ids=input_batch,
                 attention_mask=torch.ones_like(input_batch, device=adapter.device),
@@ -85,36 +85,54 @@ def setup_attribution(
     source_vectors = []
     source_layer_by_node: list[int] = []
 
-    for layer_idx in range(adapter.n_layers):
-        layer_input = mlp_inputs[layer_idx].squeeze(0)
-        layer_acts, layer_target_encoders, layer_source_vectors = (
-            adapter._compute_layer_neuron_data(layer_idx, layer_input)
-        )
-        flat_norms = layer_source_vectors.norm(dim=-1).reshape(-1)
-        k = min(max(1, int(flat_norms.numel() * prop_neurons_per_layer)), flat_norms.numel())
-        keep = torch.topk(flat_norms, k, dim=0).indices
+    with torch.no_grad():
+        for layer_idx in range(adapter.n_layers):
+            layer_input = mlp_inputs[layer_idx].squeeze(0)
+            keep, layer_acts_kept, layer_te_kept, layer_sv_kept = (
+                adapter._compute_layer_neuron_data_selective(
+                    layer_idx, layer_input, prop_neurons_per_layer
+                )
+            )
 
-        layer_locations = torch.stack(
-            [
-                torch.full((n_pos * adapter.d_mlp,), layer_idx, device=adapter.device, dtype=torch.long),
-                positions.repeat_interleave(adapter.d_mlp),
-                neuron_ids.repeat(n_pos),
-            ],
-            dim=1,
-        )
-        neuron_locations.append(layer_locations[keep])
-        neuron_activations.append(layer_acts.reshape(-1)[keep])
-        target_encoders.append(layer_target_encoders.reshape(-1, adapter.d_model)[keep])
-        source_vectors.append(layer_source_vectors.reshape(-1, adapter.d_model)[keep])
-        source_layer_by_node.extend([layer_idx] * int(keep.numel()))
+            layer_locations = torch.stack(
+                [
+                    torch.full((n_pos * adapter.d_mlp,), layer_idx, device=adapter.device, dtype=torch.long),
+                    positions.repeat_interleave(adapter.d_mlp),
+                    neuron_ids.repeat(n_pos),
+                ],
+                dim=1,
+            )
+            neuron_locations.append(layer_locations[keep])
+            neuron_activations.append(layer_acts_kept)
+            # Offload the two large per-layer tensors to CPU as we go.
+            # For long CoT prefixes each [k, d_model] slice can be ~1 GB; with
+            # 32 layers, keeping both lists on GPU plus the cat output would
+            # require ~90 GB before del frees the lists. CPU offload keeps GPU
+            # peak bounded to one layer's worth (~1 GB) until the final move.
+            target_encoders.append(layer_te_kept.to("cpu", non_blocking=True))
+            source_vectors.append(layer_sv_kept.to("cpu", non_blocking=True))
+            del layer_te_kept, layer_sv_kept
+            source_layer_by_node.extend([layer_idx] * int(keep.numel()))
+
+    nloc = torch.cat(neuron_locations, dim=0)
+    del neuron_locations
+    nact = torch.cat(neuron_activations, dim=0)
+    del neuron_activations
+    torch.cuda.empty_cache()
+    te = torch.cat(target_encoders, dim=0).to(adapter.device)
+    del target_encoders
+    torch.cuda.empty_cache()
+    sv = torch.cat(source_vectors, dim=0).to(adapter.device)
+    del source_vectors
+    torch.cuda.empty_cache()
 
     return HFAttributionContext(
         adapter=adapter,
         input_ids=input_ids,
-        neuron_locations=torch.cat(neuron_locations, dim=0),
-        neuron_activations=torch.cat(neuron_activations, dim=0),
-        target_encoders=torch.cat(target_encoders, dim=0),
-        source_vectors=torch.cat(source_vectors, dim=0),
+        neuron_locations=nloc,
+        neuron_activations=nact,
+        target_encoders=te,
+        source_vectors=sv,
         source_layer_by_node=torch.tensor(source_layer_by_node, device=adapter.device, dtype=torch.long),
         embed_out=embed_out,
         logits=out.logits,
