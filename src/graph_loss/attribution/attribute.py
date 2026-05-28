@@ -110,7 +110,11 @@ def setup_attribution(
             # require ~90 GB before del frees the lists. CPU offload keeps GPU
             # peak bounded to one layer's worth (~1 GB) until the final move.
             target_encoders.append(layer_te_kept.to("cpu", non_blocking=True))
-            source_vectors.append(layer_sv_kept.to("cpu", non_blocking=True))
+            # Use enable_grad so the CPU copy preserves the grad_fn from
+            # _compute_layer_neuron_data_selective.  The outer no_grad context
+            # would otherwise strip grad tracking from the .to() operation.
+            with torch.enable_grad():
+                source_vectors.append(layer_sv_kept.to("cpu", non_blocking=True))
             del layer_te_kept, layer_sv_kept
             source_layer_by_node.extend([layer_idx] * int(keep.numel()))
 
