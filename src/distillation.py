@@ -276,7 +276,7 @@ class DistillationTrainer:
         )
         if self.teacher_data_cache is not None:
             cached_keys = self.teacher_data_cache._samples
-            filtered = {p: a for p, a in train_data.items() if (p, str(a)) in cached_keys}
+            filtered = {p: a for p, a in train_data.items() if (p, a) in cached_keys}
             n_orig, n_kept = len(train_data), len(filtered)
             print(
                 f"Teacher cache filter: {n_kept}/{n_orig} training prompts have cached data "
