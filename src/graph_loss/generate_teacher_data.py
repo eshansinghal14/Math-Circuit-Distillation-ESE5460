@@ -124,6 +124,7 @@ def _compute_teacher_logits(adapter: HFLlamaGraphAdapter, input_ids: torch.Tenso
     return logits.squeeze(0).detach().cpu()
 
 
+@torch.no_grad()
 def _generate_cot_sample(
     *,
     adapter: "HFLlamaGraphAdapter",
@@ -147,14 +148,13 @@ def _generate_cot_sample(
         add_special_tokens=False,
     )["input_ids"].to(device)
 
-    with torch.no_grad():
-        output = adapter.model.generate(
-            prompt_ids,
-            max_new_tokens=config.cot_max_new_tokens,
-            do_sample=False,
-            return_dict_in_generate=True,
-            output_logits=True,
-        )
+    output = adapter.model.generate(
+        prompt_ids,
+        max_new_tokens=config.cot_max_new_tokens,
+        do_sample=False,
+        return_dict_in_generate=True,
+        output_logits=True,
+    )
     generated_ids = output.sequences[0, prompt_ids.shape[1]:]
     # output.logits: tuple of T tensors, each [1, vocab_size] (one per generated token)
     gen_len = len(generated_ids)
@@ -181,30 +181,19 @@ def _generate_cot_sample(
     sorted_by_entropy = sorted(range(len(entropies)), key=lambda i: entropies[i])
     selected_positions = sorted(sorted_by_entropy[:K])  # keep in trace order
 
-    # Eagerly pull everything we need off the GPU before attribution.
-    # After model.generate(), PyTorch holds a large reserved CUDA block.
-    # Deleting the output object and calling empty_cache() frees ~40-60 GB,
-    # making room for the attribution source-vector allocation (~7 GB/layer).
-    prompt_ids_cpu = prompt_ids[0].cpu()
-    generated_ids_cpu = generated_ids.cpu()
-    dla_logits_list = [output.logits[pos][0].detach().cpu() for pos in selected_positions]
-    trace_text = tokenizer.decode(generated_ids_cpu.tolist(), skip_special_tokens=True)
-    del output, prompt_ids, generated_ids
-    torch.cuda.empty_cache()
-
     trace_token_positions: list[int] = []
+    prompt_ids_cpu = prompt_ids[0].cpu()
 
-    for ki, (k, pos) in enumerate(enumerate(selected_positions)):
+    for k, pos in enumerate(selected_positions):
         t_k = pos + 1  # 1-indexed into generated trace tokens
-        extended_ids = torch.cat([prompt_ids_cpu, generated_ids_cpu[:t_k]])
+        extended_ids = torch.cat([prompt_ids_cpu, generated_ids[:t_k].cpu()])
         extended_prefix = tokenizer.decode(extended_ids.tolist(), skip_special_tokens=True)
-        dla_logits = dla_logits_list[ki]
+        dla_logits = output.logits[pos][0].detach().cpu()  # logits at position t_k
 
         logger.info("  CoT k=%d: t_k=%d, prefix length=%d tokens", k, t_k, len(extended_ids))
         result: GraphPipelineResult = create_graph(
             adapter,
             extended_prefix,
-            dtype=resolve_torch_dtype(config.dtype),
             top_k_logits=config.top_k_logits,
             temperature=config.temperature,
             prop_neurons_per_layer=config.prop_neurons_per_layer,
@@ -241,10 +230,8 @@ def _generate_cot_sample(
         torch.save(sg_data, supergraph_path)
         logger.info("  Saved CoT supergraph to %s", supergraph_path)
         trace_token_positions.append(t_k)
-        # Free attribution intermediates before the next pass.
-        del result, sg, sg_data
-        torch.cuda.empty_cache()
 
+    trace_text = tokenizer.decode(generated_ids.cpu().tolist(), skip_special_tokens=True)
     _write_json(
         os.path.join(sample_dir, "cot_metadata.json"),
         {
@@ -378,7 +365,6 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
             result: GraphPipelineResult = create_graph(
                 adapter,
                 prompt,
-                dtype=resolve_torch_dtype(config.dtype),
                 top_k_logits=config.top_k_logits,
                 temperature=config.temperature,
                 prop_neurons_per_layer=config.prop_neurons_per_layer,

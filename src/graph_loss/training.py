@@ -19,17 +19,12 @@ from graph_loss.teacher_data_cache import TeacherDataCache
 class CachedTeacherPromptData:
     """Pre-computed teacher artifacts for one prompt, loaded from TeacherDataCache."""
 
-    supergraph: SuperGraph | None
+    supergraph: SuperGraph
     logit_token_ids: torch.Tensor | None
     # Teacher logits at the last prompt-token position, used to select the student
     # DLA supernode against the teacher's output distribution rather than the
     # student's own (which is wrong early in training and shifts every step).
     teacher_dla_logits: torch.Tensor | None = None
-    # CoT fields — all None in single-position (arithmetic) mode.
-    cot_supergraphs: list[SuperGraph] | None = None
-    cot_logit_token_ids: list[torch.Tensor | None] | None = None
-    cot_prefixes: list[str] | None = None
-    cot_dla_logits: list[torch.Tensor | None] | None = None
 
 
 @dataclass
@@ -55,7 +50,6 @@ class GraphAuxConfig:
     student_graph_labels: list[str] | None = None
     student_include_dla_node: bool = False
     student_include_arg_nodes: bool = False
-    cot_k_positions: int = 0
 
 
 def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
@@ -95,198 +89,6 @@ def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> Super
     )
 
 
-def _deduplicate_arg_supernodes(
-    supernodes: list[list[int]],
-    supernode_labels: list[list[str]],
-) -> tuple[list[list[int]], list[list[str]]]:
-    """Merge supernodes that share the same primary label.
-
-    This prevents silent collisions in the label→index alignment dict when the
-    same token (e.g. "22") appears multiple times in a CoT trace, which would
-    otherwise create two ``"arg:22"`` supernodes.
-    """
-    merged: dict[str, list[int]] = {}
-    label_order: list[str] = []
-    for members, labels in zip(supernodes, supernode_labels):
-        primary = labels[0] if labels else ""
-        if primary not in merged:
-            merged[primary] = []
-            label_order.append(primary)
-        merged[primary].extend(members)
-    out_supernodes = [merged[lbl] for lbl in label_order]
-    out_labels = [[lbl] for lbl in label_order]
-    return out_supernodes, out_labels
-
-
-def _compute_cot_graph_loss(
-    *,
-    prompt: str,
-    student_adapter: HFLlamaGraphAdapter,
-    config: GraphAuxConfig,
-    cached_teacher: CachedTeacherPromptData,
-) -> tuple[torch.Tensor, dict[str, Any]]:
-    """Compute averaged graph loss across K CoT positions."""
-    assert cached_teacher.cot_supergraphs is not None
-    assert cached_teacher.cot_prefixes is not None
-
-    K = len(cached_teacher.cot_supergraphs)
-    losses: list[torch.Tensor] = []
-    merged_metrics: dict[str, Any] = {}
-
-    for k in range(K):
-        teacher_supergraph = cached_teacher.cot_supergraphs[k]
-        prefix = cached_teacher.cot_prefixes[k]
-        logit_token_ids_k = (
-            cached_teacher.cot_logit_token_ids[k]
-            if cached_teacher.cot_logit_token_ids is not None
-            else None
-        )
-        dla_logits_k = (
-            cached_teacher.cot_dla_logits[k]
-            if cached_teacher.cot_dla_logits is not None
-            else None
-        )
-
-        if config.verbose:
-            print(f"  [cot-graph k={k}] building student graph for prefix: {repr(prefix)[:60]}")
-
-        t0 = time.perf_counter()
-        try:
-            student_result = create_graph(
-                student_adapter,
-                prefix,
-                attribution_targets=logit_token_ids_k.cpu() if logit_token_ids_k is not None else None,
-                prop_neurons_per_layer=config.prop_neurons_per_layer,
-                top_k_logits=config.top_k_logits,
-                temperature=config.temperature,
-                batch_size=config.student_graph_batch_size,
-                dtype=config.graph_dtype,
-                verbose=config.verbose,
-                build_create_graph=False,
-                detach_result=False,
-                skip_logit_attribution=False,
-                dataset=config.dataset,
-                mlp_input_cache=config.mlp_input_cache,
-                # No ANOVA in CoT mode.
-                node_labels=[],
-                anova_range_radius=config.student_anova_range_radius,
-                anova_nodes_per_label=config.student_anova_nodes_per_label,
-                sum_min_specificity=config.student_sum_min_specificity,
-                include_dla_node=config.student_include_dla_node,
-                dla_model_logits=dla_logits_k if config.student_include_dla_node else None,
-                include_arg_nodes=config.student_include_arg_nodes,
-                no_grad_supergraph=True,
-            )
-        except ValueError as e:
-            raise RuntimeError(
-                f"Student CoT supergraph build failed for k={k}, prefix={prefix!r}: {e}"
-            ) from e
-
-        student_graph = student_result.graph
-        student_supergraph_structure = student_result.supergraph
-
-        # Deduplicate arg supernodes (same token may appear multiple times in trace).
-        if student_supergraph_structure.supernode_labels:
-            dedup_supernodes, dedup_labels = _deduplicate_arg_supernodes(
-                student_supergraph_structure.supernodes,
-                student_supergraph_structure.supernode_labels,
-            )
-            student_supergraph_structure = student_supergraph_structure._replace(
-                supernodes=dedup_supernodes,
-                supernode_labels=dedup_labels,
-            )
-
-        for i, members in enumerate(student_supergraph_structure.supernodes):
-            if not members:
-                label = (
-                    (student_supergraph_structure.supernode_labels or [])[i]
-                    if i < len(student_supergraph_structure.supernode_labels or [])
-                    else "unknown"
-                )
-                raise RuntimeError(
-                    f"Student CoT supernode {i} (label={label!r}) has no member nodes "
-                    f"for k={k}, prefix={prefix!r}."
-                )
-
-        student_supergraph = _aggregate_supergraph_adjacency(
-            student_graph,
-            student_supergraph_structure.supernodes,
-        )
-        student_supergraph = student_supergraph._replace(
-            supernode_labels=student_supergraph_structure.supernode_labels,
-        )
-
-        if config.verbose:
-            print(
-                f"  [cot-graph k={k}] student supergraph: "
-                f"{len(student_supergraph.supernodes)} supernodes in "
-                f"{time.perf_counter() - t0:.2f}s"
-            )
-
-        # Align teacher and student supernodes by label.
-        s_label_to_sid = {
-            labels[0]: sid
-            for sid, labels in enumerate(student_supergraph.supernode_labels or [])
-            if labels
-        }
-        t_label_to_tid = {
-            labels[0]: tid
-            for tid, labels in enumerate(teacher_supergraph.supernode_labels or [])
-            if labels
-        }
-
-        student_label_set = set(s_label_to_sid.keys())
-        teacher_label_set = set(t_label_to_tid.keys())
-        extra_in_teacher = teacher_label_set - student_label_set
-        missing_from_teacher = student_label_set - teacher_label_set
-        if extra_in_teacher or missing_from_teacher:
-            parts = []
-            if extra_in_teacher:
-                parts.append(f"  teacher has unexpected extra supernodes: {sorted(extra_in_teacher)}")
-            if missing_from_teacher:
-                parts.append(f"  teacher is missing expected supernodes:  {sorted(missing_from_teacher)}")
-            raise RuntimeError(
-                f"CoT teacher/student supernode label mismatch for k={k}, prefix={prefix!r}.\n"
-                + "\n".join(parts)
-                + f"\n  Student labels: {sorted(student_label_set)}"
-                + f"\n  Teacher labels: {sorted(teacher_label_set)}"
-            )
-
-        mapping = {
-            tid: {s_label_to_sid[labels[0]]}
-            for tid, labels in enumerate(teacher_supergraph.supernode_labels or [])
-            if labels and labels[0] in s_label_to_sid
-        }
-        teacher_ids = list(range(len(teacher_supergraph.supernodes)))
-        student_ids = list(range(len(student_supergraph.supernodes)))
-
-        loss_k, loss_breakdown_k = compute_graph_loss(
-            teacher_supergraph.supernode_adjacency_matrix.detach().to(
-                device=student_supergraph.supernode_adjacency_matrix.device,
-                dtype=student_supergraph.supernode_adjacency_matrix.dtype,
-            ),
-            student_supergraph.supernode_adjacency_matrix,
-            mapping,
-            teacher_ids,
-            student_ids,
-            similarity=config.graph_loss_type,
-        )
-        losses.append(loss_k)
-
-        for key, val in loss_breakdown_k.items():
-            merged_metrics[f"cot_k{k}_{key}"] = val
-        merged_metrics[f"cot_k{k}_teacher_supernodes"] = len(teacher_ids)
-        merged_metrics[f"cot_k{k}_student_supernodes"] = len(student_ids)
-
-    stacked = torch.stack(losses)
-    avg_loss = stacked.mean()
-    merged_metrics["teacher_supernodes"] = merged_metrics.get(f"cot_k0_teacher_supernodes", 0)
-    merged_metrics["student_supernodes"] = merged_metrics.get(f"cot_k0_student_supernodes", 0)
-    merged_metrics["student_graph_neurons"] = 0
-    merged_metrics["aligned_teacher_supernodes"] = 0
-    return avg_loss, merged_metrics
-
-
 def compute_prompt_graph_loss(
     *,
     prompt: str,
@@ -295,23 +97,9 @@ def compute_prompt_graph_loss(
     cached_teacher: CachedTeacherPromptData,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Compute graph loss for one prompt using a pre-cached teacher supergraph."""
-    # Dispatch to CoT helper when CoT supergraphs are present.
-    if cached_teacher.cot_supergraphs is not None:
-        return _compute_cot_graph_loss(
-            prompt=prompt,
-            student_adapter=student_adapter,
-            config=config,
-            cached_teacher=cached_teacher,
-        )
-
     # ------------------------------------------------------------------
     # Teacher side: always from cache
     # ------------------------------------------------------------------
-    if cached_teacher.supergraph is None:
-        raise RuntimeError(
-            f"Supergraph is None in non-CoT mode for prompt={prompt!r}. "
-            "This is a bug — supergraph must be set for arithmetic-mode prompts."
-        )
     teacher_supergraph = cached_teacher.supergraph
     logit_token_ids = cached_teacher.logit_token_ids
     if config.verbose:
@@ -480,62 +268,12 @@ def compute_prompt_graph_loss(
 def _load_cached_teacher(
     cache: TeacherDataCache,
     prompt: str,
-    answer: int | str,
+    answer: int,
     device: torch.device,
 ) -> CachedTeacherPromptData:
     """Load one prompt's teacher artifacts from disk and reconstruct a SuperGraph."""
     from graph_loss.graph import SuperGraph  # local import to avoid circular
 
-    # ------------------------------------------------------------------
-    # CoT path: load K supergraphs when cot_metadata.json exists.
-    # ------------------------------------------------------------------
-    if cache.is_cot_cache(prompt, answer):
-        try:
-            cot_data_list = cache.load_cot_teacher_supergraphs(prompt, answer)
-        except (KeyError, FileNotFoundError) as e:
-            raise RuntimeError(
-                "CoT teacher cache detected but supergraph files are missing for "
-                f"prompt={prompt!r}, answer={answer!r}. Regenerate the cache."
-            ) from e
-
-        cot_supergraphs: list[SuperGraph] = []
-        cot_logit_token_ids: list[torch.Tensor | None] = []
-        cot_prefixes: list[str] = []
-        cot_dla_logits: list[torch.Tensor | None] = []
-
-        for sg_data in cot_data_list:
-            if "supernode_labels" not in sg_data:
-                raise RuntimeError(
-                    f"CoT teacher cache file for prompt={prompt!r} is missing "
-                    "'supernode_labels'. Regenerate with generate_teacher_data.py."
-                )
-            sg = SuperGraph(
-                supernode_adjacency_matrix=sg_data["supernode_adjacency_matrix"].to(device),
-                supernodes=sg_data["supernodes"],
-                supernode_labels=sg_data.get("supernode_labels"),
-            )
-            cot_supergraphs.append(sg)
-            cot_logit_token_ids.append(
-                sg_data["logit_token_ids"].to(device) if "logit_token_ids" in sg_data else None
-            )
-            cot_prefixes.append(str(sg_data.get("prefix", "")))
-            cot_dla_logits.append(
-                sg_data["dla_logits"].to(device) if "dla_logits" in sg_data else None
-            )
-
-        return CachedTeacherPromptData(
-            supergraph=None,
-            logit_token_ids=None,
-            teacher_dla_logits=None,
-            cot_supergraphs=cot_supergraphs,
-            cot_logit_token_ids=cot_logit_token_ids,
-            cot_prefixes=cot_prefixes,
-            cot_dla_logits=cot_dla_logits,
-        )
-
-    # ------------------------------------------------------------------
-    # Standard (arithmetic) path: single supergraph.
-    # ------------------------------------------------------------------
     try:
         sg_data = cache.load_teacher_supergraph(prompt, answer)
     except (KeyError, FileNotFoundError) as e:
@@ -588,7 +326,7 @@ def backward_batch_graph_loss(
     device: torch.device,
     loss_scale: float,
     teacher_cache: TeacherDataCache,
-    answers: list[int | str],
+    answers: list[int],
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Compute and backprop graph loss one prompt at a time.
 
