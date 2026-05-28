@@ -181,14 +181,24 @@ def _generate_cot_sample(
     sorted_by_entropy = sorted(range(len(entropies)), key=lambda i: entropies[i])
     selected_positions = sorted(sorted_by_entropy[:K])  # keep in trace order
 
-    trace_token_positions: list[int] = []
+    # Eagerly pull everything we need off the GPU before attribution.
+    # After model.generate(), PyTorch holds a large reserved CUDA block.
+    # Deleting the output object and calling empty_cache() frees ~40-60 GB,
+    # making room for the attribution source-vector allocation (~7 GB/layer).
     prompt_ids_cpu = prompt_ids[0].cpu()
+    generated_ids_cpu = generated_ids.cpu()
+    dla_logits_list = [output.logits[pos][0].detach().cpu() for pos in selected_positions]
+    trace_text = tokenizer.decode(generated_ids_cpu.tolist(), skip_special_tokens=True)
+    del output, prompt_ids, generated_ids
+    torch.cuda.empty_cache()
 
-    for k, pos in enumerate(selected_positions):
+    trace_token_positions: list[int] = []
+
+    for ki, (k, pos) in enumerate(enumerate(selected_positions)):
         t_k = pos + 1  # 1-indexed into generated trace tokens
-        extended_ids = torch.cat([prompt_ids_cpu, generated_ids[:t_k].cpu()])
+        extended_ids = torch.cat([prompt_ids_cpu, generated_ids_cpu[:t_k]])
         extended_prefix = tokenizer.decode(extended_ids.tolist(), skip_special_tokens=True)
-        dla_logits = output.logits[pos][0].detach().cpu()  # logits at position t_k
+        dla_logits = dla_logits_list[ki]
 
         logger.info("  CoT k=%d: t_k=%d, prefix length=%d tokens", k, t_k, len(extended_ids))
         result: GraphPipelineResult = create_graph(
@@ -230,8 +240,10 @@ def _generate_cot_sample(
         torch.save(sg_data, supergraph_path)
         logger.info("  Saved CoT supergraph to %s", supergraph_path)
         trace_token_positions.append(t_k)
+        # Free attribution intermediates before the next pass.
+        del result, sg, sg_data
+        torch.cuda.empty_cache()
 
-    trace_text = tokenizer.decode(generated_ids.cpu().tolist(), skip_special_tokens=True)
     _write_json(
         os.path.join(sample_dir, "cot_metadata.json"),
         {
