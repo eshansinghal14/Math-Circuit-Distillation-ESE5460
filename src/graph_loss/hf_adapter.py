@@ -278,8 +278,14 @@ class HFLlamaGraphAdapter:
         te_kept = (kept_gate_act.unsqueeze(-1) * kept_up
                    + kept_upg.unsqueeze(-1) * kept_gate)     # [k, d_model]
 
-        kept_out = out_rows[keep_neu]                        # [k, d_model]
-        sv_kept  = kept_acts.unsqueeze(-1) * kept_out        # [k, d_model]
+        # enable_grad so that sv_kept tracks gradients through out_rows (W_out /
+        # down_proj) even when called inside a torch.no_grad() context.
+        # kept_acts has no grad (computed under no_grad), so autograd only saves
+        # kept_acts [k] — negligible memory.  The gradient path is:
+        #   loss → sv_kept → out_rows[keep_neu] → down_proj.weight
+        with torch.enable_grad():
+            kept_out = out_rows[keep_neu]                    # [k, d_model]
+            sv_kept  = kept_acts.unsqueeze(-1) * kept_out   # [k, d_model]
 
         return keep, kept_acts, te_kept, sv_kept
 
