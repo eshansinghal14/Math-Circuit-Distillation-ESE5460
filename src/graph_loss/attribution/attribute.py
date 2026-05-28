@@ -57,7 +57,7 @@ def setup_attribution(
         handles.append(layer.mlp.register_forward_pre_hook(_pre))
 
     try:
-        with adapter.autocast_context(dtype):
+        with torch.no_grad(), adapter.autocast_context(dtype):
             out = adapter.model(
                 input_ids=input_batch,
                 attention_mask=torch.ones_like(input_batch, device=adapter.device),
@@ -107,13 +107,22 @@ def setup_attribution(
         source_vectors.append(layer_sv_kept)
         source_layer_by_node.extend([layer_idx] * int(keep.numel()))
 
+    nloc = torch.cat(neuron_locations, dim=0)
+    del neuron_locations
+    nact = torch.cat(neuron_activations, dim=0)
+    del neuron_activations
+    te = torch.cat(target_encoders, dim=0)
+    del target_encoders
+    sv = torch.cat(source_vectors, dim=0)
+    del source_vectors
+
     return HFAttributionContext(
         adapter=adapter,
         input_ids=input_ids,
-        neuron_locations=torch.cat(neuron_locations, dim=0),
-        neuron_activations=torch.cat(neuron_activations, dim=0),
-        target_encoders=torch.cat(target_encoders, dim=0),
-        source_vectors=torch.cat(source_vectors, dim=0),
+        neuron_locations=nloc,
+        neuron_activations=nact,
+        target_encoders=te,
+        source_vectors=sv,
         source_layer_by_node=torch.tensor(source_layer_by_node, device=adapter.device, dtype=torch.long),
         embed_out=embed_out,
         logits=out.logits,
