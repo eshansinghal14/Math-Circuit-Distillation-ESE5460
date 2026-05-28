@@ -85,27 +85,28 @@ def setup_attribution(
     source_vectors = []
     source_layer_by_node: list[int] = []
 
-    for layer_idx in range(adapter.n_layers):
-        layer_input = mlp_inputs[layer_idx].squeeze(0)
-        keep, layer_acts_kept, layer_te_kept, layer_sv_kept = (
-            adapter._compute_layer_neuron_data_selective(
-                layer_idx, layer_input, prop_neurons_per_layer
+    with torch.no_grad():
+        for layer_idx in range(adapter.n_layers):
+            layer_input = mlp_inputs[layer_idx].squeeze(0)
+            keep, layer_acts_kept, layer_te_kept, layer_sv_kept = (
+                adapter._compute_layer_neuron_data_selective(
+                    layer_idx, layer_input, prop_neurons_per_layer
+                )
             )
-        )
 
-        layer_locations = torch.stack(
-            [
-                torch.full((n_pos * adapter.d_mlp,), layer_idx, device=adapter.device, dtype=torch.long),
-                positions.repeat_interleave(adapter.d_mlp),
-                neuron_ids.repeat(n_pos),
-            ],
-            dim=1,
-        )
-        neuron_locations.append(layer_locations[keep])
-        neuron_activations.append(layer_acts_kept)
-        target_encoders.append(layer_te_kept)
-        source_vectors.append(layer_sv_kept)
-        source_layer_by_node.extend([layer_idx] * int(keep.numel()))
+            layer_locations = torch.stack(
+                [
+                    torch.full((n_pos * adapter.d_mlp,), layer_idx, device=adapter.device, dtype=torch.long),
+                    positions.repeat_interleave(adapter.d_mlp),
+                    neuron_ids.repeat(n_pos),
+                ],
+                dim=1,
+            )
+            neuron_locations.append(layer_locations[keep])
+            neuron_activations.append(layer_acts_kept)
+            target_encoders.append(layer_te_kept)
+            source_vectors.append(layer_sv_kept)
+            source_layer_by_node.extend([layer_idx] * int(keep.numel()))
 
     nloc = torch.cat(neuron_locations, dim=0)
     del neuron_locations
