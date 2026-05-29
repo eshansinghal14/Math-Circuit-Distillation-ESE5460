@@ -559,11 +559,21 @@ def compute_prompt_graph_loss_compare_tokens(
                 verbose=config.verbose,
             )
 
+        # Use the teacher's exact logit token IDs for the student attribution so
+        # both models have logit rows for the same token set. This keeps frac_external
+        # computed under the same normalization for teacher and student, making the
+        # supernode edge weights directly comparable.
+        teacher_logit_token_ids = torch.tensor(
+            [t.vocab_idx for t in teacher_result.graph.logit_targets],
+            dtype=torch.long,
+        )
+
         student_result = create_graph_at_position(
             student_shared,
             target_position=-1,
             include_dla_node=True,
             dla_model_logits=pos_teacher_logits,
+            attribution_targets=teacher_logit_token_ids,
             top_k_logits=config.top_k_logits,
             temperature=config.temperature,
             batch_size=config.student_graph_batch_size,
