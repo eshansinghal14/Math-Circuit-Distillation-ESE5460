@@ -177,6 +177,7 @@ class DistillationConfig:
     compare_n_tokens: Optional[int] = None
     compare_token_selection: Literal["kl", "teacher_entropy"] = "kl"
     skip_baseline_eval: bool = False
+    debug_compare_teacher_graphs: bool = False
 
 
 
@@ -320,15 +321,17 @@ class DistillationTrainer:
         self.teacher_graph_adapter = None
 
         # Live teacher is needed when: compare-n-tokens mode, tokens-dla-nodes without
-        # a cache, or KL-only mode (no graph loss and no cache).
+        # a cache, KL-only mode (no graph loss and no cache), or debug-compare mode.
         need_live_teacher = (
             config.compare_n_tokens is not None
             or (config.tokens_dla_nodes and self.teacher_data_cache is None)
             or (self.teacher_data_cache is None and not self._use_graph)
+            or config.debug_compare_teacher_graphs
         )
         if need_live_teacher:
             mode_tag = (
                 "compare-n-tokens" if config.compare_n_tokens is not None
+                else "debug-compare" if config.debug_compare_teacher_graphs
                 else "live-teacher" if config.tokens_dla_nodes
                 else "kl-only"
             )
@@ -371,6 +374,7 @@ class DistillationTrainer:
                 tokens_dla_nodes=config.tokens_dla_nodes,
                 compare_n_tokens=config.compare_n_tokens,
                 compare_token_selection=config.compare_token_selection,
+                debug_compare_teacher_graphs=config.debug_compare_teacher_graphs,
             )
 
             self.student_graph_adapter = HFLlamaGraphAdapter(
@@ -379,7 +383,7 @@ class DistillationTrainer:
                 self.device,
             )
 
-            if self.teacher is not None and config.tokens_dla_nodes:
+            if self.teacher is not None and (config.tokens_dla_nodes or config.debug_compare_teacher_graphs):
                 self.teacher_graph_adapter = HFLlamaGraphAdapter(
                     self.teacher,
                     self.tokenizer,
@@ -573,6 +577,11 @@ class DistillationTrainer:
                     loss_scale=1.0 if use_grad_norm_scale else self.config.lambda_graph,
                     teacher_cache=self.teacher_data_cache,
                     answers=batch["answers"],
+                    debug_teacher_adapter=(
+                        self.teacher_graph_adapter
+                        if self.config.debug_compare_teacher_graphs
+                        else None
+                    ),
                 )
         except RuntimeError:
             exc_path = os.path.join(self.config.save_dir, "exception_checkpoint")
@@ -1377,6 +1386,19 @@ def build_parser() -> argparse.ArgumentParser:
             "'teacher_entropy' = lowest teacher entropy (most confident / decisive steps)."
         ),
     )
+    parser.add_argument(
+        "--debug-compare-teacher-graphs",
+        action="store_true",
+        default=False,
+        dest="debug_compare_teacher_graphs",
+        help=(
+            "Diagnostic: build the teacher graph live for every prompt and compare it to "
+            "the cached version. Logs supergraph labels, adjacency matrix stats, per-label "
+            "row diffs, and graph loss from each teacher. Requires --teacher-data-cache and "
+            "loads the teacher model regardless. Useful for pinpointing differences between "
+            "cached and live teacher graphs."
+        ),
+    )
     return parser
 
 
@@ -1519,6 +1541,7 @@ def main() -> None:
             compare_n_tokens=args.compare_n_tokens,
             compare_token_selection=args.compare_token_selection,
             skip_baseline_eval=args.skip_baseline_eval,
+            debug_compare_teacher_graphs=args.debug_compare_teacher_graphs,
 
             seed=args.seed,
             device=device,

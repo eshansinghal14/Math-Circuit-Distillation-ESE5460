@@ -58,6 +58,8 @@ class GraphAuxConfig:
     teacher_anova_nodes_per_label: int = 10
     teacher_sum_min_specificity: float = 0.0
     teacher_graph_labels: list[str] | None = None
+    # Diagnostic: build teacher graph live and compare to cached version.
+    debug_compare_teacher_graphs: bool = False
 
 
 def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
@@ -97,12 +99,197 @@ def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> Super
     )
 
 
+def _debug_compare_teacher_graphs(
+    *,
+    prompt: str,
+    config: GraphAuxConfig,
+    cached_teacher: CachedTeacherPromptData,
+    teacher_adapter: HFLlamaGraphAdapter,
+    student_supergraph: "SuperGraph",
+) -> None:
+    """Build the teacher graph live and compare it to the cached version.
+
+    Prints a detailed side-by-side comparison: supergraph labels, adjacency
+    matrix stats, per-label row differences, and graph-loss using each teacher.
+    """
+    import gc
+
+    div = "=" * 72
+    print(f"\n{div}")
+    print(f"[DEBUG-TEACHER-COMPARE] prompt: {prompt[:80]!r}")
+    print(div)
+
+    cached_sg = cached_teacher.supergraph
+    cached_labels = [lab[0] if lab else "?" for lab in (cached_sg.supernode_labels or [])]
+    cached_adj = cached_sg.supernode_adjacency_matrix.float().cpu()
+    cached_n = len(cached_sg.supernodes)
+
+    def _adj_stats(adj: torch.Tensor) -> str:
+        if adj.numel() == 0:
+            return "empty"
+        return (
+            f"min={adj.min():.4f} max={adj.max():.4f} "
+            f"mean={adj.mean():.4f} frob={adj.norm():.4f}"
+        )
+
+    def _row_norms(adj: torch.Tensor) -> list[str]:
+        return [f"{v:.4f}" for v in adj.abs().sum(dim=1).tolist()]
+
+    print(f"\n--- CACHED TEACHER ---")
+    print(f"  n_supernodes : {cached_n}")
+    print(f"  labels       : {cached_labels}")
+    print(f"  adj shape    : {tuple(cached_adj.shape)}")
+    print(f"  adj stats    : {_adj_stats(cached_adj)}")
+    print(f"  row L1 norms : {_row_norms(cached_adj)}")
+    if cached_teacher.logit_token_ids is not None:
+        print(f"  logit_tok_ids: {cached_teacher.logit_token_ids.tolist()[:15]}")
+    if cached_teacher.teacher_dla_logits is not None:
+        top5 = cached_teacher.teacher_dla_logits.float().topk(5)
+        print(f"  dla_logits top5 idx: {top5.indices.tolist()} vals: {[f'{v:.3f}' for v in top5.values.tolist()]}")
+
+    # Build teacher graph live — same call as generate_teacher_data.py (string prompt → BOS added by ensure_tokenized).
+    print(f"\n  [live teacher] building graph (prop_neurons={config.teacher_prop_neurons_per_layer})...")
+    t0 = time.perf_counter()
+    try:
+        with torch.enable_grad():
+            live_result = create_graph(
+                teacher_adapter,
+                prompt,
+                attribution_targets=(
+                    cached_teacher.logit_token_ids.cpu()
+                    if cached_teacher.logit_token_ids is not None
+                    else None
+                ),
+                prop_neurons_per_layer=config.teacher_prop_neurons_per_layer,
+                top_k_logits=config.top_k_logits,
+                temperature=config.temperature,
+                batch_size=config.teacher_graph_batch_size,
+                dtype=config.graph_dtype,
+                verbose=False,
+                build_create_graph=False,
+                detach_result=True,
+                skip_logit_attribution=False,
+                include_dla_node=config.tokens_dla_nodes,
+                dla_model_logits=cached_teacher.teacher_dla_logits,
+                include_arg_nodes=config.tokens_dla_nodes,
+                no_grad_supergraph=True,
+            )
+    except Exception as exc:
+        print(f"  ERROR building live teacher graph: {exc}")
+        return
+    print(f"  [live teacher] done in {time.perf_counter() - t0:.2f}s")
+
+    live_sg = live_result.supergraph
+    live_graph = live_result.graph
+    live_labels = [lab[0] if lab else "?" for lab in (live_sg.supernode_labels or [])]
+    live_adj = live_sg.supernode_adjacency_matrix.float().cpu()
+    live_logit_ids = [t.vocab_idx for t in live_graph.logit_targets]
+
+    print(f"\n--- LIVE TEACHER ---")
+    print(f"  n_supernodes : {len(live_sg.supernodes)}")
+    print(f"  n_neurons    : {live_graph.n_neurons}")
+    print(f"  labels       : {live_labels}")
+    print(f"  adj shape    : {tuple(live_adj.shape)}")
+    print(f"  adj stats    : {_adj_stats(live_adj)}")
+    print(f"  row L1 norms : {_row_norms(live_adj)}")
+    print(f"  logit_tok_ids: {live_logit_ids[:15]}")
+    live_top5 = live_graph.logit_probabilities.float().topk(min(5, len(live_logit_ids)))
+    print(f"  top5 logit probs: idx={[live_logit_ids[i] for i in live_top5.indices.tolist()]} "
+          f"probs={[f'{v:.3f}' for v in live_top5.values.tolist()]}")
+
+    # Label diff
+    cached_label_set = set(cached_labels)
+    live_label_set = set(live_labels)
+    matched_labels = cached_label_set & live_label_set
+    only_cached = cached_label_set - live_label_set
+    only_live = live_label_set - cached_label_set
+
+    print(f"\n--- LABEL COMPARISON ---")
+    print(f"  matched ({len(matched_labels)}): {sorted(matched_labels)}")
+    if only_cached:
+        print(f"  only in CACHED ({len(only_cached)}): {sorted(only_cached)}")
+    if only_live:
+        print(f"  only in LIVE   ({len(only_live)}): {sorted(only_live)}")
+
+    # Per-label adjacency row comparison
+    if matched_labels:
+        c_lab2idx = {lab: i for i, lab in enumerate(cached_labels)}
+        l_lab2idx = {lab: i for i, lab in enumerate(live_labels)}
+        print(f"\n--- PER-LABEL ADJ ROW DIFF (live − cached) ---")
+        for lab in sorted(matched_labels):
+            ci = c_lab2idx[lab]
+            li = l_lab2idx[lab]
+            c_row = cached_adj[ci] if ci < cached_adj.shape[0] else None
+            l_row = live_adj[li] if li < live_adj.shape[0] else None
+
+            # Align columns by label too (same ordering required for direct subtraction)
+            if c_row is not None and l_row is not None and len(c_row) == len(l_row):
+                diff = (l_row - c_row).abs()
+                print(
+                    f"  {lab!r:30s}: "
+                    f"cached={[f'{v:.4f}' for v in c_row.tolist()]}  "
+                    f"live={[f'{v:.4f}' for v in l_row.tolist()]}  "
+                    f"|diff| max={diff.max():.4f} mean={diff.mean():.4f}"
+                )
+            else:
+                print(f"  {lab!r:30s}: shape mismatch — cached row {ci}, live row {li}")
+
+    # Student supergraph summary
+    stu_adj = student_supergraph.supernode_adjacency_matrix.float().detach().cpu()
+    stu_labels = [lab[0] if lab else "?" for lab in (student_supergraph.supernode_labels or [])]
+    print(f"\n--- STUDENT ---")
+    print(f"  n_supernodes : {len(student_supergraph.supernodes)}")
+    print(f"  labels       : {stu_labels}")
+    print(f"  adj stats    : {_adj_stats(stu_adj)}")
+    print(f"  row L1 norms : {_row_norms(stu_adj)}")
+
+    # Compute graph loss with live teacher vs cached teacher
+    stu_adj_device = student_supergraph.supernode_adjacency_matrix
+    s_lab2sid = {lab: sid for sid, lab in enumerate(stu_labels) if lab}
+
+    def _compute_loss_for_teacher(teacher_sg: "SuperGraph", t_labels: list[str]) -> float | None:
+        try:
+            t2s = {
+                tid: {s_lab2sid[lab]}
+                for tid, lab in enumerate(t_labels)
+                if lab in s_lab2sid
+            }
+            loss, _ = compute_graph_loss(
+                teacher_sg.supernode_adjacency_matrix.float().to(
+                    device=stu_adj_device.device, dtype=stu_adj_device.dtype
+                ),
+                stu_adj_device,
+                t2s,
+                list(range(len(teacher_sg.supernodes))),
+                list(range(len(student_supergraph.supernodes))),
+                similarity=config.graph_loss_type,
+            )
+            return float(loss.item())
+        except Exception as exc:
+            print(f"    (error computing loss: {exc})")
+            return None
+
+    cached_loss = _compute_loss_for_teacher(cached_sg, cached_labels)
+    live_loss = _compute_loss_for_teacher(live_sg, live_labels)
+
+    print(f"\n--- GRAPH LOSS ---")
+    print(f"  cached teacher → student : {cached_loss:.4f}" if cached_loss is not None else "  cached teacher: ERROR")
+    print(f"  live teacher   → student : {live_loss:.4f}" if live_loss is not None else "  live teacher: ERROR")
+    if cached_loss is not None and live_loss is not None:
+        print(f"  difference (live − cached): {live_loss - cached_loss:+.4f}")
+
+    print(div + "\n")
+    del live_result
+    gc.collect()
+
+
 def compute_prompt_graph_loss(
     *,
     prompt: str,
     student_adapter: HFLlamaGraphAdapter,
     config: GraphAuxConfig,
     cached_teacher: CachedTeacherPromptData,
+    debug_teacher_adapter: HFLlamaGraphAdapter | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Compute graph loss for one prompt using a pre-cached teacher supergraph."""
     # ------------------------------------------------------------------
@@ -269,6 +456,16 @@ def compute_prompt_graph_loss(
         "aligned_teacher_supernodes": sum(1 for tid in teacher_ids if mapping.get(tid)),
         **loss_breakdown,
     }
+
+    if config.debug_compare_teacher_graphs and debug_teacher_adapter is not None:
+        _debug_compare_teacher_graphs(
+            prompt=prompt,
+            config=config,
+            cached_teacher=cached_teacher,
+            teacher_adapter=debug_teacher_adapter,
+            student_supergraph=student_supergraph,
+        )
+
     return graph_loss, metrics
 
 
@@ -334,6 +531,7 @@ def backward_batch_graph_loss(
     loss_scale: float,
     teacher_cache: TeacherDataCache,
     answers: list[int],
+    debug_teacher_adapter: HFLlamaGraphAdapter | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Compute and backprop graph loss one prompt at a time.
 
@@ -357,6 +555,7 @@ def backward_batch_graph_loss(
             student_adapter=student_adapter,
             config=config,
             cached_teacher=cached,
+            debug_teacher_adapter=debug_teacher_adapter,
         )
         detached_losses.append(prompt_loss.detach())
         scaled_loss = (loss_scale / denom) * prompt_loss
