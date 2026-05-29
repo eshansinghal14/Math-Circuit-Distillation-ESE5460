@@ -1141,6 +1141,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--steps", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--train-limit", type=int, default=None)
+    parser.add_argument("--test-limit", type=int, default=None,
+                        help="Use only the first N test examples for evaluation "
+                             "(speeds up periodic eval on large test sets like GSM8K).")
     parser.add_argument("--train-start-idx", type=int, default=None, dest="train_start_idx",
                         help="Index in the training dataset to start from (inclusive).")
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -1439,6 +1442,8 @@ def main() -> None:
         train_data = dict(list(train_data.items())[args.train_start_idx :])
     if args.train_limit is not None:
         train_data = dict(list(train_data.items())[: args.train_limit])
+    if args.test_limit is not None:
+        test_data = dict(list(test_data.items())[: args.test_limit])
     extra_eval_data: Dict[str, Dict[str, int]] = {}
     if args.eval_datasets:
         for eval_dataset in args.eval_datasets:
