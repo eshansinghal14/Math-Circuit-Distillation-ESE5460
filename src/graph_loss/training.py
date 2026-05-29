@@ -480,7 +480,7 @@ def compute_prompt_graph_loss_compare_tokens(
             anova_nodes_per_label=config.student_anova_nodes_per_label,
             anova_range_radius=config.student_anova_range_radius,
             sum_min_specificity=config.student_sum_min_specificity,
-            node_labels=config.student_graph_labels or [],
+            node_labels=config.student_graph_labels or None,
             include_arg_nodes=True,
             batch_size=config.teacher_graph_batch_size,
         )
@@ -495,7 +495,7 @@ def compute_prompt_graph_loss_compare_tokens(
         anova_nodes_per_label=config.student_anova_nodes_per_label,
         anova_range_radius=config.student_anova_range_radius,
         sum_min_specificity=config.student_sum_min_specificity,
-        node_labels=config.student_graph_labels or [],
+        node_labels=config.student_graph_labels or None,
         include_arg_nodes=True,
         batch_size=config.student_graph_batch_size,
     )

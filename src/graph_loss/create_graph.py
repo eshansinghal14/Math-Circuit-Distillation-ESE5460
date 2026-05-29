@@ -262,7 +262,11 @@ def build_shared_context(
     ctx = setup_attribution(adapter, input_ids, prop_neurons_per_layer, dtype)
     _logger.info("  Pre-selected neurons: %d", ctx.n_neurons)
 
-    need_anova = node_labels is not None
+    # An empty list means "no labels requested" => no ANOVA. Only a non-empty
+    # list of labels (or "all") should trigger ANOVA labeling. Using bool()
+    # instead of `is not None` prevents an empty list (e.g. from `labels or []`
+    # in the CoT/compare-tokens path) from wrongly demanding a dataset.
+    need_anova = bool(node_labels)
     label_results: dict = {}
     target_args: list = []
 
