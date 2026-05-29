@@ -31,7 +31,8 @@ class CachedTeacherPromptData:
 class GraphAuxConfig:
     lambda_graph: float = 0.1
     graph_dtype: torch.dtype | None = None
-    prop_neurons_per_layer: float = 0.1
+    teacher_prop_neurons_per_layer: float = 0.1
+    student_prop_neurons_per_layer: float = 0.1
     max_neurons_per_layer: int | None = None
     top_k_logits: float | None = 0.95
     temperature: float = 2.0
@@ -128,7 +129,7 @@ def compute_prompt_graph_loss(
             student_adapter,
             prompt,
             attribution_targets=logit_token_ids.cpu() if logit_token_ids is not None else None,
-            prop_neurons_per_layer=config.prop_neurons_per_layer,
+            prop_neurons_per_layer=config.student_prop_neurons_per_layer,
             top_k_logits=config.top_k_logits,
             temperature=config.temperature,
             batch_size=config.student_graph_batch_size,
@@ -481,7 +482,7 @@ def compute_prompt_graph_loss_compare_tokens(
         teacher_shared = build_shared_context(
             teacher_adapter,
             input_ids,
-            prop_neurons_per_layer=config.prop_neurons_per_layer,
+            prop_neurons_per_layer=config.teacher_prop_neurons_per_layer,
             max_neurons_per_layer=config.max_neurons_per_layer,
             dtype=config.graph_dtype,
             dataset=config.dataset,
@@ -497,7 +498,7 @@ def compute_prompt_graph_loss_compare_tokens(
     student_shared = build_shared_context(
         student_adapter,
         input_ids,
-        prop_neurons_per_layer=config.prop_neurons_per_layer,
+        prop_neurons_per_layer=config.student_prop_neurons_per_layer,
         max_neurons_per_layer=config.max_neurons_per_layer,
         dtype=config.graph_dtype,
         dataset=config.dataset,

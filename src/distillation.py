@@ -141,7 +141,8 @@ class DistillationConfig:
     lambda_graph: float = 0.1
     lambda_kl: float = 1.0
     graph_dtype: Optional[torch.dtype] = None
-    graph_prop_neurons_per_layer: float = 0.1
+    teacher_prop_neurons_per_layer: float = 0.1
+    student_prop_neurons_per_layer: float = 0.1
     graph_max_neurons_per_layer: int | None = None
     graph_top_k_logits: float | None = 0.955
     teacher_graph_batch_size: int = 512
@@ -350,7 +351,8 @@ class DistillationTrainer:
             self.graph_loss_config = GraphAuxConfig(
                 lambda_graph=config.lambda_graph,
                 graph_dtype=config.graph_dtype,
-                prop_neurons_per_layer=config.graph_prop_neurons_per_layer,
+                teacher_prop_neurons_per_layer=config.teacher_prop_neurons_per_layer,
+                student_prop_neurons_per_layer=config.student_prop_neurons_per_layer,
                 max_neurons_per_layer=config.graph_max_neurons_per_layer,
                 top_k_logits=config.graph_top_k_logits,
                 temperature=config.temperature,
@@ -987,7 +989,8 @@ class DistillationTrainer:
         print(f"  Temperature:      {cfg.temperature}")
         if self._use_graph:
             print(f"  lambda_graph:     {cfg.lambda_graph}")
-            print(f"  graph prop neurons/layer: {cfg.graph_prop_neurons_per_layer}")
+            print(f"  teacher prop neurons/layer: {cfg.teacher_prop_neurons_per_layer}")
+            print(f"  student prop neurons/layer: {cfg.student_prop_neurons_per_layer}")
         print(f"  Eval every:       {cfg.step_log_interval} training batches")
         if cfg.save_interval > 0:
             print(f"  Save every:       {cfg.save_interval} steps → checkpoint_step_NNNN/")
@@ -1154,7 +1157,8 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--dtype", choices=DTYPE_CHOICES, default="float32")
-    parser.add_argument("--graph-prop-neurons-per-layer", type=float, default=0.1)
+    parser.add_argument("--teacher-prop-neurons-per-layer", type=float, default=0.1)
+    parser.add_argument("--student-prop-neurons-per-layer", type=float, default=0.1)
     parser.add_argument(
         "--graph-max-neurons-per-layer",
         type=int,
@@ -1378,8 +1382,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--step-log-interval must be >= 1")
     if args.lambda_graph < 0:
         raise SystemExit("--lambda-graph must be >= 0")
-    if not (0.0 < args.graph_prop_neurons_per_layer <= 1.0):
-        raise SystemExit("--graph-prop-neurons-per-layer must be in (0, 1]")
+    if not (0.0 < args.teacher_prop_neurons_per_layer <= 1.0):
+        raise SystemExit("--teacher-prop-neurons-per-layer must be in (0, 1]")
+    if not (0.0 < args.student_prop_neurons_per_layer <= 1.0):
+        raise SystemExit("--student-prop-neurons-per-layer must be in (0, 1]")
     if args.teacher_graph_batch_size < 1:
         raise SystemExit("--teacher-graph-batch-size must be >= 1")
     if args.student_graph_batch_size < 1:
@@ -1463,7 +1469,8 @@ def main() -> None:
             lambda_graph=args.lambda_graph,
             lambda_kl=args.lambda_kl,
             graph_dtype=resolve_torch_dtype(args.dtype),
-            graph_prop_neurons_per_layer=args.graph_prop_neurons_per_layer,
+            teacher_prop_neurons_per_layer=args.teacher_prop_neurons_per_layer,
+            student_prop_neurons_per_layer=args.student_prop_neurons_per_layer,
             graph_max_neurons_per_layer=args.graph_max_neurons_per_layer,
             graph_top_k_logits=args.graph_top_k_logits if args.graph_top_k_logits > 0 else None,
             teacher_graph_batch_size=args.teacher_graph_batch_size,
