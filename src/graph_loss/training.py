@@ -32,6 +32,7 @@ class GraphAuxConfig:
     lambda_graph: float = 0.1
     graph_dtype: torch.dtype | None = None
     prop_neurons_per_layer: float = 0.1
+    max_neurons_per_layer: int | None = None
     top_k_logits: float | None = 0.95
     temperature: float = 2.0
     teacher_graph_batch_size: int = 512
@@ -474,6 +475,7 @@ def compute_prompt_graph_loss_compare_tokens(
             teacher_adapter,
             input_ids,
             prop_neurons_per_layer=config.prop_neurons_per_layer,
+            max_neurons_per_layer=config.max_neurons_per_layer,
             dtype=config.graph_dtype,
             dataset=config.dataset,
             mlp_input_cache=None,
@@ -489,6 +491,7 @@ def compute_prompt_graph_loss_compare_tokens(
         student_adapter,
         input_ids,
         prop_neurons_per_layer=config.prop_neurons_per_layer,
+        max_neurons_per_layer=config.max_neurons_per_layer,
         dtype=config.graph_dtype,
         dataset=config.dataset,
         mlp_input_cache=config.mlp_input_cache,

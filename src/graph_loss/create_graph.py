@@ -228,6 +228,7 @@ def build_shared_context(
     input_ids: torch.Tensor,
     *,
     prop_neurons_per_layer: float = 0.1,
+    max_neurons_per_layer: int | None = None,
     dtype: torch.dtype | None = None,
     dataset: str | None = None,
     mlp_input_cache: dict | None = None,
@@ -259,7 +260,7 @@ def build_shared_context(
     _logger = logger or logging.getLogger(__name__)
 
     _logger.info("Running setup_attribution (neuron pre-selection by gradient norm)")
-    ctx = setup_attribution(adapter, input_ids, prop_neurons_per_layer, dtype)
+    ctx = setup_attribution(adapter, input_ids, prop_neurons_per_layer, dtype, max_neurons_per_layer)
     _logger.info("  Pre-selected neurons: %d", ctx.n_neurons)
 
     # An empty list means "no labels requested" => no ANOVA. Only a non-empty
@@ -576,6 +577,7 @@ def create_graph(
     top_k_logits: float | None = 0.95,
     temperature: float = 2.0,
     prop_neurons_per_layer: float = 0.1,
+    max_neurons_per_layer: int | None = None,
     batch_size: int = 512,
     dtype: torch.dtype | None = None,
     verbose: bool = False,
@@ -661,6 +663,7 @@ def create_graph(
         adapter,
         input_ids,
         prop_neurons_per_layer=prop_neurons_per_layer,
+        max_neurons_per_layer=max_neurons_per_layer,
         dtype=dtype,
         dataset=dataset,
         mlp_input_cache=mlp_input_cache,

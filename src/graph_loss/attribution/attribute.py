@@ -31,6 +31,7 @@ def setup_attribution(
     input_ids: torch.Tensor,
     prop_neurons_per_layer: float,
     dtype: torch.dtype | None,
+    max_neurons_per_layer: int | None = None,
 ) -> HFAttributionContext:
     """Run the initial single forward pass and return an ``HFAttributionContext``.
 
@@ -97,7 +98,7 @@ def setup_attribution(
         layer_input = mlp_inputs[layer_idx].squeeze(0)
         keep, layer_acts_kept, layer_te_kept, layer_sv_kept = (
             adapter._compute_layer_neuron_data_selective(
-                layer_idx, layer_input, prop_neurons_per_layer
+                layer_idx, layer_input, prop_neurons_per_layer, max_neurons_per_layer
             )
         )
 

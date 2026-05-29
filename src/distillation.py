@@ -142,6 +142,7 @@ class DistillationConfig:
     lambda_kl: float = 1.0
     graph_dtype: Optional[torch.dtype] = None
     graph_prop_neurons_per_layer: float = 0.1
+    graph_max_neurons_per_layer: int | None = None
     graph_top_k_logits: float | None = 0.955
     teacher_graph_batch_size: int = 512
     student_graph_batch_size: int = 1
@@ -352,6 +353,7 @@ class DistillationTrainer:
                 lambda_graph=config.lambda_graph,
                 graph_dtype=config.graph_dtype,
                 prop_neurons_per_layer=config.graph_prop_neurons_per_layer,
+                max_neurons_per_layer=config.graph_max_neurons_per_layer,
                 top_k_logits=config.graph_top_k_logits,
                 temperature=config.temperature,
                 teacher_graph_batch_size=config.teacher_graph_batch_size,
@@ -1136,6 +1138,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--dtype", choices=DTYPE_CHOICES, default="float32")
     parser.add_argument("--graph-prop-neurons-per-layer", type=float, default=0.1)
+    parser.add_argument(
+        "--graph-max-neurons-per-layer",
+        type=int,
+        default=None,
+        help=(
+            "Optional absolute cap on attribution neurons selected per layer. "
+            "When unset (default None), behavior is unchanged and the per-layer "
+            "neuron count k scales with sequence length. When set, k is capped "
+            "so it stops scaling with sequence length, fixing CoT/long-prompt "
+            "memory blowup. Only affects the compare-tokens graph path."
+        ),
+    )
     parser.add_argument("--graph-top-k-logits", type=float, default=0.95, dest="graph_top_k_logits",
                         help="Cumulative probability threshold in (0, 1] for logit nodes. "
                              "Selects the fewest top logits summing to this fraction, capped at 10.")
@@ -1415,6 +1429,7 @@ def main() -> None:
             lambda_kl=args.lambda_kl,
             graph_dtype=resolve_torch_dtype(args.dtype),
             graph_prop_neurons_per_layer=args.graph_prop_neurons_per_layer,
+            graph_max_neurons_per_layer=args.graph_max_neurons_per_layer,
             graph_top_k_logits=args.graph_top_k_logits if args.graph_top_k_logits > 0 else None,
             teacher_graph_batch_size=args.teacher_graph_batch_size,
             student_graph_batch_size=args.student_graph_batch_size,
