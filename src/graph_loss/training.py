@@ -507,7 +507,12 @@ def compute_prompt_graph_loss_compare_tokens(
     for pos in selected_positions:
         pos_teacher_logits = teacher_logits[pos].to(device=teacher_adapter.device)
 
-        with torch.no_grad():
+        # The attribution inside create_graph_at_position runs a local
+        # torch.autograd.grad to compute edge scores, so it needs grad ENABLED
+        # even for the teacher. detach_result=True already detaches the returned
+        # graph from the student's backward, so enabling grad here does not leak
+        # teacher gradients; it only lets the local attribution graph exist.
+        with torch.enable_grad():
             teacher_result = create_graph_at_position(
                 teacher_shared,
                 target_position=pos,
