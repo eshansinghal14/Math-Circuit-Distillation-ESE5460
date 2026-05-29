@@ -420,19 +420,27 @@ def compute_prompt_graph_loss_compare_tokens(
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Graph loss for one example using the compare-n-tokens strategy.
 
-    Selects the top-``n_tokens`` response positions by KL divergence, builds
-    shared token supernodes once, then computes DLA + attribution + graph loss
-    at each selected position and averages the result.
+    For each selected response token at position ``pos``, the graph is built
+    on the causal prefix ``input_ids[:pos]`` with ``target_position=-1`` (the
+    last prefix token, which generates the logit predicting token at ``pos``).
+    This matches the semantics of the cached-teacher path: the graph captures
+    how the model processes everything it has seen so far to produce its next
+    prediction.
+
+    Selection uses ``teacher_logits[pos-1]`` (the distribution predicting
+    response token ``pos``) rather than ``teacher_logits[pos]``, so KL
+    divergence measures disagreement on the token being generated.
 
     Args:
         input_ids: [seq_len] tokenized full sequence (prompt + response).
         response_start_idx: Index of the first response token in input_ids.
         teacher_adapter: Adapter wrapping the (frozen) teacher model.
         student_adapter: Adapter wrapping the (trainable) student model.
-        config: GraphAuxConfig with tokens_dla_nodes=True and compare_n_tokens set.
+        config: GraphAuxConfig with tokens_dla_nodes=True.
         n_tokens: Number of top-KL positions to compute graph loss on.
         teacher_logits: [seq_len, vocab] teacher logits (detached, pre-computed).
         student_logits: [seq_len, vocab] student logits (detached, pre-computed).
+        seq_end_idx: True (unpadded) sequence length from the attention mask.
 
     Returns:
         (averaged graph loss tensor, metrics dict)
@@ -446,7 +454,9 @@ def compute_prompt_graph_loss_compare_tokens(
     else:
         response_end_idx = seq_len
 
-    # Response positions: [response_start_idx, response_end_idx).
+    # response_positions: absolute positions of response tokens in input_ids.
+    # For each pos in this list, input_ids[pos] is a response token and
+    # teacher_logits[pos-1] is the distribution that generated it.
     response_positions = list(range(response_start_idx, response_end_idx))
     if not response_positions:
         raise RuntimeError(
@@ -455,68 +465,69 @@ def compute_prompt_graph_loss_compare_tokens(
             "Check that input_ids contains at least one response token after the prompt."
         )
 
-    # Select N response positions to compute graph loss on.
+    # Select N response positions using logits at pos-1 (predicting each response token).
+    logit_positions = [pos - 1 for pos in response_positions]
     n_select = min(n_tokens, len(response_positions))
     if config.compare_token_selection == "teacher_entropy":
-        # Lowest teacher entropy = most confident / decisive computation steps.
-        # Student-independent (no moving target across training steps).
         entropy_vals = _entropy_per_position(
-            teacher_logits[response_positions],
+            teacher_logits[logit_positions],
             temperature=config.temperature,
         )
         top_local = torch.topk(entropy_vals, n_select, largest=False).indices.tolist()
         selection_metric_key = "compare_tokens_selection_entropy"
     else:
-        # Default: top-N positions by HIGHEST teacher-student KL divergence.
         kl_vals = _kl_per_position(
-            teacher_logits[response_positions],
-            student_logits[response_positions],
+            teacher_logits[logit_positions],
+            student_logits[logit_positions],
             temperature=config.temperature,
         )
         top_local = torch.topk(kl_vals, n_select).indices.tolist()
         selection_metric_key = "compare_tokens_selection_kl"
     selected_positions = [response_positions[i] for i in top_local]
 
-    # Build shared contexts (one forward pass + token supernodes each).
-    with torch.no_grad():
-        teacher_shared = build_shared_context(
-            teacher_adapter,
-            input_ids,
-            prop_neurons_per_layer=config.teacher_prop_neurons_per_layer,
-            max_neurons_per_layer=config.max_neurons_per_layer,
-            dtype=config.graph_dtype,
-            dataset=config.dataset,
-            mlp_input_cache=None,
-            anova_nodes_per_label=config.teacher_anova_nodes_per_label,
-            anova_range_radius=config.teacher_anova_range_radius,
-            sum_min_specificity=config.teacher_sum_min_specificity,
-            node_labels=config.teacher_graph_labels or None,
-            include_arg_nodes=True,
-            batch_size=config.teacher_graph_batch_size,
-        )
-
-    student_shared = build_shared_context(
-        student_adapter,
-        input_ids,
-        prop_neurons_per_layer=config.student_prop_neurons_per_layer,
-        max_neurons_per_layer=config.max_neurons_per_layer,
-        dtype=config.graph_dtype,
-        dataset=config.dataset,
-        mlp_input_cache=config.mlp_input_cache,
-        anova_nodes_per_label=config.student_anova_nodes_per_label,
-        anova_range_radius=config.student_anova_range_radius,
-        sum_min_specificity=config.student_sum_min_specificity,
-        node_labels=config.student_graph_labels or None,
-        include_arg_nodes=True,
-        batch_size=config.student_graph_batch_size,
-    )
-
-    # For each selected position, compute graphs and graph loss.
+    # For each selected response token at pos, build the graph on the causal
+    # prefix input_ids[:pos] with target_position=-1. This is equivalent to
+    # the cached-teacher path (prompt-only context, last position attribution).
     position_losses: list[torch.Tensor] = []
     metric_sums: dict[str, float] = {}
 
     for pos in selected_positions:
-        pos_teacher_logits = teacher_logits[pos].to(device=teacher_adapter.device)
+        # Logit that generated the response token at pos is at position pos-1.
+        pos_teacher_logits = teacher_logits[pos - 1].to(device=teacher_adapter.device)
+        prefix_ids = input_ids[:pos]
+
+        with torch.no_grad():
+            teacher_shared = build_shared_context(
+                teacher_adapter,
+                prefix_ids,
+                prop_neurons_per_layer=config.teacher_prop_neurons_per_layer,
+                max_neurons_per_layer=config.max_neurons_per_layer,
+                dtype=config.graph_dtype,
+                dataset=config.dataset,
+                mlp_input_cache=None,
+                anova_nodes_per_label=config.teacher_anova_nodes_per_label,
+                anova_range_radius=config.teacher_anova_range_radius,
+                sum_min_specificity=config.teacher_sum_min_specificity,
+                node_labels=config.teacher_graph_labels or None,
+                include_arg_nodes=True,
+                batch_size=config.teacher_graph_batch_size,
+            )
+
+        student_shared = build_shared_context(
+            student_adapter,
+            prefix_ids,
+            prop_neurons_per_layer=config.student_prop_neurons_per_layer,
+            max_neurons_per_layer=config.max_neurons_per_layer,
+            dtype=config.graph_dtype,
+            dataset=config.dataset,
+            mlp_input_cache=config.mlp_input_cache,
+            anova_nodes_per_label=config.student_anova_nodes_per_label,
+            anova_range_radius=config.student_anova_range_radius,
+            sum_min_specificity=config.student_sum_min_specificity,
+            node_labels=config.student_graph_labels or None,
+            include_arg_nodes=True,
+            batch_size=config.student_graph_batch_size,
+        )
 
         # The attribution inside create_graph_at_position runs a local
         # torch.autograd.grad to compute edge scores, so it needs grad ENABLED
@@ -526,7 +537,7 @@ def compute_prompt_graph_loss_compare_tokens(
         with torch.enable_grad():
             teacher_result = create_graph_at_position(
                 teacher_shared,
-                target_position=pos,
+                target_position=-1,
                 include_dla_node=True,
                 dla_model_logits=pos_teacher_logits,
                 top_k_logits=config.top_k_logits,
@@ -541,7 +552,7 @@ def compute_prompt_graph_loss_compare_tokens(
 
         student_result = create_graph_at_position(
             student_shared,
-            target_position=pos,
+            target_position=-1,
             include_dla_node=True,
             dla_model_logits=pos_teacher_logits,
             top_k_logits=config.top_k_logits,
