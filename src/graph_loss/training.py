@@ -52,6 +52,11 @@ class GraphAuxConfig:
     tokens_dla_nodes: bool = False
     compare_n_tokens: int | None = None
     compare_token_selection: Literal["kl", "teacher_entropy"] = "kl"
+    # Teacher-specific ANOVA config (used in compare-n-tokens live-teacher path).
+    teacher_anova_range_radius: int = 0
+    teacher_anova_nodes_per_label: int = 10
+    teacher_sum_min_specificity: float = 0.0
+    teacher_graph_labels: list[str] | None = None
 
 
 def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
@@ -444,8 +449,11 @@ def compute_prompt_graph_loss_compare_tokens(
     # Response positions: [response_start_idx, response_end_idx).
     response_positions = list(range(response_start_idx, response_end_idx))
     if not response_positions:
-        device = student_adapter.device
-        return torch.tensor(0.0, device=device, requires_grad=False), {"compare_tokens_skipped": 1.0}
+        raise RuntimeError(
+            f"Graph loss: no response tokens found for example "
+            f"(response_start_idx={response_start_idx}, seq_len={seq_len}). "
+            "Check that input_ids contains at least one response token after the prompt."
+        )
 
     # Select N response positions to compute graph loss on.
     n_select = min(n_tokens, len(response_positions))
@@ -479,10 +487,10 @@ def compute_prompt_graph_loss_compare_tokens(
             dtype=config.graph_dtype,
             dataset=config.dataset,
             mlp_input_cache=None,
-            anova_nodes_per_label=config.student_anova_nodes_per_label,
-            anova_range_radius=config.student_anova_range_radius,
-            sum_min_specificity=config.student_sum_min_specificity,
-            node_labels=config.student_graph_labels or None,
+            anova_nodes_per_label=config.teacher_anova_nodes_per_label,
+            anova_range_radius=config.teacher_anova_range_radius,
+            sum_min_specificity=config.teacher_sum_min_specificity,
+            node_labels=config.teacher_graph_labels or None,
             include_arg_nodes=True,
             batch_size=config.teacher_graph_batch_size,
         )
@@ -611,8 +619,10 @@ def compute_prompt_graph_loss_compare_tokens(
             metric_sums[key] = metric_sums.get(key, 0.0) + float(value)
 
     if not position_losses:
-        device = student_adapter.device
-        return torch.tensor(0.0, device=device, requires_grad=False), {}
+        raise RuntimeError(
+            "Graph loss: position_losses is empty after processing all selected positions. "
+            "This should not happen — investigate selected_positions computation."
+        )
 
     avg_loss = torch.stack(position_losses).mean()
     n_pos = float(len(position_losses))
@@ -670,9 +680,15 @@ def backward_batch_graph_loss_compare_tokens(
         )
         detached_losses.append(prompt_loss.detach())
         scaled_loss = (loss_scale / denom) * prompt_loss
-        if scaled_loss.requires_grad:
-            scaled_loss.backward()
-            graph_backward_prompts += 1
+        if not scaled_loss.requires_grad:
+            raise RuntimeError(
+                f"Graph loss for prompt {i!r} has no gradient (requires_grad=False). "
+                "This means the loss is detached from student parameters. "
+                "Check that create_graph_at_position is called with detach_result=False "
+                "for the student."
+            )
+        scaled_loss.backward()
+        graph_backward_prompts += 1
         del scaled_loss
         gc.collect()
         if device.type == "cuda":

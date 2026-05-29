@@ -152,6 +152,9 @@ class DistillationConfig:
     student_anova_range_radius: int = 0
     student_anova_nodes_per_label: int = 10
     student_sum_min_specificity: float = 0.0
+    teacher_anova_range_radius: int = 0
+    teacher_anova_nodes_per_label: int = 10
+    teacher_sum_min_specificity: float = 0.0
     graph_grad_norm_scale: bool = False
     graph_start_step: int = 1
     eval_batch_size: int = 50
@@ -357,6 +360,9 @@ class DistillationTrainer:
                 student_anova_range_radius=config.student_anova_range_radius,
                 student_anova_nodes_per_label=config.student_anova_nodes_per_label,
                 student_sum_min_specificity=config.student_sum_min_specificity,
+                teacher_anova_range_radius=config.teacher_anova_range_radius,
+                teacher_anova_nodes_per_label=config.teacher_anova_nodes_per_label,
+                teacher_sum_min_specificity=config.teacher_sum_min_specificity,
                 dataset=config.student_dataset,
                 graph_loss_type=config.graph_loss_type,
                 student_graph_labels=config.graph_node_labels,
@@ -1227,6 +1233,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Minimum ANOVA specificity for student supernodes.",
     )
     parser.add_argument(
+        "--teacher-anova-range-radius",
+        type=int,
+        default=0,
+        help="Radius around target arg/sum values for the teacher ANOVA range mask.",
+    )
+    parser.add_argument(
+        "--teacher-anova-nodes-per-label",
+        type=int,
+        default=10,
+        help="Cap on neurons per labelled teacher supernode (default 10).",
+    )
+    parser.add_argument(
+        "--teacher-sum-min-specificity",
+        type=float,
+        default=0.0,
+        help="Minimum ANOVA specificity for teacher supernodes.",
+    )
+    parser.add_argument(
         "--save-dir",
         type=str,
         default=os.path.join(os.path.dirname(__file__), "..", "results", "distillation"),
@@ -1451,6 +1475,9 @@ def main() -> None:
             student_anova_range_radius=args.student_anova_range_radius,
             student_anova_nodes_per_label=args.student_anova_nodes_per_label,
             student_sum_min_specificity=args.student_sum_min_specificity,
+            teacher_anova_range_radius=args.teacher_anova_range_radius,
+            teacher_anova_nodes_per_label=args.teacher_anova_nodes_per_label,
+            teacher_sum_min_specificity=args.teacher_sum_min_specificity,
             step_log_interval=args.step_log_interval,
             save_interval=args.save_interval,
             label_refresh_interval=args.label_refresh_interval,
