@@ -170,7 +170,7 @@ def _debug_compare_teacher_graphs(
                 detach_result=True,
                 skip_logit_attribution=False,
                 include_dla_node=config.tokens_dla_nodes,
-                dla_model_logits=cached_teacher.teacher_dla_logits,
+                dla_model_logits=None,  # Match cache generation: use model's own BOS-prefixed logits
                 include_arg_nodes=config.tokens_dla_nodes,
                 no_grad_supergraph=True,
             )
