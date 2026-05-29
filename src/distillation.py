@@ -649,10 +649,18 @@ class DistillationTrainer:
         prompts: List[str] = batch["prompts"]
 
         # Compute per-example response start indices from prompt lengths.
+        # Must use the raw tokenizer (no BOS prepend) to match AddDataset, which
+        # tokenizes with add_special_tokens=False and no manual BOS insertion.
+        # ensure_tokenized() prepends BOS, inflating the length by 1 relative to
+        # batch_input_ids, which would leak the first response token into the prefix.
         response_start_indices: List[int] = []
         for prompt in prompts:
-            prompt_ids = self.student_graph_adapter.ensure_tokenized(prompt)
-            response_start_indices.append(int(prompt_ids.numel()))
+            prompt_ids_raw = self.tokenizer(
+                prompt,
+                return_tensors="pt",
+                add_special_tokens=False,
+            )["input_ids"].squeeze(0)
+            response_start_indices.append(int(prompt_ids_raw.numel()))
 
         # True sequence lengths from the attention mask — avoids mistaking
         # EOS (which equals pad_token_id in LLaMA) as trailing padding.
