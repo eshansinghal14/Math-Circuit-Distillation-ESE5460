@@ -211,28 +211,30 @@ def _debug_compare_teacher_graphs(
     if only_live:
         print(f"  only in LIVE   ({len(only_live)}): {sorted(only_live)}")
 
-    # Per-label adjacency row comparison
+    # Per-label adjacency comparison — align BOTH rows AND columns by label
+    # so that element [t, s] means "supernode s → supernode t" for the same
+    # (t, s) label pair in both matrices (ordering can differ between cached/live).
     if matched_labels:
         c_lab2idx = {lab: i for i, lab in enumerate(cached_labels)}
         l_lab2idx = {lab: i for i, lab in enumerate(live_labels)}
-        print(f"\n--- PER-LABEL ADJ ROW DIFF (live − cached) ---")
-        for lab in sorted(matched_labels):
-            ci = c_lab2idx[lab]
-            li = l_lab2idx[lab]
-            c_row = cached_adj[ci] if ci < cached_adj.shape[0] else None
-            l_row = live_adj[li] if li < live_adj.shape[0] else None
-
-            # Align columns by label too (same ordering required for direct subtraction)
-            if c_row is not None and l_row is not None and len(c_row) == len(l_row):
-                diff = (l_row - c_row).abs()
-                print(
-                    f"  {lab!r:30s}: "
-                    f"cached={[f'{v:.4f}' for v in c_row.tolist()]}  "
-                    f"live={[f'{v:.4f}' for v in l_row.tolist()]}  "
-                    f"|diff| max={diff.max():.4f} mean={diff.mean():.4f}"
-                )
-            else:
-                print(f"  {lab!r:30s}: shape mismatch — cached row {ci}, live row {li}")
+        shared_labels = sorted(matched_labels)
+        print(f"\n--- PER-LABEL ADJ (rows=target, cols=source) — columns={shared_labels} ---")
+        print(f"  (both rows and columns aligned by shared label order)")
+        for tlab in shared_labels:
+            ci = c_lab2idx[tlab]
+            li = l_lab2idx[tlab]
+            # Extract and reorder columns to the shared label order
+            c_vals = [float(cached_adj[ci, c_lab2idx[slab]].item()) if slab in c_lab2idx else float("nan") for slab in shared_labels]
+            l_vals = [float(live_adj[li, l_lab2idx[slab]].item()) if slab in l_lab2idx else float("nan") for slab in shared_labels]
+            diffs = [abs(l - c) if not (c != c or l != l) else float("nan") for c, l in zip(c_vals, l_vals)]
+            max_diff = max((d for d in diffs if d == d), default=float("nan"))
+            mean_diff = sum(d for d in diffs if d == d) / max(sum(1 for d in diffs if d == d), 1)
+            print(
+                f"  row={tlab!r:25s}: "
+                f"cached={[f'{v:.4f}' for v in c_vals]}  "
+                f"live={[f'{v:.4f}' for v in l_vals]}  "
+                f"|diff| max={max_diff:.4f} mean={mean_diff:.4f}"
+            )
 
     # Student supergraph summary
     stu_adj = student_supergraph.supernode_adjacency_matrix.float().detach().cpu()
