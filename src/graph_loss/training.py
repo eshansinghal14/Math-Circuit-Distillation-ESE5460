@@ -50,6 +50,7 @@ class GraphAuxConfig:
     student_graph_labels: list[str] | None = None
     tokens_dla_nodes: bool = False
     compare_n_tokens: int | None = None
+    compare_token_selection: Literal["kl", "teacher_entropy"] = "kl"
 
 
 def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
@@ -386,6 +387,18 @@ def _kl_per_position(
     return (t_probs * (t_probs.clamp(min=1e-10).log() - s_log_probs)).sum(dim=-1)
 
 
+def _entropy_per_position(
+    teacher_logits: torch.Tensor,
+    temperature: float,
+) -> torch.Tensor:
+    """Shannon entropy of the (temperature-scaled) teacher distribution per
+    token position. Returns [seq_len] float tensor. Lower = teacher more
+    confident (a more decisive computation step)."""
+    t_log_probs = torch.log_softmax(teacher_logits / temperature, dim=-1)
+    t_probs = t_log_probs.exp()
+    return -(t_probs * t_log_probs).sum(dim=-1)
+
+
 def compute_prompt_graph_loss_compare_tokens(
     *,
     input_ids: torch.Tensor,
@@ -433,14 +446,26 @@ def compute_prompt_graph_loss_compare_tokens(
         device = student_adapter.device
         return torch.tensor(0.0, device=device, requires_grad=False), {"compare_tokens_skipped": 1.0}
 
-    # Select top-N response positions by KL divergence.
-    kl_vals = _kl_per_position(
-        teacher_logits[response_positions],
-        student_logits[response_positions],
-        temperature=config.temperature,
-    )
+    # Select N response positions to compute graph loss on.
     n_select = min(n_tokens, len(response_positions))
-    top_local = torch.topk(kl_vals, n_select).indices.tolist()
+    if config.compare_token_selection == "teacher_entropy":
+        # Lowest teacher entropy = most confident / decisive computation steps.
+        # Student-independent (no moving target across training steps).
+        entropy_vals = _entropy_per_position(
+            teacher_logits[response_positions],
+            temperature=config.temperature,
+        )
+        top_local = torch.topk(entropy_vals, n_select, largest=False).indices.tolist()
+        selection_metric_key = "compare_tokens_selection_entropy"
+    else:
+        # Default: top-N positions by HIGHEST teacher-student KL divergence.
+        kl_vals = _kl_per_position(
+            teacher_logits[response_positions],
+            student_logits[response_positions],
+            temperature=config.temperature,
+        )
+        top_local = torch.topk(kl_vals, n_select).indices.tolist()
+        selection_metric_key = "compare_tokens_selection_kl"
     selected_positions = [response_positions[i] for i in top_local]
 
     # Build shared contexts (one forward pass + token supernodes each).
@@ -587,6 +612,7 @@ def compute_prompt_graph_loss_compare_tokens(
     n_pos = float(len(position_losses))
     metrics = {key: value / n_pos for key, value in metric_sums.items()}
     metrics["compare_tokens_n_selected"] = n_pos
+    metrics[selection_metric_key] = 1.0
     return avg_loss, metrics
 
 

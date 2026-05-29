@@ -170,6 +170,7 @@ class DistillationConfig:
     graph_node_labels: Optional[List[str]] = None
     tokens_dla_nodes: bool = False
     compare_n_tokens: Optional[int] = None
+    compare_token_selection: Literal["kl", "teacher_entropy"] = "kl"
     skip_baseline_eval: bool = False
 
 
@@ -364,6 +365,7 @@ class DistillationTrainer:
                 student_graph_labels=config.graph_node_labels,
                 tokens_dla_nodes=config.tokens_dla_nodes,
                 compare_n_tokens=config.compare_n_tokens,
+                compare_token_selection=config.compare_token_selection,
             )
 
             self.student_graph_adapter = HFLlamaGraphAdapter(
@@ -1300,6 +1302,17 @@ def build_parser() -> argparse.ArgumentParser:
             "Requires --tokens-dla-nodes. Incompatible with --teacher-data-cache."
         ),
     )
+    parser.add_argument(
+        "--compare-token-selection",
+        choices=["kl", "teacher_entropy"],
+        default="kl",
+        dest="compare_token_selection",
+        help=(
+            "CoT compare-tokens: how to pick which response positions to compute graph loss on. "
+            "'kl' = highest teacher-student KL (current default); "
+            "'teacher_entropy' = lowest teacher entropy (most confident / decisive steps)."
+        ),
+    )
     return parser
 
 
@@ -1431,6 +1444,7 @@ def main() -> None:
             graph_node_labels=args.graph_node_labels,
             tokens_dla_nodes=args.tokens_dla_nodes,
             compare_n_tokens=args.compare_n_tokens,
+            compare_token_selection=args.compare_token_selection,
             skip_baseline_eval=args.skip_baseline_eval,
 
             seed=args.seed,
