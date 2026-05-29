@@ -645,8 +645,9 @@ def backward_batch_graph_loss_compare_tokens(
 
     import gc
 
-    n_tokens = config.compare_n_tokens
-    assert n_tokens is not None
+    # Default to 1 (last response token) when compare_n_tokens is unset but
+    # a live teacher is being used (tokens_dla_nodes without cache).
+    n_tokens = config.compare_n_tokens if config.compare_n_tokens is not None else 1
 
     metric_sums: dict[str, float] = {}
     detached_losses: list[torch.Tensor] = []

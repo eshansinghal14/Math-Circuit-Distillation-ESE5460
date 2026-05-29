@@ -315,12 +315,20 @@ class DistillationTrainer:
         self.teacher_graph_model = None
         self.teacher_graph_adapter = None
 
-        need_live_teacher = config.compare_n_tokens is not None or (
-            self.teacher_data_cache is None and not self._use_graph
+        # Live teacher is needed when: compare-n-tokens mode, tokens-dla-nodes without
+        # a cache, or KL-only mode (no graph loss and no cache).
+        need_live_teacher = (
+            config.compare_n_tokens is not None
+            or (config.tokens_dla_nodes and self.teacher_data_cache is None)
+            or (self.teacher_data_cache is None and not self._use_graph)
         )
-        if config.compare_n_tokens is not None:
-            # Always load teacher live for compare-n-tokens mode.
-            print(f"Loading teacher (compare-n-tokens mode): {config.teacher_model}")
+        if need_live_teacher:
+            mode_tag = (
+                "compare-n-tokens" if config.compare_n_tokens is not None
+                else "live-teacher" if config.tokens_dla_nodes
+                else "kl-only"
+            )
+            print(f"Loading teacher ({mode_tag} mode): {config.teacher_model}")
             self.teacher, _ = load_model(config.teacher_model)
             self.teacher = self.teacher.to(self.device)
             self.teacher.eval()
@@ -328,19 +336,6 @@ class DistillationTrainer:
                 param.requires_grad = False
         elif self.teacher_data_cache is not None:
             print(f"Using cached teacher data: {config.teacher_data_cache}")
-        elif self._use_graph:
-            raise RuntimeError(
-                "Graph loss requires --teacher-data-cache. "
-                "Run graph_loss/generate_teacher_data.py first, "
-                "or set --lambda-graph 0 to disable graph loss."
-            )
-        else:
-            print(f"Loading teacher: {config.teacher_model}")
-            self.teacher, _ = load_model(config.teacher_model)
-            self.teacher = self.teacher.to(self.device)
-            self.teacher.eval()
-            for param in self.teacher.parameters():
-                param.requires_grad = False
 
         self._cached_kl_logits: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
         self.graph_loss_config = None
@@ -376,7 +371,7 @@ class DistillationTrainer:
                 self.device,
             )
 
-            if config.compare_n_tokens is not None:
+            if self.teacher is not None and config.tokens_dla_nodes:
                 self.teacher_graph_adapter = HFLlamaGraphAdapter(
                     self.teacher,
                     self.tokenizer,
@@ -500,8 +495,11 @@ class DistillationTrainer:
         teacher_logits = self._teacher_logits_for_batch(batch, input_ids, attention_mask)
         student_logits = self.student(input_ids=input_ids, attention_mask=attention_mask).logits
 
-        # Cache full logit tensors for compare-n-tokens graph loss selection.
-        if self.config.compare_n_tokens is not None:
+        # Cache full logit tensors for live-teacher graph loss (compare-n-tokens or
+        # tokens-dla-nodes without a cache, both of which use _run_compare_tokens_graph_loss).
+        if self.config.compare_n_tokens is not None or (
+            self.config.tokens_dla_nodes and self.teacher_data_cache is None
+        ):
             self._cached_kl_logits = (teacher_logits.detach(), student_logits.detach())
 
         loss = kl_loss(
@@ -545,7 +543,11 @@ class DistillationTrainer:
             }
 
         try:
-            if self.config.compare_n_tokens is not None:
+            use_live_teacher = (
+                self.config.compare_n_tokens is not None
+                or (self.config.tokens_dla_nodes and self.teacher_data_cache is None)
+            )
+            if use_live_teacher:
                 graph_loss, graph_metrics = self._run_compare_tokens_graph_loss(
                     batch=batch,
                     loss_scale=1.0 if use_grad_norm_scale else self.config.lambda_graph,
