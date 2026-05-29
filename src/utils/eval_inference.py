@@ -187,9 +187,26 @@ def evaluate_prompt_answer_dict(
             print("---")
 
         for text, gold in zip(decoded, batch_a):
-            pred = _extract_int_after_equals(text)
-            if pred == gold:
-                correct += 1
+            if isinstance(gold, int):
+                # Arithmetic / single-token integer path (unchanged): the gold is
+                # an int and the prompt ends in ``=``; compare the first ``= <int>``.
+                pred = _extract_int_after_equals(text)
+                if pred == gold:
+                    correct += 1
+            else:
+                # CoT / GSM8K path: gold is the full solution string ending in
+                # ``#### N``.  Extract N from the gold and the final number from the
+                # student's generation, then compare as normalized numeric strings.
+                gold_num = _gsm8k_gold_answer_str(str(gold))
+                pred_num = extract_numeric_answer_from_text(
+                    _slice_text_after_reasoning(text)
+                )
+                if (
+                    gold_num is not None
+                    and pred_num is not None
+                    and pred_num == gold_num
+                ):
+                    correct += 1
             total += 1
 
     tokenizer.padding_side = original_side

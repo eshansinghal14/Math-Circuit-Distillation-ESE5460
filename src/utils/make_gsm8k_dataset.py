@@ -21,6 +21,7 @@ import argparse
 import json
 import logging
 import os
+import re
 from typing import Dict
 
 os.environ.setdefault("TQDM_DISABLE", "1")
@@ -51,6 +52,13 @@ def build_prompt_answer_dict(split, limit: int) -> Dict[str, str]:
         row = split[i]
         prompt = str(row["question"])
         answer = str(row["answer"])  # full CoT trace incl. trailing "#### <number>"
+        # Strip GSM8K inline calculator annotations like ``<<16-3-4=9>>``.  The
+        # result number sits OUTSIDE the brackets (``= <<16-3-4=9>>9`` -> ``= 9``),
+        # so removal keeps the natural trace and the trailing ``#### <number>``
+        # intact.  The instruct teacher never emits ``<<``, so these would only
+        # pollute the teacher-forced distillation target.
+        answer = re.sub(r"<<[^>]*>>", "", answer)
+        answer = re.sub(r"  +", " ", answer)  # collapse double spaces; keep newlines
         out[prompt] = answer
     return out
 
