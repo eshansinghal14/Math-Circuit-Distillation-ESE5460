@@ -175,6 +175,15 @@ def evaluate_prompt_answer_dict(
             pad_token_id=tokenizer.eos_token_id,
         )
         decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+        # Generated-only continuation (echoed prompt stripped). For CoT/GSM8K
+        # scoring we must NOT scan the prompt, otherwise the extractor grabs a
+        # number out of the question text. The prompt occupies the first
+        # ``inputs["input_ids"].shape[1]`` columns (pad columns included under
+        # right padding), so everything after that is purely model-generated.
+        prompt_len = inputs["input_ids"].shape[1]
+        gen_only = tokenizer.batch_decode(
+            outputs[:, prompt_len:], skip_special_tokens=True
+        )
         if debug_decode > 0 and i == 0:
             n = min(debug_decode, len(decoded))
             tag = f" [{debug_tag}]" if debug_tag else ""
@@ -186,20 +195,23 @@ def evaluate_prompt_answer_dict(
                 print(f"  gold={gold}  pred={pred}  decoded={text!r}")
             print("---")
 
-        for text, gold in zip(decoded, batch_a):
+        for text, gen, gold in zip(decoded, gen_only, batch_a):
             if isinstance(gold, int):
                 # Arithmetic / single-token integer path (unchanged): the gold is
-                # an int and the prompt ends in ``=``; compare the first ``= <int>``.
+                # an int and the prompt ends in ``=``; compare the first ``= <int>``
+                # over the FULL decoded text (prompt echo carries the ``=``).
                 pred = _extract_int_after_equals(text)
                 if pred == gold:
                     correct += 1
             else:
                 # CoT / GSM8K path: gold is the full solution string ending in
                 # ``#### N``.  Extract N from the gold and the final number from the
-                # student's generation, then compare as normalized numeric strings.
+                # student's GENERATION ONLY (``gen``) -- scanning the echoed prompt
+                # would pick numbers out of the question -- then compare as
+                # normalized numeric strings.
                 gold_num = _gsm8k_gold_answer_str(str(gold))
                 pred_num = extract_numeric_answer_from_text(
-                    _slice_text_after_reasoning(text)
+                    _slice_text_after_reasoning(gen)
                 )
                 if (
                     gold_num is not None
