@@ -218,6 +218,93 @@ class HFLlamaGraphAdapter:
             source_vectors = source_vectors * bos_mask.view(-1, 1, 1)
         return neuron_activations, target_encoders, source_vectors
 
+    def _compute_layer_neuron_data_selective(
+        self,
+        layer_idx: int,
+        mlp_input: torch.Tensor,  # [n_pos, d_model]
+        prop_neurons_per_layer: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Memory-efficient, grad-safe variant of ``_compute_layer_neuron_data``.
+
+        Avoids the two ``[n_pos, d_mlp, d_model]`` intermediates (the
+        ``gate_act.unsqueeze(-1) * up_rows.unsqueeze(0)`` style products) that
+        OOM an 80 GB GPU for long CoT prefixes. Source-vector norms are computed
+        analytically in ``O(n_pos * d_mlp)`` space, the top-k neurons are
+        selected, and the full ``[k, d_model]`` vectors are materialised only for
+        those k neurons.
+
+        Gradient flow is preserved for the STUDENT path: the small
+        ``[n_pos, d_mlp]`` activation tensors are kept in the AMBIENT autograd
+        context (no ``detach``), and the kept ``te``/``sv`` vectors are built from
+        them with differentiable ops, so they stay connected to the
+        gate/up/down projection weights and to ``mlp_input``. Only the top-k
+        *scoring* is detached — the selected indices are non-differentiable
+        anyway. Under a caller-supplied ``torch.no_grad()`` (TEACHER path) no
+        graph is built and the returned tensors have ``requires_grad`` False.
+
+        Returns:
+            keep:    [k] flat indices into the n_pos * d_mlp grid.
+            acts:    [k] neuron activations (BOS-zeroed).
+            te_kept: [k, d_model] target encoders for the selected neurons.
+            sv_kept: [k, d_model] source vectors for the selected neurons.
+        """
+        gate_rows, up_rows, out_rows, gate_bias, up_bias = self._layer_weights(
+            layer_idx,
+            device=mlp_input.device,
+            dtype=mlp_input.dtype,
+        )
+        # Small [n_pos, d_mlp] intermediates, kept in the ambient grad context so
+        # the student gradient can flow back through them. Do NOT detach here.
+        gate_pre = mlp_input @ gate_rows.T + gate_bias  # [n_pos, d_mlp]
+        up_pre = mlp_input @ up_rows.T + up_bias  # [n_pos, d_mlp]
+        gate_act = F.silu(gate_pre)  # [n_pos, d_mlp]
+        neuron_acts = gate_act * up_pre  # [n_pos, d_mlp]
+        gate_grad = self._silu_derivative(gate_pre)  # [n_pos, d_mlp]
+
+        # BOS masking (zero position 0) via out-of-place multiply so it is never
+        # selected and to match _compute_layer_neuron_data exactly. Out-of-place
+        # keeps autograd views intact (see note in _compute_layer_neuron_data).
+        # bos_mask is binary so masking the factors of a product is equivalent to
+        # masking the product (0**2 == 0, 1**2 == 1).
+        n_pos = neuron_acts.shape[0]
+        if n_pos > 0:
+            bos_mask = torch.ones(n_pos, dtype=neuron_acts.dtype, device=neuron_acts.device)
+            bos_mask[0] = 0.0
+            bm = bos_mask.unsqueeze(-1)  # [n_pos, 1]
+            neuron_acts = neuron_acts * bm
+            gate_act = gate_act * bm
+            up_pre = up_pre * bm
+            gate_grad = gate_grad * bm
+
+        # Selection scoring WITHOUT grad: norm(neuron_acts[i,j] * out_rows[j])
+        # == |neuron_acts[i,j]| * norm(out_rows[j]), identical ranking to the old
+        # layer_source_vectors.norm(dim=-1). top-k indices are non-differentiable,
+        # so detach to avoid building a scoring grad graph.
+        out_norms = out_rows.norm(dim=-1)  # [d_mlp]
+        sv_norms = neuron_acts.detach().abs() * out_norms.unsqueeze(0)  # [n_pos, d_mlp]
+        flat_norms = sv_norms.reshape(-1)
+        total = flat_norms.numel()
+        k = min(max(1, int(total * prop_neurons_per_layer)), total)
+        keep = torch.topk(flat_norms, k, dim=0).indices  # [k]
+        keep_neu = keep % self.d_mlp  # [k] neuron ids
+
+        # Materialise vectors only for the kept neurons, WITH ambient grad
+        # (no detach on this path) so source/target vectors stay differentiable.
+        kept_acts = neuron_acts.reshape(-1)[keep]  # [k]
+        kept_gate_act = gate_act.reshape(-1)[keep]  # [k]
+        kept_up = up_rows[keep_neu]  # [k, d_model]
+        kept_upg = (up_pre * gate_grad).reshape(-1)[keep]  # [k]
+        kept_gate = gate_rows[keep_neu]  # [k, d_model]
+        te_kept = (
+            kept_gate_act.unsqueeze(-1) * kept_up
+            + kept_upg.unsqueeze(-1) * kept_gate
+        )  # [k, d_model]
+
+        kept_out = out_rows[keep_neu]  # [k, d_model]
+        sv_kept = kept_acts.unsqueeze(-1) * kept_out  # [k, d_model]
+
+        return keep, kept_acts, te_kept, sv_kept
+
     def build_graph(
         self,
         prompt: str | torch.Tensor | list[int],
