@@ -702,9 +702,16 @@ def compute_prompt_graph_loss_compare_tokens(
     metric_sums: dict[str, float] = {}
 
     for pos in selected_positions:
-        # Logit that generated the response token at pos is at position pos-1.
-        pos_teacher_logits = teacher_logits[pos - 1].to(device=teacher_adapter.device)
-        prefix_ids = input_ids[:pos]
+        # Prepend BOS so the context matches ensure_tokenized(prompt_string) used by
+        # cache generation (AddDataset tokenizes without add_special_tokens, so input_ids
+        # has no BOS; the cached teacher was built via create_graph → ensure_tokenized
+        # which always prepends BOS).
+        prefix_ids_raw = input_ids[:pos]
+        bos_id = teacher_adapter.tokenizer.bos_token_id
+        prefix_ids = torch.cat([
+            torch.tensor([bos_id], device=prefix_ids_raw.device, dtype=prefix_ids_raw.dtype),
+            prefix_ids_raw,
+        ])
 
         with torch.no_grad():
             teacher_shared = build_shared_context(
@@ -722,6 +729,13 @@ def compute_prompt_graph_loss_compare_tokens(
                 include_arg_nodes=True,
                 batch_size=config.teacher_graph_batch_size,
             )
+
+        # Use the teacher's BOS-prefixed logits at the last position for DLA selection.
+        # The cached teacher was built via create_graph(...) → ensure_tokenized (adds BOS)
+        # with no dla_model_logits arg, so it used ctx.logits[0, -1] internally.
+        # The student's DLA supernode is selected against these same teacher logits so
+        # both models select DLA neurons that are informative for the teacher's output.
+        pos_teacher_logits = teacher_shared.ctx.logits[0, -1].detach()
 
         student_shared = build_shared_context(
             student_adapter,
@@ -749,7 +763,7 @@ def compute_prompt_graph_loss_compare_tokens(
                 teacher_shared,
                 target_position=-1,
                 include_dla_node=True,
-                dla_model_logits=pos_teacher_logits,
+                dla_model_logits=None,  # use teacher's own BOS-prefixed logits (matches cache generation)
                 top_k_logits=config.top_k_logits,
                 temperature=config.temperature,
                 batch_size=config.teacher_graph_batch_size,
