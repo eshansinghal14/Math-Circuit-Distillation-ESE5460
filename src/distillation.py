@@ -643,6 +643,7 @@ class DistillationTrainer:
 
         teacher_logits_batch, student_logits_batch = self._cached_kl_logits
         batch_input_ids: torch.Tensor = batch["input_ids"].to(self.device)
+        attention_mask: torch.Tensor = batch["attention_mask"].to(self.device)
         prompts: List[str] = batch["prompts"]
 
         # Compute per-example response start indices from prompt lengths.
@@ -650,6 +651,13 @@ class DistillationTrainer:
         for prompt in prompts:
             prompt_ids = self.student_graph_adapter.ensure_tokenized(prompt)
             response_start_indices.append(int(prompt_ids.numel()))
+
+        # True sequence lengths from the attention mask — avoids mistaking
+        # EOS (which equals pad_token_id in LLaMA) as trailing padding.
+        seq_end_indices: List[int] = [
+            int(attention_mask[i].sum().item())
+            for i in range(attention_mask.shape[0])
+        ]
 
         # Split batched input_ids into per-example 1-D tensors.
         input_ids_list: List[torch.Tensor] = [
@@ -667,6 +675,7 @@ class DistillationTrainer:
             loss_scale=loss_scale,
             teacher_logits_batch=teacher_logits_batch,
             student_logits_batch=student_logits_batch,
+            seq_end_indices=seq_end_indices,
         )
 
     def _record_step_metrics(self, epoch: int, batch_step: int, metrics: Dict[str, float]) -> None:

@@ -415,6 +415,7 @@ def compute_prompt_graph_loss_compare_tokens(
     n_tokens: int,
     teacher_logits: torch.Tensor,
     student_logits: torch.Tensor,
+    seq_end_idx: int | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Graph loss for one example using the compare-n-tokens strategy.
 
@@ -436,15 +437,13 @@ def compute_prompt_graph_loss_compare_tokens(
         (averaged graph loss tensor, metrics dict)
     """
     seq_len = input_ids.numel()
-    # Determine valid response positions (response tokens only, no padding).
-    # A position is valid if input_ids has a non-pad token at position+1 up to seq_len.
-    response_end_idx = seq_len  # KL computed up to but not including the padding region.
-    # Trim trailing padding: treat token id 0 (or pad_token_id) as padding if any.
-    pad_id = getattr(teacher_adapter.tokenizer, "pad_token_id", None)
-    if pad_id is not None:
-        non_pad = (input_ids != pad_id).nonzero(as_tuple=False)
-        if non_pad.numel() > 0:
-            response_end_idx = int(non_pad[-1].item()) + 1
+    # Use the caller-provided true sequence length (from attention mask) when available.
+    # Falling back to pad-token trimming is unreliable because many models set
+    # pad_token_id == eos_token_id, which would incorrectly trim the final EOS answer token.
+    if seq_end_idx is not None:
+        response_end_idx = seq_end_idx
+    else:
+        response_end_idx = seq_len
 
     # Response positions: [response_start_idx, response_end_idx).
     response_positions = list(range(response_start_idx, response_end_idx))
@@ -644,6 +643,7 @@ def backward_batch_graph_loss_compare_tokens(
     loss_scale: float,
     teacher_logits_batch: torch.Tensor,
     student_logits_batch: torch.Tensor,
+    seq_end_indices: list[int] | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Compute and backprop compare-n-tokens graph loss one example at a time.
 
@@ -667,6 +667,7 @@ def backward_batch_graph_loss_compare_tokens(
     for i, (input_ids, response_start_idx) in enumerate(zip(input_ids_batch, response_start_indices)):
         t_logits = teacher_logits_batch[i]
         s_logits = student_logits_batch[i]
+        seq_end = seq_end_indices[i] if seq_end_indices is not None else None
 
         prompt_loss, prompt_metrics = compute_prompt_graph_loss_compare_tokens(
             input_ids=input_ids.to(device),
@@ -677,6 +678,7 @@ def backward_batch_graph_loss_compare_tokens(
             n_tokens=n_tokens,
             teacher_logits=t_logits.to(device),
             student_logits=s_logits.to(device),
+            seq_end_idx=seq_end,
         )
         detached_losses.append(prompt_loss.detach())
         scaled_loss = (loss_scale / denom) * prompt_loss
