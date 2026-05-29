@@ -465,15 +465,24 @@ def compute_prompt_graph_loss_compare_tokens(
             "Check that input_ids contains at least one response token after the prompt."
         )
 
-    # Select N response positions using logits at pos-1 (predicting each response token).
+    # Select N response positions.
+    # When compare_n_tokens is None (live-teacher without multi-token mode), always
+    # use the first response token — this matches the cached-teacher path which
+    # always built the graph on the prompt predicting the first response token.
+    # KL-based selection is only used for explicit --compare-n-tokens mode, where
+    # N > 1 requires ranking positions by disagreement.
     logit_positions = [pos - 1 for pos in response_positions]
     n_select = min(n_tokens, len(response_positions))
-    if config.compare_token_selection == "teacher_entropy":
+    if config.compare_n_tokens is None:
+        selected_positions = [response_positions[0]]
+        selection_metric_key = "compare_tokens_selection_first"
+    elif config.compare_token_selection == "teacher_entropy":
         entropy_vals = _entropy_per_position(
             teacher_logits[logit_positions],
             temperature=config.temperature,
         )
         top_local = torch.topk(entropy_vals, n_select, largest=False).indices.tolist()
+        selected_positions = [response_positions[i] for i in top_local]
         selection_metric_key = "compare_tokens_selection_entropy"
     else:
         kl_vals = _kl_per_position(
@@ -482,8 +491,8 @@ def compute_prompt_graph_loss_compare_tokens(
             temperature=config.temperature,
         )
         top_local = torch.topk(kl_vals, n_select).indices.tolist()
+        selected_positions = [response_positions[i] for i in top_local]
         selection_metric_key = "compare_tokens_selection_kl"
-    selected_positions = [response_positions[i] for i in top_local]
 
     # For each selected response token at pos, build the graph on the causal
     # prefix input_ids[:pos] with target_position=-1. This is equivalent to
