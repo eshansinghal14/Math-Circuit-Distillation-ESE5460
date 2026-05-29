@@ -483,7 +483,6 @@ def compute_prompt_graph_loss_compare_tokens(
             node_labels=config.student_graph_labels or [],
             include_arg_nodes=True,
             batch_size=config.teacher_graph_batch_size,
-            verbose=config.verbose,
         )
 
     student_shared = build_shared_context(
@@ -499,7 +498,6 @@ def compute_prompt_graph_loss_compare_tokens(
         node_labels=config.student_graph_labels or [],
         include_arg_nodes=True,
         batch_size=config.student_graph_batch_size,
-        verbose=config.verbose,
     )
 
     # For each selected position, compute graphs and graph loss.
