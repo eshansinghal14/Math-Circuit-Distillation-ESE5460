@@ -354,8 +354,6 @@ def build_shared_context(
             adapter.tokenizer,
             input_ids,
             nodes_per_token=anova_nodes_per_label,
-            batch_size=batch_size,
-            fast_inner_product=True,
         )
         for sn in token_raw_supernodes:
             all_selected.update(sn)
