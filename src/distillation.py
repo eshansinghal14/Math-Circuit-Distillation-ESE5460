@@ -340,6 +340,16 @@ class DistillationTrainer:
             from graph_loss.hf_adapter import HFLlamaGraphAdapter
             from graph_loss.training import GraphAuxConfig
 
+            # When debug-comparing live teacher graphs to the cache, read the
+            # original cache hyperparameters so generate_teacher_sample uses the
+            # same node_labels and dataset as the original cache generation run.
+            teacher_graph_labels = None
+            teacher_dataset = None
+            if config.debug_compare_teacher_graphs and self.teacher_data_cache is not None:
+                hp = self.teacher_data_cache.manifest.get("hyperparameters", {})
+                teacher_graph_labels = hp.get("graph_node_labels")
+                teacher_dataset = hp.get("dataset") or hp.get("dataset_file")
+
             self.graph_loss_config = GraphAuxConfig(
                 lambda_graph=config.lambda_graph,
                 graph_dtype=config.graph_dtype,
@@ -362,6 +372,8 @@ class DistillationTrainer:
                 student_graph_labels=config.graph_node_labels,
                 tokens_dla_nodes=config.tokens_dla_nodes,
                 compare_n_tokens=config.compare_n_tokens,
+                teacher_graph_labels=teacher_graph_labels,
+                teacher_dataset=teacher_dataset,
                 debug_compare_teacher_graphs=config.debug_compare_teacher_graphs,
             )
 

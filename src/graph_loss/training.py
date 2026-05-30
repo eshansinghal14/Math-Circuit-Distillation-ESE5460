@@ -8,7 +8,6 @@ from typing import Any, Literal
 
 import torch
 
-from graph_loss.create_graph import create_graph
 from graph_loss.graph import SuperGraph, normalize_matrix
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
 from graph_loss.loss import compute_graph_loss
@@ -57,6 +56,8 @@ class GraphAuxConfig:
     teacher_anova_nodes_per_label: int = 10
     teacher_sum_min_specificity: float = 0.0
     teacher_graph_labels: list[str] | None = None
+    # Dataset used when generating the teacher cache (for ANOVA labeling in debug comparison).
+    teacher_dataset: str | None = None
     # Diagnostic: build teacher graph live and compare to cached version.
     debug_compare_teacher_graphs: bool = False
 
@@ -153,73 +154,57 @@ def _debug_compare_teacher_graphs(
     else:
         print(f"  dla_logits top5 idx: None")
 
-    # Build teacher graph live — same call as generate_teacher_data.py (string prompt → BOS added by ensure_tokenized).
+    # Use generate_teacher_sample — the exact same code path as cache generation —
+    # so that node_labels, dataset, and attribution_targets all match.
+    from graph_loss.generate_teacher_data import generate_teacher_sample
+
     print(f"\n  [live teacher] building graph (prop_neurons={config.teacher_prop_neurons_per_layer})...")
     t0 = time.perf_counter()
     try:
-        with torch.enable_grad():
-            live_result = create_graph(
-                teacher_adapter,
-                prompt,
-                attribution_targets=(
-                    cached_teacher.logit_token_ids.cpu()
-                    if cached_teacher.logit_token_ids is not None
-                    else None
-                ),
-                prop_neurons_per_layer=config.teacher_prop_neurons_per_layer,
-                top_k_logits=config.top_k_logits,
-                temperature=config.temperature,
-                batch_size=config.teacher_graph_batch_size,
-                dtype=config.graph_dtype,
-                verbose=False,
-                build_create_graph=False,
-                detach_result=True,
-                skip_logit_attribution=False,
-                include_dla_node=config.tokens_dla_nodes,
-                dla_model_logits=None,  # Match cache generation: use model's own BOS-prefixed logits
-                include_arg_nodes=config.tokens_dla_nodes,
-                no_grad_supergraph=True,
-                anova_nodes_per_label=config.teacher_anova_nodes_per_label,
-                anova_range_radius=config.teacher_anova_range_radius,
-                sum_min_specificity=config.teacher_sum_min_specificity,
-                node_labels=config.teacher_graph_labels or None,
-            )
+        live_data = generate_teacher_sample(
+            teacher_adapter,
+            prompt,
+            0,  # answer unused: causal masking makes prompt-position logits answer-independent
+            top_k_logits=config.top_k_logits,
+            temperature=config.temperature,
+            prop_neurons_per_layer=config.teacher_prop_neurons_per_layer,
+            batch_size=config.teacher_graph_batch_size,
+            dataset=config.teacher_dataset,
+            anova_nodes_per_label=config.teacher_anova_nodes_per_label,
+            anova_range_radius=config.teacher_anova_range_radius,
+            sum_min_specificity=config.teacher_sum_min_specificity,
+            node_labels=config.teacher_graph_labels,
+            include_dla_node=config.tokens_dla_nodes,
+            include_arg_nodes=config.tokens_dla_nodes,
+        )
     except Exception as exc:
         print(f"  ERROR building live teacher graph: {exc}")
         return
     print(f"  [live teacher] done in {time.perf_counter() - t0:.2f}s")
 
-    live_sg = live_result.supergraph
-    live_graph = live_result.graph
+    live_sg = live_data.supergraph
     live_labels = [lab[0] if lab else "?" for lab in (live_sg.supernode_labels or [])]
     live_adj = live_sg.supernode_adjacency_matrix.float().cpu()
-    live_logit_ids = [t.vocab_idx for t in live_graph.logit_targets]
-
-    # Compute DLA logits the same way as generate_teacher_data.py: no-BOS prompt-only
-    # forward, last position. This matches cached teacher_dla_logits so the comparison
-    # is apples-to-apples (target_position_logits uses BOS → different RoPE positions).
-    _tok = teacher_adapter.tokenizer
-    with torch.no_grad():
-        _prompt_ids = _tok(prompt, return_tensors="pt", add_special_tokens=False)["input_ids"]
-        _prompt_ids = _prompt_ids.to(teacher_adapter.cfg.device)
-        _out = teacher_adapter.model(_prompt_ids)
-        _live_logits_raw = (_out.logits if hasattr(_out, "logits") else _out).squeeze(0)
-        live_dla_logits = _live_logits_raw[-1].detach().cpu()
+    live_logit_ids = live_data.logit_token_ids.cpu().tolist() if live_data.logit_token_ids is not None else []
+    live_dla_logits = live_data.teacher_dla_logits.float().cpu() if live_data.teacher_dla_logits is not None else None
 
     print(f"\n--- LIVE TEACHER ---")
     print(f"  n_supernodes : {len(live_sg.supernodes)}")
-    print(f"  n_neurons    : {live_graph.n_neurons}")
+    print(f"  n_neurons    : {sum(len(sn) for sn in live_sg.supernodes)}")
     print(f"  labels       : {live_labels}")
     print(f"  adj shape    : {tuple(live_adj.shape)}")
     print(f"  adj stats    : {_adj_stats(live_adj)}")
     print(f"  row L1 norms : {_row_norms(live_adj)}")
     print(f"  logit_tok_ids: {live_logit_ids[:15]}")
-    if live_logit_ids:
+    if live_logit_ids and live_dla_logits is not None:
         _ids = torch.tensor(live_logit_ids[:15], dtype=torch.long)
         _vals = live_dla_logits[_ids]
         print(f"  logit_vals   : {[f'{v:.3f}' for v in _vals.tolist()]}")
-    top5 = live_dla_logits.float().topk(5)
-    print(f"  dla_logits top5 idx: {top5.indices.tolist()} vals: {[f'{v:.3f}' for v in top5.values.tolist()]}")
+    if live_dla_logits is not None:
+        top5 = live_dla_logits.topk(5)
+        print(f"  dla_logits top5 idx: {top5.indices.tolist()} vals: {[f'{v:.3f}' for v in top5.values.tolist()]}")
+    else:
+        print(f"  dla_logits top5 idx: None")
 
     # Label diff
     cached_label_set = set(cached_labels)
@@ -305,7 +290,7 @@ def _debug_compare_teacher_graphs(
         print(f"  difference (live − cached): {live_loss - cached_loss:+.4f}")
 
     print(div + "\n")
-    del live_result
+    del live_data
     gc.collect()
 
 
