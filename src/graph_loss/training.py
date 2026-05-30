@@ -195,6 +195,17 @@ def _debug_compare_teacher_graphs(
     live_adj = live_sg.supernode_adjacency_matrix.float().cpu()
     live_logit_ids = [t.vocab_idx for t in live_graph.logit_targets]
 
+    # Compute DLA logits the same way as generate_teacher_data.py: no-BOS prompt-only
+    # forward, last position. This matches cached teacher_dla_logits so the comparison
+    # is apples-to-apples (target_position_logits uses BOS → different RoPE positions).
+    _tok = teacher_adapter.tokenizer
+    with torch.no_grad():
+        _prompt_ids = _tok(prompt, return_tensors="pt", add_special_tokens=False)["input_ids"]
+        _prompt_ids = _prompt_ids.to(teacher_adapter.cfg.device)
+        _out = teacher_adapter.model(_prompt_ids)
+        _live_logits_raw = (_out.logits if hasattr(_out, "logits") else _out).squeeze(0)
+        live_dla_logits = _live_logits_raw[-1].detach().cpu()
+
     print(f"\n--- LIVE TEACHER ---")
     print(f"  n_supernodes : {len(live_sg.supernodes)}")
     print(f"  n_neurons    : {live_graph.n_neurons}")
@@ -203,13 +214,12 @@ def _debug_compare_teacher_graphs(
     print(f"  adj stats    : {_adj_stats(live_adj)}")
     print(f"  row L1 norms : {_row_norms(live_adj)}")
     print(f"  logit_tok_ids: {live_logit_ids[:15]}")
-    if live_result.target_position_logits is not None and live_logit_ids:
+    if live_logit_ids:
         _ids = torch.tensor(live_logit_ids[:15], dtype=torch.long)
-        _vals = live_result.target_position_logits.float().cpu()[_ids]
+        _vals = live_dla_logits[_ids]
         print(f"  logit_vals   : {[f'{v:.3f}' for v in _vals.tolist()]}")
-    if live_result.target_position_logits is not None:
-        top5 = live_result.target_position_logits.float().topk(5)
-        print(f"  dla_logits top5 idx: {top5.indices.tolist()} vals: {[f'{v:.3f}' for v in top5.values.tolist()]}")
+    top5 = live_dla_logits.float().topk(5)
+    print(f"  dla_logits top5 idx: {top5.indices.tolist()} vals: {[f'{v:.3f}' for v in top5.values.tolist()]}")
     else:
         print(f"  dla_logits top5 idx: None")
 
