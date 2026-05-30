@@ -30,6 +30,7 @@ from graph_loss.neuron_activation_heatmap import (
 class GraphPipelineResult:
     graph: Graph
     supergraph: SuperGraph
+    target_position_logits: torch.Tensor | None = None  # logits at target position; used for student DLA selection
 
 
 @dataclass
@@ -559,7 +560,8 @@ def create_graph_at_position(
 
     _log_supergraph_summary(graph, supergraph, logger=_logger)
     _log_pipeline_comparison(graph, supergraph, logger=_logger)
-    return GraphPipelineResult(graph=graph, supergraph=supergraph)
+    target_position_logits = shared.ctx.logits[0, target_position].detach()
+    return GraphPipelineResult(graph=graph, supergraph=supergraph, target_position_logits=target_position_logits)
 
 
 # ---------------------------------------------------------------------------
@@ -692,3 +694,58 @@ def create_graph(
         verbose=verbose,
         logger=_logger,
     )
+
+
+def build_teacher_supergraph(
+    adapter: "HFLlamaGraphAdapter",
+    prompt: str,
+    *,
+    prop_neurons_per_layer: float = 0.1,
+    top_k_logits: float | None = 0.95,
+    temperature: float = 2.0,
+    batch_size: int = 256,
+    dtype: torch.dtype | None = None,
+    include_dla_node: bool = False,
+    include_arg_nodes: bool = False,
+    anova_nodes_per_label: int = 10,
+    anova_range_radius: int = 0,
+    sum_min_specificity: float = 0.0,
+    node_labels: list[str] | None = None,
+    dataset: str | None = None,
+    mlp_input_cache: dict | None = None,
+    model_name: str | None = None,
+    verbose: bool = False,
+    logger: logging.Logger | None = None,
+) -> GraphPipelineResult:
+    """Build a teacher supergraph. Shared entry point for cache generation and live training.
+
+    Uses the same parameters and code path in both contexts, guaranteeing that
+    live teacher graphs during distillation are identical to the pre-cached ones.
+    ``target_position_logits`` in the result holds the teacher's raw logit vector
+    at the last prompt position, for use as the student's DLA reference.
+    """
+    with torch.enable_grad():
+        return create_graph(
+            adapter,
+            prompt,
+            top_k_logits=top_k_logits,
+            temperature=temperature,
+            prop_neurons_per_layer=prop_neurons_per_layer,
+            batch_size=batch_size,
+            dtype=dtype,
+            verbose=verbose,
+            dataset=dataset,
+            mlp_input_cache=mlp_input_cache,
+            model_name=model_name,
+            anova_nodes_per_label=anova_nodes_per_label,
+            anova_range_radius=anova_range_radius,
+            sum_min_specificity=sum_min_specificity,
+            node_labels=node_labels,
+            include_dla_node=include_dla_node,
+            include_arg_nodes=include_arg_nodes,
+            no_grad_supergraph=True,
+            build_create_graph=False,
+            detach_result=True,
+            skip_logit_attribution=False,
+            logger=logger,
+        )

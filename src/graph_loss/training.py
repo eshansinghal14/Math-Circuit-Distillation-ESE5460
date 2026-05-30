@@ -524,6 +524,24 @@ def _load_cached_teacher(
     )
 
 
+def _live_teacher_to_cached(
+    result: "GraphPipelineResult",
+    device: torch.device,
+) -> CachedTeacherPromptData:
+    """Wrap a live-built GraphPipelineResult as CachedTeacherPromptData for compute_prompt_graph_loss."""
+    from graph_loss.graph import SuperGraph  # local import to avoid circular
+
+    return CachedTeacherPromptData(
+        supergraph=result.supergraph,
+        logit_token_ids=result.graph.logit_token_ids.to(device),
+        teacher_dla_logits=(
+            result.target_position_logits.to(device)
+            if result.target_position_logits is not None
+            else None
+        ),
+    )
+
+
 def backward_batch_graph_loss(
     *,
     prompts: list[str],
@@ -531,15 +549,24 @@ def backward_batch_graph_loss(
     config: GraphAuxConfig,
     device: torch.device,
     loss_scale: float,
-    teacher_cache: TeacherDataCache,
+    teacher_cache: TeacherDataCache | None = None,
+    teacher_adapter: HFLlamaGraphAdapter | None = None,
     answers: list[int],
     debug_teacher_adapter: HFLlamaGraphAdapter | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Compute and backprop graph loss one prompt at a time.
 
+    Accepts either ``teacher_cache`` (pre-generated, loaded from disk) or
+    ``teacher_adapter`` (live, built on-the-fly via build_teacher_supergraph).
+    Exactly one must be provided.
+
     Processes each prompt's attribution graph immediately and backprops before
     building the next, keeping peak memory bounded to a single prompt.
     """
+    if teacher_cache is None and teacher_adapter is None:
+        raise RuntimeError(
+            "backward_batch_graph_loss requires either teacher_cache or teacher_adapter."
+        )
     if not prompts:
         return torch.tensor(0.0, device=device), {}
 
@@ -551,7 +578,29 @@ def backward_batch_graph_loss(
     graph_backward_prompts = 0
 
     for i, prompt in enumerate(prompts):
-        cached = _load_cached_teacher(teacher_cache, prompt, answers[i], device)
+        if teacher_cache is not None:
+            cached = _load_cached_teacher(teacher_cache, prompt, answers[i], device)
+        else:
+            from graph_loss.create_graph import build_teacher_supergraph
+
+            result = build_teacher_supergraph(
+                teacher_adapter,  # type: ignore[arg-type]
+                prompt,
+                prop_neurons_per_layer=config.teacher_prop_neurons_per_layer,
+                top_k_logits=config.top_k_logits,
+                temperature=config.temperature,
+                batch_size=config.teacher_graph_batch_size,
+                dtype=config.graph_dtype,
+                include_dla_node=config.tokens_dla_nodes,
+                include_arg_nodes=config.tokens_dla_nodes,
+                anova_nodes_per_label=config.teacher_anova_nodes_per_label,
+                anova_range_radius=config.teacher_anova_range_radius,
+                sum_min_specificity=config.teacher_sum_min_specificity,
+                verbose=config.verbose,
+            )
+            cached = _live_teacher_to_cached(result, device)
+            del result
+
         prompt_loss, prompt_metrics = compute_prompt_graph_loss(
             prompt=prompt,
             student_adapter=student_adapter,

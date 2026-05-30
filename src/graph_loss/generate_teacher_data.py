@@ -16,7 +16,7 @@ from transformers import AutoTokenizer
 from transformers import AutoModelForCausalLM
 from graph_loss.create_graph import (
     GraphPipelineResult,
-    create_graph,
+    build_teacher_supergraph,
     save_supergraph,
 )
 
@@ -198,7 +198,7 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
 
         logger.info("Generating teacher data for sample %d: %r", sample_idx, prompt)
 
-        result: GraphPipelineResult = create_graph(
+        result: GraphPipelineResult = build_teacher_supergraph(
             adapter,
             prompt,
             top_k_logits=config.top_k_logits,
@@ -215,7 +215,6 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
             node_labels=config.graph_node_labels,
             include_dla_node=config.include_dla_node,
             include_arg_nodes=config.include_arg_nodes,
-            no_grad_supergraph=True,
             logger=logger,
         )
 

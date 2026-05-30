@@ -320,12 +320,11 @@ class DistillationTrainer:
         self.teacher_graph_model = None
         self.teacher_graph_adapter = None
 
-        # Live teacher is needed when: compare-n-tokens mode, tokens-dla-nodes without
-        # a cache, KL-only mode (no graph loss and no cache), or debug-compare mode.
+        # Live teacher is needed when: compare-n-tokens mode, no cache (any graph/KL
+        # path), or debug-compare mode.
         need_live_teacher = (
             config.compare_n_tokens is not None
-            or (config.tokens_dla_nodes and self.teacher_data_cache is None)
-            or (self.teacher_data_cache is None and not self._use_graph)
+            or self.teacher_data_cache is None
             or config.debug_compare_teacher_graphs
         )
         if need_live_teacher:
@@ -383,7 +382,7 @@ class DistillationTrainer:
                 self.device,
             )
 
-            if self.teacher is not None and (config.tokens_dla_nodes or config.debug_compare_teacher_graphs):
+            if self.teacher is not None and (config.tokens_dla_nodes or config.debug_compare_teacher_graphs or self.teacher_data_cache is None):
                 self.teacher_graph_adapter = HFLlamaGraphAdapter(
                     self.teacher,
                     self.tokenizer,
@@ -565,8 +564,6 @@ class DistillationTrainer:
                     loss_scale=1.0 if use_grad_norm_scale else self.config.lambda_graph,
                 )
             else:
-                if self.teacher_data_cache is None:
-                    raise RuntimeError("Graph loss requires --teacher-data-cache.")
                 from graph_loss.training import backward_batch_graph_loss
 
                 graph_loss, graph_metrics = backward_batch_graph_loss(
@@ -576,6 +573,11 @@ class DistillationTrainer:
                     device=self.device,
                     loss_scale=1.0 if use_grad_norm_scale else self.config.lambda_graph,
                     teacher_cache=self.teacher_data_cache,
+                    teacher_adapter=(
+                        self.teacher_graph_adapter
+                        if self.teacher_data_cache is None
+                        else None
+                    ),
                     answers=batch["answers"],
                     debug_teacher_adapter=(
                         self.teacher_graph_adapter
