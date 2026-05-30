@@ -116,6 +116,73 @@ def _compute_teacher_logits(adapter: HFLlamaGraphAdapter, input_ids: torch.Tenso
     return logits.squeeze(0).detach().cpu()
 
 
+def generate_teacher_sample(
+    adapter: HFLlamaGraphAdapter,
+    prompt: str,
+    answer: int | str,
+    *,
+    top_k_logits: float | None = 0.95,
+    temperature: float = 2.0,
+    prop_neurons_per_layer: float = 0.1,
+    batch_size: int = 256,
+    verbose: bool = False,
+    dataset: str | None = None,
+    mlp_input_cache: dict | None = None,
+    model_name: str | None = None,
+    anova_nodes_per_label: int = 10,
+    anova_range_radius: int = 0,
+    sum_min_specificity: float = 0.0,
+    node_labels: list[str] | None = None,
+    include_dla_node: bool = False,
+    include_arg_nodes: bool = False,
+    logger: logging.Logger | None = None,
+) -> "CachedTeacherPromptData":
+    """Generate teacher data for one sample in-memory — same logic as generate_teacher_data.py.
+
+    Builds the supergraph and computes full-sequence teacher logits (for DLA selection)
+    without writing anything to disk. Returns a CachedTeacherPromptData ready for use
+    in compute_prompt_graph_loss.
+    """
+    from graph_loss.training import CachedTeacherPromptData
+
+    _logger = logger or logging.getLogger(__name__)
+
+    result: GraphPipelineResult = build_teacher_supergraph(
+        adapter,
+        prompt,
+        top_k_logits=top_k_logits,
+        temperature=temperature,
+        prop_neurons_per_layer=prop_neurons_per_layer,
+        batch_size=batch_size,
+        verbose=verbose,
+        dataset=dataset,
+        mlp_input_cache=mlp_input_cache,
+        model_name=model_name,
+        anova_nodes_per_label=anova_nodes_per_label,
+        anova_range_radius=anova_range_radius,
+        sum_min_specificity=sum_min_specificity,
+        node_labels=node_labels,
+        include_dla_node=include_dla_node,
+        include_arg_nodes=include_arg_nodes,
+        logger=_logger,
+    )
+
+    distill_tensors = _build_distillation_tensors(prompt, answer, adapter.tokenizer)
+    _logger.info("Computing full-sequence teacher logits for DLA selection")
+    full_logits = _compute_teacher_logits(adapter, distill_tensors["input_ids"])
+
+    prompt_len = distill_tensors["prompt_len"]
+    teacher_dla_logits: torch.Tensor | None = None
+    if prompt_len > 0 and full_logits.shape[0] >= prompt_len:
+        teacher_dla_logits = full_logits[prompt_len - 1].to(adapter.cfg.device)
+
+    return CachedTeacherPromptData(
+        supergraph=result.supergraph,
+        logit_token_ids=result.graph.logit_token_ids.to(adapter.cfg.device),
+        teacher_dla_logits=teacher_dla_logits,
+    )
+
+
 def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
     logger = logging.getLogger(__name__)
     store_path = os.path.abspath(config.store_path)

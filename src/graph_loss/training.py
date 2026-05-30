@@ -724,25 +724,24 @@ def backward_batch_graph_loss(
                 debug_teacher_adapter=debug_teacher_adapter,
             )
         else:
-            from graph_loss.create_graph import build_teacher_supergraph
+            from graph_loss.generate_teacher_data import generate_teacher_sample
 
-            result = build_teacher_supergraph(
+            cached = generate_teacher_sample(
                 teacher_adapter,  # type: ignore[arg-type]
                 prompt,
+                answers[i],
                 prop_neurons_per_layer=config.teacher_prop_neurons_per_layer,
                 top_k_logits=config.top_k_logits,
                 temperature=config.temperature,
                 batch_size=config.teacher_graph_batch_size,
-                dtype=config.graph_dtype,
                 include_dla_node=config.tokens_dla_nodes,
                 include_arg_nodes=config.tokens_dla_nodes,
                 anova_nodes_per_label=config.teacher_anova_nodes_per_label,
                 anova_range_radius=config.teacher_anova_range_radius,
                 sum_min_specificity=config.teacher_sum_min_specificity,
+                node_labels=config.teacher_graph_labels or None,
                 verbose=config.verbose,
             )
-            cached = _live_teacher_to_cached(result, device)
-            del result
             prompt_loss, prompt_metrics = compute_prompt_graph_loss(
                 prompt=prompt,
                 student_adapter=student_adapter,
