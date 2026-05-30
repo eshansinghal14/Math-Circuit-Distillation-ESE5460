@@ -134,17 +134,20 @@ def _debug_compare_teacher_graphs(
     def _row_norms(adj: torch.Tensor) -> list[str]:
         return [f"{v:.4f}" for v in adj.abs().sum(dim=1).tolist()]
 
+    cached_n_neurons = sum(len(sn) for sn in cached_sg.supernodes)
     print(f"\n--- CACHED TEACHER ---")
     print(f"  n_supernodes : {cached_n}")
+    print(f"  n_neurons    : {cached_n_neurons}")
     print(f"  labels       : {cached_labels}")
     print(f"  adj shape    : {tuple(cached_adj.shape)}")
     print(f"  adj stats    : {_adj_stats(cached_adj)}")
     print(f"  row L1 norms : {_row_norms(cached_adj)}")
-    if cached_teacher.logit_token_ids is not None:
-        print(f"  logit_tok_ids: {cached_teacher.logit_token_ids.tolist()[:15]}")
+    print(f"  logit_tok_ids: {cached_teacher.logit_token_ids.tolist()[:15] if cached_teacher.logit_token_ids is not None else None}")
     if cached_teacher.teacher_dla_logits is not None:
         top5 = cached_teacher.teacher_dla_logits.float().topk(5)
         print(f"  dla_logits top5 idx: {top5.indices.tolist()} vals: {[f'{v:.3f}' for v in top5.values.tolist()]}")
+    else:
+        print(f"  dla_logits top5 idx: None")
 
     # Build teacher graph live — same call as generate_teacher_data.py (string prompt → BOS added by ensure_tokenized).
     print(f"\n  [live teacher] building graph (prop_neurons={config.teacher_prop_neurons_per_layer})...")
@@ -172,6 +175,10 @@ def _debug_compare_teacher_graphs(
                 dla_model_logits=None,  # Match cache generation: use model's own BOS-prefixed logits
                 include_arg_nodes=config.tokens_dla_nodes,
                 no_grad_supergraph=True,
+                anova_nodes_per_label=config.teacher_anova_nodes_per_label,
+                anova_range_radius=config.teacher_anova_range_radius,
+                sum_min_specificity=config.teacher_sum_min_specificity,
+                node_labels=config.teacher_graph_labels or None,
             )
     except Exception as exc:
         print(f"  ERROR building live teacher graph: {exc}")
@@ -192,9 +199,11 @@ def _debug_compare_teacher_graphs(
     print(f"  adj stats    : {_adj_stats(live_adj)}")
     print(f"  row L1 norms : {_row_norms(live_adj)}")
     print(f"  logit_tok_ids: {live_logit_ids[:15]}")
-    live_top5 = live_graph.logit_probabilities.float().topk(min(5, len(live_logit_ids)))
-    print(f"  top5 logit probs: idx={[live_logit_ids[i] for i in live_top5.indices.tolist()]} "
-          f"probs={[f'{v:.3f}' for v in live_top5.values.tolist()]}")
+    if live_result.target_position_logits is not None:
+        top5 = live_result.target_position_logits.float().topk(5)
+        print(f"  dla_logits top5 idx: {top5.indices.tolist()} vals: {[f'{v:.3f}' for v in top5.values.tolist()]}")
+    else:
+        print(f"  dla_logits top5 idx: None")
 
     # Label diff
     cached_label_set = set(cached_labels)
