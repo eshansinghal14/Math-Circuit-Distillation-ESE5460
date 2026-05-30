@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 import torch
 
+from graph_loss.create_graph import create_graph
 from graph_loss.graph import SuperGraph, normalize_matrix
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
 from graph_loss.loss import compute_graph_loss
