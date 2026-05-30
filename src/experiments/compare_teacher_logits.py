@@ -130,7 +130,10 @@ def main() -> None:
         print(f"  Mean absolute diff at position {pos}: {diff.mean().item():.6f}")
 
     overall_diff = (cached_logits - live_logits).abs()
+    row_l1 = overall_diff.sum(dim=-1)  # [seq_len] — L1 norm per token position
+    row_l1_strs = [f"{v:.4f}" for v in row_l1.tolist()]
     print("\n" + "=" * 70)
+    print(f"  Row L1 norms (cached - live, one per token): {row_l1_strs}")
     print(f"  Overall max  |cached - live|: {overall_diff.max().item():.6f}")
     print(f"  Overall mean |cached - live|: {overall_diff.mean().item():.6f}")
     print("=" * 70)
