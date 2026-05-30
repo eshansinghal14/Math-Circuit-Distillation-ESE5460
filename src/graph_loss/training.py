@@ -143,6 +143,10 @@ def _debug_compare_teacher_graphs(
     print(f"  adj stats    : {_adj_stats(cached_adj)}")
     print(f"  row L1 norms : {_row_norms(cached_adj)}")
     print(f"  logit_tok_ids: {cached_teacher.logit_token_ids.tolist()[:15] if cached_teacher.logit_token_ids is not None else None}")
+    if cached_teacher.logit_token_ids is not None and cached_teacher.teacher_dla_logits is not None:
+        _ids = cached_teacher.logit_token_ids[:15]
+        _vals = cached_teacher.teacher_dla_logits.float()[_ids]
+        print(f"  logit_vals   : {[f'{v:.3f}' for v in _vals.tolist()]}")
     if cached_teacher.teacher_dla_logits is not None:
         top5 = cached_teacher.teacher_dla_logits.float().topk(5)
         print(f"  dla_logits top5 idx: {top5.indices.tolist()} vals: {[f'{v:.3f}' for v in top5.values.tolist()]}")
@@ -199,6 +203,10 @@ def _debug_compare_teacher_graphs(
     print(f"  adj stats    : {_adj_stats(live_adj)}")
     print(f"  row L1 norms : {_row_norms(live_adj)}")
     print(f"  logit_tok_ids: {live_logit_ids[:15]}")
+    if live_result.target_position_logits is not None and live_logit_ids:
+        _ids = torch.tensor(live_logit_ids[:15], dtype=torch.long)
+        _vals = live_result.target_position_logits.float().cpu()[_ids]
+        print(f"  logit_vals   : {[f'{v:.3f}' for v in _vals.tolist()]}")
     if live_result.target_position_logits is not None:
         top5 = live_result.target_position_logits.float().topk(5)
         print(f"  dla_logits top5 idx: {top5.indices.tolist()} vals: {[f'{v:.3f}' for v in top5.values.tolist()]}")

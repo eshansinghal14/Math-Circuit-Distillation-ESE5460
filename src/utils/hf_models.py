@@ -68,7 +68,7 @@ def load_model(model_name):
     try:
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            dtype=torch.float16 if device.type == "cuda" else None,
+            torch_dtype=torch.float32,
             **local_kwargs,
         ).to(device)
         tokenizer = AutoTokenizer.from_pretrained(model_name, **local_kwargs)
