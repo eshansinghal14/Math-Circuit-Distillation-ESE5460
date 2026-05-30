@@ -384,15 +384,6 @@ def _compare_tokens_loss_for_prompt(
     response_end = int(input_ids.numel())
 
     eos_id = tokenizer.eos_token_id
-    # TODO: remove this exclusion once compare_n_tokens is verified
-    response_positions = [
-        pos for pos in range(response_start, response_end)
-        if input_ids[pos].item() != eos_id
-    ]
-    if not response_positions:
-        raise RuntimeError(
-            f"compare_n_tokens: no non-EOS response tokens for prompt={prompt!r}"
-        )
 
     # Forward passes (no grad) to get logits for KL-based position selection.
     with torch.no_grad():
