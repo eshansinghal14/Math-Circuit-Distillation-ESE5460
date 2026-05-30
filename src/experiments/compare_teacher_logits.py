@@ -72,8 +72,8 @@ def _compare_supergraphs(cached: CachedTeacherPromptData, live: CachedTeacherPro
     print("=" * 70)
 
     # --- adjacency matrix ---
-    ca = cached.supergraph.supernode_adjacency_matrix.float()
-    la = live.supergraph.supernode_adjacency_matrix.float()
+    ca = cached.supergraph.supernode_adjacency_matrix.float().cpu()
+    la = live.supergraph.supernode_adjacency_matrix.float().cpu()
     print(f"\n  Cached adjacency shape : {tuple(ca.shape)}")
     print(f"  Live   adjacency shape : {tuple(la.shape)}")
 
