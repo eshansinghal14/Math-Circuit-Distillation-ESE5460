@@ -175,7 +175,6 @@ class DistillationConfig:
     graph_node_labels: Optional[List[str]] = None
     tokens_dla_nodes: bool = False
     compare_n_tokens: Optional[int] = None
-    compare_token_selection: Literal["kl", "teacher_entropy"] = "kl"
     skip_baseline_eval: bool = False
     debug_compare_teacher_graphs: bool = False
 
@@ -306,32 +305,24 @@ class DistillationTrainer:
         self.student = self.student.to(self.device).float()
         self.student.train()
 
-        # Validate new args.
-        if config.compare_n_tokens is not None:
-            if not config.tokens_dla_nodes:
-                raise ValueError("--compare-n-tokens requires --tokens-dla-nodes.")
-            if config.teacher_data_cache is not None:
-                raise ValueError(
-                    "--compare-n-tokens is incompatible with --teacher-data-cache. "
-                    "Remove --teacher-data-cache to use live teacher computation."
-                )
+        if config.compare_n_tokens is not None and config.teacher_data_cache is not None:
+            raise ValueError(
+                "--compare-n-tokens is incompatible with --teacher-data-cache. "
+                "Remove --teacher-data-cache to use live teacher computation."
+            )
 
         self.teacher = None
         self.teacher_graph_model = None
         self.teacher_graph_adapter = None
 
-        # Live teacher is needed when: compare-n-tokens mode, no cache (any graph/KL
-        # path), or debug-compare mode.
         need_live_teacher = (
-            config.compare_n_tokens is not None
-            or self.teacher_data_cache is None
+            self.teacher_data_cache is None
             or config.debug_compare_teacher_graphs
         )
         if need_live_teacher:
             mode_tag = (
-                "compare-n-tokens" if config.compare_n_tokens is not None
-                else "debug-compare" if config.debug_compare_teacher_graphs
-                else "live-teacher" if config.tokens_dla_nodes
+                "debug-compare" if config.debug_compare_teacher_graphs
+                else "live-teacher" if self._use_graph
                 else "kl-only"
             )
             print(f"Loading teacher ({mode_tag} mode): {config.teacher_model}")
@@ -343,7 +334,6 @@ class DistillationTrainer:
         elif self.teacher_data_cache is not None:
             print(f"Using cached teacher data: {config.teacher_data_cache}")
 
-        self._cached_kl_logits: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
         self.graph_loss_config = None
         self.student_graph_adapter = None
         if self._use_graph:
@@ -372,7 +362,6 @@ class DistillationTrainer:
                 student_graph_labels=config.graph_node_labels,
                 tokens_dla_nodes=config.tokens_dla_nodes,
                 compare_n_tokens=config.compare_n_tokens,
-                compare_token_selection=config.compare_token_selection,
                 debug_compare_teacher_graphs=config.debug_compare_teacher_graphs,
             )
 
@@ -506,13 +495,6 @@ class DistillationTrainer:
         teacher_logits = self._teacher_logits_for_batch(batch, input_ids, attention_mask)
         student_logits = self.student(input_ids=input_ids, attention_mask=attention_mask).logits
 
-        # Cache full logit tensors for live-teacher graph loss (compare-n-tokens or
-        # tokens-dla-nodes without a cache, both of which use _run_compare_tokens_graph_loss).
-        if self.config.compare_n_tokens is not None or (
-            self.config.tokens_dla_nodes and self.teacher_data_cache is None
-        ):
-            self._cached_kl_logits = (teacher_logits.detach(), student_logits.detach())
-
         loss = kl_loss(
             student_logits,
             teacher_logits,
@@ -554,37 +536,27 @@ class DistillationTrainer:
             }
 
         try:
-            use_live_teacher = (
-                self.config.compare_n_tokens is not None
-                or (self.config.tokens_dla_nodes and self.teacher_data_cache is None)
-            )
-            if use_live_teacher:
-                graph_loss, graph_metrics = self._run_compare_tokens_graph_loss(
-                    batch=batch,
-                    loss_scale=1.0 if use_grad_norm_scale else self.config.lambda_graph,
-                )
-            else:
-                from graph_loss.training import backward_batch_graph_loss
+            from graph_loss.training import backward_batch_graph_loss
 
-                graph_loss, graph_metrics = backward_batch_graph_loss(
-                    prompts=batch["prompts"],
-                    student_adapter=self.student_graph_adapter,
-                    config=self.graph_loss_config,
-                    device=self.device,
-                    loss_scale=1.0 if use_grad_norm_scale else self.config.lambda_graph,
-                    teacher_cache=self.teacher_data_cache,
-                    teacher_adapter=(
-                        self.teacher_graph_adapter
-                        if self.teacher_data_cache is None
-                        else None
-                    ),
-                    answers=batch["answers"],
-                    debug_teacher_adapter=(
-                        self.teacher_graph_adapter
-                        if self.config.debug_compare_teacher_graphs
-                        else None
-                    ),
-                )
+            graph_loss, graph_metrics = backward_batch_graph_loss(
+                prompts=batch["prompts"],
+                student_adapter=self.student_graph_adapter,
+                config=self.graph_loss_config,
+                device=self.device,
+                loss_scale=1.0 if use_grad_norm_scale else self.config.lambda_graph,
+                teacher_cache=self.teacher_data_cache,
+                teacher_adapter=(
+                    self.teacher_graph_adapter
+                    if self.teacher_data_cache is None
+                    else None
+                ),
+                answers=batch["answers"],
+                debug_teacher_adapter=(
+                    self.teacher_graph_adapter
+                    if self.config.debug_compare_teacher_graphs
+                    else None
+                ),
+            )
         except RuntimeError:
             exc_path = os.path.join(self.config.save_dir, "exception_checkpoint")
             os.makedirs(exc_path, exist_ok=True)
@@ -637,67 +609,6 @@ class DistillationTrainer:
             if isinstance(value, (int, float)):
                 metrics[f"graph_{key}"] = float(value)
         return total
-
-    def _run_compare_tokens_graph_loss(
-        self,
-        batch: Dict[str, Any],
-        loss_scale: float,
-    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        """Dispatch to compare-n-tokens graph loss path (live teacher and student)."""
-        from graph_loss.training import backward_batch_graph_loss_compare_tokens
-
-        if self._cached_kl_logits is None:
-            raise RuntimeError(
-                "compare-n-tokens: teacher/student logits not cached. "
-                "Ensure _forward_kl() ran before _backward_graph_loss()."
-            )
-        if self.teacher_graph_adapter is None:
-            raise RuntimeError("compare-n-tokens: teacher_graph_adapter not initialized.")
-
-        teacher_logits_batch, student_logits_batch = self._cached_kl_logits
-        batch_input_ids: torch.Tensor = batch["input_ids"].to(self.device)
-        attention_mask: torch.Tensor = batch["attention_mask"].to(self.device)
-        prompts: List[str] = batch["prompts"]
-
-        # Compute per-example response start indices from prompt lengths.
-        # Must use the raw tokenizer (no BOS prepend) to match AddDataset, which
-        # tokenizes with add_special_tokens=False and no manual BOS insertion.
-        # ensure_tokenized() prepends BOS, inflating the length by 1 relative to
-        # batch_input_ids, which would leak the first response token into the prefix.
-        response_start_indices: List[int] = []
-        for prompt in prompts:
-            prompt_ids_raw = self.tokenizer(
-                prompt,
-                return_tensors="pt",
-                add_special_tokens=False,
-            )["input_ids"].squeeze(0)
-            response_start_indices.append(int(prompt_ids_raw.numel()))
-
-        # True sequence lengths from the attention mask — avoids mistaking
-        # EOS (which equals pad_token_id in LLaMA) as trailing padding.
-        seq_end_indices: List[int] = [
-            int(attention_mask[i].sum().item())
-            for i in range(attention_mask.shape[0])
-        ]
-
-        # Split batched input_ids into per-example 1-D tensors.
-        input_ids_list: List[torch.Tensor] = [
-            batch_input_ids[i] for i in range(batch_input_ids.shape[0])
-        ]
-
-        return backward_batch_graph_loss_compare_tokens(
-            prompts=prompts,
-            input_ids_batch=input_ids_list,
-            response_start_indices=response_start_indices,
-            teacher_adapter=self.teacher_graph_adapter,
-            student_adapter=self.student_graph_adapter,
-            config=self.graph_loss_config,
-            device=self.device,
-            loss_scale=loss_scale,
-            teacher_logits_batch=teacher_logits_batch,
-            student_logits_batch=student_logits_batch,
-            seq_end_indices=seq_end_indices,
-        )
 
     def _record_step_metrics(self, epoch: int, batch_step: int, metrics: Dict[str, float]) -> None:
         self._train_step += 1
@@ -1374,18 +1285,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="compare_n_tokens",
         help=(
             "Number of top-KL-divergence response tokens to compute graph loss on. "
-            "Requires --tokens-dla-nodes. Incompatible with --teacher-data-cache."
-        ),
-    )
-    parser.add_argument(
-        "--compare-token-selection",
-        choices=["kl", "teacher_entropy"],
-        default="kl",
-        dest="compare_token_selection",
-        help=(
-            "CoT compare-tokens: how to pick which response positions to compute graph loss on. "
-            "'kl' = highest teacher-student KL (current default); "
-            "'teacher_entropy' = lowest teacher entropy (most confident / decisive steps)."
+            "Incompatible with --teacher-data-cache."
         ),
     )
     parser.add_argument(
@@ -1541,7 +1441,6 @@ def main() -> None:
             graph_node_labels=args.graph_node_labels,
             tokens_dla_nodes=args.tokens_dla_nodes,
             compare_n_tokens=args.compare_n_tokens,
-            compare_token_selection=args.compare_token_selection,
             skip_baseline_eval=args.skip_baseline_eval,
             debug_compare_teacher_graphs=args.debug_compare_teacher_graphs,
 

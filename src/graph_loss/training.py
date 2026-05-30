@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 import torch
 
-from graph_loss.create_graph import build_shared_context, create_graph, create_graph_at_position
+from graph_loss.create_graph import create_graph
 from graph_loss.graph import SuperGraph, normalize_matrix
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
 from graph_loss.loss import compute_graph_loss
@@ -52,8 +52,7 @@ class GraphAuxConfig:
     student_graph_labels: list[str] | None = None
     tokens_dla_nodes: bool = False
     compare_n_tokens: int | None = None
-    compare_token_selection: Literal["kl", "teacher_entropy"] = "kl"
-    # Teacher-specific ANOVA config (used in compare-n-tokens live-teacher path).
+    # Teacher-specific ANOVA config.
     teacher_anova_range_radius: int = 0
     teacher_anova_nodes_per_label: int = 10
     teacher_sum_min_specificity: float = 0.0
@@ -542,6 +541,109 @@ def _live_teacher_to_cached(
     )
 
 
+def _kl_per_position(
+    teacher_logits: torch.Tensor,
+    student_logits: torch.Tensor,
+    temperature: float,
+) -> torch.Tensor:
+    """KL(teacher || student) per token position. Returns [seq_len] float tensor."""
+    t_probs = torch.softmax(teacher_logits / temperature, dim=-1)
+    s_log_probs = torch.log_softmax(student_logits / temperature, dim=-1)
+    return (t_probs * (t_probs.clamp(min=1e-10).log() - s_log_probs)).sum(dim=-1)
+
+
+def _compare_tokens_loss_for_prompt(
+    *,
+    prompt: str,
+    answer: int,
+    teacher_adapter: HFLlamaGraphAdapter,
+    student_adapter: HFLlamaGraphAdapter,
+    config: GraphAuxConfig,
+    device: torch.device,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Graph loss for one prompt using KL-selected response token positions.
+
+    Tokenizes the full sequence (prompt + answer), selects the top
+    compare_n_tokens response positions by teacher-student KL divergence,
+    then builds separate teacher and student supergraphs for the causal
+    prefix at each selected position using the unified build_teacher_supergraph path.
+    """
+    from graph_loss.create_graph import build_teacher_supergraph
+
+    tokenizer = student_adapter.tokenizer
+    prompt_ids = tokenizer(
+        prompt, return_tensors="pt", add_special_tokens=False
+    )["input_ids"].squeeze(0)
+    answer_ids = tokenizer(
+        str(answer) + tokenizer.eos_token, return_tensors="pt", add_special_tokens=False
+    )["input_ids"].squeeze(0)
+    input_ids = torch.cat([prompt_ids, answer_ids]).to(device)
+    response_start = int(prompt_ids.numel())
+    response_end = int(input_ids.numel())
+
+    response_positions = list(range(response_start, response_end))
+    if not response_positions:
+        raise RuntimeError(
+            f"compare_n_tokens: no response tokens for prompt={prompt!r}"
+        )
+
+    # Forward passes (no grad) to get logits for KL-based position selection.
+    with torch.no_grad():
+        t_logits = teacher_adapter.model(input_ids.unsqueeze(0)).logits.squeeze(0).cpu()
+        s_logits = student_adapter.model(input_ids.unsqueeze(0)).logits.squeeze(0).detach().cpu()
+
+    logit_positions = [pos - 1 for pos in response_positions]
+    n_select = min(config.compare_n_tokens, len(response_positions))
+    kl_vals = _kl_per_position(
+        t_logits[logit_positions], s_logits[logit_positions], config.temperature
+    )
+    selected_positions = [
+        response_positions[i] for i in torch.topk(kl_vals, n_select).indices.tolist()
+    ]
+
+    position_losses: list[torch.Tensor] = []
+    metric_sums: dict[str, float] = {}
+
+    for pos in selected_positions:
+        # Decode prefix IDs to a string so build_teacher_supergraph / create_graph
+        # tokenize it with BOS prepended via ensure_tokenized, matching cache generation.
+        prefix_str = tokenizer.decode(input_ids[:pos].cpu(), skip_special_tokens=True)
+
+        teacher_result = build_teacher_supergraph(
+            teacher_adapter,
+            prefix_str,
+            prop_neurons_per_layer=config.teacher_prop_neurons_per_layer,
+            top_k_logits=config.top_k_logits,
+            temperature=config.temperature,
+            batch_size=config.teacher_graph_batch_size,
+            dtype=config.graph_dtype,
+            include_dla_node=config.tokens_dla_nodes,
+            include_arg_nodes=config.tokens_dla_nodes,
+            anova_nodes_per_label=config.teacher_anova_nodes_per_label,
+            anova_range_radius=config.teacher_anova_range_radius,
+            sum_min_specificity=config.teacher_sum_min_specificity,
+            verbose=config.verbose,
+        )
+        cached = _live_teacher_to_cached(teacher_result, device)
+        del teacher_result
+
+        pos_loss, pos_metrics = compute_prompt_graph_loss(
+            prompt=prefix_str,
+            student_adapter=student_adapter,
+            config=config,
+            cached_teacher=cached,
+        )
+        position_losses.append(pos_loss)
+        for key, val in pos_metrics.items():
+            metric_sums[key] = metric_sums.get(key, 0.0) + float(val)
+
+    avg_loss = torch.stack(position_losses).mean()
+    n_pos = float(len(position_losses))
+    metrics = {k: v / n_pos for k, v in metric_sums.items()}
+    metrics["compare_tokens_n_selected"] = n_pos
+    return avg_loss, metrics
+
+
 def backward_batch_graph_loss(
     *,
     prompts: list[str],
@@ -567,6 +669,10 @@ def backward_batch_graph_loss(
         raise RuntimeError(
             "backward_batch_graph_loss requires either teacher_cache or teacher_adapter."
         )
+    if config.compare_n_tokens is not None and teacher_adapter is None:
+        raise RuntimeError(
+            "compare_n_tokens requires a live teacher adapter (--teacher-data-cache is incompatible)."
+        )
     if not prompts:
         return torch.tensor(0.0, device=device), {}
 
@@ -578,8 +684,24 @@ def backward_batch_graph_loss(
     graph_backward_prompts = 0
 
     for i, prompt in enumerate(prompts):
-        if teacher_cache is not None:
+        if config.compare_n_tokens is not None:
+            prompt_loss, prompt_metrics = _compare_tokens_loss_for_prompt(
+                prompt=prompt,
+                answer=answers[i],
+                teacher_adapter=teacher_adapter,  # type: ignore[arg-type]
+                student_adapter=student_adapter,
+                config=config,
+                device=device,
+            )
+        elif teacher_cache is not None:
             cached = _load_cached_teacher(teacher_cache, prompt, answers[i], device)
+            prompt_loss, prompt_metrics = compute_prompt_graph_loss(
+                prompt=prompt,
+                student_adapter=student_adapter,
+                config=config,
+                cached_teacher=cached,
+                debug_teacher_adapter=debug_teacher_adapter,
+            )
         else:
             from graph_loss.create_graph import build_teacher_supergraph
 
@@ -600,14 +722,13 @@ def backward_batch_graph_loss(
             )
             cached = _live_teacher_to_cached(result, device)
             del result
-
-        prompt_loss, prompt_metrics = compute_prompt_graph_loss(
-            prompt=prompt,
-            student_adapter=student_adapter,
-            config=config,
-            cached_teacher=cached,
-            debug_teacher_adapter=debug_teacher_adapter,
-        )
+            prompt_loss, prompt_metrics = compute_prompt_graph_loss(
+                prompt=prompt,
+                student_adapter=student_adapter,
+                config=config,
+                cached_teacher=cached,
+                debug_teacher_adapter=debug_teacher_adapter,
+            )
         detached_losses.append(prompt_loss.detach())
         scaled_loss = (loss_scale / denom) * prompt_loss
         if scaled_loss.requires_grad:
@@ -628,373 +749,3 @@ def backward_batch_graph_loss(
     metrics["graph_backward_prompts"] = float(graph_backward_prompts)
     return loss, metrics
 
-
-# ---------------------------------------------------------------------------
-# Multi-token graph loss (--compare-n-tokens path)
-# ---------------------------------------------------------------------------
-
-def _kl_per_position(
-    teacher_logits: torch.Tensor,
-    student_logits: torch.Tensor,
-    temperature: float,
-) -> torch.Tensor:
-    """KL(teacher || student) per token position. Returns [seq_len] float tensor."""
-    t_probs = torch.softmax(teacher_logits / temperature, dim=-1)
-    s_log_probs = torch.log_softmax(student_logits / temperature, dim=-1)
-    return (t_probs * (t_probs.clamp(min=1e-10).log() - s_log_probs)).sum(dim=-1)
-
-
-def _entropy_per_position(
-    teacher_logits: torch.Tensor,
-    temperature: float,
-) -> torch.Tensor:
-    """Shannon entropy of the (temperature-scaled) teacher distribution per
-    token position. Returns [seq_len] float tensor. Lower = teacher more
-    confident (a more decisive computation step)."""
-    t_log_probs = torch.log_softmax(teacher_logits / temperature, dim=-1)
-    t_probs = t_log_probs.exp()
-    return -(t_probs * t_log_probs).sum(dim=-1)
-
-
-def compute_prompt_graph_loss_compare_tokens(
-    *,
-    input_ids: torch.Tensor,
-    response_start_idx: int,
-    teacher_adapter: HFLlamaGraphAdapter,
-    student_adapter: HFLlamaGraphAdapter,
-    config: GraphAuxConfig,
-    n_tokens: int,
-    teacher_logits: torch.Tensor,
-    student_logits: torch.Tensor,
-    seq_end_idx: int | None = None,
-) -> tuple[torch.Tensor, dict[str, Any]]:
-    """Graph loss for one example using the compare-n-tokens strategy.
-
-    For each selected response token at position ``pos``, the graph is built
-    on the causal prefix ``input_ids[:pos]`` with ``target_position=-1`` (the
-    last prefix token, which generates the logit predicting token at ``pos``).
-    This matches the semantics of the cached-teacher path: the graph captures
-    how the model processes everything it has seen so far to produce its next
-    prediction.
-
-    Selection uses ``teacher_logits[pos-1]`` (the distribution predicting
-    response token ``pos``) rather than ``teacher_logits[pos]``, so KL
-    divergence measures disagreement on the token being generated.
-
-    Args:
-        input_ids: [seq_len] tokenized full sequence (prompt + response).
-        response_start_idx: Index of the first response token in input_ids.
-        teacher_adapter: Adapter wrapping the (frozen) teacher model.
-        student_adapter: Adapter wrapping the (trainable) student model.
-        config: GraphAuxConfig with tokens_dla_nodes=True.
-        n_tokens: Number of top-KL positions to compute graph loss on.
-        teacher_logits: [seq_len, vocab] teacher logits (detached, pre-computed).
-        student_logits: [seq_len, vocab] student logits (detached, pre-computed).
-        seq_end_idx: True (unpadded) sequence length from the attention mask.
-
-    Returns:
-        (averaged graph loss tensor, metrics dict)
-    """
-    seq_len = input_ids.numel()
-    # Use the caller-provided true sequence length (from attention mask) when available.
-    # Falling back to pad-token trimming is unreliable because many models set
-    # pad_token_id == eos_token_id, which would incorrectly trim the final EOS answer token.
-    if seq_end_idx is not None:
-        response_end_idx = seq_end_idx
-    else:
-        response_end_idx = seq_len
-
-    # response_positions: absolute positions of response tokens in input_ids.
-    # For each pos in this list, input_ids[pos] is a response token and
-    # teacher_logits[pos-1] is the distribution that generated it.
-    response_positions = list(range(response_start_idx, response_end_idx))
-    if not response_positions:
-        raise RuntimeError(
-            f"Graph loss: no response tokens found for example "
-            f"(response_start_idx={response_start_idx}, seq_len={seq_len}). "
-            "Check that input_ids contains at least one response token after the prompt."
-        )
-
-    # Select N response positions.
-    # When compare_n_tokens is None (live-teacher without multi-token mode), always
-    # use the first response token — this matches the cached-teacher path which
-    # always built the graph on the prompt predicting the first response token.
-    # KL-based selection is only used for explicit --compare-n-tokens mode, where
-    # N > 1 requires ranking positions by disagreement.
-    logit_positions = [pos - 1 for pos in response_positions]
-    n_select = min(n_tokens, len(response_positions))
-    if config.compare_n_tokens is None:
-        selected_positions = [response_positions[0]]
-        selection_metric_key = "compare_tokens_selection_first"
-    elif config.compare_token_selection == "teacher_entropy":
-        entropy_vals = _entropy_per_position(
-            teacher_logits[logit_positions],
-            temperature=config.temperature,
-        )
-        top_local = torch.topk(entropy_vals, n_select, largest=False).indices.tolist()
-        selected_positions = [response_positions[i] for i in top_local]
-        selection_metric_key = "compare_tokens_selection_entropy"
-    else:
-        kl_vals = _kl_per_position(
-            teacher_logits[logit_positions],
-            student_logits[logit_positions],
-            temperature=config.temperature,
-        )
-        top_local = torch.topk(kl_vals, n_select).indices.tolist()
-        selected_positions = [response_positions[i] for i in top_local]
-        selection_metric_key = "compare_tokens_selection_kl"
-
-    # For each selected response token at pos, build the graph on the causal
-    # prefix input_ids[:pos] with target_position=-1. This is equivalent to
-    # the cached-teacher path (prompt-only context, last position attribution).
-    position_losses: list[torch.Tensor] = []
-    metric_sums: dict[str, float] = {}
-
-    for pos in selected_positions:
-        # Prepend BOS so the context matches ensure_tokenized(prompt_string) used by
-        # cache generation (AddDataset tokenizes without add_special_tokens, so input_ids
-        # has no BOS; the cached teacher was built via create_graph → ensure_tokenized
-        # which always prepends BOS).
-        prefix_ids_raw = input_ids[:pos]
-        bos_id = teacher_adapter.tokenizer.bos_token_id
-        prefix_ids = torch.cat([
-            torch.tensor([bos_id], device=prefix_ids_raw.device, dtype=prefix_ids_raw.dtype),
-            prefix_ids_raw,
-        ])
-
-        with torch.no_grad():
-            teacher_shared = build_shared_context(
-                teacher_adapter,
-                prefix_ids,
-                prop_neurons_per_layer=config.teacher_prop_neurons_per_layer,
-                max_neurons_per_layer=config.max_neurons_per_layer,
-                dtype=config.graph_dtype,
-                dataset=config.dataset,
-                mlp_input_cache=None,
-                anova_nodes_per_label=config.teacher_anova_nodes_per_label,
-                anova_range_radius=config.teacher_anova_range_radius,
-                sum_min_specificity=config.teacher_sum_min_specificity,
-                node_labels=config.teacher_graph_labels or None,
-                include_arg_nodes=True,
-                batch_size=config.teacher_graph_batch_size,
-            )
-
-        # Use the teacher's BOS-prefixed logits at the last position for DLA selection.
-        # The cached teacher was built via create_graph(...) → ensure_tokenized (adds BOS)
-        # with no dla_model_logits arg, so it used ctx.logits[0, -1] internally.
-        # The student's DLA supernode is selected against these same teacher logits so
-        # both models select DLA neurons that are informative for the teacher's output.
-        pos_teacher_logits = teacher_shared.ctx.logits[0, -1].detach()
-
-        student_shared = build_shared_context(
-            student_adapter,
-            prefix_ids,
-            prop_neurons_per_layer=config.student_prop_neurons_per_layer,
-            max_neurons_per_layer=config.max_neurons_per_layer,
-            dtype=config.graph_dtype,
-            dataset=config.dataset,
-            mlp_input_cache=config.mlp_input_cache,
-            anova_nodes_per_label=config.student_anova_nodes_per_label,
-            anova_range_radius=config.student_anova_range_radius,
-            sum_min_specificity=config.student_sum_min_specificity,
-            node_labels=config.student_graph_labels or None,
-            include_arg_nodes=True,
-            batch_size=config.student_graph_batch_size,
-        )
-
-        # The attribution inside create_graph_at_position runs a local
-        # torch.autograd.grad to compute edge scores, so it needs grad ENABLED
-        # even for the teacher. detach_result=True already detaches the returned
-        # graph from the student's backward, so enabling grad here does not leak
-        # teacher gradients; it only lets the local attribution graph exist.
-        with torch.enable_grad():
-            teacher_result = create_graph_at_position(
-                teacher_shared,
-                target_position=-1,
-                include_dla_node=True,
-                dla_model_logits=None,  # use teacher's own BOS-prefixed logits (matches cache generation)
-                top_k_logits=config.top_k_logits,
-                temperature=config.temperature,
-                batch_size=config.teacher_graph_batch_size,
-                build_create_graph=False,
-                detach_result=True,
-                skip_logit_attribution=False,
-                no_grad_supergraph=True,
-                verbose=config.verbose,
-            )
-
-        # Use the teacher's exact logit token IDs for the student attribution so
-        # both models have logit rows for the same token set. This keeps frac_external
-        # computed under the same normalization for teacher and student, making the
-        # supernode edge weights directly comparable.
-        teacher_logit_token_ids = torch.tensor(
-            [t.vocab_idx for t in teacher_result.graph.logit_targets],
-            dtype=torch.long,
-        )
-
-        student_result = create_graph_at_position(
-            student_shared,
-            target_position=-1,
-            include_dla_node=True,
-            dla_model_logits=pos_teacher_logits,
-            attribution_targets=teacher_logit_token_ids,
-            top_k_logits=config.top_k_logits,
-            temperature=config.temperature,
-            batch_size=config.student_graph_batch_size,
-            build_create_graph=False,
-            detach_result=False,
-            skip_logit_attribution=False,
-            no_grad_supergraph=True,
-            verbose=config.verbose,
-        )
-
-        teacher_supergraph = teacher_result.supergraph
-        student_graph = student_result.graph
-        student_supergraph_structure = student_result.supergraph
-
-        # Re-aggregate student supergraph with gradient flow.
-        student_supergraph = _aggregate_supergraph_adjacency(
-            student_graph,
-            student_supergraph_structure.supernodes,
-        )
-        student_supergraph = student_supergraph._replace(
-            supernode_labels=student_supergraph_structure.supernode_labels,
-        )
-
-        # Align by label and compute loss.
-        s_label_to_sid = {
-            labels[0]: sid
-            for sid, labels in enumerate(student_supergraph.supernode_labels or [])
-            if labels
-        }
-        t_label_to_tid = {
-            labels[0]: tid
-            for tid, labels in enumerate(teacher_supergraph.supernode_labels or [])
-            if labels
-        }
-        student_label_set = set(s_label_to_sid.keys())
-        teacher_label_set = set(t_label_to_tid.keys())
-        extra_in_teacher = teacher_label_set - student_label_set
-        missing_from_teacher = student_label_set - teacher_label_set
-        if extra_in_teacher or missing_from_teacher:
-            parts = []
-            if extra_in_teacher:
-                parts.append(f"  teacher has extra supernodes: {sorted(extra_in_teacher)}")
-            if missing_from_teacher:
-                parts.append(f"  teacher missing supernodes:   {sorted(missing_from_teacher)}")
-            raise RuntimeError(
-                f"Teacher/student supernode label mismatch at position {pos}.\n"
-                + "\n".join(parts)
-                + f"\n  Student: {sorted(student_label_set)}"
-                + f"\n  Teacher: {sorted(teacher_label_set)}"
-            )
-
-        mapping = {
-            tid: {s_label_to_sid[labels[0]]}
-            for tid, labels in enumerate(teacher_supergraph.supernode_labels or [])
-            if labels and labels[0] in s_label_to_sid
-        }
-        teacher_ids = list(range(len(teacher_supergraph.supernodes)))
-        student_ids = list(range(len(student_supergraph.supernodes)))
-
-        pos_loss, pos_breakdown = compute_graph_loss(
-            teacher_supergraph.supernode_adjacency_matrix.detach().to(
-                device=student_supergraph.supernode_adjacency_matrix.device,
-                dtype=student_supergraph.supernode_adjacency_matrix.dtype,
-            ),
-            student_supergraph.supernode_adjacency_matrix,
-            mapping,
-            teacher_ids,
-            student_ids,
-            similarity=config.graph_loss_type,
-        )
-        position_losses.append(pos_loss)
-        for key, value in pos_breakdown.items():
-            metric_sums[key] = metric_sums.get(key, 0.0) + float(value)
-
-    if not position_losses:
-        raise RuntimeError(
-            "Graph loss: position_losses is empty after processing all selected positions. "
-            "This should not happen — investigate selected_positions computation."
-        )
-
-    avg_loss = torch.stack(position_losses).mean()
-    n_pos = float(len(position_losses))
-    metrics = {key: value / n_pos for key, value in metric_sums.items()}
-    metrics["compare_tokens_n_selected"] = n_pos
-    metrics[selection_metric_key] = 1.0
-    return avg_loss, metrics
-
-
-def backward_batch_graph_loss_compare_tokens(
-    *,
-    prompts: list[str],
-    input_ids_batch: list[torch.Tensor],
-    response_start_indices: list[int],
-    teacher_adapter: HFLlamaGraphAdapter,
-    student_adapter: HFLlamaGraphAdapter,
-    config: GraphAuxConfig,
-    device: torch.device,
-    loss_scale: float,
-    teacher_logits_batch: torch.Tensor,
-    student_logits_batch: torch.Tensor,
-    seq_end_indices: list[int] | None = None,
-) -> tuple[torch.Tensor, dict[str, Any]]:
-    """Compute and backprop compare-n-tokens graph loss one example at a time.
-
-    Like backward_batch_graph_loss() but uses the live teacher/student adapters
-    and per-position KL divergence to select which tokens to compute graphs on.
-    """
-    if not prompts:
-        return torch.tensor(0.0, device=device), {}
-
-    import gc
-
-    # Default to 1 (last response token) when compare_n_tokens is unset but
-    # a live teacher is being used (tokens_dla_nodes without cache).
-    n_tokens = config.compare_n_tokens if config.compare_n_tokens is not None else 1
-
-    metric_sums: dict[str, float] = {}
-    detached_losses: list[torch.Tensor] = []
-    denom = float(len(prompts))
-    graph_backward_prompts = 0
-
-    for i, (input_ids, response_start_idx) in enumerate(zip(input_ids_batch, response_start_indices)):
-        t_logits = teacher_logits_batch[i]
-        s_logits = student_logits_batch[i]
-        seq_end = seq_end_indices[i] if seq_end_indices is not None else None
-
-        prompt_loss, prompt_metrics = compute_prompt_graph_loss_compare_tokens(
-            input_ids=input_ids.to(device),
-            response_start_idx=response_start_idx,
-            teacher_adapter=teacher_adapter,
-            student_adapter=student_adapter,
-            config=config,
-            n_tokens=n_tokens,
-            teacher_logits=t_logits.to(device),
-            student_logits=s_logits.to(device),
-            seq_end_idx=seq_end,
-        )
-        detached_losses.append(prompt_loss.detach())
-        scaled_loss = (loss_scale / denom) * prompt_loss
-        if not scaled_loss.requires_grad:
-            raise RuntimeError(
-                f"Graph loss for prompt {i!r} has no gradient (requires_grad=False). "
-                "This means the loss is detached from student parameters. "
-                "Check that create_graph_at_position is called with detach_result=False "
-                "for the student."
-            )
-        scaled_loss.backward()
-        graph_backward_prompts += 1
-        del scaled_loss
-        gc.collect()
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
-        for key, value in prompt_metrics.items():
-            metric_sums[key] = metric_sums.get(key, 0.0) + float(value)
-
-    loss = torch.stack(detached_losses).mean() if detached_losses else torch.tensor(0.0, device=device)
-    metrics = {key: value / denom for key, value in metric_sums.items()}
-    metrics["graph_prompts"] = float(len(prompts))
-    metrics["graph_backward_prompts"] = float(graph_backward_prompts)
-    return loss, metrics
