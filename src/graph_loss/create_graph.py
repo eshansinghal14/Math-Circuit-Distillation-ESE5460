@@ -229,7 +229,6 @@ def build_shared_context(
     input_ids: torch.Tensor,
     *,
     prop_neurons_per_layer: float = 0.1,
-    max_neurons_per_layer: int | None = None,
     dtype: torch.dtype | None = None,
     dataset: str | None = None,
     mlp_input_cache: dict | None = None,
@@ -261,7 +260,7 @@ def build_shared_context(
     _logger = logger or logging.getLogger(__name__)
 
     _logger.info("Running setup_attribution (neuron pre-selection by gradient norm)")
-    ctx = setup_attribution(adapter, input_ids, prop_neurons_per_layer, dtype, max_neurons_per_layer)
+    ctx = setup_attribution(adapter, input_ids, prop_neurons_per_layer, dtype)
     _logger.info("  Pre-selected neurons: %d", ctx.n_neurons)
 
     # An empty list means "no labels requested" => no ANOVA. Only a non-empty
@@ -577,7 +576,6 @@ def create_graph(
     top_k_logits: float | None = 0.95,
     temperature: float = 2.0,
     prop_neurons_per_layer: float = 0.1,
-    max_neurons_per_layer: int | None = None,
     batch_size: int = 512,
     dtype: torch.dtype | None = None,
     verbose: bool = False,
@@ -663,7 +661,6 @@ def create_graph(
         adapter,
         input_ids,
         prop_neurons_per_layer=prop_neurons_per_layer,
-        max_neurons_per_layer=max_neurons_per_layer,
         dtype=dtype,
         dataset=dataset,
         mlp_input_cache=mlp_input_cache,
@@ -698,7 +695,7 @@ def create_graph(
 
 def build_teacher_supergraph(
     adapter: "HFLlamaGraphAdapter",
-    prompt: str,
+    prompt: "str | torch.Tensor",
     *,
     prop_neurons_per_layer: float = 0.1,
     top_k_logits: float | None = 0.95,
@@ -723,6 +720,8 @@ def build_teacher_supergraph(
     live teacher graphs during distillation are identical to the pre-cached ones.
     ``target_position_logits`` in the result holds the teacher's raw logit vector
     at the last prompt position, for use as the student's DLA reference.
+    Accepts a string prompt or a raw token-ID tensor (BOS will be auto-prepended
+    by ``ensure_tokenized`` if not already present).
     """
     with torch.enable_grad():
         return create_graph(

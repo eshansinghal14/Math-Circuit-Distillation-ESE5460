@@ -223,7 +223,6 @@ class HFLlamaGraphAdapter:
         layer_idx: int,
         mlp_input: torch.Tensor,  # [n_pos, d_model]
         prop_neurons_per_layer: float,
-        max_neurons_per_layer: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Memory-efficient, grad-safe variant of ``_compute_layer_neuron_data``.
 
@@ -285,12 +284,7 @@ class HFLlamaGraphAdapter:
         sv_norms = neuron_acts.detach().abs() * out_norms.unsqueeze(0)  # [n_pos, d_mlp]
         flat_norms = sv_norms.reshape(-1)
         total = flat_norms.numel()
-        # Sequence-length-independent absolute cap. When max_neurons_per_layer is
-        # None (default) the cap is a no-op and k is identical to the prior
-        # behavior; when set, k stops scaling with n_pos (fixes long-CoT OOM).
         k = min(max(1, int(total * prop_neurons_per_layer)), total)
-        if max_neurons_per_layer is not None:
-            k = min(k, max(1, int(max_neurons_per_layer)))
         keep = torch.topk(flat_norms, k, dim=0).indices  # [k]
         keep_neu = keep % self.d_mlp  # [k] neuron ids
 

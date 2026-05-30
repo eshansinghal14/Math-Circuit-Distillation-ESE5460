@@ -33,7 +33,7 @@ class GraphAuxConfig:
     graph_dtype: torch.dtype | None = None
     teacher_prop_neurons_per_layer: float = 0.1
     student_prop_neurons_per_layer: float = 0.1
-    max_neurons_per_layer: int | None = None
+
     top_k_logits: float | None = 0.95
     temperature: float = 2.0
     teacher_graph_batch_size: int = 512
@@ -605,14 +605,17 @@ def _compare_tokens_loss_for_prompt(
     metric_sums: dict[str, float] = {}
 
     for pos in selected_positions:
-        # Decode prefix IDs to a string so build_teacher_supergraph / create_graph
-        # tokenize it with BOS prepended via ensure_tokenized, matching cache generation.
-        prefix_str = tokenizer.decode(input_ids[:pos].cpu(), skip_special_tokens=True)
+        # Pass raw prefix token IDs so ensure_tokenized auto-prepends BOS without
+        # a lossy decode/re-encode round trip. Decode only for the student call
+        # (compute_prompt_graph_loss takes a string and tokenizes it the same way).
+        prefix_ids = input_ids[:pos].cpu()
+        prefix_str = tokenizer.decode(prefix_ids, skip_special_tokens=True)
 
         teacher_result = build_teacher_supergraph(
             teacher_adapter,
-            prefix_str,
+            prefix_ids,
             prop_neurons_per_layer=config.teacher_prop_neurons_per_layer,
+
             top_k_logits=config.top_k_logits,
             temperature=config.temperature,
             batch_size=config.teacher_graph_batch_size,
@@ -622,6 +625,7 @@ def _compare_tokens_loss_for_prompt(
             anova_nodes_per_label=config.teacher_anova_nodes_per_label,
             anova_range_radius=config.teacher_anova_range_radius,
             sum_min_specificity=config.teacher_sum_min_specificity,
+            node_labels=config.teacher_graph_labels or None,
             verbose=config.verbose,
         )
         cached = _live_teacher_to_cached(teacher_result, device)
