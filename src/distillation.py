@@ -176,7 +176,6 @@ class DistillationConfig:
     tokens_dla_nodes: bool = False
     compare_n_tokens: Optional[int] = None
     skip_baseline_eval: bool = False
-    debug_compare_teacher_graphs: bool = False
 
 
 
@@ -315,16 +314,9 @@ class DistillationTrainer:
         self.teacher_graph_model = None
         self.teacher_graph_adapter = None
 
-        need_live_teacher = (
-            self.teacher_data_cache is None
-            or config.debug_compare_teacher_graphs
-        )
+        need_live_teacher = self.teacher_data_cache is None
         if need_live_teacher:
-            mode_tag = (
-                "debug-compare" if config.debug_compare_teacher_graphs
-                else "live-teacher" if self._use_graph
-                else "kl-only"
-            )
+            mode_tag = "live-teacher" if self._use_graph else "kl-only"
             print(f"Loading teacher ({mode_tag} mode): {config.teacher_model}")
             self.teacher, _ = load_model(config.teacher_model)
             self.teacher = self.teacher.to(self.device)
@@ -339,16 +331,6 @@ class DistillationTrainer:
         if self._use_graph:
             from graph_loss.hf_adapter import HFLlamaGraphAdapter
             from graph_loss.training import GraphAuxConfig
-
-            # When debug-comparing live teacher graphs to the cache, read the
-            # original cache hyperparameters so generate_teacher_sample uses the
-            # same node_labels and dataset as the original cache generation run.
-            teacher_graph_labels = None
-            teacher_dataset = None
-            if config.debug_compare_teacher_graphs and self.teacher_data_cache is not None:
-                hp = self.teacher_data_cache.manifest.get("hyperparameters", {})
-                teacher_graph_labels = hp.get("graph_node_labels")
-                teacher_dataset = hp.get("dataset") or hp.get("dataset_file")
 
             self.graph_loss_config = GraphAuxConfig(
                 lambda_graph=config.lambda_graph,
@@ -372,9 +354,6 @@ class DistillationTrainer:
                 student_graph_labels=config.graph_node_labels,
                 tokens_dla_nodes=config.tokens_dla_nodes,
                 compare_n_tokens=config.compare_n_tokens,
-                teacher_graph_labels=teacher_graph_labels,
-                teacher_dataset=teacher_dataset,
-                debug_compare_teacher_graphs=config.debug_compare_teacher_graphs,
             )
 
             self.student_graph_adapter = HFLlamaGraphAdapter(
@@ -383,7 +362,7 @@ class DistillationTrainer:
                 self.device,
             )
 
-            if self.teacher is not None and (config.tokens_dla_nodes or config.debug_compare_teacher_graphs or self.teacher_data_cache is None):
+            if self.teacher is not None and (config.tokens_dla_nodes or self.teacher_data_cache is None):
                 self.teacher_graph_adapter = HFLlamaGraphAdapter(
                     self.teacher,
                     self.tokenizer,
@@ -563,11 +542,6 @@ class DistillationTrainer:
                     else None
                 ),
                 answers=batch["answers"],
-                debug_teacher_adapter=(
-                    self.teacher_graph_adapter
-                    if self.config.debug_compare_teacher_graphs
-                    else None
-                ),
             )
         except RuntimeError:
             exc_path = os.path.join(self.config.save_dir, "exception_checkpoint")
@@ -1289,19 +1263,6 @@ def build_parser() -> argparse.ArgumentParser:
             "Incompatible with --teacher-data-cache."
         ),
     )
-    parser.add_argument(
-        "--debug-compare-teacher-graphs",
-        action="store_true",
-        default=False,
-        dest="debug_compare_teacher_graphs",
-        help=(
-            "Diagnostic: build the teacher graph live for every prompt and compare it to "
-            "the cached version. Logs supergraph labels, adjacency matrix stats, per-label "
-            "row diffs, and graph loss from each teacher. Requires --teacher-data-cache and "
-            "loads the teacher model regardless. Useful for pinpointing differences between "
-            "cached and live teacher graphs."
-        ),
-    )
     return parser
 
 
@@ -1443,7 +1404,6 @@ def main() -> None:
             tokens_dla_nodes=args.tokens_dla_nodes,
             compare_n_tokens=args.compare_n_tokens,
             skip_baseline_eval=args.skip_baseline_eval,
-            debug_compare_teacher_graphs=args.debug_compare_teacher_graphs,
 
             seed=args.seed,
             device=device,
