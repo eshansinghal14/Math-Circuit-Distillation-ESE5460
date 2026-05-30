@@ -412,17 +412,16 @@ def _compare_tokens_loss_for_prompt(
     metric_sums: dict[str, float] = {}
 
     for pos in selected_positions:
-        # Pass raw prefix token IDs so ensure_tokenized auto-prepends BOS without
-        # a lossy decode/re-encode round trip. Decode only for the student call
-        # (compute_prompt_graph_loss takes a string and tokenizes it the same way).
         prefix_ids = input_ids[:pos].cpu()
-        prefix_str = tokenizer.decode(prefix_ids, skip_special_tokens=True)
+        # At response_start the prefix is exactly the original prompt — use it directly
+        # to avoid any tokenize→decode→retokenize round-trip discrepancy.
+        # For mid-answer positions no original string exists, so decode is unavoidable.
+        prefix_str = prompt if pos == response_start else tokenizer.decode(prefix_ids, skip_special_tokens=True)
 
         teacher_result = build_teacher_supergraph(
             teacher_adapter,
             prefix_ids,
             prop_neurons_per_layer=config.teacher_prop_neurons_per_layer,
-
             top_k_logits=config.top_k_logits,
             temperature=config.temperature,
             batch_size=config.teacher_graph_batch_size,
@@ -437,6 +436,10 @@ def _compare_tokens_loss_for_prompt(
         )
         cached = _live_teacher_to_cached(teacher_result, device)
         del teacher_result
+
+        # Use DLA logits from the no-BOS full-sequence forward pass already computed
+        # above — matches generate_teacher_sample's full_logits[prompt_len - 1] exactly.
+        cached.teacher_dla_logits = t_logits[pos - 1].to(device)
 
         pos_loss, pos_metrics = compute_prompt_graph_loss(
             prompt=prefix_str,
