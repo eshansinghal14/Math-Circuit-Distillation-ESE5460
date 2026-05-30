@@ -220,8 +220,6 @@ def _debug_compare_teacher_graphs(
         print(f"  logit_vals   : {[f'{v:.3f}' for v in _vals.tolist()]}")
     top5 = live_dla_logits.float().topk(5)
     print(f"  dla_logits top5 idx: {top5.indices.tolist()} vals: {[f'{v:.3f}' for v in top5.values.tolist()]}")
-    else:
-        print(f"  dla_logits top5 idx: None")
 
     # Label diff
     cached_label_set = set(cached_labels)
