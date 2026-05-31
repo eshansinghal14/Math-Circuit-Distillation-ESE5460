@@ -42,6 +42,7 @@ class GraphAuxConfig:
 
     student_anova_range_radius: int = 0
     student_nodes_per_label: int = 10
+    teacher_nodes_per_label: int = 10
     student_mlp_input_cache_path: str | None = None
     mlp_input_cache: dict | None = None
     activation_write_result_cache: dict = field(default_factory=dict)
@@ -360,7 +361,7 @@ def _compare_tokens_loss_for_prompt(
     then builds separate teacher and student supergraphs for the causal
     prefix at each selected position using the unified build_teacher_supergraph path.
     """
-    from graph_loss.create_graph import build_teacher_supergraph
+    from graph_loss.create_graph import create_graph
 
     tokenizer = student_adapter.tokenizer
     prompt_ids = tokenizer(
@@ -405,18 +406,23 @@ def _compare_tokens_loss_for_prompt(
         # For mid-answer positions no original string exists, so decode is unavoidable.
         prefix_str = prompt if pos == response_start else tokenizer.decode(prefix_ids, skip_special_tokens=True)
 
-        teacher_result = build_teacher_supergraph(
-            teacher_adapter,
-            prefix_ids,
-            prop_neurons_per_layer=config.teacher_prop_neurons_per_layer,
-            top_k_logits=config.top_k_logits,
-            temperature=config.temperature,
-            batch_size=config.teacher_graph_batch_size,
-            dtype=config.graph_dtype,
-            include_dla_node=config.tokens_dla_nodes,
-            include_arg_nodes=config.tokens_dla_nodes,
-            verbose=config.verbose,
-        )
+        with torch.enable_grad():
+            teacher_result = create_graph(
+                teacher_adapter,
+                prefix_ids,
+                prop_neurons_per_layer=config.teacher_prop_neurons_per_layer,
+                top_k_logits=config.top_k_logits,
+                temperature=config.temperature,
+                batch_size=config.teacher_graph_batch_size,
+                dtype=config.graph_dtype,
+                include_dla_node=config.tokens_dla_nodes,
+                include_arg_nodes=config.tokens_dla_nodes,
+                nodes_per_label=config.teacher_nodes_per_label,
+                no_grad_supergraph=True,
+                build_create_graph=False,
+                detach_result=True,
+                verbose=config.verbose,
+            )
         cached = _live_teacher_to_cached(teacher_result, device)
         del teacher_result
 

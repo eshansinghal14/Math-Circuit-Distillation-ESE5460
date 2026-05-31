@@ -16,7 +16,7 @@ from transformers import AutoTokenizer
 from transformers import AutoModelForCausalLM
 from graph_loss.create_graph import (
     GraphPipelineResult,
-    build_teacher_supergraph,
+    create_graph,
     save_supergraph,
 )
 
@@ -143,23 +143,27 @@ def generate_teacher_sample(
 
     _logger = logger or logging.getLogger(__name__)
 
-    result: GraphPipelineResult = build_teacher_supergraph(
-        adapter,
-        prompt,
-        top_k_logits=top_k_logits,
-        temperature=temperature,
-        prop_neurons_per_layer=prop_neurons_per_layer,
-        batch_size=batch_size,
-        verbose=verbose,
-        mlp_input_cache=mlp_input_cache,
-        model_name=model_name,
-        nodes_per_label=nodes_per_label,
-        anova_range_radius=anova_range_radius,
-        node_labels=node_labels,
-        include_dla_node=include_dla_node,
-        include_arg_nodes=include_arg_nodes,
-        logger=_logger,
-    )
+    with torch.enable_grad():
+        result: GraphPipelineResult = create_graph(
+            adapter,
+            prompt,
+            top_k_logits=top_k_logits,
+            temperature=temperature,
+            prop_neurons_per_layer=prop_neurons_per_layer,
+            batch_size=batch_size,
+            verbose=verbose,
+            mlp_input_cache=mlp_input_cache,
+            model_name=model_name,
+            nodes_per_label=nodes_per_label,
+            anova_range_radius=anova_range_radius,
+            node_labels=node_labels,
+            include_dla_node=include_dla_node,
+            include_arg_nodes=include_arg_nodes,
+            no_grad_supergraph=True,
+            build_create_graph=False,
+            detach_result=True,
+            logger=_logger,
+        )
 
     distill_tensors = _build_distillation_tensors(prompt, answer, adapter.tokenizer)
     _logger.info("Computing full-sequence teacher logits for DLA selection")
@@ -256,23 +260,27 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
 
         logger.info("Generating teacher data for sample %d: %r", sample_idx, prompt)
 
-        result: GraphPipelineResult = build_teacher_supergraph(
-            adapter,
-            prompt,
-            top_k_logits=config.top_k_logits,
-            temperature=config.temperature,
-            prop_neurons_per_layer=config.prop_neurons_per_layer,
-            batch_size=config.attribution_batch_size,
-            verbose=config.verbose,
-            mlp_input_cache=mlp_input_cache,
-            model_name=config.teacher_model,
-            nodes_per_label=config.nodes_per_label,
-            anova_range_radius=config.anova_range_radius,
-            node_labels=config.graph_node_labels,
-            include_dla_node=config.include_dla_node,
-            include_arg_nodes=config.include_arg_nodes,
-            logger=logger,
-        )
+        with torch.enable_grad():
+            result: GraphPipelineResult = create_graph(
+                adapter,
+                prompt,
+                top_k_logits=config.top_k_logits,
+                temperature=config.temperature,
+                prop_neurons_per_layer=config.prop_neurons_per_layer,
+                batch_size=config.attribution_batch_size,
+                verbose=config.verbose,
+                mlp_input_cache=mlp_input_cache,
+                model_name=config.teacher_model,
+                nodes_per_label=config.nodes_per_label,
+                anova_range_radius=config.anova_range_radius,
+                node_labels=config.graph_node_labels,
+                include_dla_node=config.include_dla_node,
+                include_arg_nodes=config.include_arg_nodes,
+                no_grad_supergraph=True,
+                build_create_graph=False,
+                detach_result=True,
+                logger=logger,
+            )
 
         supergraph_path = os.path.join(sample_dir, "supergraph.pt")
         logger.info("Saving supergraph to %s", supergraph_path)

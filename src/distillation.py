@@ -151,6 +151,7 @@ class DistillationConfig:
 
     student_anova_range_radius: int = 0
     student_nodes_per_label: int = 10
+    teacher_nodes_per_label: int = 10
     graph_grad_norm_scale: bool = False
     graph_start_step: int = 1
     eval_batch_size: int = 50
@@ -340,6 +341,7 @@ class DistillationTrainer:
                 verbose=config.graph_verbose,
                 student_anova_range_radius=config.student_anova_range_radius,
                 student_nodes_per_label=config.student_nodes_per_label,
+                teacher_nodes_per_label=config.teacher_nodes_per_label,
                 graph_loss_type=config.graph_loss_type,
                 student_graph_labels=config.graph_node_labels,
                 tokens_dla_nodes=config.tokens_dla_nodes,
@@ -1131,6 +1133,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Cap on neurons per labelled student supernode (default 10).",
     )
     parser.add_argument(
+        "--teacher-nodes-per-label",
+        type=int,
+        default=10,
+        help="Cap on neurons per labelled teacher supernode (default 10).",
+    )
+    parser.add_argument(
         "--save-dir",
         type=str,
         default=os.path.join(os.path.dirname(__file__), "..", "results", "distillation"),
@@ -1347,6 +1355,7 @@ def main() -> None:
             teacher_data_cache=args.teacher_data_cache,
             student_anova_range_radius=args.student_anova_range_radius,
             student_nodes_per_label=args.student_nodes_per_label,
+            teacher_nodes_per_label=args.teacher_nodes_per_label,
             step_log_interval=args.step_log_interval,
             save_interval=args.save_interval,
             label_refresh_interval=args.label_refresh_interval,
