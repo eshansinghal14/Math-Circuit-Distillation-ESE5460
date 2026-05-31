@@ -41,22 +41,14 @@ class GraphAuxConfig:
     verbose: bool = False
 
     student_anova_range_radius: int = 0
-    student_anova_nodes_per_label: int = 10
-    student_sum_min_specificity: float = 0.0
+    student_nodes_per_label: int = 10
     student_mlp_input_cache_path: str | None = None
     mlp_input_cache: dict | None = None
-    dataset: str | None = None
-    student_activation_write_cache_path: str | None = None
     activation_write_result_cache: dict = field(default_factory=dict)
     graph_loss_type: Literal["jsd", "kld", "mse", "mse-norm", "mse-scale"] = "jsd"
     student_graph_labels: list[str] | None = None
     tokens_dla_nodes: bool = False
     compare_n_tokens: int | None = None
-    # Teacher-specific ANOVA config.
-    teacher_anova_range_radius: int = 0
-    teacher_anova_nodes_per_label: int = 10
-    teacher_sum_min_specificity: float = 0.0
-    teacher_graph_labels: list[str] | None = None
 
 
 def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
@@ -137,12 +129,10 @@ def compute_prompt_graph_loss(
             build_create_graph=False,
             detach_result=False,
             skip_logit_attribution=False,
-            dataset=config.dataset,
             mlp_input_cache=config.mlp_input_cache,
             node_labels=config.student_graph_labels or [],
             anova_range_radius=config.student_anova_range_radius,
-            anova_nodes_per_label=config.student_anova_nodes_per_label,
-            sum_min_specificity=config.student_sum_min_specificity,
+            nodes_per_label=config.student_nodes_per_label,
             include_dla_node=config.tokens_dla_nodes,
             dla_model_logits=cached_teacher.teacher_dla_logits if config.tokens_dla_nodes else None,
             include_arg_nodes=config.tokens_dla_nodes,
@@ -425,10 +415,6 @@ def _compare_tokens_loss_for_prompt(
             dtype=config.graph_dtype,
             include_dla_node=config.tokens_dla_nodes,
             include_arg_nodes=config.tokens_dla_nodes,
-            anova_nodes_per_label=config.teacher_anova_nodes_per_label,
-            anova_range_radius=config.teacher_anova_range_radius,
-            sum_min_specificity=config.teacher_sum_min_specificity,
-            node_labels=config.teacher_graph_labels or None,
             verbose=config.verbose,
         )
         cached = _live_teacher_to_cached(teacher_result, device)
@@ -524,10 +510,6 @@ def backward_batch_graph_loss(
                 batch_size=config.teacher_graph_batch_size,
                 include_dla_node=config.tokens_dla_nodes,
                 include_arg_nodes=config.tokens_dla_nodes,
-                anova_nodes_per_label=config.teacher_anova_nodes_per_label,
-                anova_range_radius=config.teacher_anova_range_radius,
-                sum_min_specificity=config.teacher_sum_min_specificity,
-                node_labels=config.teacher_graph_labels or None,
                 verbose=config.verbose,
             )
             prompt_loss, prompt_metrics = compute_prompt_graph_loss(

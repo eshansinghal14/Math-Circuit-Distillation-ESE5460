@@ -149,13 +149,8 @@ class DistillationConfig:
     student_graph_batch_size: int = 1
     graph_verbose: bool = False
 
-    student_dataset: Optional[str] = None
     student_anova_range_radius: int = 0
-    student_anova_nodes_per_label: int = 10
-    student_sum_min_specificity: float = 0.0
-    teacher_anova_range_radius: int = 0
-    teacher_anova_nodes_per_label: int = 10
-    teacher_sum_min_specificity: float = 0.0
+    student_nodes_per_label: int = 10
     graph_grad_norm_scale: bool = False
     graph_start_step: int = 1
     eval_batch_size: int = 50
@@ -344,12 +339,7 @@ class DistillationTrainer:
                 student_graph_batch_size=config.student_graph_batch_size,
                 verbose=config.graph_verbose,
                 student_anova_range_radius=config.student_anova_range_radius,
-                student_anova_nodes_per_label=config.student_anova_nodes_per_label,
-                student_sum_min_specificity=config.student_sum_min_specificity,
-                teacher_anova_range_radius=config.teacher_anova_range_radius,
-                teacher_anova_nodes_per_label=config.teacher_anova_nodes_per_label,
-                teacher_sum_min_specificity=config.teacher_sum_min_specificity,
-                dataset=config.student_dataset,
+                student_nodes_per_label=config.student_nodes_per_label,
                 graph_loss_type=config.graph_loss_type,
                 student_graph_labels=config.graph_node_labels,
                 tokens_dla_nodes=config.tokens_dla_nodes,
@@ -369,13 +359,13 @@ class DistillationTrainer:
                     self.device,
                 )
 
-            if config.student_dataset and not config.label_refresh_interval:
+            if config.graph_node_labels is not None and not config.label_refresh_interval:
                 # Only build here when label_refresh_interval==0; otherwise
                 # train() will call _refresh_student_labels() at startup.
-                from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
+                from graph_loss.neuron_activation_heatmap import _get_anova_dataset_path
                 from graph_loss.precompute_mlp_inputs import build_mlp_input_cache
 
-                dataset_path = _resolve_dataset_path(config.student_dataset)
+                dataset_path = _get_anova_dataset_path()
                 self.student.eval()
                 mlp_cache = build_mlp_input_cache(
                     self.student_graph_adapter,
@@ -428,14 +418,14 @@ class DistillationTrainer:
         """Rebuild MLP input cache from student dataset using current student weights."""
         if self.student_graph_adapter is None or self.graph_loss_config is None:
             return
-        if not self.config.student_dataset:
+        if self.config.graph_node_labels is None:
             raise RuntimeError(
-                "--label-refresh-interval > 0 requires --student-dataset."
+                "--label-refresh-interval > 0 requires --graph-node-labels."
             )
-        from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
+        from graph_loss.neuron_activation_heatmap import _get_anova_dataset_path
         from graph_loss.precompute_mlp_inputs import build_mlp_input_cache
 
-        dataset_path = _resolve_dataset_path(self.config.student_dataset)
+        dataset_path = _get_anova_dataset_path()
         self.student.eval()
         mlp_cache = build_mlp_input_cache(
             self.student_graph_adapter,
@@ -1129,47 +1119,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--teacher-data-cache", type=str, default=None, metavar="PATH")
     parser.add_argument(
-        "--student-dataset",
-        type=str,
-        default=None,
-        metavar="DATASET",
-        help="Activation dataset for student full_search clustering (e.g. 22_add_tight_all.json).",
-    )
-    parser.add_argument(
         "--student-anova-range-radius",
         type=int,
         default=0,
         help="Radius around target arg/sum values for the student ANOVA range mask.",
     )
     parser.add_argument(
-        "--student-anova-nodes-per-label",
+        "--student-nodes-per-label",
         type=int,
         default=10,
         help="Cap on neurons per labelled student supernode (default 10).",
-    )
-    parser.add_argument(
-        "--student-sum-min-specificity",
-        type=float,
-        default=0.0,
-        help="Minimum ANOVA specificity for student supernodes.",
-    )
-    parser.add_argument(
-        "--teacher-anova-range-radius",
-        type=int,
-        default=0,
-        help="Radius around target arg/sum values for the teacher ANOVA range mask.",
-    )
-    parser.add_argument(
-        "--teacher-anova-nodes-per-label",
-        type=int,
-        default=10,
-        help="Cap on neurons per labelled teacher supernode (default 10).",
-    )
-    parser.add_argument(
-        "--teacher-sum-min-specificity",
-        type=float,
-        default=0.0,
-        help="Minimum ANOVA specificity for teacher supernodes.",
     )
     parser.add_argument(
         "--save-dir",
@@ -1194,7 +1153,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Re-run ANOVA on --label-refresh-n-prompts training prompts every N steps "
             "to refresh the in-memory fixed-label cache. "
             "0 = never refresh (use precomputed labels only). "
-            "Only active when --student-dataset is set."
+            "Only active when --graph-node-labels is set."
         ),
     )
     parser.add_argument(
@@ -1209,7 +1168,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help=(
             "Rebuild the in-memory MLP input cache every N steps. "
-            "0 = never refresh (default).  Requires --student-dataset."
+            "0 = never refresh (default).  Requires --graph-node-labels."
         ),
     )
     parser.add_argument(
@@ -1386,13 +1345,8 @@ def main() -> None:
             eval_batch_size=args.eval_batch_size,
             save_dir=run_dir,
             teacher_data_cache=args.teacher_data_cache,
-            student_dataset=args.student_dataset,
             student_anova_range_radius=args.student_anova_range_radius,
-            student_anova_nodes_per_label=args.student_anova_nodes_per_label,
-            student_sum_min_specificity=args.student_sum_min_specificity,
-            teacher_anova_range_radius=args.teacher_anova_range_radius,
-            teacher_anova_nodes_per_label=args.teacher_anova_nodes_per_label,
-            teacher_sum_min_specificity=args.teacher_sum_min_specificity,
+            student_nodes_per_label=args.student_nodes_per_label,
             step_log_interval=args.step_log_interval,
             save_interval=args.save_interval,
             label_refresh_interval=args.label_refresh_interval,

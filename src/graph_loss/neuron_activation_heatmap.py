@@ -18,33 +18,9 @@ from graph_loss.utils import ActivationWriteResult
 from utils import default_datasets_dir
 
 
-def _resolve_dataset_path(dataset_name: str) -> str:
-    expanded = os.path.expanduser(dataset_name)
-    if os.path.isfile(expanded):
-        return os.path.abspath(expanded)
-
-    root = default_datasets_dir()
-    candidates = []
-    if os.path.dirname(expanded):
-        candidates.append(os.path.abspath(expanded))
-    else:
-        base = os.path.basename(expanded)
-        candidates.extend(
-            [
-                os.path.join(root, base),
-                os.path.join(root, f"{base}.json"),
-                os.path.join(root, f"{base}_all.json"),
-                os.path.join(root, f"{base}_test.json"),
-                os.path.join(root, f"{base}_train.json"),
-            ],
-        )
-
-    for candidate in candidates:
-        if os.path.isfile(candidate):
-            return os.path.abspath(candidate)
-    raise FileNotFoundError(
-        f"Could not resolve dataset {dataset_name!r}. Tried: {', '.join(candidates)}",
-    )
+def _get_anova_dataset_path() -> str:
+    """Return the hardcoded path to the 22_add_tight dataset used for ANOVA labeling."""
+    return os.path.join(default_datasets_dir(), "22_add_tight_all.json")
 
 
 def _parse_numeric_args(prompt: str) -> tuple[int, ...]:
@@ -354,7 +330,6 @@ def label_neurons_layer_by_layer(
 @torch.no_grad()
 def build_neuron_activation_write_result(
     model,
-    dataset_name: str,
     neuron_locations: list[tuple[int, int, int]] | torch.Tensor,
     *,
     mlp_input_cache: dict | None = None,
@@ -362,10 +337,8 @@ def build_neuron_activation_write_result(
     """Return a 2D activation grid for each requested neuron.
 
     If ``mlp_input_cache`` is provided it is used directly.  Otherwise a
-    temporary MLP input cache is built from the dataset and discarded after use.
+    temporary MLP input cache is built from the hardcoded 22_add_tight dataset.
     """
-    dataset_path = _resolve_dataset_path(dataset_name)
-
     if isinstance(neuron_locations, torch.Tensor):
         kept_neuron_locations = neuron_locations.detach().cpu()
     else:
@@ -373,6 +346,7 @@ def build_neuron_activation_write_result(
 
     if mlp_input_cache is None:
         from graph_loss.precompute_mlp_inputs import build_mlp_input_cache
+        dataset_path = _get_anova_dataset_path()
         model_name = getattr(model.cfg, "model_name", "model")
         mlp_input_cache = build_mlp_input_cache(model, dataset_path, model_name)
 

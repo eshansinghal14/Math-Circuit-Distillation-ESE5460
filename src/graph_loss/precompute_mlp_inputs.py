@@ -36,9 +36,25 @@ from huggingface_hub import login
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
-from graph_loss.neuron_activation_heatmap import _resolve_dataset_path, _parse_numeric_args
+from graph_loss.neuron_activation_heatmap import _parse_numeric_args
 from graph_loss.utils import DTYPE_CHOICES, resolve_torch_dtype
-from utils import HF_READ_TOKEN, load_prompt_answer_json
+from utils import HF_READ_TOKEN, default_datasets_dir, load_prompt_answer_json
+
+
+def _resolve_dataset_path(dataset_name: str) -> str:
+    expanded = os.path.expanduser(dataset_name)
+    if os.path.isfile(expanded):
+        return os.path.abspath(expanded)
+    root = default_datasets_dir()
+    candidates = [
+        os.path.join(root, os.path.basename(expanded)),
+        os.path.join(root, f"{os.path.basename(expanded)}.json"),
+        os.path.join(root, f"{os.path.basename(expanded)}_all.json"),
+    ]
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return os.path.abspath(candidate)
+    raise FileNotFoundError(f"Could not resolve dataset {dataset_name!r}. Tried: {', '.join(candidates)}")
 
 logger = logging.getLogger(__name__)
 

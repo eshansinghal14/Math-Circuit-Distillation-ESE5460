@@ -275,8 +275,7 @@ def _dla_kl_scores_for_output(
 
 def select_anova_supernodes(
     label_results: list,
-    anova_nodes_per_label: int,
-    sum_min_specificity: float = 0.0,
+    nodes_per_label: int,
     strict: bool = True,
     source_vectors: torch.Tensor | None = None,
     W_U: torch.Tensor | None = None,
@@ -291,21 +290,18 @@ def select_anova_supernodes(
     """Select ANOVA supernodes from pre-computed label results.
 
     For non-sum categories ranks by ANOVA specificity score.
-    For sum categories filters by sum_min_specificity and ranks by DLA-KL if
-    source_vectors/W_U/tokenizer/target_args are all provided; otherwise falls
-    back to ANOVA variance.
+    For sum categories ranks by DLA-KL (requires source_vectors/W_U/tokenizer/target_args).
 
     Optionally creates one additional "dla" supernode containing the top
-    ``anova_nodes_per_label`` neurons whose DLA distribution (neuron write vector
+    ``nodes_per_label`` neurons whose DLA distribution (neuron write vector
     projected through W_U, softmaxed) most closely matches the model's actual
     output distribution (lowest KL divergence).
 
     Args:
         label_results: Output of gpu_label_activation_heatmaps(). Entry i corresponds
             to neuron index i passed to build_neuron_activation_write_result.
-        anova_nodes_per_label: Max neurons per ANOVA label category (also used as the
+        nodes_per_label: Max neurons per ANOVA label category (also used as the
             size cap for the DLA supernode).
-        sum_min_specificity: Min ANOVA specificity for sum-range/sum-units candidates.
         strict: Raise ValueError when a non-sum category has no positive-variance nodes.
         source_vectors: [N, d_model] neuron write vectors from setup_attribution.
         W_U: [d_model, d_vocab] unembedding matrix.
@@ -356,9 +352,8 @@ def select_anova_supernodes(
                 for row_idx, lr in enumerate(label_results)
                 if category in lr.category_scores
                 and lr.category_scores[category] > 0.0
-                and lr.category_specificity.get(category, 0.0) > sum_min_specificity
             ]
-            if candidates and use_dla:
+            if use_dla:
                 kl_all = _dla_kl_scores_for_sum(
                     source_vectors,  # type: ignore[arg-type]
                     W_U,             # type: ignore[arg-type]
@@ -369,10 +364,7 @@ def select_anova_supernodes(
                 all_scored_rows = [(row_idx, kl_all[row_idx]) for row_idx in candidates]
             else:
                 kl_all = None
-                all_scored_rows = [
-                    (row_idx, label_results[row_idx].category_scores[category])
-                    for row_idx in candidates
-                ]
+                all_scored_rows = []
         else:
             all_scored_rows = [
                 (row_idx, lr.category_specificity.get(category, 0.0))
@@ -389,16 +381,12 @@ def select_anova_supernodes(
                     f"ANOVA category {category!r} has no positive-variance nodes."
                 )
             if is_sum_category:
-                logger.info(
-                    "  ANOVA label %s: no candidates above sum_min_specificity=%.6g",
-                    category,
-                    sum_min_specificity,
-                )
+                logger.info("  ANOVA label %s: no DLA-scored candidates", category)
             else:
                 logger.info("  ANOVA label %s: no positive-variance nodes", category)
             continue
 
-        keep_count = min(anova_nodes_per_label, len(sorted_rows))
+        keep_count = min(nodes_per_label, len(sorted_rows))
         top_rows = sorted_rows[:keep_count]
 
         for row_idx, _score in top_rows:
@@ -426,7 +414,7 @@ def select_anova_supernodes(
             category,
             len(members),
             len(sorted_rows),
-            anova_nodes_per_label,
+            nodes_per_label,
             float(top_rows[0][1]),
         )
 
@@ -449,7 +437,7 @@ def select_anova_supernodes(
             n_candidates = len(kl_scores)
             all_dla_rows = [(i, kl_scores[i]) for i in range(n_candidates)]
             sorted_dla = sorted(all_dla_rows, key=lambda item: item[1], reverse=True)
-            keep_count = min(anova_nodes_per_label, len(sorted_dla))
+            keep_count = min(nodes_per_label, len(sorted_dla))
             top_dla = sorted_dla[:keep_count]
             dla_members = []
             for row_idx, _score in top_dla:
@@ -464,7 +452,7 @@ def select_anova_supernodes(
                 "  DLA supernode: selected=%d/%d cap=%d best_score=%.6g",
                 len(dla_members),
                 n_candidates,
-                anova_nodes_per_label,
+                nodes_per_label,
                 float(top_dla[0][1]) if top_dla else 0.0,
             )
 

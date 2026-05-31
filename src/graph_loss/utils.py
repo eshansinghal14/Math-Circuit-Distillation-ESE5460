@@ -99,9 +99,9 @@ def add_graph_build_args(parser: argparse.ArgumentParser) -> None:
         help="Show attribution progress",
     )
     parser.add_argument(
-        "--anova-nodes-per-label",
-        "--anova_nodes_per_label",
-        dest="anova_nodes_per_label",
+        "--nodes-per-label",
+        "--nodes_per_label",
+        dest="nodes_per_label",
         type=int,
         default=10,
         help="Maximum positive-variance ANOVA nodes to include per label supernode.",
@@ -116,14 +116,6 @@ def add_graph_build_args(parser: argparse.ArgumentParser) -> None:
             "Radius around the target arg1/arg2 values for ANOVA range basis masks. "
             "Use 0 for exact target-value masks."
         ),
-    )
-    parser.add_argument(
-        "--sum-min-specificity",
-        "--sum_min_specificity",
-        dest="sum_min_specificity",
-        type=float,
-        default=0.0,
-        help="Minimum ANOVA specificity for sum range/sum units supernodes.",
     )
     parser.add_argument(
         "--graph-node-labels",
@@ -146,7 +138,7 @@ def add_graph_build_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         default=False,
         help=(
-            "If set, add a 'dla' supernode containing the top anova_nodes_per_label "
+            "If set, add a 'dla' supernode containing the top nodes_per_label "
             "neurons whose DLA distribution (write vector projected through W_U) most "
             "closely matches the model's actual output distribution by KL divergence."
         ),
@@ -159,7 +151,7 @@ def add_graph_build_args(parser: argparse.ArgumentParser) -> None:
         default=False,
         help=(
             "If set, create one 'arg:TOKEN' supernode per token position in the prompt. "
-            "Each supernode contains the top anova_nodes_per_label neurons (from the "
+            "Each supernode contains the top nodes_per_label neurons (from the "
             "pre-ANOVA candidate pool) whose activation is most concentrated on that "
             "token's embedding.  Concentration is measured by back-propagating each "
             "neuron's activation to the token embeddings, computing the normalised "

@@ -79,15 +79,6 @@ def main():
     )
     parser.set_defaults(export_frontend=True)
     parser.add_argument(
-        "--dataset",
-        required=True,
-        help=(
-            "Dataset prefix, filename, or path for ANOVA activation-grid labeling "
-            "and per-cluster PDF heatmaps"
-        ),
-    )
-
-    parser.add_argument(
         "--supernode-heatmap-output-dir",
         "--supernode_heatmap_output_dir",
         dest="supernode_heatmap_output_dir",
@@ -126,13 +117,10 @@ def main():
         prop_neurons_per_layer=args.prop_neurons_per_layer,
         batch_size=args.attribution_batch_size,
         verbose=args.verbose,
-        dataset=args.dataset,
-
         model_name=args.model,
         supernode_heatmap_output_dir=args.supernode_heatmap_output_dir,
-        anova_nodes_per_label=args.anova_nodes_per_label,
+        nodes_per_label=args.nodes_per_label,
         anova_range_radius=args.anova_range_radius,
-        sum_min_specificity=args.sum_min_specificity,
         node_labels=args.graph_node_labels,
         include_dla_node=args.include_dla_node,
         include_arg_nodes=args.include_arg_nodes,

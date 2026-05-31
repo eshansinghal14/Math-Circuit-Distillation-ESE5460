@@ -58,8 +58,7 @@ class GraphSharedContext:
     raw_sum_member_scores: dict
     target_args: list
     # Pipeline params forwarded to create_graph_at_position.
-    anova_nodes_per_label: int
-    sum_min_specificity: float
+    nodes_per_label: int
     # Precomputed activation write result (None in training, set by CLI path).
     activation_write_result: object
     supernode_heatmap_output_dir: str | None
@@ -230,12 +229,10 @@ def build_shared_context(
     *,
     prop_neurons_per_layer: float = 0.1,
     dtype: torch.dtype | None = None,
-    dataset: str | None = None,
     mlp_input_cache: dict | None = None,
     model_name: str | None = None,
-    anova_nodes_per_label: int = 10,
+    nodes_per_label: int = 10,
     anova_range_radius: int = 0,
-    sum_min_specificity: float = 0.0,
     node_labels: list[str] | None = None,
     include_arg_nodes: bool = False,
     batch_size: int = 512,
@@ -272,16 +269,14 @@ def build_shared_context(
     target_args: list = []
 
     if need_anova:
-        if dataset is None:
-            raise ValueError("A dataset is required for ANOVA labeling. Pass --dataset.")
         decoded = adapter.tokenizer.decode(input_ids.detach().cpu().tolist())
         target_args = parse_numeric_args(decoded)
 
         if mlp_input_cache is None and model_name is not None:
-            from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
+            from graph_loss.neuron_activation_heatmap import _get_anova_dataset_path
             from graph_loss.precompute_mlp_inputs import build_mlp_input_cache as _build_mlp_cache
-            dataset_path = _resolve_dataset_path(dataset)
-            _logger.info("Building MLP input cache for dataset: %s", dataset)
+            dataset_path = _get_anova_dataset_path()
+            _logger.info("Building MLP input cache for 22_add_tight dataset")
             mlp_input_cache = _build_mlp_cache(adapter, dataset_path, model_name, batch_size=32)
             _logger.info("  Built MLP cache: %d prompts", int(mlp_input_cache.get("meta", {}).get("n_prompts", 0)))
 
@@ -305,25 +300,23 @@ def build_shared_context(
         not need_anova
         and include_arg_nodes
         and supernode_heatmap_output_dir is not None
-        and dataset is not None
         and mlp_input_cache is None
         and model_name is not None
     ):
-        from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
+        from graph_loss.neuron_activation_heatmap import _get_anova_dataset_path
         from graph_loss.precompute_mlp_inputs import build_mlp_input_cache as _build_mlp_cache
-        dataset_path = _resolve_dataset_path(dataset)
-        _logger.info("Building MLP input cache for arg-node heatmaps: %s", dataset)
+        dataset_path = _get_anova_dataset_path()
+        _logger.info("Building MLP input cache for arg-node heatmaps (22_add_tight)")
         mlp_input_cache = _build_mlp_cache(adapter, dataset_path, model_name, batch_size=32)
         _logger.info("  Built MLP cache: %d prompts", int(mlp_input_cache.get("meta", {}).get("n_prompts", 0)))
 
     # Select ANOVA supernodes (DLA excluded here; it is position-specific).
     if need_anova:
-        _logger.info("Selecting ANOVA supernodes (top-%d per label)", anova_nodes_per_label)
+        _logger.info("Selecting ANOVA supernodes (top-%d per label)", nodes_per_label)
         anova_selected, anova_raw_supernodes, anova_supernode_labels, raw_node_labels, raw_sum_member_scores = (
             select_anova_supernodes(
                 label_results,
-                anova_nodes_per_label=anova_nodes_per_label,
-                sum_min_specificity=sum_min_specificity,
+                nodes_per_label=nodes_per_label,
                 strict=True,
                 source_vectors=ctx.source_vectors,
                 W_U=adapter.W_U,
@@ -353,7 +346,7 @@ def build_shared_context(
             ctx,
             adapter.tokenizer,
             input_ids,
-            nodes_per_token=anova_nodes_per_label,
+            nodes_per_token=nodes_per_label,
         )
         for sn in token_raw_supernodes:
             all_selected.update(sn)
@@ -372,7 +365,7 @@ def build_shared_context(
     anova_token_selected_indices = sorted(all_selected)
 
     # Precompute activation write result if needed (CLI heatmap path only; None in training).
-    need_awr = (need_anova or (include_arg_nodes and supernode_heatmap_output_dir is not None)) and dataset is not None
+    need_awr = need_anova or (include_arg_nodes and supernode_heatmap_output_dir is not None)
     activation_write_result = None
     if need_awr and anova_token_selected_indices:
         # Build a temporary filtered ctx to compute activation write results for ANOVA neurons.
@@ -383,7 +376,6 @@ def build_shared_context(
         _logger.info("Building activation-write result for %d neurons", tmp_filtered_ctx.n_neurons)
         activation_write_result = build_neuron_activation_write_result(
             adapter,
-            dataset,
             tmp_filtered_ctx.neuron_locations,
             mlp_input_cache=mlp_input_cache,
         )
@@ -399,8 +391,7 @@ def build_shared_context(
         label_results=label_results,
         raw_sum_member_scores=raw_sum_member_scores,
         target_args=target_args,
-        anova_nodes_per_label=anova_nodes_per_label,
-        sum_min_specificity=sum_min_specificity,
+        nodes_per_label=nodes_per_label,
         activation_write_result=activation_write_result,
         supernode_heatmap_output_dir=supernode_heatmap_output_dir,
     )
@@ -457,8 +448,7 @@ def create_graph_at_position(
         dla_selected, dla_raw_supernodes, dla_supernode_labels, dla_raw_node_labels, _ = (
             select_anova_supernodes(
                 shared.label_results,
-                anova_nodes_per_label=shared.anova_nodes_per_label,
-                sum_min_specificity=shared.sum_min_specificity,
+                nodes_per_label=shared.nodes_per_label,
                 strict=True,
                 source_vectors=ctx.source_vectors,
                 W_U=adapter.W_U,
@@ -585,13 +575,11 @@ def create_graph(
     # target position for attribution (default -1 = last token, existing behavior)
     target_position: int = -1,
     # ANOVA / supergraph params
-    dataset: str | None = None,
     mlp_input_cache: dict | None = None,
     model_name: str | None = None,
     supernode_heatmap_output_dir: str | None = None,
-    anova_nodes_per_label: int = 10,
+    nodes_per_label: int = 10,
     anova_range_radius: int = 0,
-    sum_min_specificity: float = 0.0,
     node_labels: list[str] | None = None,
     include_dla_node: bool = False,
     dla_model_logits: torch.Tensor | None = None,
@@ -619,19 +607,16 @@ def create_graph(
         build_create_graph: PyTorch autograd create_graph flag (training use).
         detach_result: Whether to detach the adjacency from the grad graph.
         skip_logit_attribution: Skip logit attribution phase.
-        dataset: Dataset name/path for activation-grid ANOVA labeling.
-
         mlp_input_cache: Pre-built MLP input cache.
-        model_name: HuggingFace model identifier string.
+        model_name: HuggingFace model identifier string (used as MLP cache key).
         supernode_heatmap_output_dir: Directory for per-supernode PDF heatmaps.
-        anova_nodes_per_label: Max neurons per ANOVA label supernode.
+        nodes_per_label: Max neurons per ANOVA label supernode.
         anova_range_radius: Radius for target-centered ANOVA range masks.
-        sum_min_specificity: Min ANOVA specificity for sum-range/sum-units supernodes.
         node_labels: Whitelist of ANOVA label names to include (e.g. ['arg1 range',
             'sum units']). Only supernodes whose category is in this list are created.
             If None (omitted), no ANOVA supernodes are created.
         include_dla_node: If True, create an additional "dla" supernode containing the
-            top ``anova_nodes_per_label`` neurons whose DLA distribution (write vector
+            top ``nodes_per_label`` neurons whose DLA distribution (write vector
             projected through W_U) best matches the reference output distribution by
             KL divergence.  The reference is ``dla_model_logits`` when provided,
             otherwise the model's own forward-pass logits.
@@ -643,7 +628,7 @@ def create_graph(
             non-stationary across steps).
         include_arg_nodes: If True, create one ``"arg:TOKEN"`` supernode per token
             position in the prompt.  Each supernode contains the top
-            ``anova_nodes_per_label`` neurons (from the pre-ANOVA candidate pool)
+            ``nodes_per_label`` neurons (from the pre-ANOVA candidate pool)
             whose activation is most concentrated on that token's embedding, identified
             by back-propagating each neuron's activation to the token embeddings and
             selecting by normalised embedding-gradient mass (= minimum KL divergence
@@ -662,12 +647,10 @@ def create_graph(
         input_ids,
         prop_neurons_per_layer=prop_neurons_per_layer,
         dtype=dtype,
-        dataset=dataset,
         mlp_input_cache=mlp_input_cache,
         model_name=model_name,
-        anova_nodes_per_label=anova_nodes_per_label,
+        nodes_per_label=nodes_per_label,
         anova_range_radius=anova_range_radius,
-        sum_min_specificity=sum_min_specificity,
         node_labels=node_labels,
         include_arg_nodes=include_arg_nodes,
         batch_size=batch_size,
@@ -704,11 +687,9 @@ def build_teacher_supergraph(
     dtype: torch.dtype | None = None,
     include_dla_node: bool = False,
     include_arg_nodes: bool = False,
-    anova_nodes_per_label: int = 10,
+    nodes_per_label: int = 10,
     anova_range_radius: int = 0,
-    sum_min_specificity: float = 0.0,
     node_labels: list[str] | None = None,
-    dataset: str | None = None,
     mlp_input_cache: dict | None = None,
     model_name: str | None = None,
     verbose: bool = False,
@@ -733,12 +714,10 @@ def build_teacher_supergraph(
             batch_size=batch_size,
             dtype=dtype,
             verbose=verbose,
-            dataset=dataset,
             mlp_input_cache=mlp_input_cache,
             model_name=model_name,
-            anova_nodes_per_label=anova_nodes_per_label,
+            nodes_per_label=nodes_per_label,
             anova_range_radius=anova_range_radius,
-            sum_min_specificity=sum_min_specificity,
             node_labels=node_labels,
             include_dla_node=include_dla_node,
             include_arg_nodes=include_arg_nodes,

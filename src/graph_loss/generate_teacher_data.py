@@ -43,11 +43,9 @@ class TeacherDataConfig:
     limit: int | None = None
     start_index: int = 0
     overwrite: bool = False
-    dataset: str | None = None
 
-    anova_nodes_per_label: int = 10
+    nodes_per_label: int = 10
     anova_range_radius: int = 0
-    sum_min_specificity: float = 0.0
     graph_node_labels: list[str] | None = None
     include_dla_node: bool = False
     include_arg_nodes: bool = False
@@ -126,12 +124,10 @@ def generate_teacher_sample(
     prop_neurons_per_layer: float = 0.1,
     batch_size: int = 256,
     verbose: bool = False,
-    dataset: str | None = None,
     mlp_input_cache: dict | None = None,
     model_name: str | None = None,
-    anova_nodes_per_label: int = 10,
+    nodes_per_label: int = 10,
     anova_range_radius: int = 0,
-    sum_min_specificity: float = 0.0,
     node_labels: list[str] | None = None,
     include_dla_node: bool = False,
     include_arg_nodes: bool = False,
@@ -155,12 +151,10 @@ def generate_teacher_sample(
         prop_neurons_per_layer=prop_neurons_per_layer,
         batch_size=batch_size,
         verbose=verbose,
-        dataset=dataset,
         mlp_input_cache=mlp_input_cache,
         model_name=model_name,
-        anova_nodes_per_label=anova_nodes_per_label,
+        nodes_per_label=nodes_per_label,
         anova_range_radius=anova_range_radius,
-        sum_min_specificity=sum_min_specificity,
         node_labels=node_labels,
         include_dla_node=include_dla_node,
         include_arg_nodes=include_arg_nodes,
@@ -232,14 +226,12 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
     }
 
     # Build MLP input cache once for the entire run — same across all prompts.
-    # Only needed for ANOVA neuron labeling, which is skipped when graph_node_labels
-    # is None, so skip the (expensive) cache build in that case.
-    activation_dataset = config.dataset or config.dataset_file
-    if activation_dataset and config.graph_node_labels is not None:
+    # Only needed for ANOVA neuron labeling; skip when graph_node_labels is None.
+    if config.graph_node_labels is not None:
         from graph_loss.precompute_mlp_inputs import build_mlp_input_cache
-        from graph_loss.neuron_activation_heatmap import _resolve_dataset_path
-        activation_dataset_path = _resolve_dataset_path(activation_dataset)
-        logger.info("Building MLP input cache once for dataset: %s", activation_dataset)
+        from graph_loss.neuron_activation_heatmap import _get_anova_dataset_path
+        activation_dataset_path = _get_anova_dataset_path()
+        logger.info("Building MLP input cache once for 22_add_tight dataset")
         mlp_input_cache = build_mlp_input_cache(
             adapter,
             activation_dataset_path,
@@ -249,8 +241,7 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
         n_prompts = int(mlp_input_cache.get("meta", {}).get("n_prompts", 0))
         logger.info("  MLP cache: %d prompts, ready for reuse across all training prompts", n_prompts)
     else:
-        if activation_dataset and config.graph_node_labels is None:
-            logger.info("Skipping MLP input cache (no --graph-node-labels, ANOVA not needed)")
+        logger.info("Skipping MLP input cache (no --graph-node-labels, ANOVA not needed)")
         mlp_input_cache = None
 
     for local_idx, (prompt, answer) in enumerate(tqdm(samples, desc="Generating teacher data", unit="sample")):
@@ -273,12 +264,10 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
             prop_neurons_per_layer=config.prop_neurons_per_layer,
             batch_size=config.attribution_batch_size,
             verbose=config.verbose,
-            dataset=activation_dataset,
             mlp_input_cache=mlp_input_cache,
             model_name=config.teacher_model,
-            anova_nodes_per_label=config.anova_nodes_per_label,
+            nodes_per_label=config.nodes_per_label,
             anova_range_radius=config.anova_range_radius,
-            sum_min_specificity=config.sum_min_specificity,
             node_labels=config.graph_node_labels,
             include_dla_node=config.include_dla_node,
             include_arg_nodes=config.include_arg_nodes,
@@ -406,13 +395,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=int, default=None, help="Optional number of samples")
     parser.add_argument("--start-index", type=int, default=0, help="Dataset index to start at")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing sample folders")
-    parser.add_argument(
-        "--dataset",
-        help=(
-            "Optional dataset prefix, filename, or path for activation-write "
-            "output-neuron clustering and per-cluster PDF heatmaps"
-        ),
-    )
     add_graph_build_args(parser)
     parser.add_argument(
         "--merge-shards",
@@ -449,11 +431,9 @@ def main() -> None:
         limit=args.limit,
         start_index=args.start_index,
         overwrite=args.overwrite,
-        dataset=args.dataset,
 
-        anova_nodes_per_label=args.anova_nodes_per_label,
+        nodes_per_label=args.nodes_per_label,
         anova_range_radius=args.anova_range_radius,
-        sum_min_specificity=args.sum_min_specificity,
         graph_node_labels=args.graph_node_labels,
         include_dla_node=args.include_dla_node,
         include_arg_nodes=args.include_arg_nodes,
