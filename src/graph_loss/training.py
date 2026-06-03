@@ -353,14 +353,19 @@ def _compare_tokens_loss_for_prompt(
     student_adapter: HFLlamaGraphAdapter,
     config: GraphAuxConfig,
     device: torch.device,
+    loss_scale: float,
+    denom: float,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Graph loss for one prompt using KL-selected response token positions.
 
     Tokenizes the full sequence (prompt + answer), selects the top
     compare_n_tokens response positions by teacher-student KL divergence,
     then builds separate teacher and student supergraphs for the causal
-    prefix at each selected position using the unified build_teacher_supergraph path.
+    prefix at each selected position. Backprops immediately after each
+    position to bound peak memory to one position's graphs at a time.
+    Returns a detached mean loss for logging; backward is already complete.
     """
+    import gc
     from graph_loss.create_graph import create_graph
 
     tokenizer = student_adapter.tokenizer
@@ -396,7 +401,7 @@ def _compare_tokens_loss_for_prompt(
         response_positions[i] for i in torch.topk(kl_vals, n_select).indices.tolist()
     ]
 
-    position_losses: list[torch.Tensor] = []
+    detached_losses: list[torch.Tensor] = []
     metric_sums: dict[str, float] = {}
 
     for pos in selected_positions:
@@ -436,12 +441,21 @@ def _compare_tokens_loss_for_prompt(
             config=config,
             cached_teacher=cached,
         )
-        position_losses.append(pos_loss)
+
+        scaled_pos_loss = (loss_scale / denom / n_select) * pos_loss
+        if scaled_pos_loss.requires_grad:
+            scaled_pos_loss.backward()
+        del scaled_pos_loss, cached
+        gc.collect()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        detached_losses.append(pos_loss.detach())
         for key, val in pos_metrics.items():
             metric_sums[key] = metric_sums.get(key, 0.0) + float(val)
 
-    avg_loss = torch.stack(position_losses).mean()
-    n_pos = float(len(position_losses))
+    avg_loss = torch.stack(detached_losses).mean()
+    n_pos = float(len(detached_losses))
     metrics = {k: v / n_pos for k, v in metric_sums.items()}
     metrics["compare_tokens_n_selected"] = n_pos
     return avg_loss, metrics
@@ -487,6 +501,7 @@ def backward_batch_graph_loss(
 
     for i, prompt in enumerate(prompts):
         if config.compare_n_tokens is not None:
+            # Backward is done per-position inside _compare_tokens_loss_for_prompt.
             prompt_loss, prompt_metrics = _compare_tokens_loss_for_prompt(
                 prompt=prompt,
                 answer=answers[i],
@@ -494,44 +509,43 @@ def backward_batch_graph_loss(
                 student_adapter=student_adapter,
                 config=config,
                 device=device,
+                loss_scale=loss_scale,
+                denom=denom,
             )
-        elif teacher_cache is not None:
-            cached = _load_cached_teacher(teacher_cache, prompt, answers[i], device)
-            prompt_loss, prompt_metrics = compute_prompt_graph_loss(
-                prompt=prompt,
-                student_adapter=student_adapter,
-                config=config,
-                cached_teacher=cached,
-            )
-        else:
-            from graph_loss.generate_teacher_data import generate_teacher_sample
-
-            cached = generate_teacher_sample(
-                teacher_adapter,  # type: ignore[arg-type]
-                prompt,
-                answers[i],
-                prop_neurons_per_layer=config.teacher_prop_neurons_per_layer,
-                top_k_logits=config.top_k_logits,
-                temperature=config.temperature,
-                batch_size=config.teacher_graph_batch_size,
-                include_dla_node=config.tokens_dla_nodes,
-                include_arg_nodes=config.tokens_dla_nodes,
-                verbose=config.verbose,
-            )
-            prompt_loss, prompt_metrics = compute_prompt_graph_loss(
-                prompt=prompt,
-                student_adapter=student_adapter,
-                config=config,
-                cached_teacher=cached,
-            )
-        detached_losses.append(prompt_loss.detach())
-        scaled_loss = (loss_scale / denom) * prompt_loss
-        if scaled_loss.requires_grad:
-            scaled_loss.backward()
+            detached_losses.append(prompt_loss)  # already detached
             graph_backward_prompts += 1
-        elif config.verbose:
-            print("  [graph] WARN: graph loss has no grad; skipping backward")
-        del scaled_loss
+        else:
+            if teacher_cache is not None:
+                cached = _load_cached_teacher(teacher_cache, prompt, answers[i], device)
+            else:
+                from graph_loss.generate_teacher_data import generate_teacher_sample
+
+                cached = generate_teacher_sample(
+                    teacher_adapter,  # type: ignore[arg-type]
+                    prompt,
+                    answers[i],
+                    prop_neurons_per_layer=config.teacher_prop_neurons_per_layer,
+                    top_k_logits=config.top_k_logits,
+                    temperature=config.temperature,
+                    batch_size=config.teacher_graph_batch_size,
+                    include_dla_node=config.tokens_dla_nodes,
+                    include_arg_nodes=config.tokens_dla_nodes,
+                    verbose=config.verbose,
+                )
+            prompt_loss, prompt_metrics = compute_prompt_graph_loss(
+                prompt=prompt,
+                student_adapter=student_adapter,
+                config=config,
+                cached_teacher=cached,
+            )
+            detached_losses.append(prompt_loss.detach())
+            scaled_loss = (loss_scale / denom) * prompt_loss
+            if scaled_loss.requires_grad:
+                scaled_loss.backward()
+                graph_backward_prompts += 1
+            elif config.verbose:
+                print("  [graph] WARN: graph loss has no grad; skipping backward")
+            del scaled_loss
         gc.collect()
         if device.type == "cuda":
             torch.cuda.empty_cache()

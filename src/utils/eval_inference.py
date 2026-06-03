@@ -5,9 +5,7 @@ import torch
 
 from .answer_parsing import (
     _extract_int_after_equals,
-    _gsm8k_gold_answer_str,
     _normalize_numeric_str,
-    _slice_text_after_reasoning,
     extract_numeric_answer_from_text,
 )
 from .config import EVAL_MAX_NEW_TOKENS
@@ -37,7 +35,7 @@ def load_hf_benchmark_rows(
         ds = load_dataset("openai/gsm8k", "main", split="test")
         for ex in ds:
             q = ex["question"].strip()
-            gold = _gsm8k_gold_answer_str(ex["answer"])
+            gold = extract_numeric_answer_from_text(ex["answer"])
             if gold is None:
                 continue
             prompt = f"Question: {q}\nReasoning:"
@@ -112,9 +110,12 @@ def run_hf_benchmark(
                 pad_token_id=tokenizer.pad_token_id,
             )
             decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+            prompt_len = inputs["input_ids"].shape[1]
+            gen_only = tokenizer.batch_decode(
+                outputs[:, prompt_len:], skip_special_tokens=True
+            )
             for j, full_text in enumerate(decoded):
-                tail = _slice_text_after_reasoning(full_text)
-                pred = extract_numeric_answer_from_text(tail)
+                pred = extract_numeric_answer_from_text(gen_only[j])
                 gold = golds[j]
                 if pred is not None and pred == gold:
                     correct += 1
@@ -204,15 +205,10 @@ def evaluate_prompt_answer_dict(
                 if pred == gold:
                     correct += 1
             else:
-                # CoT / GSM8K path: gold is the full solution string ending in
-                # ``#### N``.  Extract N from the gold and the final number from the
-                # student's GENERATION ONLY (``gen``) -- scanning the echoed prompt
-                # would pick numbers out of the question -- then compare as
-                # normalized numeric strings.
-                gold_num = _gsm8k_gold_answer_str(str(gold))
-                pred_num = extract_numeric_answer_from_text(
-                    _slice_text_after_reasoning(gen)
-                )
+                # CoT / GSM8K path: compare the last number in the gold solution
+                # against the last number in the student's generated continuation.
+                gold_num = extract_numeric_answer_from_text(str(gold))
+                pred_num = extract_numeric_answer_from_text(gen)
                 if (
                     gold_num is not None
                     and pred_num is not None
