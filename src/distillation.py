@@ -180,6 +180,7 @@ class DistillationConfig:
     student_model: str = LLAMA_1B_MODEL_NAME
     steps: int = 50
     batch_size: int = 32
+    grad_accum_steps: int = 1
     learning_rate: float = 1e-4
     temperature: float = 2.0
     kl_token_chunk_size: int = 64
@@ -599,6 +600,7 @@ class DistillationTrainer:
         metrics: Dict[str, float],
         non_graph_loss: torch.Tensor,
         kl_grad_norm: Optional[float] = None,
+        grad_scale: float = 1.0,
     ) -> torch.Tensor:
         if not self._use_graph:
             return non_graph_loss
@@ -627,7 +629,7 @@ class DistillationTrainer:
                 student_adapter=self.student_graph_adapter,
                 config=self.graph_loss_config,
                 device=self.device,
-                loss_scale=1.0 if use_grad_norm_scale else self.config.lambda_graph,
+                loss_scale=1.0 if use_grad_norm_scale else self.config.lambda_graph * grad_scale,
                 teacher_cache=self.teacher_data_cache,
                 teacher_adapter=(
                     self.teacher_graph_adapter
@@ -783,17 +785,20 @@ class DistillationTrainer:
         skipped_nonfinite = 0
         interval = defaultdict(float)
         interval_steps = 0
+        accum_steps = max(1, int(self.config.grad_accum_steps))
+        pending_accum_steps = 0
+        self.optimizer.zero_grad(set_to_none=True)
         for step, batch in enumerate(self.loader):
             loss, metrics = self._forward_kl(batch)
             if not torch.isfinite(loss).item():
                 skipped_nonfinite += 1
                 continue
+            grad_scale = 1.0 / accum_steps
             use_graph_this_step = self._use_graph and (
                 self._train_step + 1 >= self._graph_start_step
             )
-            self.optimizer.zero_grad(set_to_none=use_graph_this_step)
             if use_graph_this_step:
-                loss.backward()
+                (loss * grad_scale).backward()
                 kl_grads = (
                     self._clone_student_grads()
                     if self.config.track_loss_grads
@@ -801,16 +806,30 @@ class DistillationTrainer:
                 )
                 self._clear_cuda_cache()
                 kl_grad_norm = self._get_grad_norm() if self.config.graph_grad_norm_scale else None
-                loss = self._backward_graph_loss(batch, metrics, loss, kl_grad_norm=kl_grad_norm)
+                loss = self._backward_graph_loss(
+                    batch,
+                    metrics,
+                    loss,
+                    kl_grad_norm=kl_grad_norm,
+                    grad_scale=grad_scale,
+                )
                 if kl_grads is not None:
                     self._record_loss_grad_metrics(metrics, kl_grads)
             else:
-                loss.backward()
+                (loss * grad_scale).backward()
                 if self.config.track_loss_grads:
                     self._record_kl_only_grad_metrics(metrics)
-            torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.config.grad_clip)
-            self.optimizer.step()
-            if use_graph_this_step:
+            pending_accum_steps += 1
+            should_step_optimizer = (
+                pending_accum_steps >= accum_steps
+                or (max_steps is not None and n_steps + 1 >= max_steps)
+            )
+            if should_step_optimizer:
+                torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.config.grad_clip)
+                self.optimizer.step()
+                self.optimizer.zero_grad(set_to_none=True)
+                pending_accum_steps = 0
+            if use_graph_this_step or should_step_optimizer:
                 self._clear_cuda_cache()
 
             if not torch.isfinite(loss).item():
@@ -877,6 +896,11 @@ class DistillationTrainer:
 
             if max_steps is not None and n_steps >= max_steps:
                 break
+
+        if pending_accum_steps > 0:
+            torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.config.grad_clip)
+            self.optimizer.step()
+            self.optimizer.zero_grad(set_to_none=True)
 
         if n_steps == 0:
             print(
@@ -976,6 +1000,7 @@ class DistillationTrainer:
         print(f"  Run dir:          {cfg.save_dir}")
         print(f"  Steps:            {self._train_step + 1}..{target_step}")
         print(f"  Batch size:       {cfg.batch_size}")
+        print(f"  Grad accum steps: {cfg.grad_accum_steps}")
         print(f"  LR:               {cfg.learning_rate}")
         print(f"  Temperature:      {cfg.temperature}")
         if self._use_graph:
@@ -1131,6 +1156,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--datasets-dir", type=str, default=None)
     parser.add_argument("--steps", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument(
+        "--grad-accum-steps",
+        type=int,
+        default=1,
+        help=(
+            "Accumulate gradients over N valid microbatches before each optimizer "
+            "step. Loss gradients are scaled by 1/N. Default 1."
+        ),
+    )
     parser.add_argument("--train-limit", type=int, default=None)
     parser.add_argument("--test-limit", type=int, default=None,
                         help="Use only the first N test examples for evaluation "
@@ -1332,6 +1366,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--steps must be >= 0")
     if args.batch_size < 1:
         raise SystemExit("--batch-size must be >= 1")
+    if args.grad_accum_steps < 1:
+        raise SystemExit("--grad-accum-steps must be >= 1")
     if args.eval_batch_size < 1:
         raise SystemExit("--eval-batch-size must be >= 1")
     if args.step_log_interval < 1:
@@ -1433,6 +1469,7 @@ def main() -> None:
             student_model=args.student_model,
             steps=args.steps,
             batch_size=args.batch_size,
+            grad_accum_steps=args.grad_accum_steps,
             learning_rate=args.lr,
             temperature=args.temperature,
             kl_token_chunk_size=args.kl_token_chunk_size,
