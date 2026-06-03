@@ -43,7 +43,6 @@ def kl_loss(
     teacher_logits: torch.Tensor,
     attention_mask: torch.Tensor,
     temperature: float,
-    token_chunk_size: int = 64,
 ) -> torch.Tensor:
     t = temperature
     vocab = min(student_logits.shape[-1], teacher_logits.shape[-1])
@@ -52,18 +51,11 @@ def kl_loss(
     valid = attention_mask.reshape(-1).bool().nonzero(as_tuple=False).squeeze(-1)
     if valid.numel() == 0:
         return student_logits.sum() * 0.0
-
-    total = student_logits.new_zeros((), dtype=torch.float32)
-    for idx in valid.split(max(1, token_chunk_size)):
-        s_chunk = student_flat.index_select(0, idx.to(student_flat.device)).float()
-        t_chunk = teacher_flat.index_select(0, idx.to(teacher_flat.device)).to(
-            device=s_chunk.device, dtype=torch.float32,
-        )
-        log_p_t = F.log_softmax(t_chunk / t, dim=-1)
-        log_q_s = F.log_softmax(s_chunk / t, dim=-1)
-        total = total + (log_p_t.exp() * (log_p_t - log_q_s)).sum()
-
-    return total / valid.numel() * (t ** 2)
+    s = student_flat.index_select(0, valid.to(student_flat.device)).float()
+    t_log = teacher_flat.index_select(0, valid.to(teacher_flat.device)).to(device=s.device, dtype=torch.float32)
+    log_p_t = F.log_softmax(t_log / t, dim=-1)
+    log_q_s = F.log_softmax(s / t, dim=-1)
+    return (log_p_t.exp() * (log_p_t - log_q_s)).sum() / valid.numel() * (t ** 2)
 
 
 def kl_loss_from_student_hidden(
@@ -72,7 +64,6 @@ def kl_loss_from_student_hidden(
     teacher_logits: torch.Tensor,
     attention_mask: torch.Tensor,
     temperature: float,
-    token_chunk_size: int = 64,
 ) -> torch.Tensor:
     t = temperature
     vocab = min(int(lm_head.weight.shape[0]), int(teacher_logits.shape[-1]))
@@ -81,19 +72,11 @@ def kl_loss_from_student_hidden(
     valid = attention_mask.reshape(-1).bool().nonzero(as_tuple=False).squeeze(-1)
     if valid.numel() == 0:
         return student_hidden.sum() * 0.0
-
-    total = student_hidden.new_zeros((), dtype=torch.float32)
-    for idx in valid.split(max(1, token_chunk_size)):
-        h_chunk = hidden_flat.index_select(0, idx.to(hidden_flat.device))
-        s_chunk = lm_head(h_chunk)[..., :vocab].float()
-        t_chunk = teacher_flat.index_select(0, idx.to(teacher_flat.device)).to(
-            device=s_chunk.device, dtype=torch.float32,
-        )
-        log_p_t = F.log_softmax(t_chunk / t, dim=-1)
-        log_q_s = F.log_softmax(s_chunk / t, dim=-1)
-        total = total + (log_p_t.exp() * (log_p_t - log_q_s)).sum()
-
-    return total / valid.numel() * (t ** 2)
+    s = lm_head(hidden_flat.index_select(0, valid.to(hidden_flat.device)))[..., :vocab].float()
+    t_log = teacher_flat.index_select(0, valid.to(teacher_flat.device)).to(device=s.device, dtype=torch.float32)
+    log_p_t = F.log_softmax(t_log / t, dim=-1)
+    log_q_s = F.log_softmax(s / t, dim=-1)
+    return (log_p_t.exp() * (log_p_t - log_q_s)).sum() / valid.numel() * (t ** 2)
 
 
 class GSM8KDataset(Dataset):
@@ -157,7 +140,6 @@ class CoTDistillationConfig:
     grad_accum_steps: int = 1
     learning_rate: float = 1e-6
     temperature: float = 2.0
-    kl_token_chunk_size: int = 64
     grad_clip: float = 1.0
     max_response_tokens: int = 256
     eval_batch_size: int = 32
@@ -323,7 +305,6 @@ class CoTDistillationTrainer:
                 teacher_logits,
                 attention_mask,
                 self.config.temperature,
-                token_chunk_size=self.config.kl_token_chunk_size,
             )
         else:
             student_logits = self.student(
@@ -334,7 +315,6 @@ class CoTDistillationTrainer:
                 teacher_logits,
                 attention_mask,
                 self.config.temperature,
-                token_chunk_size=self.config.kl_token_chunk_size,
             )
         return loss, float(loss.item())
 
@@ -359,6 +339,7 @@ class CoTDistillationTrainer:
                 continue
 
             (loss / accum_steps).backward()
+            del loss
             pending_accum += 1
             should_step = (
                 pending_accum >= accum_steps
@@ -385,7 +366,9 @@ class CoTDistillationTrainer:
                 self._save_checkpoint_at_step(self._train_step)
 
             if self._train_step == 1 or self._train_step % max(1, self.config.step_log_interval) == 0:
+                self._clear_cuda_cache()
                 acc = self._evaluate_model(self.student)
+                self._clear_cuda_cache()
                 self.student.train()
                 self._step_log_eval_accuracy = acc
                 self.history["accuracy"].append(acc)
@@ -538,7 +521,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--grad-accum-steps", type=int, default=1)
     parser.add_argument("--lr", type=float, default=1e-6)
     parser.add_argument("--temperature", type=float, default=2.0)
-    parser.add_argument("--kl-token-chunk-size", type=int, default=64)
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--test-limit", type=int, default=100)
     parser.add_argument("--eval-batch-size", type=int, default=32)
@@ -596,7 +578,6 @@ def main() -> None:
             grad_accum_steps=args.grad_accum_steps,
             learning_rate=args.lr,
             temperature=args.temperature,
-            kl_token_chunk_size=args.kl_token_chunk_size,
             grad_clip=args.grad_clip,
             max_response_tokens=args.max_response_tokens,
             eval_batch_size=args.eval_batch_size,
