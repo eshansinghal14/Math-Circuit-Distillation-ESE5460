@@ -98,7 +98,7 @@ def kl_loss_from_student_hidden(
 
 
 class AddDataset(Dataset):
-    def __init__(self, data: Union[str, Dict[str, Union[int, str]]], tokenizer):
+    def __init__(self, data: Union[str, Dict[str, Union[int, str]]], tokenizer, max_response_tokens: Optional[int] = None):
         if isinstance(data, str):
             with open(data, "r", encoding="utf-8") as f:
                 raw = json.load(f)
@@ -113,6 +113,8 @@ class AddDataset(Dataset):
                 answer_text + tokenizer.eos_token,
                 return_tensors="pt", padding=False, add_special_tokens=False,
             )["input_ids"].squeeze(0)
+            if max_response_tokens is not None:
+                answer_ids = answer_ids[:max_response_tokens]
             self.samples.append({
                 "input_ids": torch.cat([prompt_ids, answer_ids]),
                 "prompt": str(prompt),
@@ -158,7 +160,7 @@ class CoTDistillationConfig:
     temperature: float = 2.0
     kl_token_chunk_size: int = 64
     grad_clip: float = 1.0
-    eval_max_new_tokens: int = 256
+    max_response_tokens: int = 256
     eval_batch_size: int = 32
     save_dir: str = "results/cot_distillation"
     step_log_interval: int = 1
@@ -271,7 +273,7 @@ class CoTDistillationTrainer:
             print("Using standard AdamW optimizer.")
 
         self.loader = DataLoader(
-            AddDataset(train_data, self.tokenizer),
+            AddDataset(train_data, self.tokenizer, max_response_tokens=config.max_response_tokens),
             batch_size=config.batch_size,
             shuffle=False,
             collate_fn=partial(collate_fn, pad_id=self.tokenizer.eos_token_id),
@@ -289,7 +291,7 @@ class CoTDistillationTrainer:
             "gsm8k",
             results_fname=None,
             batch_size=cfg.eval_batch_size,
-            max_new_tokens=cfg.eval_max_new_tokens,
+            max_new_tokens=cfg.max_response_tokens,
             limit=cfg.benchmark_eval_limit,
             log=False,
         )
@@ -535,6 +537,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.path.join(os.path.dirname(__file__), "..", "results", "cot_distillation"),
     )
     parser.add_argument("--step-log-interval", type=int, default=1)
+    parser.add_argument("--max-response-tokens", type=int, default=256)
     parser.add_argument("--save-interval", type=int, default=0)
     parser.add_argument("--resume-step", type=int, default=None, dest="resume_step")
     parser.add_argument("--checkpoint-run", default=None, metavar="PATH")
@@ -583,7 +586,7 @@ def main() -> None:
             temperature=args.temperature,
             kl_token_chunk_size=args.kl_token_chunk_size,
             grad_clip=args.grad_clip,
-            eval_max_new_tokens=256,
+            max_response_tokens=args.max_response_tokens,
             eval_batch_size=args.eval_batch_size,
             save_dir=run_dir,
             step_log_interval=args.step_log_interval,
