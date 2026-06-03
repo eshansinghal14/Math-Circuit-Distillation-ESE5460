@@ -38,6 +38,9 @@ from utils import (
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+_KL_CHUNK = 64
+
+
 def kl_loss(
     student_logits: torch.Tensor,
     teacher_logits: torch.Tensor,
@@ -51,11 +54,14 @@ def kl_loss(
     valid = attention_mask.reshape(-1).bool().nonzero(as_tuple=False).squeeze(-1)
     if valid.numel() == 0:
         return student_logits.sum() * 0.0
-    s = student_flat.index_select(0, valid.to(student_flat.device)).float()
-    t_log = teacher_flat.index_select(0, valid.to(teacher_flat.device)).to(device=s.device, dtype=torch.float32)
-    log_p_t = F.log_softmax(t_log / t, dim=-1)
-    log_q_s = F.log_softmax(s / t, dim=-1)
-    return (log_p_t.exp() * (log_p_t - log_q_s)).sum() / valid.numel() * (t ** 2)
+    total = student_logits.new_zeros((), dtype=torch.float32)
+    for idx in valid.split(_KL_CHUNK):
+        s = student_flat.index_select(0, idx.to(student_flat.device)).float()
+        t_log = teacher_flat.index_select(0, idx.to(teacher_flat.device)).to(device=s.device, dtype=torch.float32)
+        log_p_t = F.log_softmax(t_log / t, dim=-1)
+        log_q_s = F.log_softmax(s / t, dim=-1)
+        total = total + (log_p_t.exp() * (log_p_t - log_q_s)).sum()
+    return total / valid.numel() * (t ** 2)
 
 
 def kl_loss_from_student_hidden(
@@ -72,11 +78,14 @@ def kl_loss_from_student_hidden(
     valid = attention_mask.reshape(-1).bool().nonzero(as_tuple=False).squeeze(-1)
     if valid.numel() == 0:
         return student_hidden.sum() * 0.0
-    s = lm_head(hidden_flat.index_select(0, valid.to(hidden_flat.device)))[..., :vocab].float()
-    t_log = teacher_flat.index_select(0, valid.to(teacher_flat.device)).to(device=s.device, dtype=torch.float32)
-    log_p_t = F.log_softmax(t_log / t, dim=-1)
-    log_q_s = F.log_softmax(s / t, dim=-1)
-    return (log_p_t.exp() * (log_p_t - log_q_s)).sum() / valid.numel() * (t ** 2)
+    total = student_hidden.new_zeros((), dtype=torch.float32)
+    for idx in valid.split(_KL_CHUNK):
+        s = lm_head(hidden_flat.index_select(0, idx.to(hidden_flat.device)))[..., :vocab].float()
+        t_log = teacher_flat.index_select(0, idx.to(teacher_flat.device)).to(device=s.device, dtype=torch.float32)
+        log_p_t = F.log_softmax(t_log / t, dim=-1)
+        log_q_s = F.log_softmax(s / t, dim=-1)
+        total = total + (log_p_t.exp() * (log_p_t - log_q_s)).sum()
+    return total / valid.numel() * (t ** 2)
 
 
 class GSM8KDataset(Dataset):
@@ -267,16 +276,18 @@ class CoTDistillationTrainer:
 
     def _evaluate_model(self, model) -> float:
         cfg = self.config
-        _, acc = run_hf_benchmark(
-            model,
-            self.tokenizer,
-            "gsm8k",
-            results_fname=None,
-            batch_size=cfg.eval_batch_size,
-            max_new_tokens=cfg.max_response_tokens,
-            limit=cfg.benchmark_eval_limit,
-            log=False,
-        )
+        model.eval()
+        with torch.no_grad():
+            _, acc = run_hf_benchmark(
+                model,
+                self.tokenizer,
+                "gsm8k",
+                results_fname=None,
+                batch_size=cfg.eval_batch_size,
+                max_new_tokens=cfg.max_response_tokens,
+                limit=cfg.benchmark_eval_limit,
+                log=False,
+            )
         return float(acc)
 
     def _teacher_logits_for_batch(
