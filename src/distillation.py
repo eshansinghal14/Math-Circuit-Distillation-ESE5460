@@ -60,8 +60,11 @@ def kl_loss(
 
     total = student_logits.new_zeros((), dtype=torch.float32)
     for idx in valid.split(max(1, token_chunk_size)):
-        s_chunk = student_flat.index_select(0, idx).float()
-        t_chunk = teacher_flat.index_select(0, idx).float()
+        s_chunk = student_flat.index_select(0, idx.to(student_flat.device)).float()
+        t_chunk = teacher_flat.index_select(0, idx.to(teacher_flat.device)).to(
+            device=s_chunk.device,
+            dtype=torch.float32,
+        )
         log_p_t = F.log_softmax(t_chunk / t, dim=-1)
         log_q_s = F.log_softmax(s_chunk / t, dim=-1)
         p_t = log_p_t.exp()
@@ -495,7 +498,7 @@ class DistillationTrainer:
                     prompts=batch["prompts"],
                     answers=batch["answers"],
                     input_ids=input_ids,
-                    device=self.device,
+                    device=torch.device("cpu"),
                 )
             except (KeyError, FileNotFoundError, ValueError) as e:
                 raise RuntimeError(
@@ -506,12 +509,13 @@ class DistillationTrainer:
         if self.teacher is None:
             raise RuntimeError("No teacher model or teacher cache is configured.")
         with torch.no_grad():
-            return self.teacher(input_ids=input_ids, attention_mask=attention_mask).logits
+            return self.teacher(input_ids=input_ids, attention_mask=attention_mask).logits.detach().cpu()
 
     def _forward_kl(self, batch: Dict[str, Any]) -> tuple[torch.Tensor, Dict[str, float]]:
         input_ids = batch["input_ids"].to(self.device)
         attention_mask = batch["attention_mask"].to(self.device)
         teacher_logits = self._teacher_logits_for_batch(batch, input_ids, attention_mask)
+        self._clear_cuda_cache()
         student_logits = self.student(input_ids=input_ids, attention_mask=attention_mask).logits
 
         loss = kl_loss(
