@@ -73,6 +73,39 @@ def kl_loss(
     return total / valid.numel() * (t**2)
 
 
+def kl_loss_from_student_hidden(
+    student_hidden: torch.Tensor,
+    lm_head,
+    teacher_logits: torch.Tensor,
+    attention_mask: torch.Tensor,
+    temperature: float,
+    token_chunk_size: int = 64,
+) -> torch.Tensor:
+    """KL using chunked lm_head calls to avoid full student logits materialization."""
+    t = temperature
+    vocab = min(int(lm_head.weight.shape[0]), int(teacher_logits.shape[-1]))
+    hidden_flat = student_hidden.reshape(-1, student_hidden.shape[-1])
+    teacher_flat = teacher_logits[..., :vocab].reshape(-1, vocab)
+    valid = attention_mask.reshape(-1).bool().nonzero(as_tuple=False).squeeze(-1)
+    if valid.numel() == 0:
+        return student_hidden.sum() * 0.0
+
+    total = student_hidden.new_zeros((), dtype=torch.float32)
+    for idx in valid.split(max(1, token_chunk_size)):
+        h_chunk = hidden_flat.index_select(0, idx.to(hidden_flat.device))
+        s_chunk = lm_head(h_chunk)[..., :vocab].float()
+        t_chunk = teacher_flat.index_select(0, idx.to(teacher_flat.device)).to(
+            device=s_chunk.device,
+            dtype=torch.float32,
+        )
+        log_p_t = F.log_softmax(t_chunk / t, dim=-1)
+        log_q_s = F.log_softmax(s_chunk / t, dim=-1)
+        p_t = log_p_t.exp()
+        total = total + (p_t * (log_p_t - log_q_s)).sum()
+
+    return total / valid.numel() * (t**2)
+
+
 class AddDataset(Dataset):
     """Tokenize prompt-answer rows once for masked causal KL."""
 
@@ -313,6 +346,11 @@ class DistillationTrainer:
                 self.device,
             )
         self.student = self.student.to(self.device).float()
+        if hasattr(self.student.config, "use_cache"):
+            self.student.config.use_cache = False
+        if hasattr(self.student, "gradient_checkpointing_enable"):
+            self.student.gradient_checkpointing_enable()
+            print("Enabled student gradient checkpointing to reduce activation memory.")
         self.student.train()
 
         if config.compare_n_tokens is not None and config.teacher_data_cache is not None:
@@ -516,15 +554,37 @@ class DistillationTrainer:
         attention_mask = batch["attention_mask"].to(self.device)
         teacher_logits = self._teacher_logits_for_batch(batch, input_ids, attention_mask)
         self._clear_cuda_cache()
-        student_logits = self.student(input_ids=input_ids, attention_mask=attention_mask).logits
 
-        loss = kl_loss(
-            student_logits,
-            teacher_logits,
-            attention_mask,
-            self.config.temperature,
-            token_chunk_size=self.config.kl_token_chunk_size,
-        )
+        student_backbone = getattr(self.student, "model", None)
+        lm_head = getattr(self.student, "lm_head", None)
+        if student_backbone is not None and lm_head is not None:
+            student_out = student_backbone(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                use_cache=False,
+            )
+            student_hidden = student_out.last_hidden_state
+            loss = kl_loss_from_student_hidden(
+                student_hidden,
+                lm_head,
+                teacher_logits,
+                attention_mask,
+                self.config.temperature,
+                token_chunk_size=self.config.kl_token_chunk_size,
+            )
+        else:
+            student_logits = self.student(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                use_cache=False,
+            ).logits
+            loss = kl_loss(
+                student_logits,
+                teacher_logits,
+                attention_mask,
+                self.config.temperature,
+                token_chunk_size=self.config.kl_token_chunk_size,
+            )
         metrics: Dict[str, float] = {"kl_loss": float(loss.item())}
         metrics["total_loss"] = float(loss.item())
         if self.config.lambda_kl == 0.0:
