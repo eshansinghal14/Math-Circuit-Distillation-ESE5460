@@ -47,19 +47,27 @@ def kl_loss(
     teacher_logits: torch.Tensor,
     attention_mask: torch.Tensor,
     temperature: float,
+    token_chunk_size: int = 64,
 ) -> torch.Tensor:
     """KL from teacher to student over all non-padding token positions."""
     t = temperature
     vocab = min(student_logits.shape[-1], teacher_logits.shape[-1])
-    student_logits = student_logits[..., :vocab]
-    teacher_logits = teacher_logits[..., :vocab]
+    student_flat = student_logits[..., :vocab].reshape(-1, vocab)
+    teacher_flat = teacher_logits[..., :vocab].reshape(-1, vocab)
+    valid = attention_mask.reshape(-1).bool().nonzero(as_tuple=False).squeeze(-1)
+    if valid.numel() == 0:
+        return student_logits.sum() * 0.0
 
-    log_p_t = F.log_softmax(teacher_logits.float() / t, dim=-1)
-    p_t = log_p_t.exp()
-    log_q_s = F.log_softmax(student_logits.float() / t, dim=-1)
-    kl_per_token = (p_t * (log_p_t - log_q_s)).sum(dim=-1)
-    mask = attention_mask.float()
-    return (kl_per_token * mask).sum() / mask.sum().clamp_min(1.0) * (t**2)
+    total = student_logits.new_zeros((), dtype=torch.float32)
+    for idx in valid.split(max(1, token_chunk_size)):
+        s_chunk = student_flat.index_select(0, idx).float()
+        t_chunk = teacher_flat.index_select(0, idx).float()
+        log_p_t = F.log_softmax(t_chunk / t, dim=-1)
+        log_q_s = F.log_softmax(s_chunk / t, dim=-1)
+        p_t = log_p_t.exp()
+        total = total + (p_t * (log_p_t - log_q_s)).sum()
+
+    return total / valid.numel() * (t**2)
 
 
 class AddDataset(Dataset):
