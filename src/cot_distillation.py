@@ -166,6 +166,7 @@ class CoTDistillationConfig:
     step_log_interval: int = 1
     save_interval: int = 0
     benchmark_eval_limit: Optional[int] = 100
+    skip_baseline_eval: bool = False
     seed: int = 42
     device: torch.device = field(default_factory=get_default_device)
 
@@ -431,6 +432,18 @@ class CoTDistillationTrainer:
                 self.optimizer.load_state_dict(torch.load(opt_path, map_location=self.device))
                 print(f"Restored optimizer state from step {self._resume_step}.")
             print(f"Warm-starting from step {self._train_step + 1}.")
+        elif cfg.skip_baseline_eval:
+            self._step_log_eval_accuracy = 0.0
+        else:
+            print("Evaluating baselines...")
+            student_base = self._evaluate_model(self.student)
+            self.student.train()
+            self.history["student_baseline"] = student_base
+            print(f"  Student baseline accuracy: {student_base:.4f}")
+            teacher_base = self._evaluate_model(self.teacher)
+            self.history["teacher_baseline"] = teacher_base
+            print(f"  Teacher baseline accuracy: {teacher_base:.4f}")
+            self._step_log_eval_accuracy = student_base
 
         print("=" * 60)
         print("GSM8K CoT KL Distillation")
@@ -539,6 +552,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--step-log-interval", type=int, default=1)
     parser.add_argument("--max-response-tokens", type=int, default=256)
     parser.add_argument("--save-interval", type=int, default=0)
+    parser.add_argument("--skip-baseline-eval", action="store_true", default=False, dest="skip_baseline_eval")
     parser.add_argument("--resume-step", type=int, default=None, dest="resume_step")
     parser.add_argument("--checkpoint-run", default=None, metavar="PATH")
     parser.add_argument("--seed", type=int, default=42)
@@ -592,6 +606,7 @@ def main() -> None:
             step_log_interval=args.step_log_interval,
             save_interval=args.save_interval,
             benchmark_eval_limit=args.test_limit,
+            skip_baseline_eval=args.skip_baseline_eval,
             seed=args.seed,
             device=device,
         ),
