@@ -1452,15 +1452,11 @@ def main() -> None:
         args.student_model,
         device,
     )
-    benchmark_eval_dataset = (
-        dataset_prefix.lower()
-        if dataset_prefix.lower() == "gsm8k"
-        else None
-    )
+    benchmark_eval_dataset = None
     eval_max_new_tokens = (
         args.eval_max_new_tokens
         if args.eval_max_new_tokens is not None
-        else (256 if benchmark_eval_dataset is not None else EVAL_MAX_NEW_TOKENS)
+        else EVAL_MAX_NEW_TOKENS
     )
 
     trainer = DistillationTrainer(
