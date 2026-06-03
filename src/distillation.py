@@ -146,6 +146,7 @@ class DistillationConfig:
     batch_size: int = 32
     learning_rate: float = 1e-4
     temperature: float = 2.0
+    kl_token_chunk_size: int = 64
     grad_clip: float = 1.0
     lambda_graph: float = 0.1
     lambda_kl: float = 1.0
@@ -518,6 +519,7 @@ class DistillationTrainer:
             teacher_logits,
             attention_mask,
             self.config.temperature,
+            token_chunk_size=self.config.kl_token_chunk_size,
         )
         metrics: Dict[str, float] = {"kl_loss": float(loss.item())}
         metrics["total_loss"] = float(loss.item())
@@ -1073,6 +1075,15 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Index in the training dataset to start from (inclusive).")
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--temperature", type=float, default=2.0)
+    parser.add_argument(
+        "--kl-token-chunk-size",
+        type=int,
+        default=64,
+        help=(
+            "Number of valid sequence positions to process at once when computing "
+            "token-level KL. Lower values reduce peak memory; higher values can be faster."
+        ),
+    )
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--lambda-graph", type=float, default=0.1)
     parser.add_argument(
@@ -1261,6 +1272,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--eval-batch-size must be >= 1")
     if args.step_log_interval < 1:
         raise SystemExit("--step-log-interval must be >= 1")
+    if args.kl_token_chunk_size < 1:
+        raise SystemExit("--kl-token-chunk-size must be >= 1")
     if args.lambda_graph < 0:
         raise SystemExit("--lambda-graph must be >= 0")
     if not (0.0 < args.teacher_prop_neurons_per_layer <= 1.0):
@@ -1358,6 +1371,7 @@ def main() -> None:
             batch_size=args.batch_size,
             learning_rate=args.lr,
             temperature=args.temperature,
+            kl_token_chunk_size=args.kl_token_chunk_size,
             grad_clip=args.grad_clip,
             lambda_graph=args.lambda_graph,
             lambda_kl=args.lambda_kl,
