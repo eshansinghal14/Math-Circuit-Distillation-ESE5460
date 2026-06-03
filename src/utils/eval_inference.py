@@ -68,6 +68,24 @@ def load_hf_benchmark_rows(
     return rows
 
 
+def _format_instruct_prompts(tokenizer, prompts: List[str]) -> Tuple[List[str], bool]:
+    """Wrap user prompts in the model's chat template when available."""
+    if not getattr(tokenizer, "chat_template", None):
+        return prompts, True
+    try:
+        rendered = [
+            tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            for prompt in prompts
+        ]
+    except Exception:
+        return prompts, True
+    return rendered, False
+
+
 @torch.no_grad()
 def run_hf_benchmark(
     model,
@@ -97,12 +115,16 @@ def run_hf_benchmark(
             batch = rows[i : i + batch_size]
             prompts = [p for p, _ in batch]
             golds = [g for _, g in batch]
-            inputs = tokenizer(
+            model_prompts, add_special_tokens = _format_instruct_prompts(
+                tokenizer,
                 prompts,
+            )
+            inputs = tokenizer(
+                model_prompts,
                 return_tensors="pt",
                 padding=True,
                 truncation=True,
-                add_special_tokens=True,
+                add_special_tokens=add_special_tokens,
             ).to(model.device)
             outputs = model.generate(
                 **inputs,
