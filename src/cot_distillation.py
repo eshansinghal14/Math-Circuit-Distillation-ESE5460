@@ -97,7 +97,7 @@ def kl_loss_from_student_hidden(
     return total / valid.numel() * (t ** 2)
 
 
-class AddDataset(Dataset):
+class GSM8KDataset(Dataset):
     def __init__(self, data: Union[str, Dict[str, Union[int, str]]], tokenizer, max_response_tokens: Optional[int] = None):
         if isinstance(data, str):
             with open(data, "r", encoding="utf-8") as f:
@@ -165,6 +165,7 @@ class CoTDistillationConfig:
     save_dir: str = "results/cot_distillation"
     step_log_interval: int = 1
     save_interval: int = 0
+    teacher_dtype: torch.dtype = torch.bfloat16
     benchmark_eval_limit: Optional[int] = 100
     skip_baseline_eval: bool = False
     seed: int = 42
@@ -250,9 +251,9 @@ class CoTDistillationTrainer:
             print("Enabled student gradient checkpointing.")
         self.student.train()
 
-        print(f"Loading teacher: {config.teacher_model}")
+        print(f"Loading teacher: {config.teacher_model} (dtype={config.teacher_dtype})")
         self.teacher, _ = load_model(config.teacher_model)
-        self.teacher = self.teacher.to(self.device)
+        self.teacher = self.teacher.to(device=self.device, dtype=config.teacher_dtype)
         self.teacher.eval()
         for param in self.teacher.parameters():
             param.requires_grad = False
@@ -274,7 +275,7 @@ class CoTDistillationTrainer:
             print("Using standard AdamW optimizer.")
 
         self.loader = DataLoader(
-            AddDataset(train_data, self.tokenizer, max_response_tokens=config.max_response_tokens),
+            GSM8KDataset(train_data, self.tokenizer, max_response_tokens=config.max_response_tokens),
             batch_size=config.batch_size,
             shuffle=False,
             collate_fn=partial(collate_fn, pad_id=self.tokenizer.eos_token_id),
@@ -541,7 +542,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--temperature", type=float, default=2.0)
     parser.add_argument("--kl-token-chunk-size", type=int, default=64)
     parser.add_argument("--grad-clip", type=float, default=1.0)
-    parser.add_argument("--dtype", choices=DTYPE_CHOICES, default="float32")
+    parser.add_argument("--teacher-dtype", choices=DTYPE_CHOICES, default="bfloat16", dest="teacher_dtype")
     parser.add_argument("--test-limit", type=int, default=100)
     parser.add_argument("--eval-batch-size", type=int, default=32)
     parser.add_argument(
@@ -605,6 +606,7 @@ def main() -> None:
             save_dir=run_dir,
             step_log_interval=args.step_log_interval,
             save_interval=args.save_interval,
+            teacher_dtype=resolve_torch_dtype(args.teacher_dtype),
             benchmark_eval_limit=args.test_limit,
             skip_baseline_eval=args.skip_baseline_eval,
             seed=args.seed,
