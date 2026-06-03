@@ -33,6 +33,7 @@ from utils import (
     resolve_test_path,
     resolve_train_test_paths,
     rm_dir_tree,
+    run_hf_benchmark,
     seed_all,
 )
 
@@ -172,6 +173,8 @@ class DistillationConfig:
     tokens_dla_nodes: bool = False
     compare_n_tokens: Optional[int] = None
     skip_baseline_eval: bool = False
+    benchmark_eval_dataset: Optional[str] = None
+    benchmark_eval_limit: Optional[int] = None
 
 
 
@@ -447,6 +450,30 @@ class DistillationTrainer:
     def _extra_eval_history_key(self, prefix: str) -> str:
         return f"accuracy_extra_{prefix}"
 
+    def _evaluate_model(self, model, data: Dict[str, Any]) -> float:
+        cfg = self.config
+        if cfg.benchmark_eval_dataset is not None:
+            _, acc = run_hf_benchmark(
+                model,
+                self.tokenizer,
+                cfg.benchmark_eval_dataset,
+                results_fname=None,
+                batch_size=cfg.eval_batch_size,
+                max_new_tokens=cfg.eval_max_new_tokens,
+                limit=cfg.benchmark_eval_limit,
+                log=False,
+            )
+            return float(acc)
+        return float(
+            evaluate_prompt_answer_dict(
+                model,
+                self.tokenizer,
+                data,
+                batch_size=cfg.eval_batch_size,
+                max_new_tokens=cfg.eval_max_new_tokens,
+            )
+        )
+
     def _teacher_logits_for_batch(
         self,
         batch: Dict[str, Any],
@@ -596,13 +623,7 @@ class DistillationTrainer:
 
     def _run_training_eval(self) -> float:
         cfg = self.config
-        acc = evaluate_prompt_answer_dict(
-            self.student,
-            self.tokenizer,
-            self.test_data,
-            batch_size=cfg.eval_batch_size,
-            max_new_tokens=cfg.eval_max_new_tokens,
-        )
+        acc = self._evaluate_model(self.student, self.test_data)
         self.student.train()
         acc_f = float(acc)
         self._step_log_eval_accuracy = acc_f
@@ -826,13 +847,7 @@ class DistillationTrainer:
             self._step_log_eval_accuracy = 0.0
         else:
             print("Evaluating baselines...")
-            student_base = evaluate_prompt_answer_dict(
-                self.student,
-                self.tokenizer,
-                self.test_data,
-                batch_size=cfg.eval_batch_size,
-                max_new_tokens=cfg.eval_max_new_tokens,
-            )
+            student_base = self._evaluate_model(self.student, self.test_data)
             self.student.train()
             self.history["student_baseline"] = float(student_base)
             print(f"  Student baseline accuracy (train): {student_base:.4f}")
@@ -860,13 +875,7 @@ class DistillationTrainer:
             else:
                 teacher_for_baseline = self.teacher
 
-            teacher_base = evaluate_prompt_answer_dict(
-                teacher_for_baseline,
-                self.tokenizer,
-                self.test_data,
-                batch_size=cfg.eval_batch_size,
-                max_new_tokens=cfg.eval_max_new_tokens,
-            )
+            teacher_base = self._evaluate_model(teacher_for_baseline, self.test_data)
             self.history["teacher_baseline"] = float(teacher_base)
             print(f"  Teacher baseline accuracy (train): {teacher_base:.4f}")
             for prefix, data in self.extra_eval_data.items():
@@ -1322,6 +1331,16 @@ def main() -> None:
         args.student_model,
         device,
     )
+    benchmark_eval_dataset = (
+        dataset_prefix.lower()
+        if dataset_prefix.lower() == "gsm8k"
+        else None
+    )
+    eval_max_new_tokens = (
+        args.eval_max_new_tokens
+        if args.eval_max_new_tokens is not None
+        else (256 if benchmark_eval_dataset is not None else EVAL_MAX_NEW_TOKENS)
+    )
 
     trainer = DistillationTrainer(
         config=DistillationConfig(
@@ -1345,11 +1364,7 @@ def main() -> None:
 
             graph_grad_norm_scale=args.graph_grad_norm_scale,
             track_loss_grads=args.track_loss_grads,
-            eval_max_new_tokens=(
-                args.eval_max_new_tokens
-                if args.eval_max_new_tokens is not None
-                else EVAL_MAX_NEW_TOKENS
-            ),
+            eval_max_new_tokens=eval_max_new_tokens,
             eval_batch_size=args.eval_batch_size,
             save_dir=run_dir,
             teacher_data_cache=args.teacher_data_cache,
@@ -1367,6 +1382,8 @@ def main() -> None:
             tokens_dla_nodes=args.tokens_dla_nodes,
             compare_n_tokens=args.compare_n_tokens,
             skip_baseline_eval=args.skip_baseline_eval,
+            benchmark_eval_dataset=benchmark_eval_dataset,
+            benchmark_eval_limit=args.test_limit,
 
             seed=args.seed,
             device=device,

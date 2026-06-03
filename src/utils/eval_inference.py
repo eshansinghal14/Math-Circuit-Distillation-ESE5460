@@ -19,7 +19,8 @@ def load_hf_benchmark_rows(
 ) -> List[Tuple[str, str]]:
     """``load_dataset`` for ``gsm8k`` or ``svamp``; return ``(prompt, gold_str)`` rows.
 
-    Prompt format: ``Question: ...\\nReasoning:``. Gold is a normalized numeric string.
+    Prompt format: ``Solve the math problem step by step. ...``.
+    Gold is a normalized numeric string.
     """
     try:
         from datasets import load_dataset
@@ -38,7 +39,7 @@ def load_hf_benchmark_rows(
             gold = extract_numeric_answer_from_text(ex["answer"])
             if gold is None:
                 continue
-            prompt = f"Question: {q}\nReasoning:"
+            prompt = f"Solve the math problem step by step. {q}"
             rows.append((prompt, gold))
             if limit is not None and len(rows) >= limit:
                 break
@@ -57,7 +58,7 @@ def load_hf_benchmark_rows(
                 gold = _normalize_numeric_str(str(raw_a).strip())
             except Exception:
                 continue
-            prompt = f"Question: {q}\nReasoning:"
+            prompt = f"Solve the math problem step by step. {q}"
             rows.append((prompt, gold))
             if limit is not None and len(rows) >= limit:
                 break
@@ -72,14 +73,14 @@ def run_hf_benchmark(
     model,
     tokenizer,
     name: str,
-    results_fname: str,
+    results_fname: Optional[str] = None,
     *,
     batch_size: int = 8,
     max_new_tokens: int = 256,
     limit: Optional[int] = None,
     log: bool = True,
 ) -> Tuple[List[Dict], float]:
-    """GSM8K / SVAMP via ``load_dataset``; greedy generate; save JSON like :func:`test_model`.
+    """GSM8K / SVAMP via ``load_dataset``; greedy generate.
 
     Returns ``(results, accuracy)`` where each result has ``response``, ``answer`` (gold str),
     and ``parsed`` (predicted numeric str or ``null``).
@@ -133,8 +134,9 @@ def run_hf_benchmark(
         tokenizer.padding_side = original_side
 
     acc = correct / n if n else 0.0
-    with open(results_fname, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=4)
+    if results_fname is not None:
+        with open(results_fname, "w", encoding="utf-8") as f:
+            json.dump(results, f, indent=4)
 
     return results, acc
 

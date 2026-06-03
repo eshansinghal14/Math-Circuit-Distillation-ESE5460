@@ -45,12 +45,12 @@ def _quiet_hf_logging() -> None:
 
 
 def build_prompt_answer_dict(split, limit: int) -> Dict[str, str]:
-    """Take the first ``limit`` rows of a GSM8K split as ``{question: answer_str}``."""
+    """Take the first ``limit`` rows as ``{instruction + question: answer_str}``."""
     out: Dict[str, str] = {}
     n = min(limit, len(split)) if limit is not None else len(split)
     for i in range(n):
         row = split[i]
-        prompt = str(row["question"])
+        prompt = f"Solve the math problem step by step. {str(row['question'])}"
         answer = str(row["answer"])  # full CoT trace incl. trailing "#### <number>"
         # Strip GSM8K inline calculator annotations like ``<<16-3-4=9>>``.  The
         # result number sits OUTSIDE the brackets (``= <<16-3-4=9>>9`` -> ``= 9``),
