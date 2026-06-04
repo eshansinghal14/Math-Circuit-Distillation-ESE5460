@@ -99,6 +99,7 @@ class GSM8KDataset(Dataset):
                 answer_ids = answer_ids[:max_response_tokens]
             self.samples.append({
                 "input_ids": torch.cat([prompt_ids, answer_ids]),
+                "prompt_len": int(prompt_ids.size(0)),
                 "prompt": str(prompt),
                 "answer": answer,
             })
@@ -114,13 +115,17 @@ def collate_fn(examples, pad_id: int) -> Dict[str, Any]:
     max_len = max(ex["input_ids"].size(0) for ex in examples)
     input_ids = torch.full((len(examples), max_len), pad_id, dtype=torch.long)
     attention_mask = torch.zeros(len(examples), max_len, dtype=torch.long)
+    response_mask = torch.zeros(len(examples), max_len, dtype=torch.long)
     for row, ex in enumerate(examples):
         ids = ex["input_ids"]
+        prompt_len = ex["prompt_len"]
         input_ids[row, : ids.size(0)] = ids
         attention_mask[row, : ids.size(0)] = 1
+        response_mask[row, prompt_len : ids.size(0)] = 1
     return {
         "input_ids": input_ids,
         "attention_mask": attention_mask,
+        "response_mask": response_mask,
         "prompts": [str(ex["prompt"]) for ex in examples],
         "answers": [ex["answer"] for ex in examples],
     }
@@ -292,6 +297,7 @@ class CoTDistillationTrainer:
     def _forward_kl(self, batch: Dict[str, Any]) -> tuple[torch.Tensor, float]:
         input_ids = batch["input_ids"].to(self.device)
         attention_mask = batch["attention_mask"].to(self.device)
+        response_mask = batch["response_mask"].to(self.device)
         teacher_logits = self._teacher_logits_for_batch(batch, input_ids, attention_mask)
         self._clear_cuda_cache()
 
@@ -305,7 +311,7 @@ class CoTDistillationTrainer:
                 student_out.last_hidden_state,
                 lm_head,
                 teacher_logits,
-                attention_mask,
+                response_mask,
                 self.config.temperature,
             )
         else:
@@ -315,7 +321,7 @@ class CoTDistillationTrainer:
             loss = kl_loss(
                 student_logits,
                 teacher_logits,
-                attention_mask,
+                response_mask,
                 self.config.temperature,
             )
         return loss, float(loss.item())
