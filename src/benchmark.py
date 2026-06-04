@@ -8,7 +8,6 @@ from utils import (
     FEWSHOT_POOL_SIZE,
     LLAMA_1B_MODEL_NAME,
     TRAIN_SPLIT_SIZE,
-    build_fewshot_prefix,
     default_datasets_dir,
     load_model,
     load_prompt_answer_json,
@@ -108,14 +107,13 @@ def main(argv: Optional[List[str]] = None) -> None:
                 file=sys.stderr,
             )
 
-        fewshot_prefix = None
+        fewshot_pool = None
         if args.num_fewshot > 0:
             train_path, _, _ = resolve_train_test_paths(dataset="gsm8k", datasets_dir=None)
             all_train = load_prompt_answer_json(train_path)
             all_train_items = list(all_train.items())
             fewshot_pool = dict(all_train_items[TRAIN_SPLIT_SIZE:TRAIN_SPLIT_SIZE + FEWSHOT_POOL_SIZE])
-            fewshot_prefix = build_fewshot_prefix(fewshot_pool, args.num_fewshot)
-            print(f"Using {args.num_fewshot}-shot prompts from fewshot pool ({len(fewshot_pool)} examples).")
+            print(f"Using {args.num_fewshot}-shot prompts (random per example) from fewshot pool ({len(fewshot_pool)} examples).")
 
         results_name = f"{key}_results.json"
         results_path = os.path.join(results_dir, results_name)
@@ -128,7 +126,8 @@ def main(argv: Optional[List[str]] = None) -> None:
             max_new_tokens=max_new,
             limit=args.max_problems,
             log=True,
-            fewshot_prefix=fewshot_prefix,
+            fewshot_pool=fewshot_pool,
+            num_fewshot=args.num_fewshot,
         )
         n = len(results)
         correct = int(round(acc * n)) if n else 0

@@ -121,7 +121,7 @@ def teacher_correct_mask(
 
 
 class GSM8KDataset(Dataset):
-    def __init__(self, data: Union[str, Dict[str, Union[int, str]]], tokenizer, max_response_tokens: Optional[int] = None, fewshot_prefix: str = ""):
+    def __init__(self, data: Union[str, Dict[str, Union[int, str]]], tokenizer, max_response_tokens: Optional[int] = None, fewshot_pool: Optional[Dict] = None, num_fewshot: int = 0):
         if isinstance(data, str):
             with open(data, "r", encoding="utf-8") as f:
                 raw = json.load(f)
@@ -129,7 +129,10 @@ class GSM8KDataset(Dataset):
         self.samples = []
         for prompt, answer in data.items():
             answer_text = str(answer) if isinstance(answer, int) else answer
-            full_prompt = fewshot_prefix + prompt if fewshot_prefix else prompt
+            if fewshot_pool and num_fewshot > 0:
+                full_prompt = build_fewshot_prefix(fewshot_pool, num_fewshot) + prompt
+            else:
+                full_prompt = prompt
             prompt_ids = tokenizer(
                 full_prompt, return_tensors="pt", padding=False, add_special_tokens=False,
             )["input_ids"].squeeze(0)
@@ -200,7 +203,7 @@ class CoTDistillationConfig:
     save_interval: int = 0
     benchmark_eval_limit: Optional[int] = 100
     skip_baseline_eval: bool = False
-    fewshot_prefix: str = ""
+    num_fewshot: int = 0
     seed: int = 42
     device: torch.device = field(default_factory=get_default_device)
 
@@ -250,11 +253,13 @@ class CoTDistillationTrainer:
         config: CoTDistillationConfig,
         train_data: Dict[str, Any],
         test_data: Dict[str, Any],
+        fewshot_pool: Optional[Dict] = None,
         tokenizer=None,
         student=None,
         resume_step: Optional[int] = None,
     ) -> None:
         self.config = config
+        self.fewshot_pool = fewshot_pool or {}
         self.test_data = test_data
         self.device = torch.device(config.device)
         self._resume_step = resume_step
@@ -315,7 +320,7 @@ class CoTDistillationTrainer:
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, _lr_lambda)
 
         self.loader = DataLoader(
-            GSM8KDataset(train_data, self.tokenizer, max_response_tokens=config.max_response_tokens, fewshot_prefix=config.fewshot_prefix),
+            GSM8KDataset(train_data, self.tokenizer, max_response_tokens=config.max_response_tokens, fewshot_pool=fewshot_pool, num_fewshot=config.num_fewshot),
             batch_size=config.batch_size,
             shuffle=False,
             collate_fn=partial(collate_fn, pad_id=self.tokenizer.eos_token_id),
@@ -338,7 +343,8 @@ class CoTDistillationTrainer:
                 max_new_tokens=cfg.max_response_tokens,
                 limit=cfg.benchmark_eval_limit,
                 log=False,
-                fewshot_prefix=cfg.fewshot_prefix or None,
+                fewshot_pool=self.fewshot_pool or None,
+                num_fewshot=cfg.num_fewshot,
             )
         return float(acc)
 
@@ -673,8 +679,6 @@ def main() -> None:
     train_data = dict(all_train_items[:TRAIN_SPLIT_SIZE])
     fewshot_pool = dict(all_train_items[TRAIN_SPLIT_SIZE:TRAIN_SPLIT_SIZE + FEWSHOT_POOL_SIZE])
 
-    fewshot_prefix = build_fewshot_prefix(fewshot_pool, args.num_fewshot) if args.num_fewshot > 0 else ""
-
     test_data = load_prompt_answer_json(test_path)
     if args.test_limit is not None:
         test_data = dict(list(test_data.items())[: args.test_limit])
@@ -705,12 +709,13 @@ def main() -> None:
             save_interval=args.save_interval,
             benchmark_eval_limit=args.test_limit,
             skip_baseline_eval=args.skip_baseline_eval,
-            fewshot_prefix=fewshot_prefix,
+            num_fewshot=args.num_fewshot,
             seed=args.seed,
             device=device,
         ),
         train_data=train_data,
         test_data=test_data,
+        fewshot_pool=fewshot_pool,
         tokenizer=tokenizer,
         student=student,
         resume_step=args.resume_step,
