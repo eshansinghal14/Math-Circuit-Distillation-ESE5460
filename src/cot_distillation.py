@@ -458,7 +458,9 @@ class CoTDistillationTrainer:
                 ce_avg = interval_ce / denom
                 total_avg = interval_total / denom
                 acc_str = f" | Acc {self._step_log_eval_accuracy:.4f}" if did_eval else ""
-                print(f"  step {self._train_step:04d} | Total {total_avg:.4f} | KL {kl_avg:.4f} | CE {ce_avg:.4f}{acc_str}")
+                kl_str = f" | KL {kl_avg:.4f}" if self.config.kl_weight != 0 else ""
+                ce_str = f" | CE {ce_avg:.4f}" if self.config.ce_weight != 0 else ""
+                print(f"  step {self._train_step:04d} | Total {total_avg:.4f}{kl_str}{ce_str}{acc_str}")
                 interval_kl = 0.0
                 interval_ce = 0.0
                 interval_total = 0.0
@@ -544,11 +546,11 @@ class CoTDistillationTrainer:
             self.history["epoch"].append(epoch + 1)
             for key, value in epoch_metrics.items():
                 self.history[key].append(value)
+            kl_part = f" | KL={epoch_metrics.get('kl_loss', float('nan')):.4f}" if cfg.kl_weight != 0 else ""
+            ce_part = f" | CE={epoch_metrics.get('ce_loss', float('nan')):.4f}" if cfg.ce_weight != 0 else ""
             print(
-                f"Pass {epoch + 1}: Total={epoch_metrics.get('total_loss', float('nan')):.4f} | "
-                f"KL={epoch_metrics.get('kl_loss', float('nan')):.4f} | "
-                f"CE={epoch_metrics.get('ce_loss', float('nan')):.4f} | "
-                f"Acc={self._step_log_eval_accuracy:.4f} | Step={self._train_step}/{cfg.steps}"
+                f"Pass {epoch + 1}: Total={epoch_metrics.get('total_loss', float('nan')):.4f}"
+                f"{kl_part}{ce_part} | Acc={self._step_log_eval_accuracy:.4f} | Step={self._train_step}/{cfg.steps}"
             )
             epoch += 1
 
