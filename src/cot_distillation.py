@@ -144,6 +144,7 @@ class CoTDistillationConfig:
     batch_size: int = 32
     grad_accum_steps: int = 1
     learning_rate: float = 1e-6
+    warmup_ratio: float = 0.0
     temperature: float = 2.0
     grad_clip: float = 1.0
     max_response_tokens: int = 256
@@ -259,6 +260,13 @@ class CoTDistillationTrainer:
             )
             print("Using standard AdamW optimizer.")
 
+        warmup_steps = max(1, int(config.warmup_ratio * config.steps))
+        def _lr_lambda(current_step: int) -> float:
+            if config.warmup_ratio <= 0.0:
+                return 1.0
+            return min(1.0, current_step / warmup_steps)
+        self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, _lr_lambda)
+
         self.loader = DataLoader(
             GSM8KDataset(train_data, self.tokenizer, max_response_tokens=config.max_response_tokens),
             batch_size=config.batch_size,
@@ -356,6 +364,7 @@ class CoTDistillationTrainer:
             if should_step:
                 torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.config.grad_clip)
                 self.optimizer.step()
+                self.scheduler.step()
                 self.optimizer.zero_grad(set_to_none=True)
                 pending_accum = 0
             self._clear_cuda_cache()
@@ -393,6 +402,7 @@ class CoTDistillationTrainer:
         if pending_accum > 0:
             torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.config.grad_clip)
             self.optimizer.step()
+            self.scheduler.step()
             self.optimizer.zero_grad(set_to_none=True)
 
         return {"kl_loss": agg_kl / max(n_steps, 1)}
@@ -417,10 +427,15 @@ class CoTDistillationTrainer:
             self._step_log_eval_accuracy = (
                 float(self.history["accuracy"][-1]) if self.history.get("accuracy") else 0.0
             )
-            opt_path = os.path.join(cfg.save_dir, f"step_{self._resume_step}_checkpoint", "optimizer.pt")
+            ckpt_dir = os.path.join(cfg.save_dir, f"step_{self._resume_step}_checkpoint")
+            opt_path = os.path.join(ckpt_dir, "optimizer.pt")
             if os.path.isfile(opt_path):
                 self.optimizer.load_state_dict(torch.load(opt_path, map_location=self.device))
                 print(f"Restored optimizer state from step {self._resume_step}.")
+            sched_path = os.path.join(ckpt_dir, "scheduler.pt")
+            if os.path.isfile(sched_path):
+                self.scheduler.load_state_dict(torch.load(sched_path, map_location="cpu"))
+                print(f"Restored scheduler state from step {self._resume_step}.")
             print(f"Warm-starting from step {self._train_step + 1}.")
         elif cfg.skip_baseline_eval:
             self._step_log_eval_accuracy = 0.0
@@ -479,6 +494,7 @@ class CoTDistillationTrainer:
         self.student.save_pretrained(path)
         self.tokenizer.save_pretrained(path)
         torch.save(self.optimizer.state_dict(), os.path.join(path, "optimizer.pt"))
+        torch.save(self.scheduler.state_dict(), os.path.join(path, "scheduler.pt"))
         print(f"  [checkpoint] Saved step {step} → {path}")
 
     def _save_history(self) -> None:
@@ -528,10 +544,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--grad-accum-steps", type=int, default=1)
     parser.add_argument("--lr", type=float, default=1e-6)
+    parser.add_argument("--warmup-ratio", type=float, default=0.0, dest="warmup_ratio")
     parser.add_argument("--temperature", type=float, default=2.0)
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--test-limit", type=int, default=100)
-    parser.add_argument("--eval-batch-size", type=int, default=32)
+    parser.add_argument("--eval-batch-size", type=int, default=200)
     parser.add_argument(
         "--save-dir",
         type=str,
@@ -585,6 +602,7 @@ def main() -> None:
             batch_size=args.batch_size,
             grad_accum_steps=args.grad_accum_steps,
             learning_rate=args.lr,
+            warmup_ratio=args.warmup_ratio,
             temperature=args.temperature,
             grad_clip=args.grad_clip,
             max_response_tokens=args.max_response_tokens,
