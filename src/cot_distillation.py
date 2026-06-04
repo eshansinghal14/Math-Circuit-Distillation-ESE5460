@@ -7,16 +7,18 @@ import gc
 import importlib
 import json
 import os
+import random
 from collections import defaultdict
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 
+from graph_loss.utils import DTYPE_CHOICES, resolve_torch_dtype
 from utils import (
     FEWSHOT_POOL_SIZE,
     LLAMA_1B_MODEL_NAME,
@@ -60,6 +62,72 @@ def kl_loss(
     log_p_t = F.log_softmax(t_log / t, dim=-1)
     log_q_s = F.log_softmax(s / t, dim=-1)
     return (log_p_t.exp() * (log_p_t - log_q_s)).sum() / valid.numel() * (t ** 2)
+
+
+def generalized_jsd_loss(
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    response_mask: torch.Tensor,
+    beta: float,
+    temperature: float,
+) -> torch.Tensor:
+    """Generalized JSD distillation loss (GKD, arXiv:2306.13649).
+
+    Faithfully mirrors TRL ``GKDTrainer.generalized_jsd_loss`` (temperature
+    scaling, log_softmax, the ``beta==0``/``beta==1`` special cases using
+    ``F.kl_div(..., log_target=True)`` with PyTorch's swapped-argument
+    convention, and the ``logsumexp`` mixture for ``0 < beta < 1``) but reduces
+    over the RESPONSE-mask positions using the same masking style as ``kl_loss``
+    (flatten, index_select by mask, mean over valid tokens, ``* temperature**2``).
+
+    With ``beta == 0`` this is *exactly* the value ``kl_loss`` computes:
+    forward KL(teacher || student) on the response tokens. ``F.kl_div(input,
+    target, log_target=True)`` returns ``target.exp() * (target - input)`` per
+    element, so ``F.kl_div(student_log_probs, teacher_log_probs)`` equals
+    ``p_teacher * (log p_teacher - log p_student)`` — identical to the
+    ``(log_p_t.exp() * (log_p_t - log_q_s))`` term in ``kl_loss``.
+    """
+    t = temperature
+    vocab = min(student_logits.shape[-1], teacher_logits.shape[-1])
+    student_flat = student_logits[..., :vocab].reshape(-1, vocab)
+    teacher_flat = teacher_logits[..., :vocab].reshape(-1, vocab)
+    valid = response_mask.reshape(-1).bool().nonzero(as_tuple=False).squeeze(-1)
+    if valid.numel() == 0:
+        return student_logits.sum() * 0.0
+    s = student_flat.index_select(0, valid.to(student_flat.device)).float() / t
+    t_in = teacher_flat.index_select(0, valid.to(teacher_flat.device)).to(
+        device=s.device, dtype=torch.float32
+    ) / t
+    student_log_probs = F.log_softmax(s, dim=-1)
+    teacher_log_probs = F.log_softmax(t_in, dim=-1)
+
+    if beta == 0.0:
+        # KL(teacher || student) — identical to kl_loss's summand.
+        per_token = F.kl_div(
+            student_log_probs, teacher_log_probs, reduction="none", log_target=True
+        )
+    elif beta == 1.0:
+        # KL(student || teacher) — reverse KL.
+        per_token = F.kl_div(
+            teacher_log_probs, student_log_probs, reduction="none", log_target=True
+        )
+    else:
+        beta_t = torch.tensor(beta, dtype=student_log_probs.dtype, device=student_log_probs.device)
+        mixture_log_probs = torch.logsumexp(
+            torch.stack(
+                [
+                    student_log_probs + torch.log(beta_t),
+                    teacher_log_probs + torch.log(1.0 - beta_t),
+                ]
+            ),
+            dim=0,
+        )
+        # PyTorch swaps the standard KL argument order; see F.kl_div docs.
+        kl_teacher = F.kl_div(mixture_log_probs, teacher_log_probs, reduction="none", log_target=True)
+        kl_student = F.kl_div(mixture_log_probs, student_log_probs, reduction="none", log_target=True)
+        per_token = beta_t * kl_teacher + (1.0 - beta_t) * kl_student
+
+    return per_token.sum() / valid.numel() * (t ** 2)
 
 
 def kl_loss_from_student_hidden(
@@ -207,6 +275,30 @@ class CoTDistillationConfig:
     seed: int = 42
     device: torch.device = field(default_factory=get_default_device)
 
+    # ── Feature 1: native on-policy GKD (arXiv:2306.13649) ──────────────────
+    # Defaults below preserve the current pure off-policy forward-KL behavior.
+    lmbda: float = 0.0          # P(train on student-generated on-policy seqs); 0 = off-policy.
+    beta: float = 0.0           # JSD interp: 0 = forward KL (== kl_loss), 1 = reverse KL.
+    gkd_max_new_tokens: int = 256  # max new tokens when generating on-policy.
+    seq_kd: bool = False        # when not on-policy this step, train on teacher-generated seqs.
+
+    # ── Feature 2: CoT graph distillation (reuses graph_loss/training.py) ───
+    # lambda_graph == 0 (default) loads NO graph machinery: pure KL/GKD path.
+    lambda_graph: float = 0.0
+    graph_loss_type: Literal["jsd", "kld", "mse", "mse-norm", "mse-scale"] = "kld"
+    compare_n_tokens: Optional[int] = 3
+    tokens_dla_nodes: bool = False
+    graph_dtype: Optional[torch.dtype] = None
+    teacher_prop_neurons_per_layer: float = 0.1
+    student_prop_neurons_per_layer: float = 0.1
+    graph_top_k_logits: Optional[float] = 0.95
+    teacher_graph_batch_size: int = 32
+    student_graph_batch_size: int = 1
+    teacher_nodes_per_label: int = 10
+    student_nodes_per_label: int = 10
+    graph_start_step: int = 1
+    graph_verbose: bool = False
+
 
 def find_student_source(path: str) -> Optional[str]:
     if os.path.isdir(path) and (
@@ -264,6 +356,13 @@ class CoTDistillationTrainer:
         self.device = torch.device(config.device)
         self._resume_step = resume_step
         self._resume = resume_step is not None
+        # GKD is active whenever any on-policy/JSD knob departs from its default;
+        # otherwise the loss path is byte-for-byte the original forward-KL one.
+        self._use_gkd = (
+            config.beta != 0.0 or config.lmbda > 0.0 or config.seq_kd
+        )
+        self._use_graph = config.lambda_graph > 0.0
+        self._graph_start_step = config.graph_start_step
         seed_all(config.seed)
 
         if tokenizer is not None:
@@ -295,6 +394,39 @@ class CoTDistillationTrainer:
         self.teacher.eval()
         for param in self.teacher.parameters():
             param.requires_grad = False
+
+        # ── Feature 2 setup: graph distillation adapters/config (lazy) ──────
+        # Only touch graph_loss machinery when lambda_graph > 0 so the default
+        # KL/GKD path never imports or builds any graph state.
+        self.graph_loss_config = None
+        self.student_graph_adapter = None
+        self.teacher_graph_adapter = None
+        if self._use_graph:
+            from graph_loss.hf_adapter import HFLlamaGraphAdapter
+            from graph_loss.training import GraphAuxConfig
+
+            self.graph_loss_config = GraphAuxConfig(
+                lambda_graph=config.lambda_graph,
+                graph_dtype=config.graph_dtype,
+                teacher_prop_neurons_per_layer=config.teacher_prop_neurons_per_layer,
+                student_prop_neurons_per_layer=config.student_prop_neurons_per_layer,
+                top_k_logits=config.graph_top_k_logits,
+                temperature=config.temperature,
+                teacher_graph_batch_size=config.teacher_graph_batch_size,
+                student_graph_batch_size=config.student_graph_batch_size,
+                verbose=config.graph_verbose,
+                teacher_nodes_per_label=config.teacher_nodes_per_label,
+                student_nodes_per_label=config.student_nodes_per_label,
+                graph_loss_type=config.graph_loss_type,
+                tokens_dla_nodes=config.tokens_dla_nodes,
+                compare_n_tokens=config.compare_n_tokens,
+            )
+            self.student_graph_adapter = HFLlamaGraphAdapter(
+                self.student, self.tokenizer, self.device,
+            )
+            self.teacher_graph_adapter = HFLlamaGraphAdapter(
+                self.teacher, self.tokenizer, self.device,
+            )
 
         bnb = None
         try:
@@ -356,35 +488,148 @@ class CoTDistillationTrainer:
                 input_ids=input_ids, attention_mask=attention_mask,
             ).logits.detach().cpu()
 
-    def _forward_kl(self, batch: Dict[str, Any]) -> tuple[torch.Tensor, float]:
-        input_ids = batch["input_ids"].to(self.device)
-        attention_mask = batch["attention_mask"].to(self.device)
-        response_mask = batch["response_mask"].to(self.device)
-        teacher_logits = self._teacher_logits_for_batch(batch, input_ids, attention_mask)
-        self._clear_cuda_cache()
-
-        if self.config.only_correct:
-            correct = teacher_correct_mask(
-                teacher_logits, batch["response_mask"], self.tokenizer, batch["answers"],
-            ).to(response_mask.device)
-            response_mask = response_mask * correct.unsqueeze(1)
-
+    def _student_logits(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        """Student logits WITH grad, using the chunk-free backbone+lm_head path when available."""
         student_backbone = getattr(self.student, "model", None)
         lm_head = getattr(self.student, "lm_head", None)
         if student_backbone is not None and lm_head is not None:
             student_out = student_backbone(
                 input_ids=input_ids, attention_mask=attention_mask, use_cache=False,
             )
-            student_logits = lm_head(student_out.last_hidden_state)
-        else:
-            student_logits = self.student(
-                input_ids=input_ids, attention_mask=attention_mask, use_cache=False,
-            ).logits
+            return lm_head(student_out.last_hidden_state)
+        return self.student(
+            input_ids=input_ids, attention_mask=attention_mask, use_cache=False,
+        ).logits
 
-        kl = kl_loss(student_logits, teacher_logits, response_mask, self.config.temperature)
+    def _distill_term(
+        self,
+        student_logits: torch.Tensor,
+        teacher_logits: torch.Tensor,
+        response_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, float, float]:
+        """kl_weight * distill + ce_weight * ce.
+
+        Uses the original ``kl_loss`` (forward KL) on the default path and the
+        generalized JSD only when GKD is active.  At ``beta == 0`` the two are
+        numerically identical, so this preserves current behavior exactly when
+        all GKD knobs are at their defaults.
+        """
+        if self._use_gkd:
+            kl = generalized_jsd_loss(
+                student_logits, teacher_logits, response_mask, self.config.beta, self.config.temperature,
+            )
+        else:
+            kl = kl_loss(student_logits, teacher_logits, response_mask, self.config.temperature)
         ce = ce_loss(student_logits, teacher_logits, response_mask)
         loss = self.config.kl_weight * kl + self.config.ce_weight * ce
-        return loss, float(kl.item()), float(ce.item()), float(loss.item())
+        return loss, float(kl.item()), float(ce.item())
+
+    def _generate_on_policy_batch(
+        self, prompts: List[str], generator,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Generate continuations from ``generator`` given prompts only.
+
+        Mirrors TRL's ``generate_on_policy_outputs``: left-pad the prompts,
+        sample a continuation, then build ``(input_ids, attention_mask,
+        response_mask)`` where the response mask is 1 only on freshly generated
+        non-pad positions.  Generation runs under ``no_grad``; the loss forward
+        pass on these sequences happens later WITH grad.
+        """
+        tok = self.tokenizer
+        pad_id = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
+        prev_side = tok.padding_side
+        tok.padding_side = "left"
+        try:
+            enc = tok(prompts, return_tensors="pt", padding=True, add_special_tokens=False)
+        finally:
+            tok.padding_side = prev_side
+        prompt_ids = enc["input_ids"].to(self.device)
+        prompt_attn = enc["attention_mask"].to(self.device)
+        prompt_len = prompt_ids.shape[1]
+
+        was_training = generator.training
+        prev_use_cache = getattr(generator.config, "use_cache", None)
+        generator.eval()
+        if hasattr(generator.config, "use_cache"):
+            generator.config.use_cache = True
+        with torch.no_grad():
+            full_ids = generator.generate(
+                input_ids=prompt_ids,
+                attention_mask=prompt_attn,
+                do_sample=True,
+                temperature=self.config.temperature,
+                top_k=0,
+                max_new_tokens=self.config.gkd_max_new_tokens,
+                pad_token_id=pad_id,
+            )
+        if hasattr(generator.config, "use_cache") and prev_use_cache is not None:
+            generator.config.use_cache = prev_use_cache
+        if was_training:
+            generator.train()
+
+        non_pad = (full_ids != pad_id).long()
+        attention_mask = non_pad.clone()
+        response_mask = torch.zeros_like(full_ids)
+        response_mask[:, prompt_len:] = 1
+        response_mask = response_mask * non_pad
+        return full_ids, attention_mask, response_mask
+
+    def _forward_step(self, batch: Dict[str, Any]) -> tuple[torch.Tensor, float, float, float]:
+        """Compute the (KL/GKD + CE) loss for one batch.
+
+        With probability ``lmbda`` the batch is replaced by student-generated
+        on-policy sequences (GKD); when ``seq_kd`` is set and this is an
+        off-policy step, the batch is replaced by teacher-generated sequences.
+        Otherwise the fixed dataset batch is used (current behavior).
+        """
+        on_policy = self.config.lmbda > 0.0 and random.random() < self.config.lmbda
+        if on_policy:
+            input_ids, attention_mask, response_mask = self._generate_on_policy_batch(
+                batch["prompts"], self.student,
+            )
+        elif self.config.seq_kd:
+            input_ids, attention_mask, response_mask = self._generate_on_policy_batch(
+                batch["prompts"], self.teacher,
+            )
+        else:
+            input_ids = batch["input_ids"].to(self.device)
+            attention_mask = batch["attention_mask"].to(self.device)
+            response_mask = batch["response_mask"].to(self.device)
+
+        teacher_logits = self._teacher_logits_for_batch(batch, input_ids, attention_mask)
+        self._clear_cuda_cache()
+
+        if self.config.only_correct and not on_policy and not self.config.seq_kd:
+            correct = teacher_correct_mask(
+                teacher_logits, response_mask.cpu(), self.tokenizer, batch["answers"],
+            ).to(response_mask.device)
+            response_mask = response_mask * correct.unsqueeze(1)
+
+        student_logits = self._student_logits(input_ids, attention_mask)
+        loss, kl_val, ce_val = self._distill_term(student_logits, teacher_logits, response_mask)
+        return loss, kl_val, ce_val, float(loss.item())
+
+    def _backward_graph_loss(self, batch: Dict[str, Any], grad_scale: float) -> float:
+        """Reuse graph_loss/training.py's compare-tokens path, exactly as distillation.py.
+
+        ``backward_batch_graph_loss`` dispatches to the compare-tokens routine
+        internally when ``config.compare_n_tokens`` is set, and performs the
+        graph backward itself (accumulating into the student's existing grads).
+        Returns the detached graph-loss value for logging.
+        """
+        from graph_loss.training import backward_batch_graph_loss
+
+        graph_loss, _graph_metrics = backward_batch_graph_loss(
+            prompts=batch["prompts"],
+            student_adapter=self.student_graph_adapter,
+            config=self.graph_loss_config,
+            device=self.device,
+            loss_scale=self.config.lambda_graph * grad_scale,
+            teacher_cache=None,
+            teacher_adapter=self.teacher_graph_adapter,
+            answers=batch["answers"],
+        )
+        return float(graph_loss.item())
 
     def _clear_cuda_cache(self) -> None:
         gc.collect()
@@ -395,10 +640,12 @@ class CoTDistillationTrainer:
         self.student.train()
         agg_kl = 0.0
         agg_ce = 0.0
+        agg_graph = 0.0
         agg_total = 0.0
         n_steps = 0
         interval_kl = 0.0
         interval_ce = 0.0
+        interval_graph = 0.0
         interval_total = 0.0
         interval_steps = 0
         accum_steps = max(1, self.config.grad_accum_steps)
@@ -406,12 +653,21 @@ class CoTDistillationTrainer:
         self.optimizer.zero_grad(set_to_none=True)
 
         for batch in self.loader:
-            loss, kl_val, ce_val, total_val = self._forward_kl(batch)
+            loss, kl_val, ce_val, total_val = self._forward_step(batch)
             if not torch.isfinite(loss).item():
                 continue
 
-            (loss / accum_steps).backward()
+            grad_scale = 1.0 / accum_steps
+            (loss * grad_scale).backward()
             del loss
+            # Feature 2: add the graph-loss gradient on top of the KL/GKD gradient,
+            # exactly as distillation.py does (graph backward happens inside the call).
+            graph_val = 0.0
+            if self._use_graph and self._train_step + 1 >= self._graph_start_step:
+                self._clear_cuda_cache()
+                graph_val = self._backward_graph_loss(batch, grad_scale)
+                total_val = total_val + self.config.lambda_graph * graph_val
+                self._clear_cuda_cache()
             pending_accum += 1
             should_step = (
                 pending_accum >= accum_steps
@@ -431,12 +687,16 @@ class CoTDistillationTrainer:
                 self.history["step_kl_loss"].append(kl_val)
             if self.config.ce_weight != 0:
                 self.history["step_ce_loss"].append(ce_val)
+            if self._use_graph:
+                self.history["step_graph_loss"].append(graph_val)
             self.history["step_total_loss"].append(total_val)
             agg_kl += kl_val
             agg_ce += ce_val
+            agg_graph += graph_val
             agg_total += total_val
             interval_kl += kl_val
             interval_ce += ce_val
+            interval_graph += graph_val
             interval_total += total_val
             n_steps += 1
             interval_steps += 1
@@ -458,13 +718,17 @@ class CoTDistillationTrainer:
                 denom = max(interval_steps, 1)
                 kl_avg = interval_kl / denom
                 ce_avg = interval_ce / denom
+                graph_avg = interval_graph / denom
                 total_avg = interval_total / denom
                 acc_str = f" | Acc {self._step_log_eval_accuracy:.4f}" if did_eval else ""
-                kl_str = f" | KL {kl_avg:.4f}" if self.config.kl_weight != 0 else ""
+                kl_label = "JSD" if self._use_gkd else "KL"
+                kl_str = f" | {kl_label} {kl_avg:.4f}" if self.config.kl_weight != 0 else ""
                 ce_str = f" | CE {ce_avg:.4f}" if self.config.ce_weight != 0 else ""
-                print(f"  step {self._train_step:04d} | Total {total_avg:.4f}{kl_str}{ce_str}{acc_str}")
+                graph_str = f" | Graph {graph_avg:.4f}" if self._use_graph else ""
+                print(f"  step {self._train_step:04d} | Total {total_avg:.4f}{kl_str}{ce_str}{graph_str}{acc_str}")
                 interval_kl = 0.0
                 interval_ce = 0.0
+                interval_graph = 0.0
                 interval_total = 0.0
                 interval_steps = 0
                 self._save_curves()
@@ -484,6 +748,8 @@ class CoTDistillationTrainer:
             metrics["kl_loss"] = agg_kl / denom
         if self.config.ce_weight != 0:
             metrics["ce_loss"] = agg_ce / denom
+        if self._use_graph:
+            metrics["graph_loss"] = agg_graph / denom
         return metrics
 
     def train(self) -> Dict[str, List]:
@@ -530,13 +796,27 @@ class CoTDistillationTrainer:
             self._step_log_eval_accuracy = student_base
 
         print("=" * 60)
-        print("GSM8K CoT KL Distillation")
+        mode_bits = []
+        if self._use_gkd:
+            mode_bits.append("GKD")
+        if self._use_graph:
+            mode_bits.append("Graph")
+        mode_tag = f" ({'+'.join(mode_bits)})" if mode_bits else ""
+        print(f"GSM8K CoT KL Distillation{mode_tag}")
         print(f"  Run dir:          {cfg.save_dir}")
         print(f"  Steps:            {self._train_step + 1}..{cfg.steps}")
         print(f"  Batch size:       {cfg.batch_size}")
         print(f"  Grad accum steps: {cfg.grad_accum_steps}")
         print(f"  LR:               {cfg.learning_rate}")
         print(f"  Temperature:      {cfg.temperature}")
+        if self._use_gkd:
+            print(f"  lmbda (on-policy):{cfg.lmbda}")
+            print(f"  beta (JSD):       {cfg.beta}")
+            print(f"  seq_kd:           {cfg.seq_kd}")
+        if self._use_graph:
+            print(f"  lambda_graph:     {cfg.lambda_graph}")
+            print(f"  graph_loss_type:  {cfg.graph_loss_type}")
+            print(f"  compare_n_tokens: {cfg.compare_n_tokens}")
         print(f"  Eval every:       {cfg.step_log_interval} steps")
         print("=" * 60)
 
@@ -549,11 +829,13 @@ class CoTDistillationTrainer:
             self.history["epoch"].append(epoch + 1)
             for key, value in epoch_metrics.items():
                 self.history[key].append(value)
-            kl_part = f" | KL={epoch_metrics.get('kl_loss', float('nan')):.4f}" if cfg.kl_weight != 0 else ""
+            kl_label = "JSD" if self._use_gkd else "KL"
+            kl_part = f" | {kl_label}={epoch_metrics.get('kl_loss', float('nan')):.4f}" if cfg.kl_weight != 0 else ""
             ce_part = f" | CE={epoch_metrics.get('ce_loss', float('nan')):.4f}" if cfg.ce_weight != 0 else ""
+            graph_part = f" | Graph={epoch_metrics.get('graph_loss', float('nan')):.4f}" if self._use_graph else ""
             print(
                 f"Pass {epoch + 1}: Total={epoch_metrics.get('total_loss', float('nan')):.4f}"
-                f"{kl_part}{ce_part} | Acc={self._step_log_eval_accuracy:.4f} | Step={self._train_step}/{cfg.steps}"
+                f"{kl_part}{ce_part}{graph_part} | Acc={self._step_log_eval_accuracy:.4f} | Step={self._train_step}/{cfg.steps}"
             )
             epoch += 1
 
@@ -602,11 +884,15 @@ class CoTDistillationTrainer:
         acc_series = self.history.get("accuracy", [])
         acc_steps = self.history.get("accuracy_step", list(range(1, len(acc_series) + 1)))
 
+        graph_series = self.history.get("step_graph_loss", [])
+        kl_title = "JSD Loss" if self._use_gkd else "KL Loss"
         plots = [("Total Loss", loss_steps[: len(total_series)], total_series, None)]
         if self.config.kl_weight != 0:
-            plots.append(("KL Loss", loss_steps[: len(kl_series)], kl_series, None))
+            plots.append((kl_title, loss_steps[: len(kl_series)], kl_series, None))
         if self.config.ce_weight != 0:
             plots.append(("CE Loss", loss_steps[: len(ce_series)], ce_series, None))
+        if self._use_graph:
+            plots.append(("Graph Loss", loss_steps[: len(graph_series)], graph_series, None))
         plots.append(("Accuracy", acc_steps[: len(acc_series)], acc_series, (0, 1)))
 
         n = len(plots)
@@ -671,6 +957,63 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resume-step", type=int, default=None, dest="resume_step")
     parser.add_argument("--checkpoint-run", default=None, metavar="PATH")
     parser.add_argument("--seed", type=int, default=42)
+
+    # ── Feature 1: native on-policy GKD (arXiv:2306.13649) ──────────────────
+    gkd = parser.add_argument_group("GKD (on-policy generalized knowledge distillation)")
+    gkd.add_argument(
+        "--lmbda", type=float, default=0.0,
+        help="Per-step probability of training on STUDENT-generated (on-policy) sequences. "
+             "0.0 (default) = pure off-policy KL (current behavior).",
+    )
+    gkd.add_argument(
+        "--beta", type=float, default=0.0,
+        help="JSD interpolation: 0 = forward KL (identical to current kl_loss), "
+             "1 = reverse KL, 0<beta<1 = generalized JSD. Default 0.0.",
+    )
+    gkd.add_argument(
+        "--gkd-max-new-tokens", type=int, default=256, dest="gkd_max_new_tokens",
+        help="Max new tokens to sample when generating on-policy sequences.",
+    )
+    gkd.add_argument(
+        "--seq-kd", action="store_true", default=False, dest="seq_kd",
+        help="On off-policy steps, train on TEACHER-generated sequences (sequence-level KD).",
+    )
+
+    # ── Feature 2: CoT graph distillation (reuses graph_loss/training.py) ───
+    # Flag names mirror distillation.py so usage is consistent.
+    graph = parser.add_argument_group("Graph distillation (compare-tokens)")
+    graph.add_argument(
+        "--lambda-graph", type=float, default=0.0, dest="lambda_graph",
+        help="Weight of the graph auxiliary loss. 0.0 (default) loads NO graph machinery.",
+    )
+    graph.add_argument(
+        "--graph-loss-type", choices=["jsd", "kld", "mse", "mse-norm", "mse-scale"],
+        default="kld", dest="graph_loss_type",
+    )
+    graph.add_argument(
+        "--compare-n-tokens", type=int, default=3, dest="compare_n_tokens",
+        help="Number of top-KL response token positions to compute graph loss on.",
+    )
+    graph.add_argument(
+        "--tokens-dla-nodes", action="store_true", default=False, dest="tokens_dla_nodes",
+        help="Include arg-token supernodes and a DLA supernode in both graphs.",
+    )
+    graph.add_argument("--dtype", choices=DTYPE_CHOICES, default="bfloat16", dest="dtype")
+    graph.add_argument("--teacher-prop-neurons-per-layer", type=float, default=0.1)
+    graph.add_argument("--student-prop-neurons-per-layer", type=float, default=0.1)
+    graph.add_argument(
+        "--graph-top-k-logits", type=float, default=0.95, dest="graph_top_k_logits",
+        help="Cumulative probability threshold in (0, 1] for logit nodes.",
+    )
+    graph.add_argument("--teacher-graph-batch-size", type=int, default=32)
+    graph.add_argument("--student-graph-batch-size", type=int, default=1)
+    graph.add_argument("--teacher-nodes-per-label", type=int, default=10)
+    graph.add_argument("--student-nodes-per-label", type=int, default=10)
+    graph.add_argument(
+        "--graph-start-step", type=int, default=1,
+        help="Step (1-indexed, inclusive) at which graph loss is first applied.",
+    )
+    graph.add_argument("--graph-verbose", action="store_true", default=False, dest="graph_verbose")
     return parser
 
 
@@ -733,6 +1076,24 @@ def main() -> None:
             num_fewshot=args.num_fewshot,
             seed=args.seed,
             device=device,
+            lmbda=args.lmbda,
+            beta=args.beta,
+            gkd_max_new_tokens=args.gkd_max_new_tokens,
+            seq_kd=args.seq_kd,
+            lambda_graph=args.lambda_graph,
+            graph_loss_type=args.graph_loss_type,
+            compare_n_tokens=args.compare_n_tokens,
+            tokens_dla_nodes=args.tokens_dla_nodes,
+            graph_dtype=resolve_torch_dtype(args.dtype),
+            teacher_prop_neurons_per_layer=args.teacher_prop_neurons_per_layer,
+            student_prop_neurons_per_layer=args.student_prop_neurons_per_layer,
+            graph_top_k_logits=args.graph_top_k_logits if args.graph_top_k_logits > 0 else None,
+            teacher_graph_batch_size=args.teacher_graph_batch_size,
+            student_graph_batch_size=args.student_graph_batch_size,
+            teacher_nodes_per_label=args.teacher_nodes_per_label,
+            student_nodes_per_label=args.student_nodes_per_label,
+            graph_start_step=args.graph_start_step,
+            graph_verbose=args.graph_verbose,
         ),
         train_data=train_data,
         test_data=test_data,
