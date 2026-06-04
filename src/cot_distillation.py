@@ -427,8 +427,10 @@ class CoTDistillationTrainer:
 
             self._train_step += 1
             self.history["train_step"].append(self._train_step)
-            self.history["step_kl_loss"].append(kl_val)
-            self.history["step_ce_loss"].append(ce_val)
+            if self.config.kl_weight != 0:
+                self.history["step_kl_loss"].append(kl_val)
+            if self.config.ce_weight != 0:
+                self.history["step_ce_loss"].append(ce_val)
             self.history["step_total_loss"].append(total_val)
             agg_kl += kl_val
             agg_ce += ce_val
@@ -477,11 +479,12 @@ class CoTDistillationTrainer:
             self.optimizer.zero_grad(set_to_none=True)
 
         denom = max(n_steps, 1)
-        return {
-            "kl_loss": agg_kl / denom,
-            "ce_loss": agg_ce / denom,
-            "total_loss": agg_total / denom,
-        }
+        metrics = {"total_loss": agg_total / denom}
+        if self.config.kl_weight != 0:
+            metrics["kl_loss"] = agg_kl / denom
+        if self.config.ce_weight != 0:
+            metrics["ce_loss"] = agg_ce / denom
+        return metrics
 
     def train(self) -> Dict[str, List]:
         cfg = self.config
@@ -593,23 +596,39 @@ class CoTDistillationTrainer:
         loss_steps = self.history.get("train_step", [])
         if not loss_steps:
             return
+        total_series = self.history.get("step_total_loss", [])
         kl_series = self.history.get("step_kl_loss", [])
         ce_series = self.history.get("step_ce_loss", [])
-        total_series = self.history.get("step_total_loss", [])
         acc_series = self.history.get("accuracy", [])
         acc_steps = self.history.get("accuracy_step", list(range(1, len(acc_series) + 1)))
-        fig, axes = plt.subplots(2, 2, figsize=(14, 8))
-        axes[0, 0].plot(loss_steps[: len(total_series)], total_series, marker="o", markersize=2)
-        axes[0, 0].set_title("Total Loss")
-        axes[0, 1].plot(loss_steps[: len(kl_series)], kl_series, marker="o", markersize=2)
-        axes[0, 1].set_title("KL Loss")
-        axes[1, 0].plot(loss_steps[: len(ce_series)], ce_series, marker="o", markersize=2)
-        axes[1, 0].set_title("CE Loss")
-        axes[1, 1].plot(acc_steps[: len(acc_series)], acc_series, marker="o", markersize=3)
-        axes[1, 1].set_title("Accuracy")
-        axes[1, 1].set_ylim(0, 1)
-        for ax in axes.flat:
+
+        plots = [("Total Loss", loss_steps[: len(total_series)], total_series, None)]
+        if self.config.kl_weight != 0:
+            plots.append(("KL Loss", loss_steps[: len(kl_series)], kl_series, None))
+        if self.config.ce_weight != 0:
+            plots.append(("CE Loss", loss_steps[: len(ce_series)], ce_series, None))
+        plots.append(("Accuracy", acc_steps[: len(acc_series)], acc_series, (0, 1)))
+
+        n = len(plots)
+        cols = min(n, 2)
+        rows = (n + cols - 1) // cols
+        fig, axes_grid = plt.subplots(rows, cols, figsize=(7 * cols, 4 * rows))
+        if n == 1:
+            axes_list = [axes_grid]
+        elif rows == 1:
+            axes_list = list(axes_grid)
+        else:
+            axes_list = list(axes_grid.flat)
+
+        for ax, (title, x, y, ylim) in zip(axes_list, plots):
+            ax.plot(x, y, marker="o", markersize=2)
+            ax.set_title(title)
+            if ylim is not None:
+                ax.set_ylim(*ylim)
             ax.grid(True, alpha=0.3)
+        for ax in axes_list[n:]:
+            ax.set_visible(False)
+
         fig.tight_layout()
         os.makedirs(self.config.save_dir, exist_ok=True)
         fig.savefig(os.path.join(self.config.save_dir, "training_curves.png"), dpi=150)
