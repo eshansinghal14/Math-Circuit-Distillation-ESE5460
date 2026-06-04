@@ -93,7 +93,7 @@ def ce_loss(
     student_flat = student_logits[..., :vocab].reshape(-1, vocab)
     labels_flat = hard_labels.reshape(-1)
     s = student_flat.index_select(0, valid.to(student_flat.device)).float()
-    l = labels_flat.index_select(0, valid.to(labels_flat.device))
+    l = labels_flat.index_select(0, valid.to(labels_flat.device)).to(s.device)
     return F.cross_entropy(s, l)
 
 
