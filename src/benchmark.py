@@ -5,10 +5,15 @@ from typing import List, Optional
 
 from utils import (
     EVAL_MAX_NEW_TOKENS,
+    FEWSHOT_POOL_SIZE,
     LLAMA_1B_MODEL_NAME,
+    TRAIN_SPLIT_SIZE,
+    build_fewshot_prefix,
     default_datasets_dir,
     load_model,
+    load_prompt_answer_json,
     parse_answer,
+    resolve_train_test_paths,
     run_hf_benchmark,
     test_model,
 )
@@ -62,6 +67,14 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         metavar="N",
         help="HF only: evaluate at most N examples (default: full split)",
     )
+    p.add_argument(
+        "--num-fewshot",
+        type=int,
+        default=0,
+        metavar="N",
+        dest="num_fewshot",
+        help="Number of few-shot examples prepended to each prompt (drawn from last 473 gsm8k train examples).",
+    )
     return p.parse_args(argv)
 
 
@@ -94,6 +107,16 @@ def main(argv: Optional[List[str]] = None) -> None:
                 f"(got {max_new}).",
                 file=sys.stderr,
             )
+
+        fewshot_prefix = None
+        if args.num_fewshot > 0:
+            train_path, _, _ = resolve_train_test_paths(dataset="gsm8k", datasets_dir=None)
+            all_train = load_prompt_answer_json(train_path)
+            all_train_items = list(all_train.items())
+            fewshot_pool = dict(all_train_items[TRAIN_SPLIT_SIZE:TRAIN_SPLIT_SIZE + FEWSHOT_POOL_SIZE])
+            fewshot_prefix = build_fewshot_prefix(fewshot_pool, args.num_fewshot)
+            print(f"Using {args.num_fewshot}-shot prompts from fewshot pool ({len(fewshot_pool)} examples).")
+
         results_name = f"{key}_results.json"
         results_path = os.path.join(results_dir, results_name)
         results, acc = run_hf_benchmark(
@@ -105,6 +128,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             max_new_tokens=max_new,
             limit=args.max_problems,
             log=True,
+            fewshot_prefix=fewshot_prefix,
         )
         n = len(results)
         correct = int(round(acc * n)) if n else 0

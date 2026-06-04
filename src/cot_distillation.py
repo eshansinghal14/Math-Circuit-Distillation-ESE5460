@@ -18,8 +18,11 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 
 from utils import (
+    FEWSHOT_POOL_SIZE,
     LLAMA_1B_MODEL_NAME,
     LLAMA_8B_MODEL_NAME,
+    TRAIN_SPLIT_SIZE,
+    build_fewshot_prefix,
     get_default_device,
     json_to_prompt_answer_dict,
     load_model,
@@ -31,7 +34,7 @@ from utils import (
     run_hf_benchmark,
     seed_all,
 )
-from utils.answer_parsing import extract_numeric_answer_from_text
+from utils.answer_parsing import extract_gsm8k_answer
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -110,15 +113,15 @@ def teacher_correct_mask(
     for i in range(B):
         resp_ids = pred_ids[i][response_mask[i].bool()]
         decoded = tokenizer.decode(resp_ids.tolist(), skip_special_tokens=True)
-        pred_num = extract_numeric_answer_from_text(decoded)
-        gold_num = extract_numeric_answer_from_text(str(gold_answers[i]))
+        pred_num = extract_gsm8k_answer(decoded)
+        gold_num = extract_gsm8k_answer(str(gold_answers[i]))
         if pred_num is not None and gold_num is not None and pred_num == gold_num:
             correct[i] = True
     return correct
 
 
 class GSM8KDataset(Dataset):
-    def __init__(self, data: Union[str, Dict[str, Union[int, str]]], tokenizer, max_response_tokens: Optional[int] = None):
+    def __init__(self, data: Union[str, Dict[str, Union[int, str]]], tokenizer, max_response_tokens: Optional[int] = None, fewshot_prefix: str = ""):
         if isinstance(data, str):
             with open(data, "r", encoding="utf-8") as f:
                 raw = json.load(f)
@@ -126,8 +129,9 @@ class GSM8KDataset(Dataset):
         self.samples = []
         for prompt, answer in data.items():
             answer_text = str(answer) if isinstance(answer, int) else answer
+            full_prompt = fewshot_prefix + prompt if fewshot_prefix else prompt
             prompt_ids = tokenizer(
-                prompt, return_tensors="pt", padding=False, add_special_tokens=False,
+                full_prompt, return_tensors="pt", padding=False, add_special_tokens=False,
             )["input_ids"].squeeze(0)
             answer_ids = tokenizer(
                 answer_text + tokenizer.eos_token,
@@ -138,7 +142,7 @@ class GSM8KDataset(Dataset):
             self.samples.append({
                 "input_ids": torch.cat([prompt_ids, answer_ids]),
                 "prompt_len": int(prompt_ids.size(0)),
-                "prompt": str(prompt),
+                "prompt": full_prompt,
                 "answer": answer,
             })
 
@@ -196,6 +200,7 @@ class CoTDistillationConfig:
     save_interval: int = 0
     benchmark_eval_limit: Optional[int] = 100
     skip_baseline_eval: bool = False
+    fewshot_prefix: str = ""
     seed: int = 42
     device: torch.device = field(default_factory=get_default_device)
 
@@ -310,7 +315,7 @@ class CoTDistillationTrainer:
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, _lr_lambda)
 
         self.loader = DataLoader(
-            GSM8KDataset(train_data, self.tokenizer, max_response_tokens=config.max_response_tokens),
+            GSM8KDataset(train_data, self.tokenizer, max_response_tokens=config.max_response_tokens, fewshot_prefix=config.fewshot_prefix),
             batch_size=config.batch_size,
             shuffle=False,
             collate_fn=partial(collate_fn, pad_id=self.tokenizer.eos_token_id),
@@ -333,6 +338,7 @@ class CoTDistillationTrainer:
                 max_new_tokens=cfg.max_response_tokens,
                 limit=cfg.benchmark_eval_limit,
                 log=False,
+                fewshot_prefix=cfg.fewshot_prefix or None,
             )
         return float(acc)
 
@@ -372,7 +378,7 @@ class CoTDistillationTrainer:
         kl = kl_loss(student_logits, teacher_logits, response_mask, self.config.temperature)
         ce = ce_loss(student_logits, teacher_logits, response_mask)
         loss = self.config.kl_weight * kl + self.config.ce_weight * ce
-        return loss, float(loss.item())
+        return loss, float(kl.item()), float(ce.item()), float(loss.item())
 
     def _clear_cuda_cache(self) -> None:
         gc.collect()
@@ -382,15 +388,19 @@ class CoTDistillationTrainer:
     def train_epoch(self, epoch: int, *, max_steps: Optional[int] = None) -> Dict[str, float]:
         self.student.train()
         agg_kl = 0.0
+        agg_ce = 0.0
+        agg_total = 0.0
         n_steps = 0
         interval_kl = 0.0
+        interval_ce = 0.0
+        interval_total = 0.0
         interval_steps = 0
         accum_steps = max(1, self.config.grad_accum_steps)
         pending_accum = 0
         self.optimizer.zero_grad(set_to_none=True)
 
         for batch in self.loader:
-            loss, kl_val = self._forward_kl(batch)
+            loss, kl_val, ce_val, total_val = self._forward_kl(batch)
             if not torch.isfinite(loss).item():
                 continue
 
@@ -412,12 +422,16 @@ class CoTDistillationTrainer:
             self._train_step += 1
             self.history["train_step"].append(self._train_step)
             self.history["step_kl_loss"].append(kl_val)
+            self.history["step_ce_loss"].append(ce_val)
+            self.history["step_total_loss"].append(total_val)
             agg_kl += kl_val
+            agg_ce += ce_val
+            agg_total += total_val
             interval_kl += kl_val
+            interval_ce += ce_val
+            interval_total += total_val
             n_steps += 1
             interval_steps += 1
-            self._save_history()
-
             self._save_history()
 
             if self.config.save_interval > 0 and self._train_step % self.config.save_interval == 0:
@@ -433,10 +447,15 @@ class CoTDistillationTrainer:
                     self.student.train()
                     self.history["accuracy"].append(self._step_log_eval_accuracy)
                     self.history["accuracy_step"].append(self._train_step)
-                kl_avg = interval_kl / max(interval_steps, 1)
-                acc_str = f"{self._step_log_eval_accuracy:.4f}" if did_eval else "n/a"
-                print(f"  step {self._train_step:04d} | KL {kl_avg:.4f} | Acc {acc_str}")
+                denom = max(interval_steps, 1)
+                kl_avg = interval_kl / denom
+                ce_avg = interval_ce / denom
+                total_avg = interval_total / denom
+                acc_str = f" | Acc {self._step_log_eval_accuracy:.4f}" if did_eval else ""
+                print(f"  step {self._train_step:04d} | Total {total_avg:.4f} | KL {kl_avg:.4f} | CE {ce_avg:.4f}{acc_str}")
                 interval_kl = 0.0
+                interval_ce = 0.0
+                interval_total = 0.0
                 interval_steps = 0
                 self._save_curves()
 
@@ -449,7 +468,12 @@ class CoTDistillationTrainer:
             self.scheduler.step()
             self.optimizer.zero_grad(set_to_none=True)
 
-        return {"kl_loss": agg_kl / max(n_steps, 1)}
+        denom = max(n_steps, 1)
+        return {
+            "kl_loss": agg_kl / denom,
+            "ce_loss": agg_ce / denom,
+            "total_loss": agg_total / denom,
+        }
 
     def train(self) -> Dict[str, List]:
         cfg = self.config
@@ -515,8 +539,10 @@ class CoTDistillationTrainer:
             for key, value in epoch_metrics.items():
                 self.history[key].append(value)
             print(
-                f"Pass {epoch + 1}: KL={epoch_metrics.get('kl_loss', float('nan')):.4f}, "
-                f"Acc={self._step_log_eval_accuracy:.4f}, Step={self._train_step}/{cfg.steps}"
+                f"Pass {epoch + 1}: Total={epoch_metrics.get('total_loss', float('nan')):.4f} | "
+                f"KL={epoch_metrics.get('kl_loss', float('nan')):.4f} | "
+                f"CE={epoch_metrics.get('ce_loss', float('nan')):.4f} | "
+                f"Acc={self._step_log_eval_accuracy:.4f} | Step={self._train_step}/{cfg.steps}"
             )
             epoch += 1
 
@@ -560,15 +586,21 @@ class CoTDistillationTrainer:
         if not loss_steps:
             return
         kl_series = self.history.get("step_kl_loss", [])
+        ce_series = self.history.get("step_ce_loss", [])
+        total_series = self.history.get("step_total_loss", [])
         acc_series = self.history.get("accuracy", [])
         acc_steps = self.history.get("accuracy_step", list(range(1, len(acc_series) + 1)))
-        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-        axes[0].plot(loss_steps[: len(kl_series)], kl_series, marker="o", markersize=2)
-        axes[0].set_title("KL Loss")
-        axes[1].plot(acc_steps[: len(acc_series)], acc_series, marker="o", markersize=3)
-        axes[1].set_title("Accuracy")
-        axes[1].set_ylim(0, 1)
-        for ax in axes:
+        fig, axes = plt.subplots(2, 2, figsize=(14, 8))
+        axes[0, 0].plot(loss_steps[: len(total_series)], total_series, marker="o", markersize=2)
+        axes[0, 0].set_title("Total Loss")
+        axes[0, 1].plot(loss_steps[: len(kl_series)], kl_series, marker="o", markersize=2)
+        axes[0, 1].set_title("KL Loss")
+        axes[1, 0].plot(loss_steps[: len(ce_series)], ce_series, marker="o", markersize=2)
+        axes[1, 0].set_title("CE Loss")
+        axes[1, 1].plot(acc_steps[: len(acc_series)], acc_series, marker="o", markersize=3)
+        axes[1, 1].set_title("Accuracy")
+        axes[1, 1].set_ylim(0, 1)
+        for ax in axes.flat:
             ax.grid(True, alpha=0.3)
         fig.tight_layout()
         os.makedirs(self.config.save_dir, exist_ok=True)
@@ -607,6 +639,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-response-tokens", type=int, default=256)
     parser.add_argument("--save-interval", type=int, default=0)
     parser.add_argument("--skip-baseline-eval", action="store_true", default=False, dest="skip_baseline_eval")
+    parser.add_argument("--num-fewshot", type=int, default=0, dest="num_fewshot",
+                        help="Number of few-shot examples prepended to each prompt (drawn from last 473 train examples).")
     parser.add_argument("--resume-step", type=int, default=None, dest="resume_step")
     parser.add_argument("--checkpoint-run", default=None, metavar="PATH")
     parser.add_argument("--seed", type=int, default=42)
@@ -634,11 +668,17 @@ def main() -> None:
         print(f"Resuming from step {args.resume_step} checkpoint: {student_source}")
     os.makedirs(run_dir, exist_ok=True)
 
-    train_data = load_prompt_answer_json(train_path)
+    all_train = load_prompt_answer_json(train_path)
+    all_train_items = list(all_train.items())
+    train_data = dict(all_train_items[:TRAIN_SPLIT_SIZE])
+    fewshot_pool = dict(all_train_items[TRAIN_SPLIT_SIZE:TRAIN_SPLIT_SIZE + FEWSHOT_POOL_SIZE])
+
+    fewshot_prefix = build_fewshot_prefix(fewshot_pool, args.num_fewshot) if args.num_fewshot > 0 else ""
+
     test_data = load_prompt_answer_json(test_path)
     if args.test_limit is not None:
         test_data = dict(list(test_data.items())[: args.test_limit])
-    print(f"Train: {len(train_data)} examples | Test: {len(test_data)} examples")
+    print(f"Train: {len(train_data)} examples | Fewshot pool: {len(fewshot_pool)} | Test: {len(test_data)} examples")
 
     device = get_default_device()
     student, tokenizer = load_student_model_for_distillation(student_source, args.student_model, device)
@@ -665,6 +705,7 @@ def main() -> None:
             save_interval=args.save_interval,
             benchmark_eval_limit=args.test_limit,
             skip_baseline_eval=args.skip_baseline_eval,
+            fewshot_prefix=fewshot_prefix,
             seed=args.seed,
             device=device,
         ),

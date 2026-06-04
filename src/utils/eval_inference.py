@@ -11,6 +11,16 @@ from .answer_parsing import (
 from .config import EVAL_MAX_NEW_TOKENS
 from .dataset_json import json_to_prompt_answer_dict
 
+TRAIN_SPLIT_SIZE = 7000
+FEWSHOT_POOL_SIZE = 473
+
+
+def build_fewshot_prefix(pool: Dict[str, str], n: int) -> str:
+    """Return a few-shot prefix built from the first n examples in pool."""
+    examples = list(pool.items())[:n]
+    parts = [f"{prompt}\n{answer}" for prompt, answer in examples]
+    return "\n\n".join(parts) + "\n\n"
+
 
 def load_hf_benchmark_rows(
     name: str,
@@ -97,6 +107,7 @@ def run_hf_benchmark(
     max_new_tokens: int = 256,
     limit: Optional[int] = None,
     log: bool = True,
+    fewshot_prefix: Optional[str] = None,
 ) -> Tuple[List[Dict], float]:
     """GSM8K / SVAMP via ``load_dataset``; greedy generate.
 
@@ -114,6 +125,8 @@ def run_hf_benchmark(
         for i in range(0, n, batch_size):
             batch = rows[i : i + batch_size]
             prompts = [p for p, _ in batch]
+            if fewshot_prefix:
+                prompts = [fewshot_prefix + p for p in prompts]
             golds = [g for _, g in batch]
             model_prompts, add_special_tokens = _format_instruct_prompts(
                 tokenizer,

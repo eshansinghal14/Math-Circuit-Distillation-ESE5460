@@ -19,6 +19,9 @@ from .dataset_paths import (
 )
 from .device import get_default_device, seed_all
 from .eval_inference import (
+    FEWSHOT_POOL_SIZE,
+    TRAIN_SPLIT_SIZE,
+    build_fewshot_prefix,
     evaluate_prompt_answer_dict,
     run_hf_benchmark,
     test_model,
@@ -33,6 +36,9 @@ from .synthetic_chain_math import generate_math_dataset, normalize_op_patterns
 
 __all__ = [
     "EVAL_MAX_NEW_TOKENS",
+    "FEWSHOT_POOL_SIZE",
+    "TRAIN_SPLIT_SIZE",
+    "build_fewshot_prefix",
     "HF_READ_TOKEN",
     "LLAMA_1B_MODEL_NAME",
     "LLAMA_8B_MODEL_NAME",

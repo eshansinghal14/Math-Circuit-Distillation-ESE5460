@@ -43,5 +43,14 @@ def extract_numeric_answer_from_text(text: str) -> Optional[str]:
     return None
 
 
+def extract_gsm8k_answer(text: str) -> Optional[str]:
+    """Extract the number after the GSM8K #### delimiter."""
+    text = (text or "").strip()
+    m = re.search(r"####\s*(" + _NUM + r")", text)
+    if m:
+        return _clean_num(m.group(1))
+    return None
+
+
 def parse_answer(resp):
     return _extract_int_after_equals(resp)
