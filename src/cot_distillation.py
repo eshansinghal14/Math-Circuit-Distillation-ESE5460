@@ -151,6 +151,7 @@ class CoTDistillationConfig:
     eval_batch_size: int = 32
     save_dir: str = "results/cot_distillation"
     step_log_interval: int = 1
+    eval_every_n_steps: int = 1
     save_interval: int = 0
     benchmark_eval_limit: Optional[int] = 100
     skip_baseline_eval: bool = False
@@ -383,14 +384,15 @@ class CoTDistillationTrainer:
                 self._save_checkpoint_at_step(self._train_step)
 
             if self._train_step == 1 or self._train_step % max(1, self.config.step_log_interval) == 0:
-                self._clear_cuda_cache()
-                acc = self._evaluate_model(self.student)
-                self._clear_cuda_cache()
-                self.student.train()
-                self._step_log_eval_accuracy = acc
-                self.history["accuracy"].append(acc)
+                eval_n = max(1, self.config.eval_every_n_steps)
+                if self._train_step == 1 or self._train_step % eval_n == 0:
+                    self._clear_cuda_cache()
+                    self._step_log_eval_accuracy = self._evaluate_model(self.student)
+                    self._clear_cuda_cache()
+                    self.student.train()
+                    self.history["accuracy"].append(self._step_log_eval_accuracy)
                 kl_avg = interval_kl / max(interval_steps, 1)
-                print(f"  step {self._train_step:04d} | KL {kl_avg:.4f} | Acc {acc:.4f}")
+                print(f"  step {self._train_step:04d} | KL {kl_avg:.4f} | Acc {self._step_log_eval_accuracy:.4f}")
                 interval_kl = 0.0
                 interval_steps = 0
                 self._save_history()
@@ -555,6 +557,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.path.join(os.path.dirname(__file__), "..", "results", "cot_distillation"),
     )
     parser.add_argument("--step-log-interval", type=int, default=1)
+    parser.add_argument("--eval-every-n-steps", type=int, default=1, dest="eval_every_n_steps")
     parser.add_argument("--max-response-tokens", type=int, default=256)
     parser.add_argument("--save-interval", type=int, default=0)
     parser.add_argument("--skip-baseline-eval", action="store_true", default=False, dest="skip_baseline_eval")
@@ -609,6 +612,7 @@ def main() -> None:
             eval_batch_size=args.eval_batch_size,
             save_dir=run_dir,
             step_log_interval=args.step_log_interval,
+            eval_every_n_steps=args.eval_every_n_steps,
             save_interval=args.save_interval,
             benchmark_eval_limit=args.test_limit,
             skip_baseline_eval=args.skip_baseline_eval,
