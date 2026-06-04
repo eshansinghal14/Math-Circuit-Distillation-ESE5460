@@ -31,6 +31,7 @@ from utils import (
     run_hf_benchmark,
     seed_all,
 )
+from utils.answer_parsing import extract_numeric_answer_from_text
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -77,6 +78,43 @@ def kl_loss_from_student_hidden(
     log_p_t = F.log_softmax(t_log / t, dim=-1)
     log_q_s = F.log_softmax(s / t, dim=-1)
     return (log_p_t.exp() * (log_p_t - log_q_s)).sum() / valid.numel() * (t ** 2)
+
+
+def ce_loss(
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    response_mask: torch.Tensor,
+) -> torch.Tensor:
+    vocab = min(student_logits.shape[-1], teacher_logits.shape[-1])
+    hard_labels = teacher_logits[..., :vocab].argmax(dim=-1)
+    valid = response_mask.reshape(-1).bool().nonzero(as_tuple=False).squeeze(-1)
+    if valid.numel() == 0:
+        return student_logits.sum() * 0.0
+    student_flat = student_logits[..., :vocab].reshape(-1, vocab)
+    labels_flat = hard_labels.reshape(-1)
+    s = student_flat.index_select(0, valid.to(student_flat.device)).float()
+    l = labels_flat.index_select(0, valid.to(labels_flat.device))
+    return F.cross_entropy(s, l)
+
+
+def teacher_correct_mask(
+    teacher_logits: torch.Tensor,
+    response_mask: torch.Tensor,
+    tokenizer,
+    gold_answers: list,
+) -> torch.Tensor:
+    """Return a [B] bool tensor — True where teacher's greedy response matches the gold answer."""
+    B = teacher_logits.shape[0]
+    pred_ids = teacher_logits.argmax(dim=-1)  # [B, T]
+    correct = torch.zeros(B, dtype=torch.bool)
+    for i in range(B):
+        resp_ids = pred_ids[i][response_mask[i].bool()]
+        decoded = tokenizer.decode(resp_ids.tolist(), skip_special_tokens=True)
+        pred_num = extract_numeric_answer_from_text(decoded)
+        gold_num = extract_numeric_answer_from_text(str(gold_answers[i]))
+        if pred_num is not None and gold_num is not None and pred_num == gold_num:
+            correct[i] = True
+    return correct
 
 
 class GSM8KDataset(Dataset):
@@ -145,6 +183,9 @@ class CoTDistillationConfig:
     grad_accum_steps: int = 1
     learning_rate: float = 1e-6
     warmup_ratio: float = 0.0
+    kl_weight: float = 1.0
+    ce_weight: float = 0.0
+    only_correct: bool = False
     temperature: float = 2.0
     grad_clip: float = 1.0
     max_response_tokens: int = 256
@@ -310,29 +351,27 @@ class CoTDistillationTrainer:
         teacher_logits = self._teacher_logits_for_batch(batch, input_ids, attention_mask)
         self._clear_cuda_cache()
 
+        if self.config.only_correct:
+            correct = teacher_correct_mask(
+                teacher_logits, batch["response_mask"], self.tokenizer, batch["answers"],
+            ).to(response_mask.device)
+            response_mask = response_mask * correct.unsqueeze(1)
+
         student_backbone = getattr(self.student, "model", None)
         lm_head = getattr(self.student, "lm_head", None)
         if student_backbone is not None and lm_head is not None:
             student_out = student_backbone(
                 input_ids=input_ids, attention_mask=attention_mask, use_cache=False,
             )
-            loss = kl_loss_from_student_hidden(
-                student_out.last_hidden_state,
-                lm_head,
-                teacher_logits,
-                response_mask,
-                self.config.temperature,
-            )
+            student_logits = lm_head(student_out.last_hidden_state)
         else:
             student_logits = self.student(
                 input_ids=input_ids, attention_mask=attention_mask, use_cache=False,
             ).logits
-            loss = kl_loss(
-                student_logits,
-                teacher_logits,
-                response_mask,
-                self.config.temperature,
-            )
+
+        kl = kl_loss(student_logits, teacher_logits, response_mask, self.config.temperature)
+        ce = ce_loss(student_logits, teacher_logits, response_mask)
+        loss = self.config.kl_weight * kl + self.config.ce_weight * ce
         return loss, float(loss.item())
 
     def _clear_cuda_cache(self) -> None:
@@ -377,6 +416,7 @@ class CoTDistillationTrainer:
             interval_kl += kl_val
             n_steps += 1
             interval_steps += 1
+            self._save_history()
 
             self._save_history()
 
@@ -392,12 +432,12 @@ class CoTDistillationTrainer:
                     self._clear_cuda_cache()
                     self.student.train()
                     self.history["accuracy"].append(self._step_log_eval_accuracy)
+                    self.history["accuracy_step"].append(self._train_step)
                 kl_avg = interval_kl / max(interval_steps, 1)
                 acc_str = f"{self._step_log_eval_accuracy:.4f}" if did_eval else "n/a"
                 print(f"  step {self._train_step:04d} | KL {kl_avg:.4f} | Acc {acc_str}")
                 interval_kl = 0.0
                 interval_steps = 0
-                self._save_history()
                 self._save_curves()
 
             if max_steps is not None and n_steps >= max_steps:
@@ -521,10 +561,11 @@ class CoTDistillationTrainer:
             return
         kl_series = self.history.get("step_kl_loss", [])
         acc_series = self.history.get("accuracy", [])
+        acc_steps = self.history.get("accuracy_step", list(range(1, len(acc_series) + 1)))
         fig, axes = plt.subplots(1, 2, figsize=(12, 4))
         axes[0].plot(loss_steps[: len(kl_series)], kl_series, marker="o", markersize=2)
         axes[0].set_title("KL Loss")
-        axes[1].plot(list(range(1, len(acc_series) + 1)), acc_series, marker="o", markersize=3)
+        axes[1].plot(acc_steps[: len(acc_series)], acc_series, marker="o", markersize=3)
         axes[1].set_title("Accuracy")
         axes[1].set_ylim(0, 1)
         for ax in axes:
@@ -549,6 +590,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--grad-accum-steps", type=int, default=1)
     parser.add_argument("--lr", type=float, default=1e-6)
     parser.add_argument("--warmup-ratio", type=float, default=0.0, dest="warmup_ratio")
+    parser.add_argument("--kl-weight", type=float, default=1.0, dest="kl_weight")
+    parser.add_argument("--ce-weight", type=float, default=0.0, dest="ce_weight")
+    parser.add_argument("--only-correct", action="store_true", default=False, dest="only_correct")
     parser.add_argument("--temperature", type=float, default=2.0)
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--test-limit", type=int, default=100)
@@ -608,6 +652,9 @@ def main() -> None:
             grad_accum_steps=args.grad_accum_steps,
             learning_rate=args.lr,
             warmup_ratio=args.warmup_ratio,
+            kl_weight=args.kl_weight,
+            ce_weight=args.ce_weight,
+            only_correct=args.only_correct,
             temperature=args.temperature,
             grad_clip=args.grad_clip,
             max_response_tokens=args.max_response_tokens,
