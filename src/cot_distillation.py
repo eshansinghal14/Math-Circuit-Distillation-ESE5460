@@ -385,14 +385,16 @@ class CoTDistillationTrainer:
 
             if self._train_step == 1 or self._train_step % max(1, self.config.step_log_interval) == 0:
                 eval_n = max(1, self.config.eval_every_n_steps)
-                if self._train_step == 1 or self._train_step % eval_n == 0:
+                did_eval = self._train_step % eval_n == 0
+                if did_eval:
                     self._clear_cuda_cache()
                     self._step_log_eval_accuracy = self._evaluate_model(self.student)
                     self._clear_cuda_cache()
                     self.student.train()
                     self.history["accuracy"].append(self._step_log_eval_accuracy)
                 kl_avg = interval_kl / max(interval_steps, 1)
-                print(f"  step {self._train_step:04d} | KL {kl_avg:.4f} | Acc {self._step_log_eval_accuracy:.4f}")
+                acc_str = f"{self._step_log_eval_accuracy:.4f}" if did_eval else "n/a"
+                print(f"  step {self._train_step:04d} | KL {kl_avg:.4f} | Acc {acc_str}")
                 interval_kl = 0.0
                 interval_steps = 0
                 self._save_history()
