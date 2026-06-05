@@ -422,7 +422,7 @@ class CoTDistillationTrainer:
             self.student, self.tokenizer = load_student_model_for_distillation(
                 None, sft_target_model, self.device,
             )
-        self.student = self.student.to(self.device).float()
+        self.student = self.student.to(device=self.device, dtype=torch.bfloat16)
         if hasattr(self.student.config, "use_cache"):
             self.student.config.use_cache = False
         if hasattr(self.student, "gradient_checkpointing_enable"):

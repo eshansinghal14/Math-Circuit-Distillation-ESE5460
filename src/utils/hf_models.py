@@ -68,7 +68,7 @@ def load_model(model_name):
     try:
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=torch.float32,
+            torch_dtype=torch.bfloat16,
             **local_kwargs,
         ).to(device)
         tokenizer = AutoTokenizer.from_pretrained(model_name, **local_kwargs)
@@ -104,6 +104,6 @@ def load_student_model_for_distillation(
     else:
         print(f"  From Hugging Face: {student_model_id!r}")
         student, tokenizer = load_model(student_model_id)
-    student = student.to("cpu").float().to(device)
+    student = student.to(device=device, dtype=torch.bfloat16)
     tokenizer.padding_side = "right"
     return student, tokenizer
