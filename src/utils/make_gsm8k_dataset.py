@@ -50,7 +50,7 @@ def build_prompt_answer_dict(split, limit: int) -> Dict[str, str]:
     n = min(limit, len(split)) if limit is not None else len(split)
     for i in range(n):
         row = split[i]
-        prompt = f"Solve the math problem step by step. {str(row['question'])}"
+        prompt = f"Q: {str(row['question'])}"
         answer = str(row["answer"])  # full CoT trace incl. trailing "#### <number>"
         # Strip GSM8K inline calculator annotations like ``<<16-3-4=9>>``.  The
         # result number sits OUTSIDE the brackets (``= <<16-3-4=9>>9`` -> ``= 9``),

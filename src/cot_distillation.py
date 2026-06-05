@@ -220,8 +220,19 @@ class GSM8KDataset(Dataset):
                 full_prompt = build_fewshot_prefix(fewshot_pool, num_fewshot) + prompt
             else:
                 full_prompt = prompt
+            if getattr(tokenizer, "chat_template", None):
+                try:
+                    formatted_prompt = tokenizer.apply_chat_template(
+                        [{"role": "user", "content": full_prompt}],
+                        tokenize=False,
+                        add_generation_prompt=True,
+                    )
+                except Exception:
+                    formatted_prompt = full_prompt + "\n\nA:"
+            else:
+                formatted_prompt = full_prompt + "\n\nA:"
             prompt_ids = tokenizer(
-                full_prompt, return_tensors="pt", padding=False, add_special_tokens=False,
+                formatted_prompt, return_tensors="pt", padding=False, add_special_tokens=False,
             )["input_ids"].squeeze(0)
             answer_ids = tokenizer(
                 answer_text + tokenizer.eos_token,
@@ -571,6 +582,20 @@ class CoTDistillationTrainer:
         """
         tok = self.tokenizer
         pad_id = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
+        if getattr(tok, "chat_template", None):
+            try:
+                prompts = [
+                    tok.apply_chat_template(
+                        [{"role": "user", "content": p}],
+                        tokenize=False,
+                        add_generation_prompt=True,
+                    )
+                    for p in prompts
+                ]
+            except Exception:
+                prompts = [p + "\n\nA:" for p in prompts]
+        else:
+            prompts = [p + "\n\nA:" for p in prompts]
         prev_side = tok.padding_side
         tok.padding_side = "left"
         try:
