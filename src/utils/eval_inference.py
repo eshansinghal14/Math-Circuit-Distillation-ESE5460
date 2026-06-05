@@ -78,6 +78,53 @@ def load_hf_benchmark_rows(
     return rows[:limit] if limit is not None else rows
 
 
+def load_svamp_train_test_data() -> Tuple[Dict[str, str], Dict[str, str]]:
+    """Load SVAMP from HuggingFace; return (train_dict, test_dict) as {prompt: answer} dicts.
+
+    Answer format: ``{Equation} = {Answer}`` so ``extract_svamp_answer`` can parse it.
+    If only one split exists, 80% is used for train and 20% for test.
+    """
+    try:
+        from datasets import load_dataset
+    except ImportError as e:
+        raise ImportError(
+            "SVAMP requires `datasets`. Install with: pip install datasets",
+        ) from e
+
+    ddict = load_dataset("ChilleD/SVAMP")
+
+    def _row_to_pair(ex) -> Optional[Tuple[str, str]]:
+        if ex.get("question_concat"):
+            q = str(ex["question_concat"]).strip()
+        else:
+            q = f"{str(ex.get('Body', '')).strip()}\n{str(ex.get('Question', '')).strip()}"
+        equation = str(ex.get("Equation", "")).strip()
+        raw_ans = ex.get("Answer", ex.get("answer"))
+        if raw_ans is None:
+            return None
+        answer_num = _normalize_numeric_str(str(raw_ans).strip())
+        answer_text = f"{equation} = {answer_num}" if equation else f"= {answer_num}"
+        return f"Q: {q}", answer_text
+
+    keys = list(ddict.keys())
+    if "train" in ddict and "test" in ddict:
+        train_rows, test_rows = list(ddict["train"]), list(ddict["test"])
+    else:
+        all_rows = list(ddict[keys[0]])
+        cut = int(len(all_rows) * 0.8)
+        train_rows, test_rows = all_rows[:cut], all_rows[cut:]
+
+    def _build(rows: list) -> Dict[str, str]:
+        d: Dict[str, str] = {}
+        for ex in rows:
+            pair = _row_to_pair(ex)
+            if pair is not None:
+                d[pair[0]] = pair[1]
+        return d
+
+    return _build(train_rows), _build(test_rows)
+
+
 def _format_instruct_prompts(tokenizer, prompts: List[str]) -> Tuple[List[str], bool]:
     """Wrap prompts in the chat template; fall back to 'Q: ...\n\nA:' style."""
     if getattr(tokenizer, "chat_template", None):

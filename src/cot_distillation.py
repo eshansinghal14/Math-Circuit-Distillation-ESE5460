@@ -31,13 +31,14 @@ from utils import (
     load_model,
     load_prompt_answer_json,
     load_student_model_for_distillation,
+    load_svamp_train_test_data,
     patch_tokenizer_no_special_tokens,
     resolve_train_test_paths,
     rm_dir_tree,
     run_hf_benchmark,
     seed_all,
 )
-from utils.answer_parsing import extract_gsm8k_answer
+from utils.answer_parsing import extract_gsm8k_answer, extract_svamp_answer
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -193,16 +194,19 @@ def teacher_correct_mask(
     response_mask: torch.Tensor,
     tokenizer,
     gold_answers: list,
+    extract_fn=None,
 ) -> torch.Tensor:
     """Return a [B] bool tensor — True where teacher's greedy response matches the gold answer."""
+    if extract_fn is None:
+        extract_fn = extract_gsm8k_answer
     B = teacher_logits.shape[0]
     pred_ids = teacher_logits.argmax(dim=-1)  # [B, T]
     correct = torch.zeros(B, dtype=torch.bool)
     for i in range(B):
         resp_ids = pred_ids[i][response_mask[i].bool()]
         decoded = tokenizer.decode(resp_ids.tolist(), skip_special_tokens=True)
-        pred_num = extract_gsm8k_answer(decoded)
-        gold_num = extract_gsm8k_answer(str(gold_answers[i]))
+        pred_num = extract_fn(decoded)
+        gold_num = extract_fn(str(gold_answers[i]))
         if pred_num is not None and gold_num is not None and pred_num == gold_num:
             correct[i] = True
     return correct
@@ -282,6 +286,7 @@ def collate_fn(examples, pad_id: int) -> Dict[str, Any]:
 
 @dataclass
 class CoTDistillationConfig:
+    dataset: Literal["gsm8k", "svamp"] = "gsm8k"
     teacher_model: str = LLAMA_8B_MODEL_NAME
     student_model: str = LLAMA_1B_MODEL_NAME
     steps: int = 15
@@ -406,6 +411,7 @@ class CoTDistillationTrainer:
         self._use_graph = config.lambda_graph > 0.0
         self._graph_start_step = config.graph_start_step
         seed_all(config.seed)
+        self._extract_answer = extract_svamp_answer if config.dataset == "svamp" else extract_gsm8k_answer
 
         if tokenizer is not None:
             self.tokenizer = tokenizer
@@ -517,7 +523,7 @@ class CoTDistillationTrainer:
             _, acc = run_hf_benchmark(
                 model,
                 self.tokenizer,
-                "gsm8k",
+                cfg.dataset,
                 results_fname=None,
                 batch_size=cfg.eval_batch_size,
                 max_new_tokens=cfg.max_response_tokens,
@@ -670,6 +676,7 @@ class CoTDistillationTrainer:
         if self.config.only_correct and not on_policy and not self.config.seq_kd:
             correct = teacher_correct_mask(
                 teacher_logits, response_mask.cpu(), self.tokenizer, batch["answers"],
+                extract_fn=self._extract_answer,
             ).to(response_mask.device)
             response_mask = response_mask * correct.unsqueeze(1)
 
@@ -994,13 +1001,14 @@ class CoTDistillationTrainer:
         self._save_history()
         self._save_curves()
         self._save_checkpoint()
-        print(f"Results saved to: {cfg.save_dir}")
+        print(f"Results saved to: {cfg.save_dir} (model: final_checkpoint/)")
         return dict(self.history)
 
     def _save_checkpoint(self) -> None:
-        os.makedirs(self.config.save_dir, exist_ok=True)
-        self.student.save_pretrained(self.config.save_dir)
-        self.tokenizer.save_pretrained(self.config.save_dir)
+        path = os.path.join(self.config.save_dir, "final_checkpoint")
+        os.makedirs(path, exist_ok=True)
+        self.student.save_pretrained(path)
+        self.tokenizer.save_pretrained(path)
 
     def _save_checkpoint_at_step(self, step: int) -> None:
         path = os.path.join(self.config.save_dir, f"step_{step}_checkpoint")
@@ -1106,6 +1114,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-baseline-eval", action="store_true", default=False, dest="skip_baseline_eval")
     parser.add_argument("--num-fewshot", type=int, default=0, dest="num_fewshot",
                         help="Number of few-shot examples prepended to each prompt (drawn from last 473 train examples).")
+    parser.add_argument(
+        "--dataset", choices=["gsm8k", "svamp"], default="gsm8k",
+        help="Training and evaluation dataset. svamp loads from HuggingFace ChilleD/SVAMP.",
+    )
     parser.add_argument("--resume-step", type=int, default=None, dest="resume_step")
     parser.add_argument("--checkpoint-run", default=None, metavar="PATH")
     parser.add_argument("--seed", type=int, default=42)
@@ -1183,7 +1195,10 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    train_path, test_path, _ = resolve_train_test_paths(dataset="gsm8k", datasets_dir=None)
+    if args.dataset == "gsm8k":
+        train_path, test_path, _ = resolve_train_test_paths(dataset="gsm8k", datasets_dir=None)
+    else:
+        train_path = test_path = None
     run_dir, student_source = resolve_distillation_run_dir(
         os.path.abspath(args.save_dir),
         resume=args.resume_step is not None,
@@ -1200,17 +1215,21 @@ def main() -> None:
         print(f"Resuming from step {args.resume_step} checkpoint: {student_source}")
     os.makedirs(run_dir, exist_ok=True)
 
-    all_train = load_prompt_answer_json(train_path)
-    all_train_items = list(all_train.items())
-    train_data = dict(all_train_items[:TRAIN_SPLIT_SIZE])
-    fewshot_pool = dict(all_train_items[TRAIN_SPLIT_SIZE:TRAIN_SPLIT_SIZE + FEWSHOT_POOL_SIZE])
-
-    if args.sft_model == "teacher":
-        train_data = dict(all_train_items)
-
-    test_data = load_prompt_answer_json(test_path)
-    if args.test_limit is not None:
-        test_data = dict(list(test_data.items())[: args.test_limit])
+    if args.dataset == "svamp":
+        train_data, test_data = load_svamp_train_test_data()
+        fewshot_pool = {}
+        if args.test_limit is not None:
+            test_data = dict(list(test_data.items())[: args.test_limit])
+    else:
+        all_train = load_prompt_answer_json(train_path)
+        all_train_items = list(all_train.items())
+        train_data = dict(all_train_items[:TRAIN_SPLIT_SIZE])
+        fewshot_pool = dict(all_train_items[TRAIN_SPLIT_SIZE:TRAIN_SPLIT_SIZE + FEWSHOT_POOL_SIZE])
+        if args.sft_model == "teacher":
+            train_data = dict(all_train_items)
+        test_data = load_prompt_answer_json(test_path)
+        if args.test_limit is not None:
+            test_data = dict(list(test_data.items())[: args.test_limit])
     print(f"Train: {len(train_data)} examples | Fewshot pool: {len(fewshot_pool)} | Test: {len(test_data)} examples")
 
     device = get_default_device()
@@ -1221,6 +1240,7 @@ def main() -> None:
 
     trainer = CoTDistillationTrainer(
         config=CoTDistillationConfig(
+            dataset=args.dataset,
             teacher_model=args.teacher_model,
             student_model=args.student_model,
             steps=args.steps,

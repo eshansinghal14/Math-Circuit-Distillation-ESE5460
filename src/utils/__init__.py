@@ -23,6 +23,7 @@ from .eval_inference import (
     TRAIN_SPLIT_SIZE,
     build_fewshot_prefix,
     evaluate_prompt_answer_dict,
+    load_svamp_train_test_data,
     run_hf_benchmark,
     test_model,
 )
@@ -50,6 +51,7 @@ __all__ = [
     "default_datasets_dir",
     "evaluate_prompt_answer_dict",
     "extract_svamp_answer",
+    "load_svamp_train_test_data",
     "generate_math_dataset",
     "get_default_device",
     "json_to_prompt_answer_dict",
