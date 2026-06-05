@@ -340,8 +340,9 @@ def _kl_per_position(
     temperature: float,
 ) -> torch.Tensor:
     """KL(teacher || student) per token position. Returns [seq_len] float tensor."""
-    t_probs = torch.softmax(teacher_logits / temperature, dim=-1)
-    s_log_probs = torch.log_softmax(student_logits / temperature, dim=-1)
+    vocab = min(teacher_logits.shape[-1], student_logits.shape[-1])
+    t_probs = torch.softmax(teacher_logits[..., :vocab] / temperature, dim=-1)
+    s_log_probs = torch.log_softmax(student_logits[..., :vocab] / temperature, dim=-1)
     return (t_probs * (t_probs.clamp(min=1e-10).log() - s_log_probs)).sum(dim=-1)
 
 
