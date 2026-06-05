@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import torch
 
@@ -472,6 +472,7 @@ def backward_batch_graph_loss(
     teacher_cache: TeacherDataCache | None = None,
     teacher_adapter: HFLlamaGraphAdapter | None = None,
     answers: list[int],
+    on_prompt_done: Callable[[int, int], None] | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Compute and backprop graph loss one prompt at a time.
 
@@ -550,6 +551,8 @@ def backward_batch_graph_loss(
         gc.collect()
         if device.type == "cuda":
             torch.cuda.empty_cache()
+        if on_prompt_done is not None:
+            on_prompt_done(i + 1, len(prompts))
         for key, value in prompt_metrics.items():
             metric_sums[key] = metric_sums.get(key, 0.0) + float(value)
 

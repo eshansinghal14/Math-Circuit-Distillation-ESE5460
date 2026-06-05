@@ -687,6 +687,9 @@ class CoTDistillationTrainer:
         """
         from graph_loss.training import backward_batch_graph_loss
 
+        def _log_graph_progress(done: int, total: int) -> None:
+            print(f"    [graph] prompt {done}/{total}", flush=True)
+
         graph_loss, _graph_metrics = backward_batch_graph_loss(
             prompts=batch["prompts"],
             student_adapter=self.student_graph_adapter,
@@ -696,6 +699,7 @@ class CoTDistillationTrainer:
             teacher_cache=None,
             teacher_adapter=self.teacher_graph_adapter,
             answers=batch["answers"],
+            on_prompt_done=_log_graph_progress,
         )
         return float(graph_loss.item())
 
