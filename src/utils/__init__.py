@@ -1,4 +1,4 @@
-from .answer_parsing import parse_answer
+from .answer_parsing import extract_svamp_answer, parse_answer
 from .config import (
     EVAL_MAX_NEW_TOKENS,
     HF_READ_TOKEN,
@@ -49,6 +49,7 @@ __all__ = [
     "dataset_all_json_path",
     "default_datasets_dir",
     "evaluate_prompt_answer_dict",
+    "extract_svamp_answer",
     "generate_math_dataset",
     "get_default_device",
     "json_to_prompt_answer_dict",

@@ -9,6 +9,7 @@ from .answer_parsing import (
     _extract_int_after_equals,
     _normalize_numeric_str,
     extract_gsm8k_answer,
+    extract_svamp_answer,
 )
 from .config import EVAL_MAX_NEW_TOKENS
 from .dataset_json import json_to_prompt_answer_dict
@@ -114,6 +115,7 @@ def run_hf_benchmark(
     Returns ``(results, accuracy)`` where each result has ``response``, ``answer`` (gold str),
     and ``parsed`` (predicted numeric str or ``null``).
     """
+    key = name.strip().lower()
     rows = load_hf_benchmark_rows(name, limit=limit)
     n = len(rows)
     results: List[Dict] = []
@@ -152,8 +154,9 @@ def run_hf_benchmark(
             gen_only = tokenizer.batch_decode(
                 outputs[:, prompt_len:], skip_special_tokens=True
             )
+            extract_answer = extract_svamp_answer if key == "svamp" else extract_gsm8k_answer
             for j, full_text in enumerate(decoded):
-                pred = extract_gsm8k_answer(gen_only[j])
+                pred = extract_answer(gen_only[j])
                 gold = golds[j]
                 if pred is not None and pred == gold:
                     correct += 1

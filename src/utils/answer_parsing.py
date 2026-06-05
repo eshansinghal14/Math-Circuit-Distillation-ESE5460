@@ -52,5 +52,14 @@ def extract_gsm8k_answer(text: str) -> Optional[str]:
     return None
 
 
+def extract_svamp_answer(text: str) -> Optional[str]:
+    """Extract the number after the last '=' in the generated text."""
+    text = (text or "").strip()
+    matches = re.findall(r"=\s*(" + _NUM + r")", text)
+    if matches:
+        return _clean_num(matches[-1])
+    return None
+
+
 def parse_answer(resp):
     return _extract_int_after_equals(resp)
