@@ -51,7 +51,7 @@ def load_hf_benchmark_rows(
             gold = extract_gsm8k_answer(ex["answer"])
             if gold is None:
                 continue
-            prompt = f"Solve the math problem step by step. {q}"
+            prompt = f"Q: {q}"
             rows.append((prompt, gold))
             if limit is not None and len(rows) >= limit:
                 break
@@ -70,7 +70,7 @@ def load_hf_benchmark_rows(
                 gold = _normalize_numeric_str(str(raw_a).strip())
             except Exception:
                 continue
-            prompt = f"Solve the math problem step by step. {q}"
+            prompt = f"Q: {q}"
             rows.append((prompt, gold))
             if limit is not None and len(rows) >= limit:
                 break
@@ -81,21 +81,21 @@ def load_hf_benchmark_rows(
 
 
 def _format_instruct_prompts(tokenizer, prompts: List[str]) -> Tuple[List[str], bool]:
-    """Wrap user prompts in the model's chat template when available."""
-    if not getattr(tokenizer, "chat_template", None):
-        return prompts, True
-    try:
-        rendered = [
-            tokenizer.apply_chat_template(
-                [{"role": "user", "content": prompt}],
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-            for prompt in prompts
-        ]
-    except Exception:
-        return prompts, True
-    return rendered, False
+    """Wrap prompts in the chat template; fall back to 'Q: ...\n\nA:' style."""
+    if getattr(tokenizer, "chat_template", None):
+        try:
+            rendered = [
+                tokenizer.apply_chat_template(
+                    [{"role": "user", "content": prompt}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+                for prompt in prompts
+            ]
+            return rendered, False
+        except Exception:
+            pass
+    return [p + "\n\nA:" for p in prompts], False
 
 
 @torch.no_grad()
@@ -147,6 +147,8 @@ def run_hf_benchmark(
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
                 pad_token_id=tokenizer.pad_token_id,
+                stop_strings=["\n\n"],
+                tokenizer=tokenizer,
             )
             decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
             prompt_len = inputs["input_ids"].shape[1]
@@ -214,6 +216,8 @@ def evaluate_prompt_answer_dict(
             max_new_tokens=max_new_tokens,
             do_sample=False,
             pad_token_id=tokenizer.eos_token_id,
+            stop_strings=["\n\n"],
+            tokenizer=tokenizer,
         )
         decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
         # Generated-only continuation (echoed prompt stripped). For CoT/GSM8K
