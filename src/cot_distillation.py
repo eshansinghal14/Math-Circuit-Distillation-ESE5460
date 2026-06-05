@@ -1125,7 +1125,10 @@ def main() -> None:
     print(f"Train: {len(train_data)} examples | Fewshot pool: {len(fewshot_pool)} | Test: {len(test_data)} examples")
 
     device = get_default_device()
-    student, tokenizer = load_student_model_for_distillation(student_source, args.student_model, device)
+    if args.sft_model == "teacher":
+        student, tokenizer = None, None
+    else:
+        student, tokenizer = load_student_model_for_distillation(student_source, args.student_model, device)
 
     trainer = CoTDistillationTrainer(
         config=CoTDistillationConfig(
