@@ -396,7 +396,6 @@ def _compare_tokens_loss_for_prompt(
 
     logit_positions = [pos - 1 for pos in response_positions]
     if config.compare_ans_token:
-        # Scan left-to-right; pick the first response position where answer parsing succeeds.
         extract_fn = config.extract_fn
         if extract_fn is None:
             from utils.answer_parsing import extract_numeric_answer_from_text
@@ -405,17 +404,24 @@ def _compare_tokens_loss_for_prompt(
             input_ids[response_start:response_end].tolist(), skip_special_tokens=True
         )
         answer_str = extract_fn(full_resp)
-        ans_pos = response_positions[-1]  # fallback to last token
+        selected_positions = None
         if answer_str is not None:
-            for pos in response_positions:
-                prefix = tokenizer.decode(
-                    input_ids[response_start:pos + 1].tolist(), skip_special_tokens=True
-                )
-                if extract_fn(prefix) == answer_str:
-                    ans_pos = pos
+            response_ids = input_ids[response_start:response_end].tolist()
+            # Try with a leading space first (numbers typically follow '= ' in responses).
+            for space in (' ', ''):
+                cand_ids = tokenizer(space + answer_str, add_special_tokens=False)["input_ids"]
+                if hasattr(cand_ids, 'tolist'):
+                    cand_ids = cand_ids.tolist()
+                n_ans = len(cand_ids)
+                for i in range(len(response_ids) - n_ans, -1, -1):
+                    if response_ids[i:i + n_ans] == cand_ids:
+                        selected_positions = [response_positions[i + j] for j in range(n_ans)]
+                        break
+                if selected_positions is not None:
                     break
-        selected_positions = [ans_pos]
-        n_select = 1
+        if selected_positions is None:
+            selected_positions = [response_positions[-1]]
+        n_select = len(selected_positions)
     else:
         with torch.no_grad():
             s_logits = student_adapter.model(input_ids.unsqueeze(0)).logits.squeeze(0).detach().cpu()
