@@ -168,6 +168,25 @@ def ce_loss(
     return F.cross_entropy(s, l)
 
 
+def sft_ce_loss(
+    student_logits: torch.Tensor,
+    input_ids: torch.Tensor,
+    response_mask: torch.Tensor,
+) -> torch.Tensor:
+    """CE against gold token IDs for SFT (no teacher needed)."""
+    logits = student_logits[:, :-1, :]
+    labels = input_ids[:, 1:]
+    mask = response_mask[:, 1:]
+    valid = mask.reshape(-1).bool().nonzero(as_tuple=False).squeeze(-1)
+    if valid.numel() == 0:
+        return student_logits.sum() * 0.0
+    logits_flat = logits.reshape(-1, logits.shape[-1])
+    labels_flat = labels.reshape(-1)
+    s = logits_flat.index_select(0, valid.to(logits_flat.device)).float()
+    l = labels_flat.index_select(0, valid.to(labels_flat.device)).to(s.device)
+    return F.cross_entropy(s, l)
+
+
 def teacher_correct_mask(
     teacher_logits: torch.Tensor,
     response_mask: torch.Tensor,
@@ -299,6 +318,11 @@ class CoTDistillationConfig:
     graph_start_step: int = 1
     graph_verbose: bool = False
 
+    # ── SFT mode ─────────────────────────────────────────────────────────────
+    # "student" or "teacher": fine-tune that model on gold GSM8K responses.
+    # Forces kl_weight=0, ce_weight=1.0; no frozen teacher is loaded.
+    sft_model: Optional[Literal["student", "teacher"]] = None
+
 
 def find_student_source(path: str) -> Optional[str]:
     if os.path.isdir(path) and (
@@ -358,6 +382,10 @@ class CoTDistillationTrainer:
         self._resume = resume_step is not None
         # GKD is active whenever any on-policy/JSD knob departs from its default;
         # otherwise the loss path is byte-for-byte the original forward-KL one.
+        self._is_sft = config.sft_model is not None
+        if self._is_sft:
+            config.kl_weight = 0.0
+            config.ce_weight = 1.0
         self._use_gkd = (
             config.beta != 0.0 or config.lmbda > 0.0 or config.seq_kd
         )
@@ -374,11 +402,14 @@ class CoTDistillationTrainer:
         self.tokenizer = patch_tokenizer_no_special_tokens(self.tokenizer)
         self.tokenizer.padding_side = "right"
 
-        if student is not None:
+        sft_target_model = (
+            config.teacher_model if config.sft_model == "teacher" else config.student_model
+        )
+        if student is not None and config.sft_model != "teacher":
             self.student = student
         else:
             self.student, self.tokenizer = load_student_model_for_distillation(
-                None, config.student_model, self.device,
+                None, sft_target_model, self.device,
             )
         self.student = self.student.to(self.device).float()
         if hasattr(self.student.config, "use_cache"):
@@ -388,12 +419,15 @@ class CoTDistillationTrainer:
             print("Enabled student gradient checkpointing.")
         self.student.train()
 
-        print(f"Loading teacher: {config.teacher_model}")
-        self.teacher, _ = load_model(config.teacher_model)
-        self.teacher = self.teacher.to(device=self.device, dtype=torch.bfloat16)
-        self.teacher.eval()
-        for param in self.teacher.parameters():
-            param.requires_grad = False
+        if self._is_sft:
+            self.teacher = None
+        else:
+            print(f"Loading teacher: {config.teacher_model}")
+            self.teacher, _ = load_model(config.teacher_model)
+            self.teacher = self.teacher.to(device=self.device, dtype=torch.bfloat16)
+            self.teacher.eval()
+            for param in self.teacher.parameters():
+                param.requires_grad = False
 
         # ── Feature 2 setup: graph distillation adapters/config (lazy) ──────
         # Only touch graph_loss machinery when lambda_graph > 0 so the default
@@ -401,7 +435,7 @@ class CoTDistillationTrainer:
         self.graph_loss_config = None
         self.student_graph_adapter = None
         self.teacher_graph_adapter = None
-        if self._use_graph:
+        if self._use_graph and not self._is_sft:
             from graph_loss.hf_adapter import HFLlamaGraphAdapter
             from graph_loss.training import GraphAuxConfig
 
@@ -596,6 +630,12 @@ class CoTDistillationTrainer:
             attention_mask = batch["attention_mask"].to(self.device)
             response_mask = batch["response_mask"].to(self.device)
 
+        if self._is_sft:
+            student_logits = self._student_logits(input_ids, attention_mask)
+            loss = sft_ce_loss(student_logits, input_ids, response_mask)
+            ce_val = float(loss.item())
+            return loss, 0.0, ce_val, ce_val
+
         teacher_logits = self._teacher_logits_for_batch(batch, input_ids, attention_mask)
         self._clear_cuda_cache()
 
@@ -789,14 +829,18 @@ class CoTDistillationTrainer:
             student_base = self._evaluate_model(self.student)
             self.student.train()
             self.history["student_baseline"] = student_base
-            print(f"  Student baseline accuracy: {student_base:.4f}")
-            teacher_base = self._evaluate_model(self.teacher)
-            self.history["teacher_baseline"] = teacher_base
-            print(f"  Teacher baseline accuracy: {teacher_base:.4f}")
+            label = cfg.sft_model if self._is_sft else "student"
+            print(f"  {label} baseline accuracy: {student_base:.4f}")
+            if not self._is_sft:
+                teacher_base = self._evaluate_model(self.teacher)
+                self.history["teacher_baseline"] = teacher_base
+                print(f"  Teacher baseline accuracy: {teacher_base:.4f}")
             self._step_log_eval_accuracy = student_base
 
         print("=" * 60)
         mode_bits = []
+        if self._is_sft:
+            mode_bits.append(f"SFT-{cfg.sft_model}")
         if self._use_gkd:
             mode_bits.append("GKD")
         if self._use_graph:
@@ -957,6 +1001,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resume-step", type=int, default=None, dest="resume_step")
     parser.add_argument("--checkpoint-run", default=None, metavar="PATH")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--sft-model", choices=["student", "teacher"], default=None, dest="sft_model",
+        help="SFT the specified model on GSM8K gold responses (forces kl_weight=0, ce_weight=1).",
+    )
 
     # ── Feature 1: native on-policy GKD (arXiv:2306.13649) ──────────────────
     gkd = parser.add_argument_group("GKD (on-policy generalized knowledge distillation)")
@@ -1043,6 +1091,9 @@ def main() -> None:
     train_data = dict(all_train_items[:TRAIN_SPLIT_SIZE])
     fewshot_pool = dict(all_train_items[TRAIN_SPLIT_SIZE:TRAIN_SPLIT_SIZE + FEWSHOT_POOL_SIZE])
 
+    if args.sft_model is not None:
+        train_data = fewshot_pool
+
     test_data = load_prompt_answer_json(test_path)
     if args.test_limit is not None:
         test_data = dict(list(test_data.items())[: args.test_limit])
@@ -1094,6 +1145,7 @@ def main() -> None:
             student_nodes_per_label=args.student_nodes_per_label,
             graph_start_step=args.graph_start_step,
             graph_verbose=args.graph_verbose,
+            sft_model=args.sft_model,
         ),
         train_data=train_data,
         test_data=test_data,

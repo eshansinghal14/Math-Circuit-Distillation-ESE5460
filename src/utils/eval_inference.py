@@ -7,13 +7,13 @@ import torch
 from .answer_parsing import (
     _extract_int_after_equals,
     _normalize_numeric_str,
-    extract_numeric_answer_from_text,
+    extract_gsm8k_answer,
 )
 from .config import EVAL_MAX_NEW_TOKENS
 from .dataset_json import json_to_prompt_answer_dict
 
-TRAIN_SPLIT_SIZE = 7000
-FEWSHOT_POOL_SIZE = 473
+TRAIN_SPLIT_SIZE = 6000
+FEWSHOT_POOL_SIZE = 1473
 
 
 def build_fewshot_prefix(pool: Dict[str, str], n: int) -> str:
@@ -48,7 +48,7 @@ def load_hf_benchmark_rows(
         ds = load_dataset("openai/gsm8k", "main", split="test")
         for ex in ds:
             q = ex["question"].strip()
-            gold = extract_numeric_answer_from_text(ex["answer"])
+            gold = extract_gsm8k_answer(ex["answer"])
             if gold is None:
                 continue
             prompt = f"Solve the math problem step by step. {q}"
@@ -154,7 +154,7 @@ def run_hf_benchmark(
                 outputs[:, prompt_len:], skip_special_tokens=True
             )
             for j, full_text in enumerate(decoded):
-                pred = extract_numeric_answer_from_text(gen_only[j])
+                pred = extract_gsm8k_answer(gen_only[j])
                 gold = golds[j]
                 if pred is not None and pred == gold:
                     correct += 1
@@ -245,10 +245,9 @@ def evaluate_prompt_answer_dict(
                 if pred == gold:
                     correct += 1
             else:
-                # CoT / GSM8K path: compare the last number in the gold solution
-                # against the last number in the student's generated continuation.
-                gold_num = extract_numeric_answer_from_text(str(gold))
-                pred_num = extract_numeric_answer_from_text(gen)
+                # CoT / GSM8K path: require the #### delimiter.
+                gold_num = extract_gsm8k_answer(str(gold))
+                pred_num = extract_gsm8k_answer(gen)
                 if (
                     gold_num is not None
                     and pred_num is not None
