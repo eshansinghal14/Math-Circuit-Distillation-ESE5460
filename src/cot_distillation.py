@@ -508,10 +508,15 @@ class CoTDistillationTrainer:
             return min(1.0, current_step / warmup_steps)
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, _lr_lambda)
 
+        _sft_generator = None
+        if self._is_sft:
+            _sft_generator = torch.Generator()
+            _sft_generator.manual_seed(config.seed)
         self.loader = DataLoader(
             GSM8KDataset(train_data, self.tokenizer, max_response_tokens=config.max_response_tokens, fewshot_pool=fewshot_pool, num_fewshot=config.num_fewshot),
             batch_size=config.batch_size,
-            shuffle=False,
+            shuffle=self._is_sft,
+            generator=_sft_generator,
             collate_fn=partial(collate_fn, pad_id=self.tokenizer.eos_token_id),
         )
 
