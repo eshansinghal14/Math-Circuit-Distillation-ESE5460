@@ -401,11 +401,12 @@ def _compare_tokens_loss_for_prompt(
     selected_positions = [
         response_positions[i] for i in torch.topk(kl_vals, n_select).indices.tolist()
     ]
+    print(f"      [graph] {len(input_ids)} tokens, {n_select} positions selected", flush=True)
 
     detached_losses: list[torch.Tensor] = []
     metric_sums: dict[str, float] = {}
 
-    for pos in selected_positions:
+    for graph_idx, pos in enumerate(selected_positions):
         prefix_ids = input_ids[:pos].cpu()
 
         with torch.enable_grad():
@@ -440,6 +441,7 @@ def _compare_tokens_loss_for_prompt(
             config=config,
             cached_teacher=cached,
         )
+        print(f"      [graph] graph {graph_idx + 1}/{n_select} built", flush=True)
 
         scaled_pos_loss = (loss_scale / denom / n_select) * pos_loss
         if scaled_pos_loss.requires_grad:
