@@ -82,7 +82,6 @@ def load_svamp_train_test_data() -> Tuple[Dict[str, str], Dict[str, str]]:
     """Load SVAMP from HuggingFace; return (train_dict, test_dict) as {prompt: answer} dicts.
 
     Answer format: ``{Equation} = {Answer}`` so ``extract_svamp_answer`` can parse it.
-    If only one split exists, 80% is used for train and 20% for test.
     """
     try:
         from datasets import load_dataset
@@ -106,13 +105,7 @@ def load_svamp_train_test_data() -> Tuple[Dict[str, str], Dict[str, str]]:
         answer_text = f"{equation} = {answer_num}" if equation else f"= {answer_num}"
         return f"Q: {q}", answer_text
 
-    keys = list(ddict.keys())
-    if "train" in ddict and "test" in ddict:
-        train_rows, test_rows = list(ddict["train"]), list(ddict["test"])
-    else:
-        all_rows = list(ddict[keys[0]])
-        cut = int(len(all_rows) * 0.8)
-        train_rows, test_rows = all_rows[:cut], all_rows[cut:]
+    train_rows, test_rows = list(ddict["train"]), list(ddict["test"])
 
     def _build(rows: list) -> Dict[str, str]:
         d: Dict[str, str] = {}
