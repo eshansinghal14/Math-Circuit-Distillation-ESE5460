@@ -322,6 +322,7 @@ class CoTDistillationConfig:
     # lambda_graph == 0 (default) loads NO graph machinery: pure KL/GKD path.
     lambda_graph: float = 0.0
     graph_loss_type: Literal["jsd", "kld", "mse", "mse-norm", "mse-scale"] = "kld"
+    include_prompt_logits: bool = False
     compare_n_tokens: Optional[int] = 3
     compare_last_token: bool = False
     tokens_dla_nodes: bool = False
@@ -683,7 +684,8 @@ class CoTDistillationTrainer:
             response_mask = response_mask * correct.unsqueeze(1)
 
         student_logits = self._student_logits(input_ids, attention_mask)
-        loss, kl_val, ce_val = self._distill_term(student_logits, teacher_logits, response_mask)
+        distill_mask = attention_mask if self.config.include_prompt_logits else response_mask
+        loss, kl_val, ce_val = self._distill_term(student_logits, teacher_logits, distill_mask)
         return loss, kl_val, ce_val, float(loss.item())
 
     def _backward_graph_loss(self, batch: Dict[str, Any], grad_scale: float) -> float:
@@ -1100,6 +1102,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--kl-weight", type=float, default=1.0, dest="kl_weight")
     parser.add_argument("--ce-weight", type=float, default=0.0, dest="ce_weight")
     parser.add_argument("--only-correct", action="store_true", default=False, dest="only_correct")
+    parser.add_argument(
+        "--include-prompt-logits", action="store_true", default=False, dest="include_prompt_logits",
+        help="Include prompt token positions in the KD loss (default: response tokens only).",
+    )
     parser.add_argument("--temperature", type=float, default=2.0)
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--test-limit", type=int, default=100)
@@ -1257,6 +1263,7 @@ def main() -> None:
             kl_weight=args.kl_weight,
             ce_weight=args.ce_weight,
             only_correct=args.only_correct,
+            include_prompt_logits=args.include_prompt_logits,
             temperature=args.temperature,
             grad_clip=args.grad_clip,
             max_response_tokens=args.max_response_tokens,
