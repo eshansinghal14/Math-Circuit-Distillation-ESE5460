@@ -6,6 +6,7 @@ import argparse
 import gc
 import importlib
 import json
+import math
 import os
 import random
 from collections import defaultdict
@@ -328,6 +329,8 @@ class CoTDistillationConfig:
     student_nodes_per_label: int = 10
     graph_start_step: int = 1
     graph_verbose: bool = False
+
+    track_loss_grads: bool = False
 
     # ── SFT mode ─────────────────────────────────────────────────────────────
     # "student" or "teacher": fine-tune that model on gold GSM8K responses.
@@ -696,6 +699,52 @@ class CoTDistillationTrainer:
         )
         return float(graph_loss.item())
 
+    def _clone_student_grads(self) -> List[Optional[torch.Tensor]]:
+        return [
+            param.grad.detach().clone() if param.grad is not None else None
+            for param in self.student.parameters()
+        ]
+
+    def _record_kl_only_grad_metrics(self, metrics: Dict[str, float]) -> None:
+        kl_norm_sq = 0.0
+        for param in self.student.parameters():
+            if param.grad is not None:
+                grad = param.grad.detach().float()
+                kl_norm_sq += float((grad * grad).sum().item())
+        metrics["kl_loss_grad"] = math.sqrt(kl_norm_sq)
+        metrics["graph_loss_grad"] = 0.0
+        metrics["loss_cossim"] = 0.0
+
+    def _record_loss_grad_metrics(
+        self,
+        metrics: Dict[str, float],
+        kl_grads: List[Optional[torch.Tensor]],
+    ) -> None:
+        kl_norm_sq = 0.0
+        graph_norm_sq = 0.0
+        dot = 0.0
+        for param, kl_grad in zip(self.student.parameters(), kl_grads, strict=True):
+            if kl_grad is not None:
+                kl_grad_f = kl_grad.float()
+                kl_norm_sq += float((kl_grad_f * kl_grad_f).sum().item())
+            if param.grad is None:
+                continue
+            graph_grad = param.grad.detach()
+            if kl_grad is not None:
+                graph_grad = graph_grad - kl_grad.to(device=graph_grad.device)
+                dot += float((kl_grad.to(device=graph_grad.device).float() * graph_grad.float()).sum().item())
+            graph_grad_f = graph_grad.float()
+            graph_norm_sq += float((graph_grad_f * graph_grad_f).sum().item())
+        kl_norm = math.sqrt(kl_norm_sq)
+        graph_norm = math.sqrt(graph_norm_sq)
+        metrics["kl_loss_grad"] = kl_norm
+        metrics["graph_loss_grad"] = graph_norm
+        metrics["loss_cossim"] = (
+            dot / (kl_norm * graph_norm)
+            if kl_norm > 0.0 and graph_norm > 0.0
+            else 0.0
+        )
+
     def _clear_cuda_cache(self) -> None:
         gc.collect()
         if torch.cuda.is_available():
@@ -731,10 +780,20 @@ class CoTDistillationTrainer:
             # exactly as distillation.py does (graph backward happens inside the call).
             graph_val = 0.0
             if self._use_graph and self._train_step + 1 >= self._graph_start_step:
+                kl_grads = self._clone_student_grads() if self.config.track_loss_grads else None
                 self._clear_cuda_cache()
                 graph_val = self._backward_graph_loss(batch, grad_scale)
                 total_val = total_val + self.config.lambda_graph * graph_val
+                if kl_grads is not None:
+                    _grad_metrics: Dict[str, float] = {}
+                    self._record_loss_grad_metrics(_grad_metrics, kl_grads)
                 self._clear_cuda_cache()
+            else:
+                if self.config.track_loss_grads:
+                    _grad_metrics = {}
+                    self._record_kl_only_grad_metrics(_grad_metrics)
+                else:
+                    _grad_metrics = {}
             pending_accum += 1
             _win_kl += kl_val; _win_ce += ce_val; _win_graph += graph_val; _win_total += total_val; _win_n += 1
 
@@ -801,7 +860,14 @@ class CoTDistillationTrainer:
                     kl_str = f" | {kl_label} {kl_avg:.4f}" if self.config.kl_weight != 0 else ""
                     ce_str = f" | CE {ce_avg:.4f}" if self.config.ce_weight != 0 else ""
                     graph_str = f" | Graph {graph_avg:.4f}" if self._use_graph else ""
-                    print(f"  step {self._train_step:04d} | Total {total_avg:.4f}{kl_str}{ce_str}{graph_str}{acc_str}")
+                    grad_str = ""
+                    if self.config.track_loss_grads:
+                        grad_str = (
+                            f" | grad KL {_grad_metrics.get('kl_loss_grad', 0.0):.3e}"
+                            f" Graph {_grad_metrics.get('graph_loss_grad', 0.0):.3e}"
+                            f" cos {_grad_metrics.get('loss_cossim', 0.0):.4f}"
+                        )
+                    print(f"  step {self._train_step:04d} | Total {total_avg:.4f}{kl_str}{ce_str}{graph_str}{acc_str}{grad_str}")
                     interval_kl = 0.0
                     interval_ce = 0.0
                     interval_graph = 0.0
@@ -1043,6 +1109,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--sft-model", choices=["student", "teacher"], default=None, dest="sft_model",
         help="SFT the specified model on GSM8K gold responses (forces kl_weight=0, ce_weight=1).",
     )
+    parser.add_argument(
+        "--track-loss-grads",
+        action="store_true",
+        dest="track_loss_grads",
+        help="Log KL and graph gradient norms plus their cosine similarity.",
+    )
 
     # ── Feature 1: native on-policy GKD (arXiv:2306.13649) ──────────────────
     gkd = parser.add_argument_group("GKD (on-policy generalized knowledge distillation)")
@@ -1187,6 +1259,7 @@ def main() -> None:
             graph_start_step=args.graph_start_step,
             graph_verbose=args.graph_verbose,
             sft_model=args.sft_model,
+            track_loss_grads=args.track_loss_grads,
         ),
         train_data=train_data,
         test_data=test_data,
