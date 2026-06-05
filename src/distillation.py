@@ -136,6 +136,7 @@ class AddDataset(Dataset):
             self.samples.append(
                 {
                     "input_ids": torch.cat([prompt_ids, answer_ids]),
+                    "prompt_len": prompt_ids.size(0),
                     "prompt": str(prompt),
                     "answer": answer,  # preserve original type (int or str)
                 },
@@ -154,16 +155,21 @@ def collate_fn(examples, pad_id: int) -> Dict[str, Any]:
     batch_size = len(examples)
     input_ids = torch.full((batch_size, max_len), pad_id, dtype=torch.long)
     attention_mask = torch.zeros(batch_size, max_len, dtype=torch.long)
+    response_mask = torch.zeros(batch_size, max_len, dtype=torch.long)
 
     for row, ex in enumerate(examples):
         ids = ex["input_ids"]
         length = ids.size(0)
+        prompt_len = ex["prompt_len"]
         input_ids[row, :length] = ids
         attention_mask[row, :length] = 1
+        # 1 only for response (answer) tokens; excludes prompt tokens and padding
+        response_mask[row, prompt_len:length] = 1
 
     return {
         "input_ids": input_ids,
         "attention_mask": attention_mask,
+        "response_mask": response_mask,
         "prompts": [str(ex["prompt"]) for ex in examples],
         "answers": [ex["answer"] for ex in examples],  # preserve int or str type
     }
@@ -553,6 +559,7 @@ class DistillationTrainer:
     def _forward_kl(self, batch: Dict[str, Any]) -> tuple[torch.Tensor, Dict[str, float]]:
         input_ids = batch["input_ids"].to(self.device)
         attention_mask = batch["attention_mask"].to(self.device)
+        response_mask = batch["response_mask"].to(self.device)
         teacher_logits = self._teacher_logits_for_batch(batch, input_ids, attention_mask)
         self._clear_cuda_cache()
 
@@ -569,7 +576,7 @@ class DistillationTrainer:
                 student_hidden,
                 lm_head,
                 teacher_logits,
-                attention_mask,
+                response_mask,
                 self.config.temperature,
                 token_chunk_size=self.config.kl_token_chunk_size,
             )
@@ -582,7 +589,7 @@ class DistillationTrainer:
             loss = kl_loss(
                 student_logits,
                 teacher_logits,
-                attention_mask,
+                response_mask,
                 self.config.temperature,
                 token_chunk_size=self.config.kl_token_chunk_size,
             )
