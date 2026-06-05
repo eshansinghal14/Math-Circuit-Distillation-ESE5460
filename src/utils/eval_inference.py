@@ -12,8 +12,8 @@ from .answer_parsing import (
 from .config import EVAL_MAX_NEW_TOKENS
 from .dataset_json import json_to_prompt_answer_dict
 
-TRAIN_SPLIT_SIZE = 6000
-FEWSHOT_POOL_SIZE = 1473
+TRAIN_SPLIT_SIZE = 7000
+FEWSHOT_POOL_SIZE = 473
 
 
 def build_fewshot_prefix(pool: Dict[str, str], n: int) -> str:

@@ -1116,8 +1116,8 @@ def main() -> None:
     train_data = dict(all_train_items[:TRAIN_SPLIT_SIZE])
     fewshot_pool = dict(all_train_items[TRAIN_SPLIT_SIZE:TRAIN_SPLIT_SIZE + FEWSHOT_POOL_SIZE])
 
-    if args.sft_model is not None:
-        train_data = fewshot_pool
+    if args.sft_model == "teacher":
+        train_data = dict(all_train_items)
 
     test_data = load_prompt_answer_json(test_path)
     if args.test_limit is not None:
