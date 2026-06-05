@@ -441,7 +441,8 @@ def _compare_tokens_loss_for_prompt(
             config=config,
             cached_teacher=cached,
         )
-        print(f"      [graph] graph {graph_idx + 1}/{n_select} built", flush=True)
+        token_str = tokenizer.decode([input_ids[pos].item()])
+        print(f"      [graph] graph {graph_idx + 1}/{n_select} built (token {pos}: {token_str!r})", flush=True)
 
         scaled_pos_loss = (loss_scale / denom / n_select) * pos_loss
         if scaled_pos_loss.requires_grad:
