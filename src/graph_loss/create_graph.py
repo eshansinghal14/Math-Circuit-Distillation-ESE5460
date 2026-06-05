@@ -507,6 +507,10 @@ def create_graph_at_position(
     for idx in selected_row_indices:
         keep_mask[idx] = True
     filtered_ctx = ctx.filter(keep_mask)
+    # Free the unselected neurons' large tensors — only filtered_ctx is needed from here.
+    ctx.source_vectors = None
+    ctx.target_encoders = None
+    ctx.neuron_activations = None
     _logger.info("  Filtered context: %d neurons", filtered_ctx.n_neurons)
 
     _logger.info("Running edge attribution on filtered neurons (position=%d)", target_position)
