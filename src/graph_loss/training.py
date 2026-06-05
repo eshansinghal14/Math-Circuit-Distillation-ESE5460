@@ -50,7 +50,8 @@ class GraphAuxConfig:
     student_graph_labels: list[str] | None = None
     tokens_dla_nodes: bool = False
     compare_n_tokens: int | None = None
-    compare_last_token: bool = False
+    compare_ans_token: bool = False
+    extract_fn: Callable | None = None
 
 
 def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
@@ -389,16 +390,35 @@ def _compare_tokens_loss_for_prompt(
             f"compare_n_tokens: no non-EOS response tokens for prompt={prompt!r}"
         )
 
-    # Forward passes (no grad) to get logits for KL-based position selection.
+    # Teacher forward always needed: DLA logits at selected positions use t_logits[pos-1].
     with torch.no_grad():
         t_logits = teacher_adapter.model(input_ids.unsqueeze(0)).logits.squeeze(0).cpu()
-        s_logits = student_adapter.model(input_ids.unsqueeze(0)).logits.squeeze(0).detach().cpu()
 
     logit_positions = [pos - 1 for pos in response_positions]
-    if config.compare_last_token:
-        selected_positions = [response_positions[-1]]
+    if config.compare_ans_token:
+        # Scan left-to-right; pick the first response position where answer parsing succeeds.
+        extract_fn = config.extract_fn
+        if extract_fn is None:
+            from utils.answer_parsing import extract_numeric_answer_from_text
+            extract_fn = extract_numeric_answer_from_text
+        full_resp = tokenizer.decode(
+            input_ids[response_start:response_end].tolist(), skip_special_tokens=True
+        )
+        answer_str = extract_fn(full_resp)
+        ans_pos = response_positions[-1]  # fallback to last token
+        if answer_str is not None:
+            for pos in response_positions:
+                prefix = tokenizer.decode(
+                    input_ids[response_start:pos + 1].tolist(), skip_special_tokens=True
+                )
+                if extract_fn(prefix) == answer_str:
+                    ans_pos = pos
+                    break
+        selected_positions = [ans_pos]
         n_select = 1
     else:
+        with torch.no_grad():
+            s_logits = student_adapter.model(input_ids.unsqueeze(0)).logits.squeeze(0).detach().cpu()
         n_select = min(config.compare_n_tokens, len(response_positions))
         kl_vals = _kl_per_position(
             t_logits[logit_positions], s_logits[logit_positions], config.temperature
