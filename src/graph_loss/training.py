@@ -407,17 +407,13 @@ def _compare_tokens_loss_for_prompt(
         selected_positions = None
         if answer_str is not None:
             response_ids = input_ids[response_start:response_end].tolist()
-            # Try with a leading space first (numbers typically follow '= ' in responses).
-            for space in (' ', ''):
-                cand_ids = tokenizer(space + answer_str, add_special_tokens=False)["input_ids"]
-                if hasattr(cand_ids, 'tolist'):
-                    cand_ids = cand_ids.tolist()
-                n_ans = len(cand_ids)
-                for i in range(len(response_ids) - n_ans, -1, -1):
-                    if response_ids[i:i + n_ans] == cand_ids:
-                        selected_positions = [response_positions[i + j] for j in range(n_ans)]
-                        break
-                if selected_positions is not None:
+            cand_ids = tokenizer(answer_str, add_special_tokens=False)["input_ids"]
+            if hasattr(cand_ids, 'tolist'):
+                cand_ids = cand_ids.tolist()
+            n_ans = len(cand_ids)
+            for i in range(len(response_ids) - n_ans, -1, -1):
+                if response_ids[i:i + n_ans] == cand_ids:
+                    selected_positions = [response_positions[i + j] for j in range(n_ans)]
                     break
         if selected_positions is None:
             selected_positions = [response_positions[-1]]
