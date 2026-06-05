@@ -447,12 +447,11 @@ def _compare_tokens_loss_for_prompt(
         scaled_pos_loss = (loss_scale / denom / n_select) * pos_loss
         if scaled_pos_loss.requires_grad:
             scaled_pos_loss.backward()
-        del scaled_pos_loss, cached
+        detached_losses.append(pos_loss.detach())
+        del scaled_pos_loss, cached, pos_loss
         gc.collect()
         if device.type == "cuda":
             torch.cuda.empty_cache()
-
-        detached_losses.append(pos_loss.detach())
         for key, val in pos_metrics.items():
             metric_sums[key] = metric_sums.get(key, 0.0) + float(val)
 
