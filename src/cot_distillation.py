@@ -716,6 +716,8 @@ class CoTDistillationTrainer:
         accum_steps = max(1, self.config.grad_accum_steps)
         pending_accum = 0
         self.optimizer.zero_grad(set_to_none=True)
+        # per-window accumulators (one window = one optimizer step)
+        _win_kl = 0.0; _win_ce = 0.0; _win_graph = 0.0; _win_total = 0.0; _win_n = 0
 
         for batch in self.loader:
             loss, kl_val, ce_val, total_val = self._forward_step(batch)
@@ -734,6 +736,8 @@ class CoTDistillationTrainer:
                 total_val = total_val + self.config.lambda_graph * graph_val
                 self._clear_cuda_cache()
             pending_accum += 1
+            _win_kl += kl_val; _win_ce += ce_val; _win_graph += graph_val; _win_total += total_val; _win_n += 1
+
             should_step = (
                 pending_accum >= accum_steps
                 or (max_steps is not None and n_steps + 1 >= max_steps)
@@ -744,62 +748,71 @@ class CoTDistillationTrainer:
                 self.scheduler.step()
                 self.optimizer.zero_grad(set_to_none=True)
                 pending_accum = 0
+
+                # average losses over the batches in this optimizer step
+                _denom = max(_win_n, 1)
+                kl_val = _win_kl / _denom
+                ce_val = _win_ce / _denom
+                graph_val = _win_graph / _denom
+                total_val = _win_total / _denom
+                _win_kl = 0.0; _win_ce = 0.0; _win_graph = 0.0; _win_total = 0.0; _win_n = 0
+
+                self._train_step += 1
+                self.history["train_step"].append(self._train_step)
+                if self.config.kl_weight != 0:
+                    self.history["step_kl_loss"].append(kl_val)
+                if self.config.ce_weight != 0:
+                    self.history["step_ce_loss"].append(ce_val)
+                if self._use_graph:
+                    self.history["step_graph_loss"].append(graph_val)
+                self.history["step_total_loss"].append(total_val)
+                agg_kl += kl_val
+                agg_ce += ce_val
+                agg_graph += graph_val
+                agg_total += total_val
+                interval_kl += kl_val
+                interval_ce += ce_val
+                interval_graph += graph_val
+                interval_total += total_val
+                n_steps += 1
+                interval_steps += 1
+                self._save_history()
+
+                if self.config.save_interval > 0 and self._train_step % self.config.save_interval == 0:
+                    self._save_checkpoint_at_step(self._train_step)
+
+                if self._train_step == 1 or self._train_step % max(1, self.config.step_log_interval) == 0:
+                    eval_n = max(1, self.config.eval_every_n_steps)
+                    did_eval = self._train_step % eval_n == 0
+                    if did_eval:
+                        self._clear_cuda_cache()
+                        self._step_log_eval_accuracy = self._evaluate_model(self.student)
+                        self._clear_cuda_cache()
+                        self.student.train()
+                        self.history["accuracy"].append(self._step_log_eval_accuracy)
+                        self.history["accuracy_step"].append(self._train_step)
+                    denom = max(interval_steps, 1)
+                    kl_avg = interval_kl / denom
+                    ce_avg = interval_ce / denom
+                    graph_avg = interval_graph / denom
+                    total_avg = interval_total / denom
+                    acc_str = f" | Acc {self._step_log_eval_accuracy:.4f}" if did_eval else ""
+                    kl_label = "JSD" if self._use_gkd else "KL"
+                    kl_str = f" | {kl_label} {kl_avg:.4f}" if self.config.kl_weight != 0 else ""
+                    ce_str = f" | CE {ce_avg:.4f}" if self.config.ce_weight != 0 else ""
+                    graph_str = f" | Graph {graph_avg:.4f}" if self._use_graph else ""
+                    print(f"  step {self._train_step:04d} | Total {total_avg:.4f}{kl_str}{ce_str}{graph_str}{acc_str}")
+                    interval_kl = 0.0
+                    interval_ce = 0.0
+                    interval_graph = 0.0
+                    interval_total = 0.0
+                    interval_steps = 0
+                    self._save_curves()
+
+                if max_steps is not None and n_steps >= max_steps:
+                    break
+
             self._clear_cuda_cache()
-
-            self._train_step += 1
-            self.history["train_step"].append(self._train_step)
-            if self.config.kl_weight != 0:
-                self.history["step_kl_loss"].append(kl_val)
-            if self.config.ce_weight != 0:
-                self.history["step_ce_loss"].append(ce_val)
-            if self._use_graph:
-                self.history["step_graph_loss"].append(graph_val)
-            self.history["step_total_loss"].append(total_val)
-            agg_kl += kl_val
-            agg_ce += ce_val
-            agg_graph += graph_val
-            agg_total += total_val
-            interval_kl += kl_val
-            interval_ce += ce_val
-            interval_graph += graph_val
-            interval_total += total_val
-            n_steps += 1
-            interval_steps += 1
-            self._save_history()
-
-            if self.config.save_interval > 0 and self._train_step % self.config.save_interval == 0:
-                self._save_checkpoint_at_step(self._train_step)
-
-            if self._train_step == 1 or self._train_step % max(1, self.config.step_log_interval) == 0:
-                eval_n = max(1, self.config.eval_every_n_steps)
-                did_eval = self._train_step % eval_n == 0
-                if did_eval:
-                    self._clear_cuda_cache()
-                    self._step_log_eval_accuracy = self._evaluate_model(self.student)
-                    self._clear_cuda_cache()
-                    self.student.train()
-                    self.history["accuracy"].append(self._step_log_eval_accuracy)
-                    self.history["accuracy_step"].append(self._train_step)
-                denom = max(interval_steps, 1)
-                kl_avg = interval_kl / denom
-                ce_avg = interval_ce / denom
-                graph_avg = interval_graph / denom
-                total_avg = interval_total / denom
-                acc_str = f" | Acc {self._step_log_eval_accuracy:.4f}" if did_eval else ""
-                kl_label = "JSD" if self._use_gkd else "KL"
-                kl_str = f" | {kl_label} {kl_avg:.4f}" if self.config.kl_weight != 0 else ""
-                ce_str = f" | CE {ce_avg:.4f}" if self.config.ce_weight != 0 else ""
-                graph_str = f" | Graph {graph_avg:.4f}" if self._use_graph else ""
-                print(f"  step {self._train_step:04d} | Total {total_avg:.4f}{kl_str}{ce_str}{graph_str}{acc_str}")
-                interval_kl = 0.0
-                interval_ce = 0.0
-                interval_graph = 0.0
-                interval_total = 0.0
-                interval_steps = 0
-                self._save_curves()
-
-            if max_steps is not None and n_steps >= max_steps:
-                break
 
         if pending_accum > 0:
             torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.config.grad_clip)

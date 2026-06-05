@@ -31,7 +31,7 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--model-name",
         type=str,
         required=True,
-        help=f"HuggingFace model identifier (e.g. {LLAMA_1B_MODEL_NAME})",
+        help=f"HuggingFace model identifier or local path (e.g. {LLAMA_1B_MODEL_NAME})",
     )
     p.add_argument(
         "--dataset",
