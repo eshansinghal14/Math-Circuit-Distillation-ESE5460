@@ -50,6 +50,7 @@ class GraphAuxConfig:
     student_graph_labels: list[str] | None = None
     tokens_dla_nodes: bool = False
     compare_n_tokens: int | None = None
+    compare_last_token: bool = False
 
 
 def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
@@ -394,13 +395,17 @@ def _compare_tokens_loss_for_prompt(
         s_logits = student_adapter.model(input_ids.unsqueeze(0)).logits.squeeze(0).detach().cpu()
 
     logit_positions = [pos - 1 for pos in response_positions]
-    n_select = min(config.compare_n_tokens, len(response_positions))
-    kl_vals = _kl_per_position(
-        t_logits[logit_positions], s_logits[logit_positions], config.temperature
-    )
-    selected_positions = [
-        response_positions[i] for i in torch.topk(kl_vals, n_select).indices.tolist()
-    ]
+    if config.compare_last_token:
+        selected_positions = [response_positions[-1]]
+        n_select = 1
+    else:
+        n_select = min(config.compare_n_tokens, len(response_positions))
+        kl_vals = _kl_per_position(
+            t_logits[logit_positions], s_logits[logit_positions], config.temperature
+        )
+        selected_positions = [
+            response_positions[i] for i in torch.topk(kl_vals, n_select).indices.tolist()
+        ]
     print(f"      [graph] {len(input_ids)} tokens, {n_select} positions selected", flush=True)
 
     detached_losses: list[torch.Tensor] = []

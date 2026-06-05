@@ -323,6 +323,7 @@ class CoTDistillationConfig:
     lambda_graph: float = 0.0
     graph_loss_type: Literal["jsd", "kld", "mse", "mse-norm", "mse-scale"] = "kld"
     compare_n_tokens: Optional[int] = 3
+    compare_last_token: bool = False
     tokens_dla_nodes: bool = False
     graph_dtype: Optional[torch.dtype] = None
     teacher_prop_neurons_per_layer: float = 0.1
@@ -474,6 +475,7 @@ class CoTDistillationTrainer:
                 graph_loss_type=config.graph_loss_type,
                 tokens_dla_nodes=config.tokens_dla_nodes,
                 compare_n_tokens=config.compare_n_tokens,
+                compare_last_token=config.compare_last_token,
             )
             self.student_graph_adapter = HFLlamaGraphAdapter(
                 self.student, self.tokenizer, self.device,
@@ -1169,6 +1171,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Number of top-KL response token positions to compute graph loss on.",
     )
     graph.add_argument(
+        "--compare-last-token", action="store_true", default=False, dest="compare_last_token",
+        help="Build the graph on the last response token only, overriding --compare-n-tokens.",
+    )
+    graph.add_argument(
         "--tokens-dla-nodes", action="store_true", default=False, dest="tokens_dla_nodes",
         help="Include arg-token supernodes and a DLA supernode in both graphs.",
     )
@@ -1272,6 +1278,7 @@ def main() -> None:
             graph_loss_type=args.graph_loss_type,
             compare_n_tokens=args.compare_n_tokens,
             tokens_dla_nodes=args.tokens_dla_nodes,
+            compare_last_token=args.compare_last_token,
             graph_dtype=resolve_torch_dtype(args.dtype),
             teacher_prop_neurons_per_layer=args.teacher_prop_neurons_per_layer,
             student_prop_neurons_per_layer=args.student_prop_neurons_per_layer,
