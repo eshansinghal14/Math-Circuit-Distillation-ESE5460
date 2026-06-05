@@ -1,3 +1,4 @@
+import functools
 import json
 import random
 from typing import Dict, List, Optional, Tuple
@@ -24,16 +25,9 @@ def build_fewshot_prefix(pool: Dict[str, str], n: int) -> str:
     return "\n\n".join(parts) + "\n\n"
 
 
-def load_hf_benchmark_rows(
-    name: str,
-    *,
-    limit: Optional[int] = None,
-) -> List[Tuple[str, str]]:
-    """``load_dataset`` for ``gsm8k`` or ``svamp``; return ``(prompt, gold_str)`` rows.
-
-    Prompt format: ``Solve the math problem step by step. ...``.
-    Gold is a normalized numeric string.
-    """
+@functools.lru_cache(maxsize=None)
+def _load_hf_benchmark_rows_uncached(name: str) -> List[Tuple[str, str]]:
+    """Load the full dataset once; result is cached for the process lifetime."""
     try:
         from datasets import load_dataset
     except ImportError as e:
@@ -51,10 +45,7 @@ def load_hf_benchmark_rows(
             gold = extract_gsm8k_answer(ex["answer"])
             if gold is None:
                 continue
-            prompt = f"Q: {q}"
-            rows.append((prompt, gold))
-            if limit is not None and len(rows) >= limit:
-                break
+            rows.append((f"Q: {q}", gold))
     elif key == "svamp":
         ddict = load_dataset("ChilleD/SVAMP")
         split = "test" if "test" in ddict else "train"
@@ -70,14 +61,20 @@ def load_hf_benchmark_rows(
                 gold = _normalize_numeric_str(str(raw_a).strip())
             except Exception:
                 continue
-            prompt = f"Q: {q}"
-            rows.append((prompt, gold))
-            if limit is not None and len(rows) >= limit:
-                break
+            rows.append((f"Q: {q}", gold))
     else:
         raise ValueError(f"Unknown HF benchmark dataset: {name!r}")
 
     return rows
+
+
+def load_hf_benchmark_rows(
+    name: str,
+    *,
+    limit: Optional[int] = None,
+) -> List[Tuple[str, str]]:
+    rows = _load_hf_benchmark_rows_uncached(name.strip().lower())
+    return rows[:limit] if limit is not None else rows
 
 
 def _format_instruct_prompts(tokenizer, prompts: List[str]) -> Tuple[List[str], bool]:
