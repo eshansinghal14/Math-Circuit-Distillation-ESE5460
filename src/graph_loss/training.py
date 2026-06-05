@@ -91,7 +91,7 @@ def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> Super
 
 def compute_prompt_graph_loss(
     *,
-    prompt: str,
+    prompt: str | torch.Tensor,
     student_adapter: HFLlamaGraphAdapter,
     config: GraphAuxConfig,
     cached_teacher: CachedTeacherPromptData,
@@ -407,10 +407,6 @@ def _compare_tokens_loss_for_prompt(
 
     for pos in selected_positions:
         prefix_ids = input_ids[:pos].cpu()
-        # At response_start the prefix is exactly the original prompt — use it directly
-        # to avoid any tokenize→decode→retokenize round-trip discrepancy.
-        # For mid-answer positions no original string exists, so decode is unavoidable.
-        prefix_str = prompt if pos == response_start else tokenizer.decode(prefix_ids, skip_special_tokens=True)
 
         with torch.enable_grad():
             teacher_result = create_graph(
@@ -436,8 +432,10 @@ def _compare_tokens_loss_for_prompt(
         # above — matches generate_teacher_sample's full_logits[prompt_len - 1] exactly.
         cached.teacher_dla_logits = t_logits[pos - 1].to(device)
 
+        # Pass prefix_ids directly so the student tokenizes from the same IDs
+        # as the teacher — avoids decode→re-tokenize round-trip instability.
         pos_loss, pos_metrics = compute_prompt_graph_loss(
-            prompt=prefix_str,
+            prompt=prefix_ids,
             student_adapter=student_adapter,
             config=config,
             cached_teacher=cached,
