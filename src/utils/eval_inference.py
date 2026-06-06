@@ -149,14 +149,21 @@ def run_hf_benchmark(
     log: bool = True,
     fewshot_pool: Optional[Dict[str, str]] = None,
     num_fewshot: int = 0,
+    preloaded_rows: Optional[List[Tuple[str, str]]] = None,
 ) -> Tuple[List[Dict], float]:
     """GSM8K / SVAMP via ``load_dataset``; greedy generate.
+
+    Pass ``preloaded_rows`` (list of (prompt, gold_answer) tuples) to skip HuggingFace
+    loading — used for local datasets resolved from the datasets/ directory.
 
     Returns ``(results, accuracy)`` where each result has ``response``, ``answer`` (gold str),
     and ``parsed`` (predicted numeric str or ``null``).
     """
     key = name.strip().lower()
-    rows = load_hf_benchmark_rows(name, limit=limit)
+    if preloaded_rows is not None:
+        rows = preloaded_rows[:limit] if limit is not None else preloaded_rows
+    else:
+        rows = load_hf_benchmark_rows(name, limit=limit)
     n = len(rows)
     results: List[Dict] = []
     correct = 0

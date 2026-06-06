@@ -286,7 +286,7 @@ def collate_fn(examples, pad_id: int) -> Dict[str, Any]:
 
 @dataclass
 class CoTDistillationConfig:
-    dataset: Literal["gsm8k", "svamp"] = "gsm8k"
+    dataset: str = "gsm8k"
     teacher_model: str = LLAMA_8B_MODEL_NAME
     student_model: str = LLAMA_1B_MODEL_NAME
     steps: int = 15
@@ -527,6 +527,8 @@ class CoTDistillationTrainer:
 
     def _evaluate_model(self, model) -> float:
         cfg = self.config
+        is_local = cfg.dataset not in ("gsm8k", "svamp")
+        preloaded = list(self.test_data.items()) if is_local else None
         model.eval()
         with torch.no_grad():
             _, acc = run_hf_benchmark(
@@ -540,6 +542,7 @@ class CoTDistillationTrainer:
                 log=False,
                 fewshot_pool=self.fewshot_pool or None,
                 num_fewshot=cfg.num_fewshot,
+                preloaded_rows=preloaded,
             )
         return float(acc)
 
@@ -1129,8 +1132,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-fewshot", type=int, default=0, dest="num_fewshot",
                         help="Number of few-shot examples prepended to each prompt (drawn from last 473 train examples).")
     parser.add_argument(
-        "--dataset", choices=["gsm8k", "svamp"], default="gsm8k",
-        help="Training and evaluation dataset. svamp loads from HuggingFace ChilleD/SVAMP.",
+        "--dataset", default="gsm8k",
+        help="Training and evaluation dataset. 'gsm8k' and 'svamp' load from HuggingFace. "
+             "Any other value is treated as a local dataset prefix (e.g. '22_add') resolved "
+             "under the standard datasets/ directory.",
     )
     parser.add_argument("--resume-step", type=int, default=None, dest="resume_step")
     parser.add_argument("--checkpoint-run", default=None, metavar="PATH")
@@ -1213,8 +1218,8 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    if args.dataset == "gsm8k":
-        train_path, test_path, _ = resolve_train_test_paths(dataset="gsm8k", datasets_dir=None)
+    if args.dataset != "svamp":
+        train_path, test_path, _ = resolve_train_test_paths(dataset=args.dataset, datasets_dir=None)
     else:
         train_path = test_path = None
     run_dir, student_source = resolve_distillation_run_dir(
