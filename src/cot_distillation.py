@@ -38,7 +38,7 @@ from utils import (
     run_hf_benchmark,
     seed_all,
 )
-from utils.answer_parsing import extract_gsm8k_answer, extract_svamp_answer
+from utils.answer_parsing import _extract_int_after_equals, extract_gsm8k_answer, extract_svamp_answer
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -528,7 +528,8 @@ class CoTDistillationTrainer:
     def _evaluate_model(self, model) -> float:
         cfg = self.config
         is_local = cfg.dataset not in ("gsm8k", "svamp")
-        preloaded = list(self.test_data.items()) if is_local else None
+        if is_local:
+            return self._evaluate_local(model)
         model.eval()
         with torch.no_grad():
             _, acc = run_hf_benchmark(
@@ -542,9 +543,51 @@ class CoTDistillationTrainer:
                 log=False,
                 fewshot_pool=self.fewshot_pool or None,
                 num_fewshot=cfg.num_fewshot,
-                preloaded_rows=preloaded,
             )
         return float(acc)
+
+    def _evaluate_local(self, model) -> float:
+        """Eval for local arithmetic datasets: matches benchmark.py / test_model logic.
+
+        Prompts end with ``=``; answer is extracted via ``_extract_int_after_equals``
+        on the full decoded text (prompt echo carries the ``=``).
+        """
+        cfg = self.config
+        items = list(self.test_data.items())
+        if cfg.benchmark_eval_limit is not None:
+            items = items[: cfg.benchmark_eval_limit]
+        prompts = [p for p, _ in items]
+        gold_answers = [int(a) for _, a in items]
+        n = len(prompts)
+        correct = 0
+        original_side = self.tokenizer.padding_side
+        self.tokenizer.padding_side = "right"
+        model.eval()
+        try:
+            for i in range(0, n, cfg.eval_batch_size):
+                batch_prompts = prompts[i : i + cfg.eval_batch_size]
+                batch_golds = gold_answers[i : i + cfg.eval_batch_size]
+                with torch.no_grad():
+                    inputs = self.tokenizer(
+                        batch_prompts,
+                        return_tensors="pt",
+                        padding=True,
+                        truncation=True,
+                        add_special_tokens=True,
+                    ).to(model.device)
+                    outputs = model.generate(
+                        **inputs,
+                        max_new_tokens=cfg.max_response_tokens,
+                        do_sample=False,
+                        pad_token_id=self.tokenizer.pad_token_id,
+                    )
+                decoded = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
+                for text, gold in zip(decoded, batch_golds):
+                    if _extract_int_after_equals(text) == gold:
+                        correct += 1
+        finally:
+            self.tokenizer.padding_side = original_side
+        return correct / n if n else 0.0
 
     def _teacher_logits_for_batch(
         self, batch: Dict[str, Any], input_ids: torch.Tensor, attention_mask: torch.Tensor,
