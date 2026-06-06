@@ -66,14 +66,13 @@ def _tokenize_prompt_batch(adapter, prompts: list[str]) -> tuple[torch.Tensor, l
         for prompt in prompts
     ]
     bos_token_id = tokenizer.bos_token_id
-    if bos_token_id is None:
-        raise ValueError("Tokenizer must define bos_token_id.")
-    tokenized = [
-        ids
-        if int(ids[0].item()) == int(bos_token_id)
-        else torch.cat([torch.tensor([bos_token_id], dtype=ids.dtype), ids])
-        for ids in tokenized
-    ]
+    if bos_token_id is not None:
+        tokenized = [
+            ids
+            if int(ids[0].item()) == int(bos_token_id)
+            else torch.cat([torch.tensor([bos_token_id], dtype=ids.dtype), ids])
+            for ids in tokenized
+        ]
     lengths = [int(ids.numel()) for ids in tokenized]
     max_len = max(lengths)
     pad_token_id = (
