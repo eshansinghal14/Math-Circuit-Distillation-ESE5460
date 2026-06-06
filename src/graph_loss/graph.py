@@ -507,7 +507,10 @@ def select_arg_supernodes(
     raw_supernodes: list[list[int]] = []
     supernode_labels_out: list[list[str]] = []
 
-    for pos in range(n_pos):
+    bos_id = getattr(tokenizer, "bos_token_id", None)
+    start_pos = 1 if (bos_id is not None and token_ids_list and token_ids_list[0] == bos_id) else 0
+
+    for pos in range(start_pos, n_pos):
         scores = d_f[:, pos]  # [n_neurons]
         k = min(nodes_per_token, n_neurons)
         top_indices = torch.topk(scores, k, dim=0).indices.tolist()
