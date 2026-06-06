@@ -452,12 +452,20 @@ class DistillationTrainer:
             )
             print("Using 8-bit Paged AdamW optimizer to save memory.")
         else:
-            self.optimizer = AdamW(
-                params=self.student.parameters(),
-                lr=config.learning_rate,
-                foreach=False,
-            )
-            print("Using standard AdamW optimizer (foreach=False to reduce peak memory).")
+            try:
+                self.optimizer = AdamW(
+                    params=self.student.parameters(),
+                    lr=config.learning_rate,
+                    fused=True,
+                )
+                print("Using fused AdamW optimizer (no temp allocations).")
+            except RuntimeError:
+                self.optimizer = AdamW(
+                    params=self.student.parameters(),
+                    lr=config.learning_rate,
+                    foreach=False,
+                )
+                print("Using standard AdamW optimizer (foreach=False).")
 
         self.loader = DataLoader(
             AddDataset(self.train_data, self.tokenizer),
