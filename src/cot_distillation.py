@@ -719,7 +719,7 @@ class CoTDistillationTrainer:
             teacher_cache=None,
             teacher_adapter=self.teacher_graph_adapter,
             answers=batch["answers"],
-            on_prompt_done=_log_graph_progress,
+            on_prompt_done=_log_graph_progress if self.config.graph_verbose else None,
         )
         return float(graph_loss.item())
 
