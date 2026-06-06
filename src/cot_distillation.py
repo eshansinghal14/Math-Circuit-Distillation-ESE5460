@@ -213,7 +213,7 @@ def teacher_correct_mask(
 
 
 class GSM8KDataset(Dataset):
-    def __init__(self, data: Union[str, Dict[str, Union[int, str]]], tokenizer, max_response_tokens: Optional[int] = None, fewshot_pool: Optional[Dict] = None, num_fewshot: int = 0):
+    def __init__(self, data: Union[str, Dict[str, Union[int, str]]], tokenizer, max_response_tokens: Optional[int] = None, fewshot_pool: Optional[Dict] = None, num_fewshot: int = 0, use_chat_template: bool = True):
         if isinstance(data, str):
             with open(data, "r", encoding="utf-8") as f:
                 raw = json.load(f)
@@ -225,7 +225,7 @@ class GSM8KDataset(Dataset):
                 full_prompt = build_fewshot_prefix(fewshot_pool, num_fewshot) + prompt
             else:
                 full_prompt = prompt
-            if getattr(tokenizer, "chat_template", None):
+            if use_chat_template and getattr(tokenizer, "chat_template", None):
                 try:
                     formatted_prompt = tokenizer.apply_chat_template(
                         [{"role": "user", "content": full_prompt}],
@@ -235,7 +235,7 @@ class GSM8KDataset(Dataset):
                 except Exception:
                     formatted_prompt = full_prompt + "\n\nA:"
             else:
-                formatted_prompt = full_prompt + "\n\nA:"
+                formatted_prompt = full_prompt
             prompt_ids = tokenizer(
                 formatted_prompt, return_tensors="pt", padding=False, add_special_tokens=False,
             )["input_ids"].squeeze(0)
@@ -514,7 +514,7 @@ class CoTDistillationTrainer:
             _sft_generator = torch.Generator()
             _sft_generator.manual_seed(config.seed)
         self.loader = DataLoader(
-            GSM8KDataset(train_data, self.tokenizer, max_response_tokens=config.max_response_tokens, fewshot_pool=fewshot_pool, num_fewshot=config.num_fewshot),
+            GSM8KDataset(train_data, self.tokenizer, max_response_tokens=config.max_response_tokens, fewshot_pool=fewshot_pool, num_fewshot=config.num_fewshot, use_chat_template=config.dataset in ("gsm8k", "svamp")),
             batch_size=config.batch_size,
             shuffle=self._is_sft,
             generator=_sft_generator,
@@ -646,7 +646,7 @@ class CoTDistillationTrainer:
         """
         tok = self.tokenizer
         pad_id = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
-        if getattr(tok, "chat_template", None):
+        if self.config.dataset in ("gsm8k", "svamp") and getattr(tok, "chat_template", None):
             try:
                 prompts = [
                     tok.apply_chat_template(
@@ -658,8 +658,6 @@ class CoTDistillationTrainer:
                 ]
             except Exception:
                 prompts = [p + "\n\nA:" for p in prompts]
-        else:
-            prompts = [p + "\n\nA:" for p in prompts]
         prev_side = tok.padding_side
         tok.padding_side = "left"
         try:
