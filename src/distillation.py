@@ -455,8 +455,9 @@ class DistillationTrainer:
             self.optimizer = AdamW(
                 params=self.student.parameters(),
                 lr=config.learning_rate,
+                foreach=False,
             )
-            print("Using standard AdamW optimizer.")
+            print("Using standard AdamW optimizer (foreach=False to reduce peak memory).")
 
         self.loader = DataLoader(
             AddDataset(self.train_data, self.tokenizer),
