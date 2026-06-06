@@ -400,8 +400,10 @@ def _compare_tokens_loss_for_prompt(
         if extract_fn is None:
             from utils.answer_parsing import extract_numeric_answer_from_text
             extract_fn = extract_numeric_answer_from_text
+        # Include the last prompt token so "= <answer>" patterns are visible to extract_fn.
+        context_start = max(0, response_start - 1)
         full_resp = tokenizer.decode(
-            input_ids[response_start:response_end].tolist(), skip_special_tokens=True
+            input_ids[context_start:response_end].tolist(), skip_special_tokens=True
         )
         answer_str = extract_fn(full_resp)
         selected_positions = None

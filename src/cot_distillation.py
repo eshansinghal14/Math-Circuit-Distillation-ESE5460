@@ -413,7 +413,10 @@ class CoTDistillationTrainer:
         self._use_graph = config.lambda_graph > 0.0
         self._graph_start_step = config.graph_start_step
         seed_all(config.seed)
-        self._extract_answer = extract_svamp_answer if config.dataset == "svamp" else extract_gsm8k_answer
+        if config.dataset == "gsm8k":
+            self._extract_answer = extract_gsm8k_answer
+        else:
+            self._extract_answer = extract_svamp_answer
 
         if tokenizer is not None:
             self.tokenizer = tokenizer
