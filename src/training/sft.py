@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from training.utils import eval_model, load_student_model, make_optimizer, save_checkpoint, save_curves, save_history
 
 from utils import (
+    DIR_ROOT,
     PromptAnswerDataset,
     collate_fn,
     load_data,
@@ -202,7 +203,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--save-dir",
         type=str,
-        default=os.path.join(os.path.dirname(__file__), "..", "..", "results", "sft"),
+        default="results/sft",
     )
     parser.add_argument("--eval-every-n-steps", type=int, default=1, dest="eval_every_n_steps")
     parser.add_argument("--max-eval-tokens", type=int, default=256, dest="max_eval_tokens")
@@ -221,7 +222,7 @@ def main() -> None:
             steps=args.steps,
             batch_size=args.batch_size,
             learning_rate=args.lr,
-            save_dir=os.path.abspath(args.save_dir),
+            save_dir=os.path.join(DIR_ROOT, args.save_dir),
             eval_every_n_steps=args.eval_every_n_steps,
             max_eval_tokens=args.max_eval_tokens,
         ),

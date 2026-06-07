@@ -15,6 +15,8 @@ if not HF_READ_TOKEN:
 SRC_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 REPO_ROOT = os.path.abspath(os.path.join(SRC_ROOT, ".."))
 
+DIR_ROOT = "/content/drive/My Drive/Math Circuit Distillation (ESE 5460)"
+
 # Prompts end with "=" and all 2-3 digit answers (20-198) are single tokens in Llama-3 BPE.
 EVAL_MAX_NEW_TOKENS = 1
 

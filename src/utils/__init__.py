@@ -1,6 +1,7 @@
 from .answer_parsing import extract_svamp_answer, parse_answer, parse_response
 from .config import (
     EVAL_MAX_NEW_TOKENS,
+    DIR_ROOT,
     HF_READ_TOKEN,
     LLAMA_1B_MODEL_NAME,
     LLAMA_8B_MODEL_NAME,
@@ -40,6 +41,7 @@ from .synthetic_chain_math import generate_math_dataset, normalize_op_patterns
 __all__ = [
     "EVAL_MAX_NEW_TOKENS",
     "FEWSHOT_POOL_SIZE",
+    "DIR_ROOT",
     "TRAIN_SPLIT_SIZE",
     "build_fewshot_prefix",
     "collate_fn",
