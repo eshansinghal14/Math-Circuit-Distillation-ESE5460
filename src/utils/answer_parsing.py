@@ -63,3 +63,12 @@ def extract_svamp_answer(text: str) -> Optional[str]:
 
 def parse_answer(resp):
     return _extract_int_after_equals(resp)
+
+
+def parse_response(text: str, dataset: str) -> Optional:
+    """Parse a model-generated response according to the dataset's answer format."""
+    if dataset == "gsm8k":
+        return extract_gsm8k_answer(text)
+    if dataset == "svamp":
+        return extract_svamp_answer(text)
+    return _extract_int_after_equals(text)

@@ -1,5 +1,8 @@
 import json
-from typing import Dict, Union
+from typing import Any, Dict, List, Union
+
+import torch
+from torch.utils.data import Dataset
 
 
 def _coerce_answer(value: object) -> Union[int, str]:
@@ -55,4 +58,72 @@ def load_prompt_answer_json(path: str) -> Dict[str, Union[int, str]]:
     """
     with open(path, "r", encoding="utf-8") as f:
         return json_to_prompt_answer_dict(json.load(f))
+
+
+_HF_DATASETS = ("gsm8k", "svamp")
+
+
+class PromptAnswerDataset(Dataset):
+    """Tokenized prompt-answer dataset for SFT.
+
+    Uses a chat template for HF datasets (gsm8k, svamp); plain text for local ones.
+    Each sample stores ``input_ids`` (prompt + answer), ``prompt_len``, ``prompt``, ``answer``.
+    """
+
+    def __init__(self, dataset: str, data: Dict[str, Union[int, str]], tokenizer) -> None:
+        use_chat = dataset in _HF_DATASETS
+        self.samples: List[Dict[str, Any]] = []
+        for prompt, answer in data.items():
+            answer_text = str(answer) if isinstance(answer, int) else answer
+            if use_chat and getattr(tokenizer, "chat_template", None):
+                try:
+                    formatted_prompt = tokenizer.apply_chat_template(
+                        [{"role": "user", "content": prompt}],
+                        tokenize=False,
+                        add_generation_prompt=True,
+                    )
+                except Exception:
+                    formatted_prompt = prompt + "\n\nA:"
+            else:
+                formatted_prompt = prompt
+            prompt_ids = tokenizer(
+                formatted_prompt, return_tensors="pt", padding=False, add_special_tokens=False,
+            )["input_ids"].squeeze(0)
+            answer_ids = tokenizer(
+                answer_text + tokenizer.eos_token,
+                return_tensors="pt", padding=False, add_special_tokens=False,
+            )["input_ids"].squeeze(0)
+            self.samples.append({
+                "input_ids": torch.cat([prompt_ids, answer_ids]),
+                "prompt_len": int(prompt_ids.size(0)),
+                "prompt": prompt,
+                "formatted_prompt": formatted_prompt,
+                "answer": answer,
+            })
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        return self.samples[idx]
+
+
+def collate_fn(examples: List[Dict[str, Any]], pad_id: int) -> Dict[str, Any]:
+    max_len = max(ex["input_ids"].size(0) for ex in examples)
+    input_ids = torch.full((len(examples), max_len), pad_id, dtype=torch.long)
+    attention_mask = torch.zeros(len(examples), max_len, dtype=torch.long)
+    response_mask = torch.zeros(len(examples), max_len, dtype=torch.long)
+    for row, ex in enumerate(examples):
+        ids = ex["input_ids"]
+        prompt_len = ex["prompt_len"]
+        input_ids[row, : ids.size(0)] = ids
+        attention_mask[row, : ids.size(0)] = 1
+        response_mask[row, prompt_len : ids.size(0)] = 1
+    return {
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+        "response_mask": response_mask,
+        "prompts": [str(ex["prompt"]) for ex in examples],
+        "answers": [ex["answer"] for ex in examples],
+    }
 

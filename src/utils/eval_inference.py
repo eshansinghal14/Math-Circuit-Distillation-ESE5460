@@ -368,3 +368,35 @@ def test_model(
 
     return results
 
+
+def load_data(dataset: str, test_limit: Optional[int] = None):
+    """Return (train_data, test_data) dicts for any supported dataset.
+
+    Handles gsm8k and svamp (HuggingFace) as well as local prefixes (e.g. '22_add').
+    For gsm8k the training set is capped at TRAIN_SPLIT_SIZE examples.
+    """
+    from .dataset_paths import resolve_train_test_paths
+    from .dataset_json import load_prompt_answer_json
+
+    if dataset == "svamp":
+        train_data, test_data = load_svamp_train_test_data()
+    else:
+        train_path, test_path, _ = resolve_train_test_paths(dataset=dataset, datasets_dir=None)
+        all_train = load_prompt_answer_json(train_path)
+        train_data = dict(list(all_train.items())[:TRAIN_SPLIT_SIZE]) if dataset == "gsm8k" else all_train
+        test_data = load_prompt_answer_json(test_path)
+    if test_limit is not None:
+        test_data = dict(list(test_data.items())[:test_limit])
+    return train_data, test_data
+
+
+def evaluate_model(model, tokenizer, dataset: str, test_data: Dict, batch_size: int, limit: Optional[int] = None) -> float:
+    """Evaluate model accuracy; dispatches to HF benchmark or local eval by dataset name."""
+    if dataset in ("gsm8k", "svamp"):
+        _, acc = run_hf_benchmark(model, tokenizer, dataset, batch_size=batch_size, limit=limit, log=False)
+        return float(acc)
+    items = list(test_data.items())
+    if limit is not None:
+        items = items[:limit]
+    return evaluate_prompt_answer_dict(model, tokenizer, dict(items), batch_size=batch_size)
+

@@ -1,4 +1,4 @@
-from .answer_parsing import extract_svamp_answer, parse_answer
+from .answer_parsing import extract_svamp_answer, parse_answer, parse_response
 from .config import (
     EVAL_MAX_NEW_TOKENS,
     HF_READ_TOKEN,
@@ -9,7 +9,7 @@ from .config import (
     NEURON_CLUSTERING_TEACHER_SUBPATH,
     STUDENT_MODEL_DIR,
 )
-from .dataset_json import json_to_prompt_answer_dict, load_prompt_answer_json
+from .dataset_json import collate_fn, json_to_prompt_answer_dict, load_prompt_answer_json, PromptAnswerDataset
 from .dataset_paths import (
     dataset_all_json_path,
     default_datasets_dir,
@@ -22,7 +22,9 @@ from .eval_inference import (
     FEWSHOT_POOL_SIZE,
     TRAIN_SPLIT_SIZE,
     build_fewshot_prefix,
+    evaluate_model,
     evaluate_prompt_answer_dict,
+    load_data,
     load_svamp_train_test_data,
     run_hf_benchmark,
     test_model,
@@ -40,6 +42,8 @@ __all__ = [
     "FEWSHOT_POOL_SIZE",
     "TRAIN_SPLIT_SIZE",
     "build_fewshot_prefix",
+    "collate_fn",
+    "evaluate_model",
     "HF_READ_TOKEN",
     "LLAMA_1B_MODEL_NAME",
     "LLAMA_8B_MODEL_NAME",
@@ -51,7 +55,9 @@ __all__ = [
     "default_datasets_dir",
     "evaluate_prompt_answer_dict",
     "extract_svamp_answer",
+    "load_data",
     "load_svamp_train_test_data",
+    "PromptAnswerDataset",
     "generate_math_dataset",
     "get_default_device",
     "json_to_prompt_answer_dict",
@@ -61,6 +67,7 @@ __all__ = [
     "most_recent_subdirectory",
     "normalize_op_patterns",
     "parse_answer",
+    "parse_response",
     "patch_tokenizer_no_special_tokens",
     "random_ablation_poly_output_dir",
     "resolve_test_path",
