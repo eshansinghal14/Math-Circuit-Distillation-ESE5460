@@ -144,6 +144,7 @@ class SFTTrainer:
             self.history["step_ce_loss"].append(loss_val)
             total_loss += loss_val
             n_steps += 1
+            print(f"  Step {self._train_step}/{self.config.steps} | CE={loss_val:.4f}")
 
         return {"ce_loss": total_loss / max(n_steps, 1)}
 
@@ -166,26 +167,17 @@ class SFTTrainer:
 
         print(f"SFT | model={cfg.model} | dataset={cfg.dataset} | steps={cfg.steps} | lr={cfg.learning_rate}")
 
-        epoch = 0
         while self._train_step < cfg.steps:
             remaining = cfg.steps - self._train_step
-            metrics = self.train_epoch(max_steps=remaining)
+            metrics = self.train_epoch(max_steps=min(cfg.eval_every_n_steps, remaining))
             if not metrics:
                 break
-            self.history["epoch"].append(epoch + 1)
             self.history["ce_loss"].append(metrics["ce_loss"])
 
-            if self._train_step % cfg.eval_every_n_steps == 0:
-                acc = self._eval()
-                self.history["accuracy"].append(acc)
-                self.history["accuracy_step"].append(self._train_step)
-                print(
-                    f"  Step {self._train_step}/{cfg.steps} | CE={metrics['ce_loss']:.4f} | Acc={acc:.4f}"
-                )
-            else:
-                print(f"  Step {self._train_step}/{cfg.steps} | CE={metrics['ce_loss']:.4f}")
-
-            epoch += 1
+            acc = self._eval()
+            self.history["accuracy"].append(acc)
+            self.history["accuracy_step"].append(self._train_step)
+            print(f"  Step {self._train_step}/{cfg.steps} | Acc={acc:.4f}")
 
         save_history(self.history, cfg.save_dir)
         save_curves(self.history, cfg.save_dir)

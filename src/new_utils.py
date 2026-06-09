@@ -30,9 +30,14 @@ def _clean_num(s: str) -> str:
     return _normalize_numeric_str(s.replace(",", ""))
 
 
-def _extract_int_after_equals(text: str) -> Optional[int]:
-    m = re.search(r"=\s*(\d+)", text)
-    return int(m.group(1)) if m else None
+def extract_local_dataset_answer(text: str) -> Optional[int]:
+    matches = re.findall(r"=\s*(-?\d+)", text)
+    if matches:
+        try:
+            return int(matches[-1])
+        except ValueError:
+            return None
+    return None
 
 
 def extract_gsm8k_answer(text: str) -> Optional[str]:
@@ -56,7 +61,7 @@ def parse_response(text: str, dataset: str) -> Optional:
         return extract_gsm8k_answer(text)
     if dataset == "svamp":
         return extract_svamp_answer(text)
-    return _extract_int_after_equals(text)
+    return extract_local_dataset_answer(text)
 
 
 def patch_tokenizer_no_special_tokens(tokenizer):
@@ -134,7 +139,7 @@ def eval_model(model, tokenizer, test_dataset, dataset_name: str, batch_size: in
             prompts = [s["formatted_prompt"] for s in batch]
             golds = [s["answer"] for s in batch]
             inputs = tokenizer(
-                prompts, return_tensors="pt", padding=True, truncation=True, add_special_tokens=False,
+                prompts, return_tensors="pt", padding=True, truncation=True, add_special_tokens=True,
             ).to(device)
             outputs = model.generate(
                 **inputs,
@@ -142,21 +147,17 @@ def eval_model(model, tokenizer, test_dataset, dataset_name: str, batch_size: in
                 do_sample=False,
                 pad_token_id=tokenizer.pad_token_id,
             )
-            gen_texts = tokenizer.batch_decode(
-                outputs[:, inputs["input_ids"].shape[1]:], skip_special_tokens=True,
-            )
-            for gen, gold in zip(gen_texts, golds):
-                pred = parse_response(gen, dataset_name)
-                gold_parsed = parse_response(str(gold), dataset_name)
-                # normalize both sides to str for comparison; also handle arithmetic
-                # datasets where the model generates just the number (no "=" in gen)
-                if pred is None and isinstance(gold, int):
-                    m = re.search(r"-?\d+", gen.strip())
-                    pred = int(m.group()) if m else None
-                if pred is not None and gold_parsed is not None and str(pred) == str(gold_parsed):
-                    correct += 1
-                elif pred is not None and isinstance(gold, int) and pred == gold:
-                    correct += 1
+            # decode full output (prompt echo + gen) so "= 46" is present for arithmetic extraction
+            full_texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+            for full_text, gold in zip(full_texts, golds):
+                pred = parse_response(full_text, dataset_name)
+                if isinstance(gold, int):
+                    if pred is not None and pred == gold:
+                        correct += 1
+                else:
+                    gold_parsed = parse_response(str(gold), dataset_name)
+                    if pred is not None and gold_parsed is not None and pred == gold_parsed:
+                        correct += 1
                 total += 1
     finally:
         tokenizer.padding_side = original_side
