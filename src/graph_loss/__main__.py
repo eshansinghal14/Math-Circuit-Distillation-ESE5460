@@ -47,7 +47,8 @@ def main():
     )
     args = parser.parse_args()
     if args.supernode_heatmap_output_dir:
-        args.supernode_heatmap_output_dir = os.path.abspath(args.supernode_heatmap_output_dir)
+        if not os.path.isabs(args.supernode_heatmap_output_dir):
+            args.supernode_heatmap_output_dir = os.path.join(DIR_ROOT, args.supernode_heatmap_output_dir)
 
     frontend_output_dir = str(default_frontend_output_dir())
 
