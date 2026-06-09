@@ -330,31 +330,32 @@ def build_shared_context(
         raw_node_labels: dict = {}
         raw_sum_member_scores: dict = {}
 
-    # Select arg-token supernodes (position-independent: embedding gradient norms).
+    # Select arg-token supernodes when no ANOVA labels requested.
     token_raw_supernodes: list = []
     token_supernode_labels: list = []
     all_selected = set(anova_selected)
 
-    _logger.info("Computing arg-token supernodes for %d token positions", ctx.n_tokens)
-    token_raw_supernodes, token_supernode_labels = select_arg_supernodes(
-        ctx,
-        adapter.tokenizer,
-        input_ids,
-        nodes_per_token=nodes_per_label,
-    )
-    for sn in token_raw_supernodes:
-        all_selected.update(sn)
-    for sn, label in zip(token_raw_supernodes, token_supernode_labels):
-        label_str = label[0] if label else "arg"
-        for idx in sn:
-            raw_node_labels.setdefault(idx, [])
-            if label_str not in raw_node_labels[idx]:
-                raw_node_labels[idx].append(label_str)
-    _logger.info(
-        "  Arg-nodes: %d token supernodes; total unique neurons so far: %d",
-        len(token_raw_supernodes),
-        len(all_selected),
-    )
+    if not need_anova:
+        _logger.info("Computing arg-token supernodes for %d token positions", ctx.n_tokens)
+        token_raw_supernodes, token_supernode_labels = select_arg_supernodes(
+            ctx,
+            adapter.tokenizer,
+            input_ids,
+            nodes_per_token=nodes_per_label,
+        )
+        for sn in token_raw_supernodes:
+            all_selected.update(sn)
+        for sn, label in zip(token_raw_supernodes, token_supernode_labels):
+            label_str = label[0] if label else "arg"
+            for idx in sn:
+                raw_node_labels.setdefault(idx, [])
+                if label_str not in raw_node_labels[idx]:
+                    raw_node_labels[idx].append(label_str)
+        _logger.info(
+            "  Arg-nodes: %d token supernodes; total unique neurons so far: %d",
+            len(token_raw_supernodes),
+            len(all_selected),
+        )
 
     anova_token_selected_indices = sorted(all_selected)
 
@@ -425,28 +426,34 @@ def create_graph_at_position(
     ctx = shared.ctx
     adapter = ctx.adapter
 
-    # --- Compute DLA supernode (position-specific) ---
-    ref_logits = (
-        dla_model_logits
-        if dla_model_logits is not None
-        else ctx.logits[0, target_position].detach()
-    )
-    _logger.info("Selecting DLA supernode at position %d", target_position)
-    dla_selected, dla_raw_supernodes, dla_supernode_labels, dla_raw_node_labels, _ = (
-        select_anova_supernodes(
-            shared.label_results,
-            nodes_per_label=shared.nodes_per_label,
-            strict=True,
-            source_vectors=ctx.source_vectors,
-            W_U=adapter.W_U,
-            tokenizer=adapter.tokenizer,
-            target_args=shared.target_args,
-            allowed_labels=set(),  # no ANOVA supernodes, only DLA
-            include_dla_node=True,
-            model_logits=ref_logits,
+    # --- Compute DLA supernode when no ANOVA labels were provided ---
+    dla_raw_supernodes: list = []
+    dla_supernode_labels: list = []
+    dla_raw_node_labels: dict = {}
+    dla_selected: list = []
+
+    if not shared.anova_raw_supernodes:
+        ref_logits = (
+            dla_model_logits
+            if dla_model_logits is not None
+            else ctx.logits[0, target_position].detach()
         )
-    )
-    _logger.info("  DLA selected %d neurons", len(dla_selected))
+        _logger.info("Selecting DLA supernode at position %d", target_position)
+        dla_selected, dla_raw_supernodes, dla_supernode_labels, dla_raw_node_labels, _ = (
+            select_anova_supernodes(
+                shared.label_results,
+                nodes_per_label=shared.nodes_per_label,
+                strict=True,
+                source_vectors=ctx.source_vectors,
+                W_U=adapter.W_U,
+                tokenizer=adapter.tokenizer,
+                target_args=shared.target_args,
+                allowed_labels=set(),
+                include_dla_node=True,
+                model_logits=ref_logits,
+            )
+        )
+        _logger.info("  DLA selected %d neurons", len(dla_selected))
 
     # --- Merge all neuron sets and remap to filtered-ctx indices ---
     all_selected_set = set(shared.anova_token_selected_indices) | set(dla_selected)
@@ -465,6 +472,15 @@ def create_graph_at_position(
         + dla_supernode_labels
     )
     supernodes = [[old_to_new[idx] for idx in sn] for sn in all_raw_supernodes]
+
+    # Map filtered_ctx indices back to activation_write_result indices.
+    # activation_write_result was built from anova_token_selected_indices only,
+    # so DLA neurons (added later) have no entry and must not be looked up.
+    awr_index_map: dict[int, int] = {
+        old_to_new[ctx_idx]: awr_idx
+        for awr_idx, ctx_idx in enumerate(shared.anova_token_selected_indices)
+        if ctx_idx in old_to_new
+    }
 
     # Merge per-neuron label dicts.
     merged_node_labels: dict = dict(shared.raw_node_labels)
@@ -526,6 +542,7 @@ def create_graph_at_position(
             node_labels=node_labels_filtered,
             supernode_heatmap_output_dir=shared.supernode_heatmap_output_dir,
             activation_write_result=shared.activation_write_result,
+            awr_index_map=awr_index_map,
             sum_member_scores=sum_member_scores,
             filtered_label_results=filtered_label_results,
             W_U=adapter.W_U,

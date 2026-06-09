@@ -546,6 +546,7 @@ def build_super_graph(
     node_labels: dict[int, list[str]] | None = None,
     supernode_heatmap_output_dir: str | None = None,
     activation_write_result: ActivationWriteResult | None = None,
+    awr_index_map: dict[int, int] | None = None,
     sum_member_scores: dict[str, dict[int, tuple[float, float, float]]] | None = None,
     filtered_label_results: dict | None = None,
     W_U: torch.Tensor | None = None,
@@ -680,7 +681,11 @@ def build_super_graph(
                 supernode_heatmap_pdf_paths.append("")
                 continue
 
-            row_indices = torch.tensor(members, dtype=torch.long)
+            if awr_index_map is not None:
+                awr_members = [awr_index_map[m] for m in members]
+            else:
+                awr_members = members
+            row_indices = torch.tensor(awr_members, dtype=torch.long)
             cluster_heatmaps = activation_write_result.activations[row_indices].detach().float()
             member_var_spec = None
             if filtered_label_results is not None:
