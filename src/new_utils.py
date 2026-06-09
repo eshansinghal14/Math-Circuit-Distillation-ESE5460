@@ -8,6 +8,8 @@ from torch.utils.data import DataLoader
 
 HF_READ_TOKEN = os.environ.get("HF_READ_TOKEN", "") or os.environ.get("HF_TOKEN", "")
 
+DIR_ROOT = "/content/drive/My Drive/Math Circuit Distillation (ESE 5460)"
+
 _logged_in = False
 
 _NUM = r"-?\d[\d,]*(?:\.\d+)?"

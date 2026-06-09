@@ -12,7 +12,7 @@ from graph_loss.frontend_assets.frontend_export import (
 )
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
 from graph_loss.utils import add_graph_build_args
-from new_utils import load_model
+from new_utils import DIR_ROOT, load_model
 
 
 def main():
@@ -39,7 +39,7 @@ def main():
         "--supernode-heatmap-output-dir",
         "--supernode_heatmap_output_dir",
         dest="supernode_heatmap_output_dir",
-        default="supernode_heatmaps",
+        default=os.path.join(DIR_ROOT, "supernode_heatmaps"),
         help=(
             "Directory for per-supernode activation heatmap PDFs when dataset "
             "activation clustering is used"
