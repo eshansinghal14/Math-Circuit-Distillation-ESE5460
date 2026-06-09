@@ -230,10 +230,9 @@ def label_neurons_layer_by_layer(
     if not valid_batch_layers:
         return [empty] * n_kept
 
-    # Process one layer at a time to avoid loading all layer tensors onto GPU simultaneously.
-    batch_grids_gpu: list[torch.Tensor] = []
-    batch_loc_indices: list[int] = []
+    total_neurons_labeled = 0
 
+    # Process one layer at a time; run ANOVA immediately per-layer so grids never accumulate.
     for layer in valid_batch_layers:
         layer_tensor_gpu = layer_inputs[layer].to(device=device)  # [P, n_positions, d]
         n_positions = int(layer_tensor_gpu.shape[1])
@@ -286,32 +285,32 @@ def label_neurons_layer_by_layer(
         neuron_acts_batch = F.silu(gate_out) * up_out  # [n_groups, P, N_max]
         del gate_out, up_out
 
+        layer_grids_gpu: list[torch.Tensor] = []
+        layer_loc_indices: list[int] = []
         for g_idx, tp in enumerate(token_positions):
             neurons = layer_group_map[tp]
             n_g = len(neurons)
             acts = neuron_acts_batch[g_idx, :, :n_g].float()  # [P, n_g]
             grid = torch.full((n_g, grid_cells), float("nan"), dtype=torch.float32, device=device)
             grid[:, flat_indices_gpu] = acts.T
-            batch_grids_gpu.append(grid)
-            batch_loc_indices.extend(li for li, _ in neurons)
+            layer_grids_gpu.append(grid)
+            layer_loc_indices.extend(li for li, _ in neurons)
 
         del neuron_acts_batch
 
-    if not batch_grids_gpu:
-        return [empty] * n_kept
-
-    # Run ANOVA matmuls on GPU; only [N, R] scores are transferred to CPU.
-    batch_grid_gpu = torch.cat(batch_grids_gpu, dim=0)  # [N_total, grid_cells]
-    del batch_grids_gpu
-    batch_labels = gpu_label_activation_heatmaps(batch_grid_gpu, gpu_anova_state, anova_rules)
-    del batch_grid_gpu
-    for label_j, loc_idx in enumerate(batch_loc_indices):
-        label_results[loc_idx] = batch_labels[label_j]
+        # Run ANOVA for this layer immediately so grids don't accumulate across layers.
+        layer_batch_gpu = torch.cat(layer_grids_gpu, dim=0)
+        del layer_grids_gpu
+        layer_labels = gpu_label_activation_heatmaps(layer_batch_gpu, gpu_anova_state, anova_rules)
+        del layer_batch_gpu
+        for label_j, loc_idx in enumerate(layer_loc_indices):
+            label_results[loc_idx] = layer_labels[label_j]
+        total_neurons_labeled += len(layer_loc_indices)
 
     logger.info(
         "  ANOVA labeled %d layers (%d neurons)",
         len(valid_batch_layers),
-        len(batch_loc_indices),
+        total_neurons_labeled,
     )
 
     return [lbl if lbl is not None else empty for lbl in label_results]
