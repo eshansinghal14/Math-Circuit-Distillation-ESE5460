@@ -12,17 +12,19 @@ from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+
+from new_utils import DataLoader, eval_model
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from training.utils import eval_model, load_student_model, make_optimizer, save_checkpoint, save_curves, save_history
+from training.utils import make_optimizer, save_checkpoint, save_curves, save_history
 
 from utils import (
     DIR_ROOT,
     PromptAnswerDataset,
     collate_fn,
     load_data,
+    load_model,
     seed_all,
 )
 
@@ -86,7 +88,11 @@ class SFTTrainer:
         self.config = config
         seed_all(_SEED)
 
-        self.model, self.tokenizer = load_student_model(config.model)
+        self.model, self.tokenizer = load_model(config.model)
+        if hasattr(self.model.config, "use_cache"):
+            self.model.config.use_cache = False
+        if hasattr(self.model, "gradient_checkpointing_enable"):
+            self.model.gradient_checkpointing_enable()
 
         dataset = PromptAnswerDataset(config.dataset, train_data, self.tokenizer)
         self.test_dataset = PromptAnswerDataset(config.dataset, test_data, self.tokenizer)
@@ -207,7 +213,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--eval-every-n-steps", type=int, default=1, dest="eval_every_n_steps")
     parser.add_argument("--max-eval-tokens", type=int, default=256, dest="max_eval_tokens")
-    parser.add_argument("--test-limit", type=int, default=100, dest="test_limit")
+    parser.add_argument("--test-limit", type=int, default=None, dest="test_limit")
     return parser
 
 

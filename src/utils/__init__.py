@@ -37,6 +37,7 @@ from .hf_models import (
     patch_tokenizer_no_special_tokens,
 )
 from .synthetic_chain_math import generate_math_dataset, normalize_op_patterns
+from torch.utils.data import DataLoader
 
 __all__ = [
     "EVAL_MAX_NEW_TOKENS",
@@ -53,6 +54,7 @@ __all__ = [
     "NEURON_CLUSTERING_SUBDIR",
     "NEURON_CLUSTERING_TEACHER_SUBPATH",
     "STUDENT_MODEL_DIR",
+    "DataLoader",
     "dataset_all_json_path",
     "default_datasets_dir",
     "evaluate_prompt_answer_dict",

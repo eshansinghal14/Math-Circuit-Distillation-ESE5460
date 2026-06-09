@@ -16,7 +16,7 @@ from graph_loss.graph import Graph, SuperGraph
 
 
 def default_frontend_output_dir() -> Path:
-    return Path(__file__).resolve().parent / "frontend_assets"
+    return Path(__file__).resolve().parent
 
 
 def slugify(value: str, *, fallback: str = "supergraph") -> str:
@@ -246,7 +246,6 @@ def _supergraph_links(
 
     links.sort(key=lambda item: abs(item["weight"]))
     return links
-
 
 
 def _supernode_label(

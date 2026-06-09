@@ -11,7 +11,7 @@ from graph_loss.create_graph import (
     create_graph,
     save_supergraph,
 )
-from graph_loss.frontend_export import (
+from graph_loss.frontend_assets.frontend_export import (
     default_frontend_output_dir,
     export_supergraph_frontend,
 )
