@@ -18,7 +18,7 @@ import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 
-from graph_loss.utils import DTYPE_CHOICES, resolve_torch_dtype
+from graph_loss.utils import DTYPE_CHOICES
 from utils import (
     EVAL_MAX_NEW_TOKENS,
     LLAMA_1B_MODEL_NAME,
@@ -1488,7 +1488,7 @@ def main() -> None:
             grad_clip=args.grad_clip,
             lambda_graph=args.lambda_graph,
             lambda_kl=args.lambda_kl,
-            graph_dtype=resolve_torch_dtype(args.dtype),
+            graph_dtype=getattr(torch, args.dtype),
             teacher_prop_neurons_per_layer=args.teacher_prop_neurons_per_layer,
             student_prop_neurons_per_layer=args.student_prop_neurons_per_layer,
 

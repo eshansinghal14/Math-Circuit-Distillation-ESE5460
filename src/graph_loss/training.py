@@ -136,9 +136,7 @@ def compute_prompt_graph_loss(
             node_labels=config.student_graph_labels or [],
             anova_range_radius=config.student_anova_range_radius,
             nodes_per_label=config.student_nodes_per_label,
-            include_dla_node=config.tokens_dla_nodes,
-            dla_model_logits=cached_teacher.teacher_dla_logits if config.tokens_dla_nodes else None,
-            include_arg_nodes=config.tokens_dla_nodes,
+            dla_model_logits=cached_teacher.teacher_dla_logits,
             no_grad_supergraph=True,
         )
     except ValueError as e:
@@ -448,8 +446,6 @@ def _compare_tokens_loss_for_prompt(
                 temperature=config.temperature,
                 batch_size=config.teacher_graph_batch_size,
                 dtype=config.graph_dtype,
-                include_dla_node=config.tokens_dla_nodes,
-                include_arg_nodes=config.tokens_dla_nodes,
                 nodes_per_label=config.teacher_nodes_per_label,
                 no_grad_supergraph=True,
                 build_create_graph=False,
@@ -561,8 +557,6 @@ def backward_batch_graph_loss(
                     top_k_logits=config.top_k_logits,
                     temperature=config.temperature,
                     batch_size=config.teacher_graph_batch_size,
-                    include_dla_node=config.tokens_dla_nodes,
-                    include_arg_nodes=config.tokens_dla_nodes,
                     verbose=config.verbose,
                 )
             prompt_loss, prompt_metrics = compute_prompt_graph_loss(

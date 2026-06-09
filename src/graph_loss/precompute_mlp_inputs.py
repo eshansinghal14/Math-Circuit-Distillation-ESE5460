@@ -37,7 +37,7 @@ from huggingface_hub import login
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
 from graph_loss.neuron_activation_heatmap import _parse_numeric_args
-from graph_loss.utils import DTYPE_CHOICES, resolve_torch_dtype
+from graph_loss.utils import DTYPE_CHOICES
 from utils import HF_READ_TOKEN, default_datasets_dir, load_prompt_answer_json
 
 
@@ -278,7 +278,7 @@ def main() -> None:
     if HF_READ_TOKEN:
         login(HF_READ_TOKEN)
 
-    dtype = resolve_torch_dtype(args.dtype)
+    dtype = getattr(torch, args.dtype)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("Loading model: %s", args.model)
     hf_model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=dtype)

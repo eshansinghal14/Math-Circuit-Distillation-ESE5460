@@ -723,6 +723,20 @@ def build_super_graph(
             logger.info("  Saved supernode heatmap PDF: %s", saved_path)
             supernode_heatmap_pdf_paths.append(saved_path)
 
+    labels_short = [
+        (supernode_labels[i][0] if supernode_labels and supernode_labels[i] else str(i))
+        for i in range(num_supernodes)
+    ]
+    col_w = max((len(l) for l in labels_short), default=4) + 2
+    header = " " * col_w + "".join(l.rjust(col_w) for l in labels_short)
+    logger.info("  Supernode adjacency matrix:\n%s", header)
+    mat_cpu = supernode_adj_matrix.detach().cpu()
+    for i, row_label in enumerate(labels_short):
+        row_str = row_label.ljust(col_w) + "".join(
+            f"{mat_cpu[i, j].item():.3f}".rjust(col_w) for j in range(num_supernodes)
+        )
+        logger.info("    %s", row_str)
+
     logger.info("  Aggregated supergraph: %d supernodes", num_supernodes)
     return SuperGraph(
         supernode_adjacency_matrix=supernode_adj_matrix,

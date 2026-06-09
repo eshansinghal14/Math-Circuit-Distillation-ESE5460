@@ -234,7 +234,6 @@ def build_shared_context(
     nodes_per_label: int = 10,
     anova_range_radius: int = 0,
     node_labels: list[str] | None = None,
-    include_arg_nodes: bool = False,
     batch_size: int = 512,
     supernode_heatmap_output_dir: str | None = None,
     logger: logging.Logger | None = None,
@@ -293,12 +292,8 @@ def build_shared_context(
         decoded = adapter.tokenizer.decode(input_ids.detach().cpu().tolist())
         target_args = parse_numeric_args(decoded)
 
-    # Build MLP cache for arg-node heatmaps when ANOVA wasn't run but heatmap output is
-    # requested. Only the CLI path sets supernode_heatmap_output_dir, so this is a no-op
-    # in training.
     if (
         not need_anova
-        and include_arg_nodes
         and supernode_heatmap_output_dir is not None
         and mlp_input_cache is None
         and model_name is not None
@@ -340,32 +335,31 @@ def build_shared_context(
     token_supernode_labels: list = []
     all_selected = set(anova_selected)
 
-    if include_arg_nodes:
-        _logger.info("Computing arg-token supernodes for %d token positions", ctx.n_tokens)
-        token_raw_supernodes, token_supernode_labels = select_arg_supernodes(
-            ctx,
-            adapter.tokenizer,
-            input_ids,
-            nodes_per_token=nodes_per_label,
-        )
-        for sn in token_raw_supernodes:
-            all_selected.update(sn)
-        for sn, label in zip(token_raw_supernodes, token_supernode_labels):
-            label_str = label[0] if label else "arg"
-            for idx in sn:
-                raw_node_labels.setdefault(idx, [])
-                if label_str not in raw_node_labels[idx]:
-                    raw_node_labels[idx].append(label_str)
-        _logger.info(
-            "  Arg-nodes: %d token supernodes; total unique neurons so far: %d",
-            len(token_raw_supernodes),
-            len(all_selected),
-        )
+    _logger.info("Computing arg-token supernodes for %d token positions", ctx.n_tokens)
+    token_raw_supernodes, token_supernode_labels = select_arg_supernodes(
+        ctx,
+        adapter.tokenizer,
+        input_ids,
+        nodes_per_token=nodes_per_label,
+    )
+    for sn in token_raw_supernodes:
+        all_selected.update(sn)
+    for sn, label in zip(token_raw_supernodes, token_supernode_labels):
+        label_str = label[0] if label else "arg"
+        for idx in sn:
+            raw_node_labels.setdefault(idx, [])
+            if label_str not in raw_node_labels[idx]:
+                raw_node_labels[idx].append(label_str)
+    _logger.info(
+        "  Arg-nodes: %d token supernodes; total unique neurons so far: %d",
+        len(token_raw_supernodes),
+        len(all_selected),
+    )
 
     anova_token_selected_indices = sorted(all_selected)
 
     # Precompute activation write result if needed (CLI heatmap path only; None in training).
-    need_awr = need_anova or (include_arg_nodes and supernode_heatmap_output_dir is not None)
+    need_awr = need_anova or (supernode_heatmap_output_dir is not None)
     activation_write_result = None
     if need_awr and anova_token_selected_indices:
         # Build a temporary filtered ctx to compute activation write results for ANOVA neurons.
@@ -401,7 +395,6 @@ def create_graph_at_position(
     shared: GraphSharedContext,
     *,
     target_position: int = -1,
-    include_dla_node: bool = False,
     dla_model_logits: torch.Tensor | None = None,
     attribution_targets=None,
     top_k_logits: float | None = 0.95,
@@ -433,33 +426,27 @@ def create_graph_at_position(
     adapter = ctx.adapter
 
     # --- Compute DLA supernode (position-specific) ---
-    dla_raw_supernodes: list = []
-    dla_supernode_labels: list = []
-    dla_raw_node_labels: dict = {}
-    dla_selected: list = []
-
-    if include_dla_node:
-        ref_logits = (
-            dla_model_logits
-            if dla_model_logits is not None
-            else ctx.logits[0, target_position].detach()
+    ref_logits = (
+        dla_model_logits
+        if dla_model_logits is not None
+        else ctx.logits[0, target_position].detach()
+    )
+    _logger.info("Selecting DLA supernode at position %d", target_position)
+    dla_selected, dla_raw_supernodes, dla_supernode_labels, dla_raw_node_labels, _ = (
+        select_anova_supernodes(
+            shared.label_results,
+            nodes_per_label=shared.nodes_per_label,
+            strict=True,
+            source_vectors=ctx.source_vectors,
+            W_U=adapter.W_U,
+            tokenizer=adapter.tokenizer,
+            target_args=shared.target_args,
+            allowed_labels=set(),  # no ANOVA supernodes, only DLA
+            include_dla_node=True,
+            model_logits=ref_logits,
         )
-        _logger.info("Selecting DLA supernode at position %d", target_position)
-        dla_selected, dla_raw_supernodes, dla_supernode_labels, dla_raw_node_labels, _ = (
-            select_anova_supernodes(
-                shared.label_results,
-                nodes_per_label=shared.nodes_per_label,
-                strict=True,
-                source_vectors=ctx.source_vectors,
-                W_U=adapter.W_U,
-                tokenizer=adapter.tokenizer,
-                target_args=shared.target_args,
-                allowed_labels=set(),  # no ANOVA supernodes, only DLA
-                include_dla_node=True,
-                model_logits=ref_logits,
-            )
-        )
-        _logger.info("  DLA selected %d neurons", len(dla_selected))
+    )
+    _logger.info("  DLA selected %d neurons", len(dla_selected))
 
     # --- Merge all neuron sets and remap to filtered-ctx indices ---
     all_selected_set = set(shared.anova_token_selected_indices) | set(dla_selected)
@@ -585,9 +572,7 @@ def create_graph(
     nodes_per_label: int = 10,
     anova_range_radius: int = 0,
     node_labels: list[str] | None = None,
-    include_dla_node: bool = False,
     dla_model_logits: torch.Tensor | None = None,
-    include_arg_nodes: bool = False,
     no_grad_supergraph: bool = False,
     logger: logging.Logger | None = None,
 ) -> GraphPipelineResult:
@@ -656,7 +641,6 @@ def create_graph(
         nodes_per_label=nodes_per_label,
         anova_range_radius=anova_range_radius,
         node_labels=node_labels,
-        include_arg_nodes=include_arg_nodes,
         batch_size=batch_size,
         supernode_heatmap_output_dir=supernode_heatmap_output_dir,
         logger=_logger,
@@ -665,7 +649,6 @@ def create_graph(
     return create_graph_at_position(
         shared,
         target_position=target_position,
-        include_dla_node=include_dla_node,
         dla_model_logits=dla_model_logits,
         attribution_targets=attribution_targets,
         top_k_logits=top_k_logits,

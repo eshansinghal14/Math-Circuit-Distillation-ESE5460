@@ -8,7 +8,7 @@ from typing import Any
 import torch
 
 
-DTYPE_CHOICES = ["float32", "bfloat16", "float16", "fp32", "bf16", "fp16"]
+DTYPE_CHOICES = ["float32", "bfloat16", "float16"]
 
 
 @dataclass
@@ -62,12 +62,6 @@ class UnifiedConfig:
 
 
 def add_graph_build_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--dtype",
-        choices=DTYPE_CHOICES,
-        default="float32",
-        help="Model dtype",
-    )
     parser.add_argument(
         "--top_k_logits",
         type=float,
@@ -131,41 +125,5 @@ def add_graph_build_args(parser: argparse.ArgumentParser) -> None:
             "If omitted, no ANOVA supernodes are created."
         ),
     )
-    parser.add_argument(
-        "--include-dla-node",
-        "--include_dla_node",
-        dest="include_dla_node",
-        action="store_true",
-        default=False,
-        help=(
-            "If set, add a 'dla' supernode containing the top nodes_per_label "
-            "neurons whose DLA distribution (write vector projected through W_U) most "
-            "closely matches the model's actual output distribution by KL divergence."
-        ),
-    )
-    parser.add_argument(
-        "--include-arg-nodes",
-        "--include_arg_nodes",
-        dest="include_arg_nodes",
-        action="store_true",
-        default=False,
-        help=(
-            "If set, create one 'arg:TOKEN' supernode per token position in the prompt. "
-            "Each supernode contains the top nodes_per_label neurons (from the "
-            "pre-ANOVA candidate pool) whose activation is most concentrated on that "
-            "token's embedding.  Concentration is measured by back-propagating each "
-            "neuron's activation to the token embeddings, computing the normalised "
-            "per-position L2-norm distribution d_f(p), and selecting neurons with "
-            "minimum KL(δ_p ‖ d_f) = maximum d_f(p) for the target position p."
-        ),
-    )
 
 
-def resolve_torch_dtype(dtype: str) -> torch.dtype:
-    dtype_mapping = {
-        "fp32": "float32",
-        "bf16": "bfloat16",
-        "fp16": "float16",
-    }
-    dtype_name = dtype_mapping.get(dtype, dtype)
-    return getattr(torch, dtype_name)

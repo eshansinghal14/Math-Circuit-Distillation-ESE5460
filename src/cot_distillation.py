@@ -19,7 +19,7 @@ import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 
-from graph_loss.utils import DTYPE_CHOICES, resolve_torch_dtype
+from graph_loss.utils import DTYPE_CHOICES
 from utils import (
     FEWSHOT_POOL_SIZE,
     LLAMA_1B_MODEL_NAME,
@@ -1341,7 +1341,7 @@ def main() -> None:
             compare_n_tokens=args.compare_n_tokens,
             tokens_dla_nodes=args.tokens_dla_nodes,
             compare_ans_token=args.compare_ans_token,
-            graph_dtype=resolve_torch_dtype(args.dtype),
+            graph_dtype=getattr(torch, args.dtype),
             teacher_prop_neurons_per_layer=args.teacher_prop_neurons_per_layer,
             student_prop_neurons_per_layer=args.student_prop_neurons_per_layer,
             graph_top_k_logits=args.graph_top_k_logits if args.graph_top_k_logits > 0 else None,

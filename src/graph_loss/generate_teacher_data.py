@@ -17,7 +17,6 @@ from transformers import AutoModelForCausalLM
 from graph_loss.create_graph import (
     GraphPipelineResult,
     create_graph,
-    save_supergraph,
 )
 
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
@@ -34,7 +33,6 @@ class TeacherDataConfig:
     store_path: str
     dataset_file: str
     teacher_model: str
-    dtype: str = "float32"
     top_k_logits: float | None = 0.95
     temperature: float = 2.0
     prop_neurons_per_layer: float = 0.1
@@ -47,8 +45,6 @@ class TeacherDataConfig:
     nodes_per_label: int = 10
     anova_range_radius: int = 0
     graph_node_labels: list[str] | None = None
-    include_dla_node: bool = False
-    include_arg_nodes: bool = False
 
 
 def _resolve_dataset_file(dataset_file: str) -> str:
@@ -129,8 +125,6 @@ def generate_teacher_sample(
     nodes_per_label: int = 10,
     anova_range_radius: int = 0,
     node_labels: list[str] | None = None,
-    include_dla_node: bool = False,
-    include_arg_nodes: bool = False,
     logger: logging.Logger | None = None,
 ) -> "CachedTeacherPromptData":
     """Generate teacher data for one sample in-memory — same logic as generate_teacher_data.py.
@@ -157,8 +151,6 @@ def generate_teacher_sample(
             nodes_per_label=nodes_per_label,
             anova_range_radius=anova_range_radius,
             node_labels=node_labels,
-            include_dla_node=include_dla_node,
-            include_arg_nodes=include_arg_nodes,
             no_grad_supergraph=True,
             build_create_graph=False,
             detach_result=True,
@@ -274,21 +266,11 @@ def generate_teacher_data(config: TeacherDataConfig) -> dict[str, Any]:
                 nodes_per_label=config.nodes_per_label,
                 anova_range_radius=config.anova_range_radius,
                 node_labels=config.graph_node_labels,
-                include_dla_node=config.include_dla_node,
-                include_arg_nodes=config.include_arg_nodes,
                 no_grad_supergraph=True,
                 build_create_graph=False,
                 detach_result=True,
                 logger=logger,
             )
-
-        supergraph_path = os.path.join(sample_dir, "supergraph.pt")
-        logger.info("Saving supergraph to %s", supergraph_path)
-        save_supergraph(
-            supergraph_path,
-            result.supergraph,
-            logit_token_ids=result.graph.logit_token_ids,
-        )
 
         logger.info("Computing teacher logits for distillation cache")
         distill_tensors = _build_distillation_tensors(prompt, answer, teacher_tokenizer)
@@ -430,7 +412,6 @@ def main() -> None:
         store_path=args.store_path,
         dataset_file=args.dataset_file,
         teacher_model=args.teacher_model,
-        dtype=args.dtype,
         top_k_logits=args.top_k_logits,
         temperature=args.temperature,
         prop_neurons_per_layer=args.prop_neurons_per_layer,
@@ -443,8 +424,6 @@ def main() -> None:
         nodes_per_label=args.nodes_per_label,
         anova_range_radius=args.anova_range_radius,
         graph_node_labels=args.graph_node_labels,
-        include_dla_node=args.include_dla_node,
-        include_arg_nodes=args.include_arg_nodes,
     )
     generate_teacher_data(config)
 
