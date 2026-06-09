@@ -71,6 +71,7 @@ class SFTConfig:
     max_eval_tokens: int = 256
     save_dir: str = "results/sft"
     eval_every_n_steps: int = 1
+    grad_accum_steps: int = 1
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -117,9 +118,13 @@ class SFTTrainer:
 
     def train_epoch(self, *, max_steps: Optional[int] = None) -> Dict[str, float]:
         self.model.train()
+        grad_accum = self.config.grad_accum_steps
         total_loss = 0.0
         n_steps = 0
+        accum_loss = 0.0
+        micro_step = 0
 
+        self.optimizer.zero_grad()
         for batch in self.loader:
             if max_steps is not None and n_steps >= max_steps:
                 break
@@ -128,22 +133,29 @@ class SFTTrainer:
             response_mask = batch["response_mask"].to(_DEVICE)
 
             logits = self.model(input_ids, attention_mask=attention_mask).logits
-            loss = sft_ce_loss(logits, input_ids, response_mask)
+            loss = sft_ce_loss(logits, input_ids, response_mask) / grad_accum
 
             if not torch.isfinite(loss):
+                micro_step += 1
+                if micro_step % grad_accum == 0:
+                    self.optimizer.zero_grad()
                 continue
 
-            self.optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), _GRAD_CLIP)
-            self.optimizer.step()
+            accum_loss += float(loss.item())
+            micro_step += 1
 
-            loss_val = float(loss.item())
-            self._train_step += 1
-            self.history["train_step"].append(self._train_step)
-            self.history["step_ce_loss"].append(loss_val)
-            total_loss += loss_val
-            n_steps += 1
+            if micro_step % grad_accum == 0:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), _GRAD_CLIP)
+                self.optimizer.step()
+                self.optimizer.zero_grad()
+
+                self._train_step += 1
+                self.history["train_step"].append(self._train_step)
+                self.history["step_ce_loss"].append(accum_loss)
+                total_loss += accum_loss
+                accum_loss = 0.0
+                n_steps += 1
 
         return {"ce_loss": total_loss / max(n_steps, 1)}
 
@@ -203,6 +215,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="results/sft",
     )
     parser.add_argument("--eval-every-n-steps", type=int, default=1, dest="eval_every_n_steps")
+    parser.add_argument("--grad-accum-steps", type=int, default=1, dest="grad_accum_steps")
     parser.add_argument("--max-eval-tokens", type=int, default=256, dest="max_eval_tokens")
     parser.add_argument("--test-limit", type=int, default=None, dest="test_limit")
     return parser
@@ -221,6 +234,7 @@ def main() -> None:
             learning_rate=args.lr,
             save_dir=os.path.join(DIR_ROOT, args.save_dir),
             eval_every_n_steps=args.eval_every_n_steps,
+            grad_accum_steps=args.grad_accum_steps,
             max_eval_tokens=args.max_eval_tokens,
         ),
         train_data,
