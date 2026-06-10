@@ -13,20 +13,20 @@ from typing import Any, Dict, List, Optional
 import torch
 import torch.nn.functional as F
 
-from new_utils import DataLoader, eval_model
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from training.utils import add_standard_args, make_optimizer, save_checkpoint, save_curves, save_history
-
-from utils import (
+from new_utils import (
+    DataLoader,
     DIR_ROOT,
     PromptAnswerDataset,
     collate_fn,
+    eval_model,
     load_data,
     load_model,
     seed_all,
 )
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from training.utils import add_standard_args, make_optimizer, save_checkpoint, save_curves, save_history
 
 _DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 _GRAD_CLIP = 1.0

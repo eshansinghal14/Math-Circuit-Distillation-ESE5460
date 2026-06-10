@@ -14,13 +14,13 @@ def main() -> None:
     )
 
     generate_math_dataset(
-        dataset_all_json_path("22_add_tight_5000"),
+        dataset_all_json_path("21_mult_tight"),
         tokenizer,
-        digits=[2, 2],
-        operations=[["+"]],
+        digits=[2, 1],
+        operations=[["*"]],
         spaces=False,
         shuffle=True,
-        samples=10000,
+        samples=1000,
         split_test_frac=0.5,
     )
 
