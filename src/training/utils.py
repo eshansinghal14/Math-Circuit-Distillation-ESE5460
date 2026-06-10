@@ -94,7 +94,17 @@ def save_curves(
     axes[0].plot(steps[: len(ce_series)], ce_series, marker="o", markersize=2)
     axes[0].set_title(loss_label)
     axes[0].grid(True, alpha=0.3)
-    axes[1].plot(acc_steps[: len(acc_series)], acc_series, marker="o", markersize=2)
+    axes[1].plot(acc_steps[: len(acc_series)], acc_series, marker="o", markersize=2, label="student")
+    student_baseline = history.get("student_baseline")
+    teacher_baseline = history.get("teacher_baseline")
+    if student_baseline is not None:
+        axes[1].axhline(student_baseline, color="steelblue", linestyle="--", linewidth=1,
+                        label=f"student baseline ({student_baseline:.3f})")
+    if teacher_baseline is not None:
+        axes[1].axhline(teacher_baseline, color="darkorange", linestyle="--", linewidth=1,
+                        label=f"teacher baseline ({teacher_baseline:.3f})")
+    if student_baseline is not None or teacher_baseline is not None:
+        axes[1].legend(fontsize=8)
     axes[1].set_title("Accuracy")
     axes[1].set_ylim(0, 1)
     axes[1].grid(True, alpha=0.3)
