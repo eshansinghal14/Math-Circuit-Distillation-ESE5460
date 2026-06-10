@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from typing import Any, Dict, List
@@ -39,7 +40,12 @@ def save_history(history: Dict[str, Any], save_dir: str) -> None:
         os.fsync(f.fileno())
 
 
-def save_curves(history: Dict[str, List], save_dir: str) -> None:
+def save_curves(
+    history: Dict[str, List],
+    save_dir: str,
+    loss_key: str = "step_ce_loss",
+    loss_label: str = "CE Loss",
+) -> None:
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -47,14 +53,14 @@ def save_curves(history: Dict[str, List], save_dir: str) -> None:
     except ImportError:
         return
     steps = history.get("train_step", [])
-    ce_series = history.get("step_ce_loss", [])
+    ce_series = history.get(loss_key, [])
     acc_series = history.get("accuracy", [])
     acc_steps = history.get("accuracy_step", list(range(1, len(acc_series) + 1)))
     if not steps:
         return
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
     axes[0].plot(steps[: len(ce_series)], ce_series, marker="o", markersize=2)
-    axes[0].set_title("CE Loss")
+    axes[0].set_title(loss_label)
     axes[0].grid(True, alpha=0.3)
     axes[1].plot(acc_steps[: len(acc_series)], acc_series, marker="o", markersize=2)
     axes[1].set_title("Accuracy")
@@ -63,3 +69,17 @@ def save_curves(history: Dict[str, List], save_dir: str) -> None:
     fig.tight_layout()
     fig.savefig(os.path.join(save_dir, "training_curves.png"), dpi=150)
     plt.close(fig)
+
+
+def add_standard_args(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_argument_group("standard_args")
+    group.add_argument("--model", type=str, required=True)
+    group.add_argument("--dataset", type=str, required=True)
+    group.add_argument("--steps", type=int, default=15)
+    group.add_argument("--batch-size", type=int, default=32, dest="batch_size")
+    group.add_argument("--lr", type=float, default=1e-6)
+    group.add_argument("--save-dir", type=str, default="results/sft")
+    group.add_argument("--eval-every-n-steps", type=int, default=1, dest="eval_every_n_steps")
+    group.add_argument("--grad-accum-steps", type=int, default=1, dest="grad_accum_steps")
+    group.add_argument("--max-eval-tokens", type=int, default=256, dest="max_eval_tokens")
+    group.add_argument("--test-limit", type=int, default=None, dest="test_limit")
