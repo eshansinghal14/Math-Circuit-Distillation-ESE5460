@@ -6,7 +6,7 @@ import argparse
 import os
 import sys
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Dict, List, Optional
 
@@ -16,8 +16,7 @@ from new_utils import DataLoader, eval_model
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from distillation import kl_loss
-from training.utils import add_standard_args, make_optimizer, save_checkpoint, save_curves, save_history
+from training.utils import add_standard_args, kl_loss, make_optimizer, save_checkpoint, save_curves, save_history
 
 from utils import (
     DIR_ROOT,
@@ -52,6 +51,7 @@ class StandardKDConfig:
     save_dir: str = "results/standard_kd"
     eval_every_n_steps: int = 1
     grad_accum_steps: int = 1
+    eval_datasets: List[str] = field(default_factory=list)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -91,17 +91,28 @@ class StandardKDTrainer:
             collate_fn=partial(collate_fn, pad_id=self.tokenizer.eos_token_id),
         )
 
+        self.extra_test_datasets: Dict[str, PromptAnswerDataset] = {}
+        for ds in config.eval_datasets:
+            _, ds_test_data = load_data(ds)
+            self.extra_test_datasets[ds] = PromptAnswerDataset(ds, ds_test_data, self.tokenizer)
+
         self.optimizer = make_optimizer(self.model, config.learning_rate)
 
         self.history: Dict[str, List] = defaultdict(list)
         self._train_step = 0
 
-    def _eval(self) -> float:
+    def _eval_on(self, model, dataset_name: str, test_dataset: PromptAnswerDataset) -> float:
         cfg = self.config
-        return eval_model(
-            self.model, self.tokenizer, self.test_dataset,
-            cfg.dataset, cfg.batch_size, cfg.max_eval_tokens,
-        )
+        return eval_model(model, self.tokenizer, test_dataset, dataset_name, cfg.batch_size, cfg.max_eval_tokens)
+
+    def _eval(self) -> float:
+        return self._eval_on(self.model, self.config.dataset, self.test_dataset)
+
+    def _eval_teacher(self) -> float:
+        return self._eval_on(self.teacher, self.config.dataset, self.test_dataset)
+
+    def _eval_all_extra(self) -> Dict[str, float]:
+        return {ds: self._eval_on(self.model, ds, td) for ds, td in self.extra_test_datasets.items()}
 
     def train_epoch(self, *, max_steps: Optional[int] = None) -> Dict[str, float]:
         self.model.train()
@@ -160,7 +171,13 @@ class StandardKDTrainer:
         print("Evaluating baseline...")
         baseline_acc = self._eval()
         self.history["student_baseline"] = baseline_acc
-        print(f"  Baseline accuracy: {baseline_acc:.4f}")
+        print(f"  Student baseline accuracy: {baseline_acc:.4f}")
+        teacher_baseline_acc = self._eval_teacher()
+        self.history["teacher_baseline"] = teacher_baseline_acc
+        print(f"  Teacher baseline accuracy: {teacher_baseline_acc:.4f}")
+        for ds, acc in self._eval_all_extra().items():
+            self.history[f"baseline_{ds}"] = acc
+            print(f"  Student baseline [{ds}]: {acc:.4f}")
 
         sample = self.loader.dataset[0]
         print("─" * 60)
@@ -185,7 +202,11 @@ class StandardKDTrainer:
             acc = self._eval()
             self.history["accuracy"].append(acc)
             self.history["accuracy_step"].append(self._train_step)
-            print(f"  Step {self._train_step}/{cfg.steps} | KL={metrics['kl_loss']:.4f} | Acc={acc:.4f}")
+            extra_accs = self._eval_all_extra()
+            for ds, ds_acc in extra_accs.items():
+                self.history[f"accuracy_{ds}"].append(ds_acc)
+            extra_str = "".join(f" | {ds}={a:.4f}" for ds, a in extra_accs.items())
+            print(f"  Step {self._train_step}/{cfg.steps} | KL={metrics['kl_loss']:.4f} | Acc={acc:.4f}{extra_str}")
 
         save_history(self.history, cfg.save_dir)
         save_curves(self.history, cfg.save_dir, loss_key="step_kl_loss", loss_label="KL Loss")
@@ -206,6 +227,8 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--teacher", type=str, required=True)
     group.add_argument("--temperature", type=float, default=2.0)
     group.add_argument("--kl-token-chunk-size", type=int, default=64, dest="kl_token_chunk_size")
+    group.add_argument("--eval-datasets", type=str, nargs="*", default=[], dest="eval_datasets",
+                       metavar="DATASET", help="Additional datasets to evaluate on at every eval step.")
     return parser
 
 
@@ -227,6 +250,7 @@ def main() -> None:
             eval_every_n_steps=args.eval_every_n_steps,
             grad_accum_steps=args.grad_accum_steps,
             max_eval_tokens=args.max_eval_tokens,
+            eval_datasets=args.eval_datasets,
         ),
         train_data,
         test_data,

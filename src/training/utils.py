@@ -8,6 +8,38 @@ import os
 from typing import Any, Dict, List
 
 import torch
+import torch.nn.functional as F
+
+
+def kl_loss(
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    attention_mask: torch.Tensor,
+    temperature: float,
+    token_chunk_size: int = 64,
+) -> torch.Tensor:
+    """KL divergence from teacher to student over all non-padding token positions."""
+    t = temperature
+    vocab = min(student_logits.shape[-1], teacher_logits.shape[-1])
+    student_flat = student_logits[..., :vocab].reshape(-1, vocab)
+    teacher_flat = teacher_logits[..., :vocab].reshape(-1, vocab)
+    valid = attention_mask.reshape(-1).bool().nonzero(as_tuple=False).squeeze(-1)
+    if valid.numel() == 0:
+        return student_logits.sum() * 0.0
+
+    total = student_logits.new_zeros((), dtype=torch.float32)
+    for idx in valid.split(max(1, token_chunk_size)):
+        s_chunk = student_flat.index_select(0, idx.to(student_flat.device)).float()
+        t_chunk = teacher_flat.index_select(0, idx.to(teacher_flat.device)).to(
+            device=s_chunk.device,
+            dtype=torch.float32,
+        )
+        log_p_t = F.log_softmax(t_chunk / t, dim=-1)
+        log_q_s = F.log_softmax(s_chunk / t, dim=-1)
+        p_t = log_p_t.exp()
+        total = total + (p_t * (log_p_t - log_q_s)).sum()
+
+    return total / valid.numel() * (t**2)
 
 
 def make_optimizer(model, lr: float):
