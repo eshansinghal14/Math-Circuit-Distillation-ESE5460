@@ -125,8 +125,9 @@ class ActivationsAnovaKDTrainer:
             temperature=config.temperature,
             teacher_graph_batch_size=config.teacher_graph_batch_size,
             student_graph_batch_size=config.student_graph_batch_size,
-            nodes_per_label=config.nodes_per_label,
-            anova_range_radius=config.anova_range_radius,
+            student_nodes_per_label=config.nodes_per_label,
+            teacher_nodes_per_label=config.nodes_per_label,
+            student_anova_range_radius=config.anova_range_radius,
             graph_loss_type=config.graph_loss_type,
             student_graph_labels=config.graph_node_labels if config.graph_node_labels else None,
             verbose=config.graph_verbose,
@@ -306,7 +307,7 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+", default=[], dest="graph_node_labels", metavar="LABEL",
         help="ANOVA supernode labels, e.g. 'sum units' 'arg1 range'. Pass 'all' for every category.",
     )
-    group.add_argument("--nodes-per-label", "--nodes_per_label", type=int, default=10,
+    group.add_argument("--nodes-per-label", type=int, default=10,
                        dest="nodes_per_label")
     group.add_argument("--anova-range-radius", "--anova_range_radius", type=int, default=0,
                        dest="anova_range_radius")
