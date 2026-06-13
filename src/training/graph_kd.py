@@ -66,6 +66,7 @@ class GraphKDConfig:
     student_graph_batch_size: int = 1
     n_graph_prompts: Optional[int] = None
     graph_verbose: bool = False
+    track_grad_norms: bool = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -156,6 +157,8 @@ class GraphKDTrainer:
         n_steps = 0
         accum_kl = 0.0
         accum_graph = 0.0
+        accum_kl_gnorm = 0.0
+        accum_graph_gnorm = 0.0
         micro_step = 0
 
         self.optimizer.zero_grad()
@@ -179,6 +182,11 @@ class GraphKDTrainer:
             kl_finite = torch.isfinite(kl)
             if kl_finite:
                 kl.backward()
+                if cfg.track_grad_norms:
+                    accum_kl_gnorm += sum(
+                        p.grad.data.norm(2).item() ** 2
+                        for p in self.model.parameters() if p.grad is not None
+                    ) ** 0.5
 
             # ── Graph loss ────────────────────────────────────────────────────
             prompts: List[str] = batch["prompts"]
@@ -209,7 +217,9 @@ class GraphKDTrainer:
             accum_graph += graph_val
 
             if micro_step % grad_accum == 0:
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), _GRAD_CLIP)
+                total_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), _GRAD_CLIP)
+                if cfg.track_grad_norms:
+                    accum_graph_gnorm += float(total_norm)
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
@@ -219,9 +229,15 @@ class GraphKDTrainer:
                 self.history["step_graph_loss"].append(accum_graph)
                 total_kl += accum_kl
                 total_graph += accum_graph
-                print(f"  step {self._train_step} | KL={accum_kl:.4f} | Graph={accum_graph:.4f}")
+                if cfg.track_grad_norms:
+                    gnorm_str = f" | KL_gnorm={accum_kl_gnorm:.4f} | graph_gnorm={accum_graph_gnorm:.4f}"
+                else:
+                    gnorm_str = ""
+                print(f"  step {self._train_step} | KL={accum_kl:.4f} | Graph={accum_graph:.4f}{gnorm_str}")
                 accum_kl = 0.0
                 accum_graph = 0.0
+                accum_kl_gnorm = 0.0
+                accum_graph_gnorm = 0.0
                 n_steps += 1
 
         denom = max(n_steps, 1)
@@ -314,6 +330,8 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--n-graph-prompts", type=int, default=None, dest="n_graph_prompts",
                        help="Max prompts per batch to compute graph loss for (None = all).")
     group.add_argument("--graph-verbose", action="store_true", dest="graph_verbose")
+    group.add_argument("--track-grad-norms", action="store_true", dest="track_grad_norms",
+                       help="Print KL and graph grad norms each step.")
     return parser
 
 
@@ -346,6 +364,7 @@ def main() -> None:
             student_graph_batch_size=args.student_graph_batch_size,
             n_graph_prompts=args.n_graph_prompts,
             graph_verbose=args.graph_verbose,
+            track_grad_norms=args.track_grad_norms,
         ),
         train_data,
         test_data,
