@@ -253,7 +253,12 @@ def load_data(dataset: str, test_limit: Optional[int] = None) -> Tuple[Dict, Dic
 
     def _load(path: str) -> Dict:
         with open(path, encoding="utf-8") as f:
-            return json.load(f)
+            rows = json.load(f)
+        out: Dict[str, Union[int, str]] = {}
+        for row in rows:
+            v = row["a_str"]
+            out[str(row["q_str"])] = int(v) if isinstance(v, (int, bool)) or (isinstance(v, str) and v.lstrip("-").isdigit()) else str(v)
+        return out
 
     train_data = _load(train_path)
     test_data = _load(test_path)
