@@ -6,6 +6,8 @@ import random
 import sys
 from typing import List, Optional
 
+import numpy as np
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from new_utils import DIR_ROOT
 
@@ -51,21 +53,26 @@ def generate_math_dataset(
 
     pairs: List[tuple] = []
 
-    all_pairs: List[tuple] = []
-    for nums in itertools.product(*[range(10**d) for d in digits]):
-        for op in operations:
-            all_pairs.append(build_pair(list(nums), op))
-
     if samples is None:
-        pairs = all_pairs
+        for nums in itertools.product(*[range(10**d) for d in digits]):
+            for op in operations:
+                pairs.append(build_pair(list(nums), op))
         if shuffle:
             random.shuffle(pairs)
     else:
-        if samples > len(all_pairs):
+        total_space = len(operations)
+        for d in digits:
+            total_space *= 10 ** d
+        if samples > total_space:
             raise ValueError(
-                f"Requested {samples} samples but only {len(all_pairs)} unique problems exist."
+                f"Requested {samples} samples but only {total_space} unique problems exist."
             )
-        pairs = random.sample(all_pairs, samples)
+        nums_array = np.column_stack([
+            np.random.randint(0, 10 ** d, size=samples) for d in digits
+        ])
+        ops = [random.choice(operations) for _ in range(samples)]
+        for i in range(samples):
+            pairs.append(build_pair(nums_array[i].tolist(), ops[i]))
 
     rows = [{"q_str": q, "a_str": a} for q, a in pairs]
 
