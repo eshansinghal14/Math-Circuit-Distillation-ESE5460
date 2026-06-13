@@ -9,7 +9,7 @@ from typing import List, Optional
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from new_utils import DIR_ROOT
+from utils import DIR_ROOT
 
 
 def generate_math_dataset(

@@ -272,11 +272,11 @@ def build_shared_context(
         target_args = parse_numeric_args(decoded)
 
         if mlp_input_cache is None and model_name is not None:
-            from graph_loss.neuron_activation_heatmap import _get_anova_dataset_path
             from graph_loss.precompute_mlp_inputs import build_mlp_input_cache as _build_mlp_cache
-            dataset_path = _get_anova_dataset_path()
-            _logger.info("Building MLP input cache for 22_add_tight dataset")
-            mlp_input_cache = _build_mlp_cache(adapter, dataset_path, model_name, batch_size=32)
+            from utils import load_data as _load_data
+            _train_data, _ = _load_data("22_add")
+            _logger.info("Building MLP input cache for 22_add dataset")
+            mlp_input_cache = _build_mlp_cache(adapter, "22_add", model_name, data_dict=_train_data, batch_size=32)
             _logger.info("  Built MLP cache: %d prompts", int(mlp_input_cache.get("meta", {}).get("n_prompts", 0)))
 
         _logger.info("ANOVA-labeling %d pre-selected neurons (layer-by-layer)", ctx.n_neurons)
@@ -298,11 +298,11 @@ def build_shared_context(
         and mlp_input_cache is None
         and model_name is not None
     ):
-        from graph_loss.neuron_activation_heatmap import _get_anova_dataset_path
         from graph_loss.precompute_mlp_inputs import build_mlp_input_cache as _build_mlp_cache
-        dataset_path = _get_anova_dataset_path()
-        _logger.info("Building MLP input cache for arg-node heatmaps (22_add_tight)")
-        mlp_input_cache = _build_mlp_cache(adapter, dataset_path, model_name, batch_size=32)
+        from utils import load_data as _load_data
+        _train_data, _ = _load_data("22_add")
+        _logger.info("Building MLP input cache for arg-node heatmaps (22_add)")
+        mlp_input_cache = _build_mlp_cache(adapter, "22_add", model_name, data_dict=_train_data, batch_size=32)
         _logger.info("  Built MLP cache: %d prompts", int(mlp_input_cache.get("meta", {}).get("n_prompts", 0)))
 
     # Select ANOVA supernodes (DLA excluded here; it is position-specific).

@@ -15,23 +15,7 @@ import torch
 import torch.nn.functional as F
 
 from graph_loss.utils import ActivationWriteResult
-from utils import default_datasets_dir
-from utils.config import DIR_ROOT
-
-
-def _get_anova_dataset_path() -> str:
-    """Return the path to the 22_add_tight dataset used for ANOVA labeling.
-
-    Checks the subdirectory layout (matching load_data convention) first:
-      <datasets>/22_add_tight/train.json
-    Falls back to the legacy flat layout:
-      <datasets>/22_add_tight_all.json
-    """
-    subdir = os.path.join(DIR_ROOT, "datasets", "22_add_tight", "train.json")
-    if os.path.isfile(subdir):
-        return subdir
-    flat = os.path.join(default_datasets_dir(), "22_add_tight_all.json")
-    return flat
+from utils import load_data
 
 
 def _parse_numeric_args(prompt: str) -> tuple[int, ...]:
@@ -337,7 +321,7 @@ def build_neuron_activation_write_result(
     """Return a 2D activation grid for each requested neuron.
 
     If ``mlp_input_cache`` is provided it is used directly.  Otherwise a
-    temporary MLP input cache is built from the hardcoded 22_add_tight dataset.
+    temporary MLP input cache is built from the hardcoded 22_add dataset.
     """
     if isinstance(neuron_locations, torch.Tensor):
         kept_neuron_locations = neuron_locations.detach().cpu()
@@ -346,9 +330,9 @@ def build_neuron_activation_write_result(
 
     if mlp_input_cache is None:
         from graph_loss.precompute_mlp_inputs import build_mlp_input_cache
-        dataset_path = _get_anova_dataset_path()
+        train_data, _ = load_data("22_add")
         model_name = getattr(model.cfg, "model_name", "model")
-        mlp_input_cache = build_mlp_input_cache(model, dataset_path, model_name)
+        mlp_input_cache = build_mlp_input_cache(model, "22_add", model_name, data_dict=train_data)
 
     try:
         return compute_activation_grid_from_mlp_cache(model, kept_neuron_locations, mlp_input_cache)

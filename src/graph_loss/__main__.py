@@ -12,7 +12,7 @@ from graph_loss.frontend_assets.frontend_export import (
 )
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
 from graph_loss.utils import add_graph_build_args
-from new_utils import DIR_ROOT, load_model
+from utils import DIR_ROOT, load_model
 
 
 def main():

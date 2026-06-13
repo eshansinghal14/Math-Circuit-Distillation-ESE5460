@@ -1,8 +1,9 @@
+import json
 import math
 import os
 import random
 import re
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -241,4 +242,23 @@ def collate_fn(examples: List[Dict[str, Any]], pad_id: int) -> Dict[str, Any]:
     }
 
 
-from utils.eval_inference import load_data
+_TRAIN_SPLIT_SIZE = 7000
+
+
+def load_data(dataset: str, test_limit: Optional[int] = None) -> Tuple[Dict, Dict]:
+    """Return (train_data, test_data) dicts for a local dataset under DIR_ROOT/datasets/."""
+    datasets_base = os.path.join(DIR_ROOT, "datasets")
+    train_path = os.path.join(datasets_base, dataset, "train.json")
+    test_path = os.path.join(datasets_base, dataset, "test.json")
+
+    def _load(path: str) -> Dict:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+
+    train_data = _load(train_path)
+    test_data = _load(test_path)
+    if dataset == "gsm8k":
+        train_data = dict(list(train_data.items())[:_TRAIN_SPLIT_SIZE])
+    if test_limit is not None:
+        test_data = dict(list(test_data.items())[:test_limit])
+    return train_data, test_data

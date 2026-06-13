@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
-from new_utils import (
+from utils import (
     DataLoader,
     DIR_ROOT,
     PromptAnswerDataset,
