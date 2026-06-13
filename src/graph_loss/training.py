@@ -42,6 +42,7 @@ class GraphAuxConfig:
     compare_n_tokens: int | None = None
     compare_ans_token: bool = False
     dataset_name: str = "local"
+    use_heatmap_arg_nodes: bool = False
 
 
 def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
@@ -121,6 +122,7 @@ def compute_prompt_graph_loss(
             nodes_per_label=config.student_nodes_per_label,
             dla_model_logits=teacher_dla_logits,
             no_grad_supergraph=True,
+            use_heatmap_arg_nodes=config.use_heatmap_arg_nodes,
         )
     except ValueError as e:
         raise RuntimeError(
@@ -448,6 +450,7 @@ def backward_batch_graph_loss(
                     no_grad_supergraph=True,
                     build_create_graph=False,
                     detach_result=True,
+                    use_heatmap_arg_nodes=config.use_heatmap_arg_nodes,
                 )
             prompt_ids = teacher_adapter.tokenizer(
                 prompt, return_tensors="pt", add_special_tokens=False

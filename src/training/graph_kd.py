@@ -67,6 +67,7 @@ class GraphKDConfig:
     n_graph_prompts: Optional[int] = None
     graph_verbose: bool = False
     track_grad_norms: bool = False
+    use_heatmap_arg_nodes: bool = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -129,6 +130,7 @@ class GraphKDTrainer:
             teacher_nodes_per_label=config.nodes_per_label,
             graph_loss_type=config.graph_loss_type,
             verbose=config.graph_verbose,
+            use_heatmap_arg_nodes=config.use_heatmap_arg_nodes,
         )
 
         self.history: Dict[str, List] = defaultdict(list)
@@ -332,6 +334,11 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--graph-verbose", action="store_true", dest="graph_verbose")
     group.add_argument("--track-grad-norms", action="store_true", dest="track_grad_norms",
                        help="Print KL and graph grad norms each step.")
+    group.add_argument(
+        "--use-heatmap-arg-nodes", "--use_heatmap_arg_nodes",
+        action="store_true", default=False, dest="use_heatmap_arg_nodes",
+        help="Replace inner-product arg-token supernodes with ANOVA range supernodes (anova_range_radius=1).",
+    )
     return parser
 
 
@@ -365,6 +372,7 @@ def main() -> None:
             n_graph_prompts=args.n_graph_prompts,
             graph_verbose=args.graph_verbose,
             track_grad_norms=args.track_grad_norms,
+            use_heatmap_arg_nodes=args.use_heatmap_arg_nodes,
         ),
         train_data,
         test_data,
