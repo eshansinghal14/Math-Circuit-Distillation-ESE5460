@@ -16,11 +16,22 @@ import torch.nn.functional as F
 
 from graph_loss.utils import ActivationWriteResult
 from utils import default_datasets_dir
+from utils.config import DIR_ROOT
 
 
 def _get_anova_dataset_path() -> str:
-    """Return the hardcoded path to the 22_add_tight dataset used for ANOVA labeling."""
-    return os.path.join(default_datasets_dir(), "22_add_tight_all.json")
+    """Return the path to the 22_add_tight dataset used for ANOVA labeling.
+
+    Checks the subdirectory layout (matching load_data convention) first:
+      <datasets>/22_add_tight/train.json
+    Falls back to the legacy flat layout:
+      <datasets>/22_add_tight_all.json
+    """
+    subdir = os.path.join(DIR_ROOT, "datasets", "22_add_tight", "train.json")
+    if os.path.isfile(subdir):
+        return subdir
+    flat = os.path.join(default_datasets_dir(), "22_add_tight_all.json")
+    return flat
 
 
 def _parse_numeric_args(prompt: str) -> tuple[int, ...]:
