@@ -117,6 +117,17 @@ class GraphKDTrainer:
         self.student_adapter = HFLlamaGraphAdapter(self.model, self.tokenizer, _DEVICE)
         self.teacher_adapter = HFLlamaGraphAdapter(self.teacher, self.tokenizer, _DEVICE)
 
+        student_mlp_cache: dict | None = None
+        teacher_mlp_cache: dict | None = None
+        if config.use_heatmap_arg_nodes:
+            from graph_loss.precompute_mlp_inputs import build_mlp_input_cache as _build_mlp_cache
+            student_mlp_cache = _build_mlp_cache(
+                self.student_adapter, config.dataset, config.model, data_dict=train_data
+            )
+            teacher_mlp_cache = _build_mlp_cache(
+                self.teacher_adapter, config.dataset, config.teacher, data_dict=train_data
+            )
+
         # node_labels=None → automatic arg-token + DLA supernodes; no MLP cache needed
         self.graph_config = GraphAuxConfig(
             lambda_graph=config.lambda_graph,
@@ -131,6 +142,8 @@ class GraphKDTrainer:
             graph_loss_type=config.graph_loss_type,
             verbose=config.graph_verbose,
             use_heatmap_arg_nodes=config.use_heatmap_arg_nodes,
+            mlp_input_cache=student_mlp_cache,
+            teacher_mlp_input_cache=teacher_mlp_cache,
         )
 
         self.history: Dict[str, List] = defaultdict(list)

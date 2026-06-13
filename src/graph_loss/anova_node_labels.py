@@ -97,7 +97,7 @@ def build_anova_basis_rules(
     grids = [_axis_values_grid(arg_values, dim) for dim in range(len(arg_values))]
     rules: list[BasisRule] = []
 
-    for dim in range(min(2, len(arg_values))):
+    for dim in range(len(arg_values)):
         arg_name = f"arg{dim + 1}"
         values = grids[dim]
         centers = (

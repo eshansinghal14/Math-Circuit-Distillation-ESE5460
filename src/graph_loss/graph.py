@@ -341,7 +341,13 @@ def select_anova_supernodes(
     node_labels: dict[int, list[str]] = {}
     sum_member_scores: dict[str, dict[int, tuple[float, float, float]]] = {}
 
-    for category in ANOVA_LABEL_CATEGORIES:
+    _base_categories = set(ANOVA_LABEL_CATEGORIES)
+    _extra_categories = (
+        [lbl for lbl in sorted(allowed_labels) if lbl not in _base_categories]
+        if allowed_labels
+        else []
+    )
+    for category in list(ANOVA_LABEL_CATEGORIES) + _extra_categories:
         if allowed_labels is not None and category not in allowed_labels:
             continue
         is_sum_category = category in {"sum range", "sum units"}
