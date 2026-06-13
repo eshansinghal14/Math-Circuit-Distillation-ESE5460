@@ -6,7 +6,7 @@ import argparse
 import os
 import sys
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Dict, List, Optional
 
@@ -72,6 +72,7 @@ class SFTConfig:
     save_dir: str = "results/sft"
     eval_every_n_steps: int = 1
     grad_accum_steps: int = 1
+    eval_datasets: List[str] = field(default_factory=list)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -104,17 +105,25 @@ class SFTTrainer:
             collate_fn=partial(collate_fn, pad_id=self.tokenizer.eos_token_id),
         )
 
+        self.extra_test_datasets: Dict[str, PromptAnswerDataset] = {}
+        for ds in config.eval_datasets:
+            _, ds_test_data = load_data(ds)
+            self.extra_test_datasets[ds] = PromptAnswerDataset(ds, ds_test_data, self.tokenizer)
+
         self.optimizer = make_optimizer(self.model, config.learning_rate)
 
         self.history: Dict[str, List] = defaultdict(list)
         self._train_step = 0
 
-    def _eval(self) -> float:
+    def _eval_on(self, dataset_name: str, test_dataset: PromptAnswerDataset) -> float:
         cfg = self.config
-        return eval_model(
-            self.model, self.tokenizer, self.test_dataset,
-            cfg.dataset, cfg.batch_size, cfg.max_eval_tokens,
-        )
+        return eval_model(self.model, self.tokenizer, test_dataset, dataset_name, cfg.batch_size, cfg.max_eval_tokens)
+
+    def _eval(self) -> float:
+        return self._eval_on(self.config.dataset, self.test_dataset)
+
+    def _eval_all_extra(self) -> Dict[str, float]:
+        return {ds: self._eval_on(ds, td) for ds, td in self.extra_test_datasets.items()}
 
     def train_epoch(self, *, max_steps: Optional[int] = None) -> Dict[str, float]:
         self.model.train()
@@ -167,7 +176,12 @@ class SFTTrainer:
         print("Evaluating baseline...")
         baseline_acc = self._eval()
         self.history["student_baseline"] = baseline_acc
+        self.history["accuracy"].append(baseline_acc)
+        self.history["accuracy_step"].append(0)
         print(f"  Baseline accuracy: {baseline_acc:.4f}")
+        for ds, acc in self._eval_all_extra().items():
+            self.history[f"accuracy_{ds}"].append(acc)
+            print(f"  Baseline [{ds}]: {acc:.4f}")
 
         sample = self.loader.dataset[0]
         print("─" * 60)
@@ -189,7 +203,11 @@ class SFTTrainer:
             acc = self._eval()
             self.history["accuracy"].append(acc)
             self.history["accuracy_step"].append(self._train_step)
-            print(f"  [eval] step {self._train_step}/{cfg.steps} | Acc={acc:.4f}")
+            extra_accs = self._eval_all_extra()
+            for ds, ds_acc in extra_accs.items():
+                self.history[f"accuracy_{ds}"].append(ds_acc)
+            extra_str = "".join(f" | {ds}={a:.4f}" for ds, a in extra_accs.items())
+            print(f"  [eval] step {self._train_step}/{cfg.steps} | Acc={acc:.4f}{extra_str}")
 
         save_history(self.history, cfg.save_dir)
         save_curves(self.history, cfg.save_dir)
@@ -224,6 +242,7 @@ def main() -> None:
             eval_every_n_steps=args.eval_every_n_steps,
             grad_accum_steps=args.grad_accum_steps,
             max_eval_tokens=args.max_eval_tokens,
+            eval_datasets=args.eval_datasets,
         ),
         train_data,
         test_data,
