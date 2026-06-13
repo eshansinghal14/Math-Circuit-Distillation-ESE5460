@@ -355,7 +355,7 @@ def build_parser() -> argparse.ArgumentParser:
                        dest="student_prop_neurons_per_layer")
     group.add_argument("--teacher-graph-batch-size", type=int, default=512,
                        dest="teacher_graph_batch_size")
-    group.add_argument("--student-graph-batch-size", type=int, default=1,
+    group.add_argument("--student-graph-batch-size", type=int, default=128,
                        dest="student_graph_batch_size")
     group.add_argument("--n-graph-prompts", type=int, default=None, dest="n_graph_prompts",
                        help="Max prompts per batch to compute graph loss for (None = all).")
