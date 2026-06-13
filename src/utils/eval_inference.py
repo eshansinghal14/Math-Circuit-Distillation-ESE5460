@@ -1,5 +1,6 @@
 import functools
 import json
+import os
 import random
 from typing import Dict, List, Optional, Tuple
 
@@ -11,7 +12,7 @@ from .answer_parsing import (
     extract_gsm8k_answer,
     extract_svamp_answer,
 )
-from .config import EVAL_MAX_NEW_TOKENS
+from .config import DIR_ROOT, EVAL_MAX_NEW_TOKENS
 from .dataset_json import json_to_prompt_answer_dict
 
 TRAIN_SPLIT_SIZE = 7000
@@ -375,13 +376,13 @@ def load_data(dataset: str, test_limit: Optional[int] = None):
     Handles gsm8k and svamp (HuggingFace) as well as local prefixes (e.g. '22_add').
     For gsm8k the training set is capped at TRAIN_SPLIT_SIZE examples.
     """
-    from .dataset_paths import resolve_train_test_paths
-    from .dataset_json import load_prompt_answer_json
-
     if dataset == "svamp":
         train_data, test_data = load_svamp_train_test_data()
     else:
-        train_path, test_path, _ = resolve_train_test_paths(dataset=dataset, datasets_dir=None)
+        from .dataset_json import load_prompt_answer_json
+        datasets_base = os.path.join(DIR_ROOT, "datasets")
+        train_path = os.path.join(datasets_base, dataset, "train.json")
+        test_path = os.path.join(datasets_base, dataset, "test.json")
         all_train = load_prompt_answer_json(train_path)
         train_data = dict(list(all_train.items())[:TRAIN_SPLIT_SIZE]) if dataset == "gsm8k" else all_train
         test_data = load_prompt_answer_json(test_path)
