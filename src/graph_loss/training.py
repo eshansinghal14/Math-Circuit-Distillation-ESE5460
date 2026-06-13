@@ -108,7 +108,7 @@ def compute_prompt_graph_loss(
     logit_token_ids = cached_teacher.logit_token_ids
     if config.verbose:
         print(
-            f"  [graph] loaded teacher supergraph from cache: "
+            f"  [graph] teacher supergraph ready: "
             f"{len(teacher_supergraph.supernodes)} supernodes"
         )
 
