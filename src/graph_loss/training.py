@@ -6,6 +6,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
+from utils import parse_response
+
 import torch
 
 from graph_loss.create_graph import create_graph
@@ -34,13 +36,12 @@ class GraphAuxConfig:
     mlp_input_cache: dict | None = None
     activation_write_result_cache: dict = field(default_factory=dict)
     graph_loss_type: Literal["jsd", "kld", "mse", "mse-norm", "mse-scale"] = "jsd"
-    student_graph_labels: list[str] | None = None
-    teacher_graph_labels: list[str] | None = None
+    graph_node_labels: list[str] | None = None
     teacher_mlp_input_cache: dict | None = None
     tokens_dla_nodes: bool = False
     compare_n_tokens: int | None = None
     compare_ans_token: bool = False
-    extract_fn: Callable | None = None
+    dataset_name: str = "local"
 
 
 def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
@@ -115,7 +116,7 @@ def compute_prompt_graph_loss(
             detach_result=False,
             skip_logit_attribution=False,
             mlp_input_cache=config.mlp_input_cache,
-            node_labels=config.student_graph_labels or [],
+            node_labels=config.graph_node_labels or [],
             anova_range_radius=config.student_anova_range_radius,
             nodes_per_label=config.student_nodes_per_label,
             dla_model_logits=teacher_dla_logits,
@@ -132,8 +133,8 @@ def compute_prompt_graph_loss(
     # Filter supernodes to only the requested labels (if specified).
     # Supernodes added via explicit flags (DLA, arg-token) are always kept regardless
     # of the ANOVA label whitelist.
-    if config.student_graph_labels is not None:
-        label_set = set(config.student_graph_labels)
+    if config.graph_node_labels is not None:
+        label_set = set(config.graph_node_labels)
         if config.tokens_dla_nodes:
             label_set.add("dla")
         keep_indices = [
@@ -248,7 +249,6 @@ def _kl_per_position(
     student_logits: torch.Tensor,
     temperature: float,
 ) -> torch.Tensor:
-    """KL(teacher || student) per token position. Returns [seq_len] float tensor."""
     vocab = min(teacher_logits.shape[-1], student_logits.shape[-1])
     t_probs = torch.softmax(teacher_logits[..., :vocab] / temperature, dim=-1)
     s_log_probs = torch.log_softmax(student_logits[..., :vocab] / temperature, dim=-1)
@@ -302,20 +302,17 @@ def _compare_tokens_loss_for_prompt(
 
     logit_positions = [pos - 1 for pos in response_positions]
     if config.compare_ans_token:
-        extract_fn = config.extract_fn
-        if extract_fn is None:
-            from utils.answer_parsing import extract_numeric_answer_from_text
-            extract_fn = extract_numeric_answer_from_text
-        # Include the last prompt token so "= <answer>" patterns are visible to extract_fn.
+        extract_fn = lambda text: parse_response(text, config.dataset_name)
+        # Include the last prompt token so "= <answer>" patterns are visible.
         context_start = max(0, response_start - 1)
         full_resp = tokenizer.decode(
             input_ids[context_start:response_end].tolist(), skip_special_tokens=True
         )
-        answer_str = extract_fn(full_resp)
+        answer_val = extract_fn(full_resp)
         selected_positions = None
-        if answer_str is not None:
+        if answer_val is not None:
             response_ids = input_ids[response_start:response_end].tolist()
-            cand_ids = tokenizer(answer_str, add_special_tokens=False)["input_ids"]
+            cand_ids = tokenizer(str(answer_val), add_special_tokens=False)["input_ids"]
             if hasattr(cand_ids, 'tolist'):
                 cand_ids = cand_ids.tolist()
             n_ans = len(cand_ids)
@@ -445,7 +442,7 @@ def backward_batch_graph_loss(
                     temperature=config.temperature,
                     batch_size=config.teacher_graph_batch_size,
                     verbose=config.verbose,
-                    node_labels=config.teacher_graph_labels,
+                    node_labels=config.graph_node_labels,
                     mlp_input_cache=config.teacher_mlp_input_cache,
                     nodes_per_label=config.teacher_nodes_per_label,
                     no_grad_supergraph=True,
