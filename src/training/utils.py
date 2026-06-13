@@ -120,6 +120,15 @@ def save_curves(
     plt.close(fig)
 
 
+def add_kd_args(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_argument_group("kd_args")
+    group.add_argument("--teacher", type=str, required=True)
+    group.add_argument("--temperature", type=float, default=2.0)
+    group.add_argument("--kl-token-chunk-size", type=int, default=64, dest="kl_token_chunk_size")
+    group.add_argument("--eval-datasets", type=str, nargs="*", default=[], dest="eval_datasets",
+                       metavar="DATASET", help="Additional datasets to evaluate on at every eval step.")
+
+
 def add_standard_args(parser: argparse.ArgumentParser) -> None:
     group = parser.add_argument_group("standard_args")
     group.add_argument("--model", type=str, required=True)

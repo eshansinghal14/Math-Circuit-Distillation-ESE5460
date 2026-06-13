@@ -1,9 +1,10 @@
-"""KL-only knowledge distillation — student learns from teacher's output distribution."""
+"""KL + ANOVA-graph distillation — student learns from teacher logits and circuit structure."""
 
 from __future__ import annotations
 
 import argparse
 import os
+import random
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -25,6 +26,8 @@ from new_utils import (
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from graph_loss.hf_adapter import HFLlamaGraphAdapter
+from graph_loss.training import GraphAuxConfig, backward_batch_graph_loss
 from training.utils import add_kd_args, add_standard_args, kl_loss, make_optimizer, save_checkpoint, save_curves, save_history
 
 _DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -38,7 +41,7 @@ _SEED = 42
 
 
 @dataclass
-class StandardKDConfig:
+class ActivationsAnovaKDConfig:
     model: str
     teacher: str
     dataset: str
@@ -48,10 +51,23 @@ class StandardKDConfig:
     temperature: float = 2.0
     kl_token_chunk_size: int = 64
     max_eval_tokens: int = 256
-    save_dir: str = "results/standard_kd"
+    save_dir: str = "results/activations_anova_kd"
     eval_every_n_steps: int = 1
     grad_accum_steps: int = 1
     eval_datasets: List[str] = field(default_factory=list)
+    # graph loss
+    lambda_graph: float = 0.1
+    graph_node_labels: List[str] = field(default_factory=list)
+    teacher_prop_neurons_per_layer: float = 0.1
+    student_prop_neurons_per_layer: float = 0.1
+    nodes_per_label: int = 10
+    anova_range_radius: int = 0
+    graph_loss_type: str = "jsd"
+    top_k_logits: float = 0.95
+    teacher_graph_batch_size: int = 512
+    student_graph_batch_size: int = 1
+    n_graph_prompts: Optional[int] = None
+    graph_verbose: bool = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -59,10 +75,10 @@ class StandardKDConfig:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class StandardKDTrainer:
+class ActivationsAnovaKDTrainer:
     def __init__(
         self,
-        config: StandardKDConfig,
+        config: ActivationsAnovaKDConfig,
         train_data: Dict[str, Any],
         test_data: Dict[str, Any],
     ) -> None:
@@ -98,6 +114,24 @@ class StandardKDTrainer:
 
         self.optimizer = make_optimizer(self.model, config.learning_rate)
 
+        self.student_adapter = HFLlamaGraphAdapter(self.model, self.tokenizer, _DEVICE)
+        self.teacher_adapter = HFLlamaGraphAdapter(self.teacher, self.tokenizer, _DEVICE)
+
+        self.graph_config = GraphAuxConfig(
+            lambda_graph=config.lambda_graph,
+            teacher_prop_neurons_per_layer=config.teacher_prop_neurons_per_layer,
+            student_prop_neurons_per_layer=config.student_prop_neurons_per_layer,
+            top_k_logits=config.top_k_logits,
+            temperature=config.temperature,
+            teacher_graph_batch_size=config.teacher_graph_batch_size,
+            student_graph_batch_size=config.student_graph_batch_size,
+            nodes_per_label=config.nodes_per_label,
+            anova_range_radius=config.anova_range_radius,
+            graph_loss_type=config.graph_loss_type,
+            student_graph_labels=config.graph_node_labels if config.graph_node_labels else None,
+            verbose=config.graph_verbose,
+        )
+
         self.history: Dict[str, List] = defaultdict(list)
         self._train_step = 0
 
@@ -118,9 +152,13 @@ class StandardKDTrainer:
         self.model.train()
         cfg = self.config
         grad_accum = cfg.grad_accum_steps
-        total_loss = 0.0
+        use_graph = bool(cfg.graph_node_labels)
+
+        total_kl = 0.0
+        total_graph = 0.0
         n_steps = 0
-        accum_loss = 0.0
+        accum_kl = 0.0
+        accum_graph = 0.0
         micro_step = 0
 
         self.optimizer.zero_grad()
@@ -130,25 +168,50 @@ class StandardKDTrainer:
             input_ids = batch["input_ids"].to(_DEVICE)
             attention_mask = batch["attention_mask"].to(_DEVICE)
 
+            # ── KL loss ───────────────────────────────────────────────────────
             student_logits = self.model(input_ids, attention_mask=attention_mask).logits
 
             with torch.no_grad():
                 teacher_logits = self.teacher(input_ids, attention_mask=attention_mask).logits
 
-            loss = kl_loss(
+            kl = kl_loss(
                 student_logits, teacher_logits, attention_mask,
                 cfg.temperature, cfg.kl_token_chunk_size,
             ) / grad_accum
 
-            if not torch.isfinite(loss):
-                micro_step += 1
+            kl_finite = torch.isfinite(kl)
+            if kl_finite:
+                kl.backward()
+
+            # ── Graph loss ────────────────────────────────────────────────────
+            graph_val = 0.0
+            if use_graph:
+                prompts: List[str] = batch["prompts"]
+                answers = batch["answers"]
+                if cfg.n_graph_prompts is not None and cfg.n_graph_prompts < len(prompts):
+                    sel = random.sample(range(len(prompts)), cfg.n_graph_prompts)
+                    prompts = [prompts[i] for i in sel]
+                    answers = [answers[i] for i in sel]
+                graph_loss_tensor, _ = backward_batch_graph_loss(
+                    prompts=prompts,
+                    answers=answers,
+                    student_adapter=self.student_adapter,
+                    teacher_adapter=self.teacher_adapter,
+                    config=self.graph_config,
+                    device=_DEVICE,
+                    loss_scale=cfg.lambda_graph / grad_accum,
+                )
+                graph_val = float(graph_loss_tensor.item())
+
+            micro_step += 1
+
+            if not kl_finite:
                 if micro_step % grad_accum == 0:
                     self.optimizer.zero_grad()
                 continue
 
-            loss.backward()
-            accum_loss += float(loss.item())
-            micro_step += 1
+            accum_kl += float(kl.item())
+            accum_graph += graph_val
 
             if micro_step % grad_accum == 0:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), _GRAD_CLIP)
@@ -157,13 +220,17 @@ class StandardKDTrainer:
 
                 self._train_step += 1
                 self.history["train_step"].append(self._train_step)
-                self.history["step_kl_loss"].append(accum_loss)
-                total_loss += accum_loss
-                print(f"  step {self._train_step} | KL={accum_loss:.4f}")
-                accum_loss = 0.0
+                self.history["step_kl_loss"].append(accum_kl)
+                self.history["step_graph_loss"].append(accum_graph)
+                total_kl += accum_kl
+                total_graph += accum_graph
+                print(f"  step {self._train_step} | KL={accum_kl:.4f} | Graph={accum_graph:.4f}")
+                accum_kl = 0.0
+                accum_graph = 0.0
                 n_steps += 1
 
-        return {"kl_loss": total_loss / max(n_steps, 1)}
+        denom = max(n_steps, 1)
+        return {"kl_loss": total_kl / denom, "graph_loss": total_graph / denom}
 
     def train(self) -> Dict[str, List]:
         cfg = self.config
@@ -191,8 +258,9 @@ class StandardKDTrainer:
         print("─" * 60)
 
         print(
-            f"KD | student={cfg.model} | teacher={cfg.teacher} | dataset={cfg.dataset}"
+            f"ANOVA-KD | student={cfg.model} | teacher={cfg.teacher} | dataset={cfg.dataset}"
             f" | steps={cfg.steps} | lr={cfg.learning_rate} | temp={cfg.temperature}"
+            f" | lambda_graph={cfg.lambda_graph} | labels={cfg.graph_node_labels}"
         )
 
         while self._train_step < cfg.steps:
@@ -201,6 +269,7 @@ class StandardKDTrainer:
             if not metrics:
                 break
             self.history["kl_loss"].append(metrics["kl_loss"])
+            self.history["graph_loss"].append(metrics["graph_loss"])
 
             acc = self._eval()
             self.history["accuracy"].append(acc)
@@ -224,9 +293,40 @@ class StandardKDTrainer:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="KL-only distillation on GSM8K / SVAMP / local datasets.")
+    parser = argparse.ArgumentParser(
+        description="KL + ANOVA-graph distillation on GSM8K / SVAMP / local datasets."
+    )
     add_standard_args(parser)
     add_kd_args(parser)
+    group = parser.add_argument_group("kd_graph_args")
+    # graph loss
+    group.add_argument("--lambda-graph", type=float, default=0.1, dest="lambda_graph")
+    group.add_argument(
+        "--graph-node-labels",
+        nargs="+", default=[], dest="graph_node_labels", metavar="LABEL",
+        help="ANOVA supernode labels, e.g. 'sum units' 'arg1 range'. Pass 'all' for every category.",
+    )
+    group.add_argument("--nodes-per-label", "--nodes_per_label", type=int, default=10,
+                       dest="nodes_per_label")
+    group.add_argument("--anova-range-radius", "--anova_range_radius", type=int, default=0,
+                       dest="anova_range_radius")
+    group.add_argument(
+        "--graph-loss-type", type=str, default="jsd", dest="graph_loss_type",
+        choices=["jsd", "kld", "mse", "mse-norm", "mse-scale"],
+    )
+    group.add_argument("--top-k-logits", "--top_k_logits", type=float, default=0.95,
+                       dest="top_k_logits")
+    group.add_argument("--teacher-prop-neurons", type=float, default=0.1,
+                       dest="teacher_prop_neurons_per_layer")
+    group.add_argument("--student-prop-neurons", type=float, default=0.1,
+                       dest="student_prop_neurons_per_layer")
+    group.add_argument("--teacher-graph-batch-size", type=int, default=512,
+                       dest="teacher_graph_batch_size")
+    group.add_argument("--student-graph-batch-size", type=int, default=1,
+                       dest="student_graph_batch_size")
+    group.add_argument("--n-graph-prompts", type=int, default=None, dest="n_graph_prompts",
+                       help="Max prompts per batch to compute graph loss for (None = all).")
+    group.add_argument("--graph-verbose", action="store_true", dest="graph_verbose")
     return parser
 
 
@@ -234,8 +334,8 @@ def main() -> None:
     args = build_parser().parse_args()
     train_data, test_data = load_data(args.dataset, test_limit=args.test_limit)
     print(f"Train: {len(train_data)} | Test: {len(test_data)}")
-    trainer = StandardKDTrainer(
-        StandardKDConfig(
+    trainer = ActivationsAnovaKDTrainer(
+        ActivationsAnovaKDConfig(
             model=args.model,
             teacher=args.teacher,
             dataset=args.dataset,
@@ -249,6 +349,18 @@ def main() -> None:
             grad_accum_steps=args.grad_accum_steps,
             max_eval_tokens=args.max_eval_tokens,
             eval_datasets=args.eval_datasets,
+            lambda_graph=args.lambda_graph,
+            graph_node_labels=args.graph_node_labels,
+            nodes_per_label=args.nodes_per_label,
+            anova_range_radius=args.anova_range_radius,
+            graph_loss_type=args.graph_loss_type,
+            top_k_logits=args.top_k_logits,
+            teacher_prop_neurons_per_layer=args.teacher_prop_neurons_per_layer,
+            student_prop_neurons_per_layer=args.student_prop_neurons_per_layer,
+            teacher_graph_batch_size=args.teacher_graph_batch_size,
+            student_graph_batch_size=args.student_graph_batch_size,
+            n_graph_prompts=args.n_graph_prompts,
+            graph_verbose=args.graph_verbose,
         ),
         train_data,
         test_data,
