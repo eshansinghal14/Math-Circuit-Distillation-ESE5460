@@ -28,6 +28,8 @@ def generate_math_dataset(
 
     prefix = prompt or ""
 
+    _OP_FN = {"+": lambda a, b: a + b, "-": lambda a, b: a - b, "*": lambda a, b: a * b}
+
     def build_pair(nums: List[int], op: str):
         if spaces:
             parts = [str(nums[0])] + [f" {op} {n}" for n in nums[1:]]
@@ -37,7 +39,14 @@ def generate_math_dataset(
             parts = [str(nums[0])] + [f"{op}{n}" for n in nums[1:]]
             expr = "".join(parts)
             q_str = prefix + expr + "="
-        a_str = str(eval(expr.replace(" ", "")))
+        fn = _OP_FN.get(op)
+        if fn is not None:
+            result = nums[0]
+            for n in nums[1:]:
+                result = fn(result, n)
+            a_str = str(result)
+        else:
+            a_str = str(eval(expr.replace(" ", "")))
         return q_str, a_str
 
     pairs: List[tuple] = []
