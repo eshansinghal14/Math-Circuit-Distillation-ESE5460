@@ -12,7 +12,6 @@ from graph_loss.create_graph import create_graph
 from graph_loss.graph import SuperGraph, normalize_matrix
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
 from graph_loss.loss import compute_graph_loss
-from graph_loss.teacher_data_cache import TeacherDataCache
 
 
 @dataclass
@@ -265,59 +264,6 @@ def compute_prompt_graph_loss(
     return graph_loss, metrics
 
 
-def _load_cached_teacher(
-    cache: TeacherDataCache,
-    prompt: str,
-    answer: int,
-    device: torch.device,
-) -> CachedTeacherPromptData:
-    """Load one prompt's teacher artifacts from disk and reconstruct a SuperGraph."""
-    from graph_loss.graph import SuperGraph  # local import to avoid circular
-
-    try:
-        sg_data = cache.load_teacher_supergraph(prompt, answer)
-    except (KeyError, FileNotFoundError) as e:
-        raise RuntimeError(
-            "Teacher data cache is enabled but required graph data is missing for "
-            f"prompt={prompt!r}, answer={answer!r}. Regenerate the cache for this "
-            "dataset/tokenizer or remove --teacher-data-cache."
-        ) from e
-
-    if "supernode_labels" not in sg_data:
-        raise RuntimeError(
-            f"Teacher cache file for prompt={prompt!r}, answer={answer!r} is missing "
-            "'supernode_labels'. Regenerate the teacher cache with the current "
-            "generate_teacher_data.py."
-        )
-
-    logit_token_ids: torch.Tensor | None = sg_data.get("logit_token_ids")
-    supergraph = SuperGraph(
-        supernode_adjacency_matrix=sg_data["supernode_adjacency_matrix"].to(device),
-        supernodes=sg_data["supernodes"],
-        supernode_labels=sg_data.get("supernode_labels"),
-    )
-
-    # Load teacher logits at the last prompt-token position so that the student's
-    # DLA supernode can be selected against the teacher's output distribution
-    # instead of the student's own (which is wrong early in training and shifts
-    # every step as the student learns).
-    teacher_dla_logits: torch.Tensor | None = None
-    try:
-        logits_record = cache._load_logits_record(prompt, answer)
-        prompt_len = int(logits_record.get("prompt_len", logits_record["input_ids"].numel()))
-        full_logits: torch.Tensor = logits_record["logits"]  # [seq_len, vocab]
-        if prompt_len > 0 and full_logits.shape[0] >= prompt_len:
-            teacher_dla_logits = full_logits[prompt_len - 1].to(device=device)
-    except Exception:
-        pass  # fall back to student logits in compute_prompt_graph_loss
-
-    return CachedTeacherPromptData(
-        supergraph=supergraph,
-        logit_token_ids=logit_token_ids,
-        teacher_dla_logits=teacher_dla_logits,
-    )
-
-
 def _live_teacher_to_cached(
     result: "GraphPipelineResult",
     device: torch.device,
@@ -498,28 +444,15 @@ def backward_batch_graph_loss(
     config: GraphAuxConfig,
     device: torch.device,
     loss_scale: float,
-    teacher_cache: TeacherDataCache | None = None,
-    teacher_adapter: HFLlamaGraphAdapter | None = None,
+    teacher_adapter: HFLlamaGraphAdapter,
     answers: list[int],
     on_prompt_done: Callable[[int, int], None] | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Compute and backprop graph loss one prompt at a time.
 
-    Accepts either ``teacher_cache`` (pre-generated, loaded from disk) or
-    ``teacher_adapter`` (live, built on-the-fly via build_teacher_supergraph).
-    Exactly one must be provided.
-
     Processes each prompt's attribution graph immediately and backprops before
     building the next, keeping peak memory bounded to a single prompt.
     """
-    if teacher_cache is None and teacher_adapter is None:
-        raise RuntimeError(
-            "backward_batch_graph_loss requires either teacher_cache or teacher_adapter."
-        )
-    if config.compare_n_tokens is not None and teacher_adapter is None:
-        raise RuntimeError(
-            "compare_n_tokens requires a live teacher adapter (--teacher-data-cache is incompatible)."
-        )
     if not prompts:
         return torch.tensor(0.0, device=device), {}
 
@@ -546,15 +479,10 @@ def backward_batch_graph_loss(
             detached_losses.append(prompt_loss)  # already detached
             graph_backward_prompts += 1
         else:
-            if teacher_cache is not None:
-                cached = _load_cached_teacher(teacher_cache, prompt, answers[i], device)
-            else:
-                from graph_loss.generate_teacher_data import generate_teacher_sample
-
-                cached = generate_teacher_sample(
-                    teacher_adapter,  # type: ignore[arg-type]
+            with torch.enable_grad():
+                teacher_result = create_graph(
+                    teacher_adapter,
                     prompt,
-                    answers[i],
                     prop_neurons_per_layer=config.teacher_prop_neurons_per_layer,
                     top_k_logits=config.top_k_logits,
                     temperature=config.temperature,
@@ -563,7 +491,30 @@ def backward_batch_graph_loss(
                     node_labels=config.teacher_graph_labels,
                     mlp_input_cache=config.teacher_mlp_input_cache,
                     nodes_per_label=config.teacher_nodes_per_label,
+                    no_grad_supergraph=True,
+                    build_create_graph=False,
+                    detach_result=True,
                 )
+            prompt_ids = teacher_adapter.tokenizer(
+                prompt, return_tensors="pt", add_special_tokens=False
+            )["input_ids"].squeeze(0)
+            answer_ids = teacher_adapter.tokenizer(
+                str(answers[i]) + teacher_adapter.tokenizer.eos_token,
+                return_tensors="pt", add_special_tokens=False,
+            )["input_ids"].squeeze(0)
+            full_input_ids = torch.cat([prompt_ids, answer_ids]).to(device)
+            prompt_len = int(prompt_ids.numel())
+            with torch.no_grad():
+                full_logits = teacher_adapter.model(full_input_ids.unsqueeze(0)).logits.squeeze(0).detach().cpu()
+            teacher_dla_logits: torch.Tensor | None = None
+            if prompt_len > 0 and full_logits.shape[0] >= prompt_len:
+                teacher_dla_logits = full_logits[prompt_len - 1].to(device)
+            cached = CachedTeacherPromptData(
+                supergraph=teacher_result.supergraph,
+                logit_token_ids=teacher_result.graph.logit_token_ids.to(device),
+                teacher_dla_logits=teacher_dla_logits,
+            )
+            del teacher_result
             prompt_loss, prompt_metrics = compute_prompt_graph_loss(
                 prompt=prompt,
                 student_adapter=student_adapter,
