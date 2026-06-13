@@ -130,27 +130,40 @@ class ActivationsAnovaKDTrainer:
             student_anova_range_radius=config.anova_range_radius,
             graph_loss_type=config.graph_loss_type,
             student_graph_labels=config.graph_node_labels if config.graph_node_labels else None,
+            teacher_graph_labels=config.graph_node_labels if config.graph_node_labels else None,
             verbose=config.graph_verbose,
         )
 
         if config.graph_node_labels:
             from graph_loss.precompute_mlp_inputs import build_mlp_input_cache
-            # Use the training dataset path as the cache key so the cache is
-            # reused across runs on the same model+dataset combination.
+            # Use training dataset path as cache key (reused across runs on same model+dataset).
             anova_cache_key = os.path.join(
                 DIR_ROOT, "datasets", config.dataset, "train.json"
             )
+
             print("Building student MLP input cache for ANOVA labeling...")
-            mlp_cache = build_mlp_input_cache(
+            student_mlp_cache = build_mlp_input_cache(
                 self.student_adapter,
                 anova_cache_key,
                 config.model,
                 data_dict=train_data,
                 batch_size=32,
             )
-            self.graph_config.mlp_input_cache = mlp_cache
-            n_prompts = int(mlp_cache.get("meta", {}).get("n_prompts", 0))
-            print(f"  MLP cache ready: {n_prompts} prompts")
+            self.graph_config.mlp_input_cache = student_mlp_cache
+            n_prompts = int(student_mlp_cache.get("meta", {}).get("n_prompts", 0))
+            print(f"  Student MLP cache ready: {n_prompts} prompts")
+
+            print("Building teacher MLP input cache for ANOVA labeling...")
+            teacher_mlp_cache = build_mlp_input_cache(
+                self.teacher_adapter,
+                anova_cache_key,
+                config.teacher,
+                data_dict=train_data,
+                batch_size=32,
+            )
+            self.graph_config.teacher_mlp_input_cache = teacher_mlp_cache
+            n_prompts = int(teacher_mlp_cache.get("meta", {}).get("n_prompts", 0))
+            print(f"  Teacher MLP cache ready: {n_prompts} prompts")
 
         self.history: Dict[str, List] = defaultdict(list)
         self._train_step = 0

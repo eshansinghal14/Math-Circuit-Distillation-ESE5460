@@ -48,6 +48,8 @@ class GraphAuxConfig:
     activation_write_result_cache: dict = field(default_factory=dict)
     graph_loss_type: Literal["jsd", "kld", "mse", "mse-norm", "mse-scale"] = "jsd"
     student_graph_labels: list[str] | None = None
+    teacher_graph_labels: list[str] | None = None
+    teacher_mlp_input_cache: dict | None = None
     tokens_dla_nodes: bool = False
     compare_n_tokens: int | None = None
     compare_ans_token: bool = False
@@ -558,6 +560,9 @@ def backward_batch_graph_loss(
                     temperature=config.temperature,
                     batch_size=config.teacher_graph_batch_size,
                     verbose=config.verbose,
+                    node_labels=config.teacher_graph_labels,
+                    mlp_input_cache=config.teacher_mlp_input_cache,
+                    nodes_per_label=config.teacher_nodes_per_label,
                 )
             prompt_loss, prompt_metrics = compute_prompt_graph_loss(
                 prompt=prompt,
