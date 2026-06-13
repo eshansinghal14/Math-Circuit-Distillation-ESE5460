@@ -208,42 +208,63 @@ def _batch_explained_variance_scores(acts_flat: torch.Tensor, masks_flat: torch.
 
 
 def build_gpu_anova_state(rules: list[BasisRule], device: torch.device) -> dict:
-    """Pre-allocate GPU tensors and precompute fixed category mappings for the ANOVA pipeline.
+    """Pre-allocate GPU tensors and precompute category mappings for the ANOVA pipeline.
+
+    Derives the category list dynamically from the supplied rules so that datasets
+    with more than 2 numeric arguments (e.g. "arg3 range", "arg3 units") work without
+    any changes to the fixed ANOVA_LABEL_CATEGORIES constant.
+
     Call once before the batch loop; pass the result to gpu_label_activation_heatmaps.
     """
-    C = len(ANOVA_LABEL_CATEGORIES)
-    B = len(BASE_ANOVA_LABEL_CATEGORIES)
-    cat_to_idx = {c: i for i, c in enumerate(ANOVA_LABEL_CATEGORIES)}
+    # Build an ordered category list: known categories first (preserving their order),
+    # then any extra categories introduced by rules (e.g. "arg3 range").
+    _known = set(ANOVA_LABEL_CATEGORIES)
+    _seen_extra: dict[str, None] = {}  # ordered-set via dict
+    for r in rules:
+        if r.category not in _known:
+            _seen_extra[r.category] = None
+    all_categories: list[str] = list(ANOVA_LABEL_CATEGORIES) + list(_seen_extra)
+
+    # Base categories: original base list + the same extra dynamic categories
+    # (dynamic arg-range/unit categories are base-level for specificity purposes).
+    base_categories: list[str] = list(BASE_ANOVA_LABEL_CATEGORIES) + list(_seen_extra)
+
+    C = len(all_categories)
+    B = len(base_categories)
+    cat_to_idx = {c: i for i, c in enumerate(all_categories)}
 
     masks_flat = torch.stack([r.mask.detach().float().flatten() for r in rules]).to(device)  # [R, M]
 
-    # [R] — which ANOVA_LABEL_CATEGORIES column each rule belongs to
+    # [R] — which all_categories column each rule belongs to
     rule_cat_ids = torch.tensor(
         [cat_to_idx[r.category] for r in rules], dtype=torch.long, device=device
     )
 
-    # [B] — indices into ANOVA_LABEL_CATEGORIES for the B base categories
+    # [B] — indices into all_categories for the B base categories
     base_to_all = torch.tensor(
-        [cat_to_idx[c] for c in BASE_ANOVA_LABEL_CATEGORIES], dtype=torch.long, device=device
+        [cat_to_idx[c] for c in base_categories], dtype=torch.long, device=device
     )
 
-    # Fixed label string per category slot (empty string = category not present in these rules)
+    # Label string per category slot (empty string = category not present in these rules)
     cat_label_strs: list[str] = [""] * C
     for rule in rules:
         cat_label_strs[cat_to_idx[rule.category]] = rule.label
 
-    # Composite "arg1 units and arg2 units"
-    arg1u_idx = cat_to_idx["arg1 units"]
-    arg2u_idx = cat_to_idx["arg2 units"]
-    combo_idx = cat_to_idx["arg1 units and arg2 units"]
-    has_combo = bool(cat_label_strs[arg1u_idx] and cat_label_strs[arg2u_idx])
+    # Composite "arg1 units and arg2 units" (only valid for 2-arg problems)
+    arg1u_idx = cat_to_idx.get("arg1 units", -1)
+    arg2u_idx = cat_to_idx.get("arg2 units", -1)
+    combo_idx = cat_to_idx.get("arg1 units and arg2 units", -1)
+    has_combo = bool(
+        arg1u_idx >= 0 and arg2u_idx >= 0 and combo_idx >= 0
+        and cat_label_strs[arg1u_idx] and cat_label_strs[arg2u_idx]
+    )
     if has_combo:
         cat_label_strs[combo_idx] = f"{cat_label_strs[arg1u_idx]} and {cat_label_strs[arg2u_idx]}"
 
     # Base-category columns that are competitors for the combo specificity
     combo_excluded = CATEGORY_COMPONENTS.get("arg1 units and arg2 units", set())
     combo_competitor_cols = torch.tensor(
-        [i for i, c in enumerate(BASE_ANOVA_LABEL_CATEGORIES) if c not in combo_excluded],
+        [i for i, c in enumerate(base_categories) if c not in combo_excluded],
         dtype=torch.long, device=device,
     )
 
@@ -256,6 +277,8 @@ def build_gpu_anova_state(rules: list[BasisRule], device: torch.device) -> dict:
         "arg1u_idx": arg1u_idx, "arg2u_idx": arg2u_idx, "combo_idx": combo_idx,
         "has_combo": has_combo,
         "combo_competitor_cols": combo_competitor_cols,
+        "all_categories": all_categories,
+        "base_categories": base_categories,
     }
 
 
@@ -289,6 +312,8 @@ def gpu_label_activation_heatmaps(
     combo_idx        = gpu_state["combo_idx"]
     has_combo        = gpu_state["has_combo"]
     combo_cols       = gpu_state["combo_competitor_cols"]
+    all_categories   = gpu_state["all_categories"]
+    base_categories  = gpu_state["base_categories"]
     dev              = acts_flat_gpu.device
 
     # --- GPU: explained variance [N, R] ---
@@ -337,31 +362,31 @@ def gpu_label_activation_heatmaps(
         row_bs = bs[n]
 
         category_scores_n = {
-            ANOVA_LABEL_CATEGORIES[c]: row_cs[c]
+            all_categories[c]: row_cs[c]
             for c in range(C)
             if cat_label_strs[c] and row_cs[c] > 0.0
         }
         category_specificity_n = {
-            BASE_ANOVA_LABEL_CATEGORIES[b]: row_bs[b]
+            base_categories[b]: row_bs[b]
             for b in range(B)
-            if BASE_ANOVA_LABEL_CATEGORIES[b] in category_scores_n
+            if base_categories[b] in category_scores_n
         }
         if has_combo and "arg1 units and arg2 units" in category_scores_n:
             category_specificity_n["arg1 units and arg2 units"] = combo_s[n]
 
         labels = [
             cat_label_strs[c]
-            for c, cat in enumerate(ANOVA_LABEL_CATEGORIES)
+            for c, cat in enumerate(all_categories)
             if cat in category_scores_n
         ]
         scores_n = {
             cat_label_strs[c]: row_cs[c]
-            for c, cat in enumerate(ANOVA_LABEL_CATEGORIES)
+            for c, cat in enumerate(all_categories)
             if cat in category_scores_n
         }
         categories_n = {
             cat: cat_label_strs[c]
-            for c, cat in enumerate(ANOVA_LABEL_CATEGORIES)
+            for c, cat in enumerate(all_categories)
             if cat in category_scores_n
         }
 
