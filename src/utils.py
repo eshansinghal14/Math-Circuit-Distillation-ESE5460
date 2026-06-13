@@ -109,17 +109,30 @@ def load_model(model_name):
         _logged_in = True
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    _is_local = model_name.startswith("/") or model_name.startswith(".") or os.path.isdir(model_name)
-    local_kwargs = {"local_files_only": True} if _is_local else {}
+
+    # Resolve model path: explicit local path → HF hub → DIR_ROOT/<model_name>
+    _explicit_local = model_name.startswith("/") or model_name.startswith(".") or os.path.isdir(model_name)
+    if _explicit_local:
+        load_path = model_name
+        local_kwargs = {"local_files_only": True}
+    else:
+        dir_root_path = os.path.join(DIR_ROOT, model_name)
+        if os.path.isdir(dir_root_path):
+            load_path = dir_root_path
+            local_kwargs = {"local_files_only": True}
+        else:
+            load_path = model_name
+            local_kwargs = {}
+
     _prev_tqdm = os.environ.get("TQDM_DISABLE")
     os.environ["TQDM_DISABLE"] = "1"
     try:
         model = AutoModelForCausalLM.from_pretrained(
-            model_name,
+            load_path,
             torch_dtype=torch.bfloat16,
             **local_kwargs,
         ).to(device)
-        tokenizer = AutoTokenizer.from_pretrained(model_name, **local_kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(load_path, **local_kwargs)
     finally:
         if _prev_tqdm is None:
             os.environ.pop("TQDM_DISABLE", None)
