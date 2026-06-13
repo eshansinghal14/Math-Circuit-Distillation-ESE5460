@@ -88,16 +88,33 @@ def save_curves(
     ce_series = history.get(loss_key, [])
     acc_series = history.get("accuracy", [])
     acc_steps = history.get("accuracy_step", list(range(1, len(acc_series) + 1)))
+    extra_acc_keys = sorted(k for k in history if k.startswith("accuracy_") and k != "accuracy_step")
+    use_legend = bool(extra_acc_keys)
     if not steps:
         return
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
     axes[0].plot(steps[: len(ce_series)], ce_series, marker="o", markersize=2)
     axes[0].set_title(loss_label)
     axes[0].grid(True, alpha=0.3)
-    axes[1].plot(acc_steps[: len(acc_series)], acc_series, marker="o", markersize=2)
+    if acc_series:
+        axes[1].plot(
+            acc_steps[: len(acc_series)], acc_series,
+            marker="o", markersize=2,
+            label="main" if use_legend else None,
+        )
+    for key in extra_acc_keys:
+        ds_name = key[len("accuracy_"):]
+        extra_series = history.get(key, [])
+        if extra_series:
+            axes[1].plot(
+                acc_steps[: len(extra_series)], extra_series,
+                marker="o", markersize=2, label=ds_name,
+            )
     axes[1].set_title("Accuracy")
     axes[1].set_ylim(0, 1)
     axes[1].grid(True, alpha=0.3)
+    if use_legend:
+        axes[1].legend(fontsize=7, loc="lower right")
     fig.tight_layout()
     fig.savefig(os.path.join(save_dir, "training_curves.png"), dpi=150)
     plt.close(fig)

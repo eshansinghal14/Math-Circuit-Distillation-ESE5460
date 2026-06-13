@@ -159,6 +159,7 @@ class StandardKDTrainer:
                 self.history["train_step"].append(self._train_step)
                 self.history["step_kl_loss"].append(accum_loss)
                 total_loss += accum_loss
+                print(f"  step {self._train_step} | KL={accum_loss:.4f}")
                 accum_loss = 0.0
                 n_steps += 1
 
@@ -208,7 +209,7 @@ class StandardKDTrainer:
             for ds, ds_acc in extra_accs.items():
                 self.history[f"accuracy_{ds}"].append(ds_acc)
             extra_str = "".join(f" | {ds}={a:.4f}" for ds, a in extra_accs.items())
-            print(f"  Step {self._train_step}/{cfg.steps} | KL={metrics['kl_loss']:.4f} | Acc={acc:.4f}{extra_str}")
+            print(f"  [eval] step {self._train_step}/{cfg.steps} | Acc={acc:.4f}{extra_str}")
 
         save_history(self.history, cfg.save_dir)
         save_curves(self.history, cfg.save_dir, loss_key="step_kl_loss", loss_label="KL Loss")

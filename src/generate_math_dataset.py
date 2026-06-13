@@ -3,9 +3,11 @@ import itertools
 import json
 import os
 import random
+import sys
 from typing import List, Optional
 
-_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from new_utils import DIR_ROOT
 
 
 def generate_math_dataset(
@@ -40,36 +42,25 @@ def generate_math_dataset(
 
     pairs: List[tuple] = []
 
+    all_pairs: List[tuple] = []
+    for nums in itertools.product(*[range(10**d) for d in digits]):
+        for op in operations:
+            all_pairs.append(build_pair(list(nums), op))
+
     if samples is None:
-        for nums in itertools.product(*[range(10**d) for d in digits]):
-            for op in operations:
-                pairs.append(build_pair(list(nums), op))
+        pairs = all_pairs
         if shuffle:
             random.shuffle(pairs)
     else:
-        seen: set = set()
-        cap = max(1_000_000, samples * 10_000)
-        for _ in range(cap):
-            if len(pairs) >= samples:
-                break
-            nums = [random.randrange(10**d) for d in digits]
-            op = random.choice(operations)
-            q_str, a_str = build_pair(nums, op)
-            if q_str in seen:
-                continue
-            seen.add(q_str)
-            pairs.append((q_str, a_str))
-        if len(pairs) < samples:
+        if samples > len(all_pairs):
             raise ValueError(
-                f"Could only draw {len(pairs)} unique problems (requested {samples}); "
-                "the search space may be too small."
+                f"Requested {samples} samples but only {len(all_pairs)} unique problems exist."
             )
-        if shuffle:
-            random.shuffle(pairs)
+        pairs = random.sample(all_pairs, samples)
 
     rows = [{"q_str": q, "a_str": a} for q, a in pairs]
 
-    out_dir = os.path.join(_REPO_ROOT, "datasets", dataset_name)
+    out_dir = os.path.join(DIR_ROOT, "datasets", dataset_name)
     os.makedirs(out_dir, exist_ok=True)
 
     def _write(path: str, data: list) -> None:
@@ -77,8 +68,8 @@ def generate_math_dataset(
             json.dump(data, f, indent=4)
 
     if test_split is not None:
-        if not (0.0 < test_split < 1.0):
-            raise ValueError("test_split must be in (0, 1).")
+        if not (0.0 < test_split <= 1.0):
+            raise ValueError("test_split must be in (0, 1].")
         split_i = int(len(rows) * (1.0 - test_split))
         _write(os.path.join(out_dir, "train.json"), rows[:split_i])
         _write(os.path.join(out_dir, "test.json"), rows[split_i:])

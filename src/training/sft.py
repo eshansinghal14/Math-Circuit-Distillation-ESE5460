@@ -154,6 +154,7 @@ class SFTTrainer:
                 self.history["train_step"].append(self._train_step)
                 self.history["step_ce_loss"].append(accum_loss)
                 total_loss += accum_loss
+                print(f"  step {self._train_step} | CE={accum_loss:.4f}")
                 accum_loss = 0.0
                 n_steps += 1
 
@@ -188,7 +189,7 @@ class SFTTrainer:
             acc = self._eval()
             self.history["accuracy"].append(acc)
             self.history["accuracy_step"].append(self._train_step)
-            print(f"  Step {self._train_step}/{cfg.steps} | CE={metrics['ce_loss']:.4f} | Acc={acc:.4f}")
+            print(f"  [eval] step {self._train_step}/{cfg.steps} | Acc={acc:.4f}")
 
         save_history(self.history, cfg.save_dir)
         save_curves(self.history, cfg.save_dir)
