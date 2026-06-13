@@ -125,5 +125,16 @@ def add_graph_build_args(parser: argparse.ArgumentParser) -> None:
             "If omitted, no ANOVA supernodes are created."
         ),
     )
+    parser.add_argument(
+        "--use-heatmap-arg-nodes",
+        "--use_heatmap_arg_nodes",
+        dest="use_heatmap_arg_nodes",
+        action="store_true",
+        default=False,
+        help=(
+            "Replace inner-product arg-token supernodes with ANOVA range supernodes "
+            "(anova_range_radius=1), one per number token in the prompt."
+        ),
+    )
 
 

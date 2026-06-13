@@ -236,6 +236,7 @@ def build_shared_context(
     node_labels: list[str] | None = None,
     batch_size: int = 512,
     supernode_heatmap_output_dir: str | None = None,
+    use_heatmap_arg_nodes: bool = False,
     logger: logging.Logger | None = None,
 ) -> GraphSharedContext:
     """Phase 1 of the graph pipeline: forward pass, ANOVA labeling, token supernodes.
@@ -336,31 +337,72 @@ def build_shared_context(
     all_selected = set(anova_selected)
 
     if not need_anova:
-        _logger.info("Computing arg-token supernodes for %d token positions", ctx.n_tokens)
-        token_raw_supernodes, token_supernode_labels = select_arg_supernodes(
-            ctx,
-            adapter.tokenizer,
-            input_ids,
-            nodes_per_token=nodes_per_label,
-        )
-        for sn in token_raw_supernodes:
-            all_selected.update(sn)
-        for sn, label in zip(token_raw_supernodes, token_supernode_labels):
-            label_str = label[0] if label else "arg"
-            for idx in sn:
-                raw_node_labels.setdefault(idx, [])
-                if label_str not in raw_node_labels[idx]:
-                    raw_node_labels[idx].append(label_str)
-        _logger.info(
-            "  Arg-nodes: %d token supernodes; total unique neurons so far: %d",
-            len(token_raw_supernodes),
-            len(all_selected),
-        )
+        if use_heatmap_arg_nodes:
+            if mlp_input_cache is None and model_name is not None:
+                from graph_loss.precompute_mlp_inputs import build_mlp_input_cache as _build_mlp_cache
+                from utils import load_data as _load_data
+                _train_data, _ = _load_data("22_add")
+                _logger.info("Building MLP input cache for heatmap-arg-nodes (22_add)")
+                mlp_input_cache = _build_mlp_cache(adapter, "22_add", model_name, data_dict=_train_data, batch_size=32)
+                _logger.info("  Built MLP cache: %d prompts", int(mlp_input_cache.get("meta", {}).get("n_prompts", 0)))
+
+            _logger.info("ANOVA-labeling neurons for heatmap-arg-nodes (range_radius=1)")
+            label_results = label_neurons_layer_by_layer(
+                adapter,
+                ctx.neuron_locations,
+                mlp_input_cache,
+                target_args=target_args,
+                anova_range_radius=1,
+            )
+
+            range_labels = {f"arg{i + 1} range" for i in range(len(target_args))}
+            _logger.info("Selecting heatmap-arg-node supernodes for labels: %s", range_labels)
+            _, token_raw_supernodes, token_supernode_labels, raw_node_labels, _ = (
+                select_anova_supernodes(
+                    label_results,
+                    nodes_per_label=nodes_per_label,
+                    strict=False,
+                    source_vectors=ctx.source_vectors,
+                    W_U=adapter.W_U,
+                    tokenizer=adapter.tokenizer,
+                    target_args=target_args,
+                    allowed_labels=range_labels,
+                    include_dla_node=False,
+                )
+            )
+            for sn in token_raw_supernodes:
+                all_selected.update(sn)
+            _logger.info(
+                "  Heatmap-arg-nodes: %d supernodes; total unique neurons so far: %d",
+                len(token_raw_supernodes),
+                len(all_selected),
+            )
+        else:
+            _logger.info("Computing arg-token supernodes for %d token positions", ctx.n_tokens)
+            token_raw_supernodes, token_supernode_labels = select_arg_supernodes(
+                ctx,
+                adapter.tokenizer,
+                input_ids,
+                nodes_per_token=nodes_per_label,
+            )
+            for sn in token_raw_supernodes:
+                all_selected.update(sn)
+            for sn, label in zip(token_raw_supernodes, token_supernode_labels):
+                label_str = label[0] if label else "arg"
+                for idx in sn:
+                    raw_node_labels.setdefault(idx, [])
+                    if label_str not in raw_node_labels[idx]:
+                        raw_node_labels[idx].append(label_str)
+            _logger.info(
+                "  Arg-nodes: %d token supernodes; total unique neurons so far: %d",
+                len(token_raw_supernodes),
+                len(all_selected),
+            )
 
     anova_token_selected_indices = sorted(all_selected)
 
     # Precompute activation write result if needed (CLI heatmap path only; None in training).
-    need_awr = need_anova or (supernode_heatmap_output_dir is not None)
+    need_awr = need_anova or use_heatmap_arg_nodes or (supernode_heatmap_output_dir is not None)
     activation_write_result = None
     if need_awr and anova_token_selected_indices:
         # Build a temporary filtered ctx to compute activation write results for ANOVA neurons.
@@ -591,6 +633,7 @@ def create_graph(
     node_labels: list[str] | None = None,
     dla_model_logits: torch.Tensor | None = None,
     no_grad_supergraph: bool = False,
+    use_heatmap_arg_nodes: bool = False,
     logger: logging.Logger | None = None,
 ) -> GraphPipelineResult:
     """Run the ANOVA-first graph creation pipeline.
@@ -660,6 +703,7 @@ def create_graph(
         node_labels=node_labels,
         batch_size=batch_size,
         supernode_heatmap_output_dir=supernode_heatmap_output_dir,
+        use_heatmap_arg_nodes=use_heatmap_arg_nodes,
         logger=_logger,
     )
 
