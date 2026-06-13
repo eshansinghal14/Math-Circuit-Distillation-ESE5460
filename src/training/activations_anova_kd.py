@@ -129,7 +129,8 @@ class ActivationsAnovaKDTrainer:
             teacher_nodes_per_label=config.nodes_per_label,
             student_anova_range_radius=config.anova_range_radius,
             graph_loss_type=config.graph_loss_type,
-            graph_labels=config.graph_node_labels if config.graph_node_labels else None,
+            student_graph_labels=config.graph_node_labels if config.graph_node_labels else None,
+            teacher_graph_labels=config.graph_node_labels if config.graph_node_labels else None,
             verbose=config.graph_verbose,
         )
 

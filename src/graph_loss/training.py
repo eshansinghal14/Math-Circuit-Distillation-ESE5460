@@ -15,18 +15,6 @@ from graph_loss.loss import compute_graph_loss
 
 
 @dataclass
-class CachedTeacherPromptData:
-    """Pre-computed teacher artifacts for one prompt, loaded from TeacherDataCache."""
-
-    supergraph: SuperGraph
-    logit_token_ids: torch.Tensor | None
-    # Teacher logits at the last prompt-token position, used to select the student
-    # DLA supernode against the teacher's output distribution rather than the
-    # student's own (which is wrong early in training and shifts every step).
-    teacher_dla_logits: torch.Tensor | None = None
-
-
-@dataclass
 class GraphAuxConfig:
     lambda_graph: float = 0.1
     graph_dtype: torch.dtype | None = None
@@ -97,23 +85,16 @@ def compute_prompt_graph_loss(
     prompt: str | torch.Tensor,
     student_adapter: HFLlamaGraphAdapter,
     config: GraphAuxConfig,
-    cached_teacher: CachedTeacherPromptData,
+    teacher_supergraph: SuperGraph,
+    logit_token_ids: torch.Tensor | None,
+    teacher_dla_logits: torch.Tensor | None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
-    """Compute graph loss for one prompt using a pre-cached teacher supergraph."""
-    # ------------------------------------------------------------------
-    # Teacher side: always from cache
-    # ------------------------------------------------------------------
-    teacher_supergraph = cached_teacher.supergraph
-    logit_token_ids = cached_teacher.logit_token_ids
     if config.verbose:
         print(
             f"  [graph] teacher supergraph ready: "
             f"{len(teacher_supergraph.supernodes)} supernodes"
         )
 
-    # ------------------------------------------------------------------
-    # Student side: always live (trainable)
-    # ------------------------------------------------------------------
     if config.verbose:
         print(f"  [graph] building student graph for prompt: {prompt!r}")
 
@@ -137,7 +118,7 @@ def compute_prompt_graph_loss(
             node_labels=config.student_graph_labels or [],
             anova_range_radius=config.student_anova_range_radius,
             nodes_per_label=config.student_nodes_per_label,
-            dla_model_logits=cached_teacher.teacher_dla_logits,
+            dla_model_logits=teacher_dla_logits,
             no_grad_supergraph=True,
         )
     except ValueError as e:
@@ -228,8 +209,6 @@ def compute_prompt_graph_loss(
             + "\n".join(parts)
             + f"\n  Student labels: {sorted(student_label_set)}"
             + f"\n  Teacher labels: {sorted(teacher_label_set)}"
-            + "\nRegenerate the teacher cache with flags matching the current distillation args "
-            "(--include-arg-nodes / --include-dla-node)."
         )
 
     mapping = {
@@ -262,24 +241,6 @@ def compute_prompt_graph_loss(
     }
 
     return graph_loss, metrics
-
-
-def _live_teacher_to_cached(
-    result: "GraphPipelineResult",
-    device: torch.device,
-) -> CachedTeacherPromptData:
-    """Wrap a live-built GraphPipelineResult as CachedTeacherPromptData for compute_prompt_graph_loss."""
-    from graph_loss.graph import SuperGraph  # local import to avoid circular
-
-    return CachedTeacherPromptData(
-        supergraph=result.supergraph,
-        logit_token_ids=result.graph.logit_token_ids.to(device),
-        teacher_dla_logits=(
-            result.target_position_logits.to(device)
-            if result.target_position_logits is not None
-            else None
-        ),
-    )
 
 
 def _kl_per_position(
@@ -315,7 +276,6 @@ def _compare_tokens_loss_for_prompt(
     Returns a detached mean loss for logging; backward is already complete.
     """
     import gc
-    from graph_loss.create_graph import create_graph
 
     tokenizer = student_adapter.tokenizer
     prompt_ids = tokenizer(
@@ -400,12 +360,6 @@ def _compare_tokens_loss_for_prompt(
                 detach_result=True,
                 verbose=config.verbose,
             )
-        cached = _live_teacher_to_cached(teacher_result, device)
-        del teacher_result
-
-        # Use DLA logits from the no-BOS full-sequence forward pass already computed
-        # above — matches generate_teacher_sample's full_logits[prompt_len - 1] exactly.
-        cached.teacher_dla_logits = t_logits[pos - 1].to(device)
 
         # Pass prefix_ids directly so the student tokenizes from the same IDs
         # as the teacher — avoids decode→re-tokenize round-trip instability.
@@ -413,8 +367,11 @@ def _compare_tokens_loss_for_prompt(
             prompt=prefix_ids,
             student_adapter=student_adapter,
             config=config,
-            cached_teacher=cached,
+            teacher_supergraph=teacher_result.supergraph,
+            logit_token_ids=teacher_result.graph.logit_token_ids.to(device),
+            teacher_dla_logits=t_logits[pos - 1].to(device),
         )
+        del teacher_result
         if config.verbose:
             token_str = tokenizer.decode([input_ids[pos].item()])
             print(f"      [graph] graph {graph_idx + 1}/{n_select} built (token {pos}: {token_str!r})", flush=True)
@@ -423,7 +380,7 @@ def _compare_tokens_loss_for_prompt(
         if scaled_pos_loss.requires_grad:
             scaled_pos_loss.backward()
         detached_losses.append(pos_loss.detach())
-        del scaled_pos_loss, cached, pos_loss
+        del scaled_pos_loss, pos_loss
         gc.collect()
         if device.type == "cuda":
             torch.cuda.empty_cache()
@@ -509,17 +466,16 @@ def backward_batch_graph_loss(
             teacher_dla_logits: torch.Tensor | None = None
             if prompt_len > 0 and full_logits.shape[0] >= prompt_len:
                 teacher_dla_logits = full_logits[prompt_len - 1].to(device)
-            cached = CachedTeacherPromptData(
-                supergraph=teacher_result.supergraph,
-                logit_token_ids=teacher_result.graph.logit_token_ids.to(device),
-                teacher_dla_logits=teacher_dla_logits,
-            )
+            logit_token_ids = teacher_result.graph.logit_token_ids.to(device)
+            teacher_supergraph = teacher_result.supergraph
             del teacher_result
             prompt_loss, prompt_metrics = compute_prompt_graph_loss(
                 prompt=prompt,
                 student_adapter=student_adapter,
                 config=config,
-                cached_teacher=cached,
+                teacher_supergraph=teacher_supergraph,
+                logit_token_ids=logit_token_ids,
+                teacher_dla_logits=teacher_dla_logits,
             )
             detached_losses.append(prompt_loss.detach())
             scaled_loss = (loss_scale / denom) * prompt_loss
