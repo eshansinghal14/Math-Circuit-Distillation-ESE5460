@@ -133,6 +133,18 @@ class ActivationsAnovaKDTrainer:
             verbose=config.graph_verbose,
         )
 
+        if config.graph_node_labels:
+            from graph_loss.neuron_activation_heatmap import _get_anova_dataset_path
+            from graph_loss.precompute_mlp_inputs import build_mlp_input_cache
+            dataset_path = _get_anova_dataset_path()
+            print("Building student MLP input cache for ANOVA labeling...")
+            mlp_cache = build_mlp_input_cache(
+                self.student_adapter, dataset_path, config.model, batch_size=32
+            )
+            self.graph_config.mlp_input_cache = mlp_cache
+            n_prompts = int(mlp_cache.get("meta", {}).get("n_prompts", 0))
+            print(f"  MLP cache ready: {n_prompts} prompts")
+
         self.history: Dict[str, List] = defaultdict(list)
         self._train_step = 0
 
