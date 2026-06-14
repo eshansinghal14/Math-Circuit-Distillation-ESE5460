@@ -15,33 +15,15 @@ def _compute_edge_loss(
     epsilon: float = 1e-8,
     similarity: Literal["jsd", "kld", "mse", "mse-norm", "mse-scale"] = "jsd",
 ) -> torch.Tensor:
-    """Edge-level structural loss: row-wise Jensen-Shannon between coarsened adjacency.
+    """Edge-level structural loss: row-wise similarity between aligned supernode adjacency.
 
-    Conceptual model:  each row of the supernode adjacency matrix represents
-    "where does this supernode route its causal influence to downstream
-    supernodes".  After L1 normalisation of absolute values, each row is a
-    probability distribution over downstream supernodes.  The loss is the
-    mean over rows of JSD(teacher_row, student_row).
-
-    Why KL on distributions instead of MSE on raw entries:
-    1. Scale-invariant — the loss compares routing *structure*, not absolute
-       magnitudes.  Teacher and student adjacency entries are at different
-       scales (different model sizes, different attribution magnitudes); MSE
-       on raw entries was O(1e-6), making the graph signal ~100x smaller than
-       KL distillation (~1.0) even at lambda=10.
-    2. Probabilistically interpretable — "the student should distribute its
-       influence the way the teacher does", which is the intent of structural
-       distillation.
-    3. Naturally bounded — KL on n_T-dim distributions is in [0, log(n_T)],
-       same order of magnitude as the token-level KL distillation loss.
-
-    Coarsening step (unchanged): the student adjacency is aggregated into a
-    teacher-sized matrix using the alignment mapping, so both matrices live
-    on the same (n_T x n_T) support before KL is computed.
+    Assumes a 1-to-1 mapping between teacher and student supernodes.  Each row of
+    the adjacency matrix represents "where does this supernode route its causal
+    influence"; after L1 normalisation of absolute values each row is a probability
+    distribution and the loss is the mean row-wise similarity (JSD/KLD/MSE).
 
     Notes:
-    - Uses |entries| then L1-normalises so the sign of attribution magnitudes
-      doesn't matter (they represent strength of influence, not direction).
+    - Uses |entries| then L1-normalises so attribution sign doesn't matter.
     - Teacher distribution is detached: it's the fixed target.
     - Rows with no matched student supernode are skipped (no gradient).
     """
@@ -53,35 +35,28 @@ def _compute_edge_loss(
     if n_T == 0 or not mapping:
         return torch.tensor(0.0, device=device, dtype=dtype)
 
-    rows: list[torch.Tensor] = []
-    row_indices: list[int] = []
+    # 1-to-1: teacher index -> single aligned student index
+    t_to_s: dict[int, int] = {}
+    for ti, t in enumerate(teacher_ids):
+        s_mapped = [s_id2idx[s] for s in mapping.get(t, set()) if s in s_id2idx]
+        if s_mapped:
+            t_to_s[ti] = s_mapped[0]
 
-    for ti_tgt, t_tgt in enumerate(teacher_ids):
-        s_tgts = [s_id2idx[s] for s in mapping.get(t_tgt, set()) if s in s_id2idx]
-        if not s_tgts:
-            continue
-        n_tgt = float(len(s_tgts))
-        s_tgts_t = torch.tensor(s_tgts, device=device, dtype=torch.long)
-        row_entries: list[torch.Tensor] = []
-        for t_src in teacher_ids:
-            s_srcs = [s_id2idx[s] for s in mapping.get(t_src, set()) if s in s_id2idx]
-            if not s_srcs:
-                row_entries.append(torch.zeros((), device=device, dtype=dtype))
-                continue
-            s_srcs_t = torch.tensor(s_srcs, device=device, dtype=torch.long)
-            block_sum = W_S.index_select(0, s_tgts_t).index_select(1, s_srcs_t).sum()
-            row_entries.append(block_sum / n_tgt)
-        rows.append(torch.stack(row_entries))
-        row_indices.append(ti_tgt)
-
-    if not rows:
+    if not t_to_s:
         return torch.tensor(0.0, device=device, dtype=dtype)
 
-    W_S_coarse_partial = torch.stack(rows)
-    teacher_rows = W_T[row_indices].to(device=device, dtype=dtype)
+    valid_t = sorted(t_to_s.keys())
+    t_idx = torch.tensor(valid_t, device=device, dtype=torch.long)
+    s_idx = torch.tensor([t_to_s[ti] for ti in valid_t], device=device, dtype=torch.long)
+
+    # Aligned student submatrix: rows = valid targets, cols = all n_T teacher slots
+    W_S_aligned = torch.zeros(len(valid_t), n_T, device=device, dtype=dtype)
+    W_S_aligned[:, t_idx] = W_S[s_idx][:, s_idx]
+
+    teacher_rows = W_T[t_idx].to(device=device, dtype=dtype)
 
     t_abs = teacher_rows.float().abs()
-    s_abs = W_S_coarse_partial.float().abs()
+    s_abs = W_S_aligned.float().abs()
     t_dist = t_abs / t_abs.sum(dim=1, keepdim=True).clamp(min=epsilon)
     s_dist = s_abs / s_abs.sum(dim=1, keepdim=True).clamp(min=epsilon)
 
@@ -139,16 +114,3 @@ def compute_graph_loss(
     """Graph loss: edge-structure similarity between aligned supernode adjacency rows."""
     loss = _compute_edge_loss(W_T, W_S, mapping, teacher_ids, student_ids, epsilon, similarity)
     return loss, {"edge_loss": loss.item()}
-
-
-# Backward-compatible alias so existing notebooks/scripts don't break.
-def compute_L_graph(
-    W_T: torch.Tensor,
-    W_S: torch.Tensor,
-    mapping: dict[int, set[int]],
-    teacher_ids: list[int],
-    student_ids: list[int],
-    epsilon: float = 1e-4,
-) -> torch.Tensor:
-    """Legacy wrapper — returns edge loss only."""
-    return _compute_edge_loss(W_T, W_S, mapping, teacher_ids, student_ids, epsilon)

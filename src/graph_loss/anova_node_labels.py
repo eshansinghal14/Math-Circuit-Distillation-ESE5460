@@ -135,6 +135,31 @@ def build_anova_basis_rules(
         mask = arg1_box & arg2_box
         rules.append(BasisRule(_joint_range_label(arg1_values, arg2_values, mask), mask, category="arg1 range and arg2 range"))
 
+    # Pairwise sum ranges: heatmap-scored, specificity-ranked (not DLA).
+    for _i in range(len(arg_values)):
+        for _j in range(_i + 1, len(arg_values)):
+            pair_sums = grids[_i] + grids[_j]
+            pair_category = f"arg{_i + 1} arg{_j + 1} sum range"
+            pair_prefix = f"arg{_i + 1}+arg{_j + 1}"
+            if target_args is not None and len(target_args) > _j:
+                center = int(target_args[_i] + target_args[_j])
+                if anova_range_radius:
+                    mask = (pair_sums >= center - anova_range_radius) & (pair_sums <= center + anova_range_radius)
+                    label = _mask_interval_label(pair_prefix, pair_sums, mask)
+                else:
+                    mask = pair_sums == center
+                    label = _format_interval_label(pair_prefix, center, center)
+                rules.append(BasisRule(label, mask, category=pair_category))
+            else:
+                for center in sorted({int(v) for v in pair_sums.flatten().tolist()}):
+                    if anova_range_radius:
+                        mask = (pair_sums >= center - anova_range_radius) & (pair_sums <= center + anova_range_radius)
+                        label = _mask_interval_label(pair_prefix, pair_sums, mask)
+                    else:
+                        mask = pair_sums == center
+                        label = _format_interval_label(pair_prefix, center, center)
+                    rules.append(BasisRule(label, mask, category=pair_category))
+
     if len(arg_values) >= 2:
         sums = grids[0] + grids[1]
         sum_centers = (

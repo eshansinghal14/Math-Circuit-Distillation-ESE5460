@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import random
 import sys
 from collections import defaultdict
@@ -67,7 +68,8 @@ class GraphKDConfig:
     n_graph_prompts: Optional[int] = None
     graph_verbose: bool = False
     track_grad_norms: bool = False
-    use_heatmap_arg_nodes: bool = False
+    graph_node_labels: List[str] = field(default_factory=list)
+    anova_range_radius: int = 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -119,7 +121,7 @@ class GraphKDTrainer:
 
         student_mlp_cache: dict | None = None
         teacher_mlp_cache: dict | None = None
-        if config.use_heatmap_arg_nodes:
+        if config.graph_node_labels:
             from graph_loss.precompute_mlp_inputs import build_mlp_input_cache as _build_mlp_cache
             student_mlp_cache = _build_mlp_cache(
                 self.student_adapter, config.dataset, config.model, data_dict=train_data
@@ -128,7 +130,6 @@ class GraphKDTrainer:
                 self.teacher_adapter, config.dataset, config.teacher, data_dict=train_data
             )
 
-        # node_labels=None → automatic arg-token + DLA supernodes; no MLP cache needed
         self.graph_config = GraphAuxConfig(
             lambda_graph=config.lambda_graph,
             teacher_prop_neurons_per_layer=config.teacher_prop_neurons_per_layer,
@@ -141,9 +142,11 @@ class GraphKDTrainer:
             teacher_nodes_per_label=config.nodes_per_label,
             graph_loss_type=config.graph_loss_type,
             verbose=config.graph_verbose,
-            use_heatmap_arg_nodes=config.use_heatmap_arg_nodes,
             mlp_input_cache=student_mlp_cache,
             teacher_mlp_input_cache=teacher_mlp_cache,
+            graph_node_labels=config.graph_node_labels if config.graph_node_labels else None,
+            student_anova_range_radius=config.anova_range_radius,
+            dataset_name=config.dataset,
         )
 
         self.history: Dict[str, List] = defaultdict(list)
@@ -348,15 +351,23 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--track-grad-norms", action="store_true", dest="track_grad_norms",
                        help="Print KL and graph grad norms each step.")
     group.add_argument(
-        "--use-heatmap-arg-nodes", "--use_heatmap_arg_nodes",
-        action="store_true", default=False, dest="use_heatmap_arg_nodes",
-        help="Replace inner-product arg-token supernodes with ANOVA range supernodes (anova_range_radius=1).",
+        "--graph-node-labels", "--graph_node_labels",
+        nargs="+", default=[], dest="graph_node_labels", metavar="LABEL",
+        help="ANOVA supernode labels, e.g. 'sum units' 'arg1 range'. Pass 'all' for every category.",
     )
+    group.add_argument("--anova-range-radius", "--anova_range_radius", type=int, default=0,
+                       dest="anova_range_radius")
     return parser
+
+
+def _normalize_label(label: str) -> str:
+    """Normalize 'arg N ...' -> 'argN ...' for CLI convenience."""
+    return re.sub(r'\barg\s+(\d+)', lambda m: f'arg{m.group(1)}', label)
 
 
 def main() -> None:
     args = build_parser().parse_args()
+    graph_node_labels = [_normalize_label(lbl) for lbl in args.graph_node_labels]
     train_data, test_data = load_data(args.dataset, test_limit=args.test_limit)
     print(f"Train: {len(train_data)} | Test: {len(test_data)}")
     trainer = GraphKDTrainer(
@@ -385,7 +396,8 @@ def main() -> None:
             n_graph_prompts=args.n_graph_prompts,
             graph_verbose=args.graph_verbose,
             track_grad_norms=args.track_grad_norms,
-            use_heatmap_arg_nodes=args.use_heatmap_arg_nodes,
+            graph_node_labels=graph_node_labels,
+            anova_range_radius=args.anova_range_radius,
         ),
         train_data,
         test_data,

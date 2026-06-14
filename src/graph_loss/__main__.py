@@ -71,7 +71,6 @@ def main():
         nodes_per_label=args.nodes_per_label,
         anova_range_radius=args.anova_range_radius,
         node_labels=args.graph_node_labels,
-        use_heatmap_arg_nodes=args.use_heatmap_arg_nodes,
         logger=logger,
     )
 
