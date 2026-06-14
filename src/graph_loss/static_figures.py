@@ -203,12 +203,19 @@ class AlignedGraphs:
     norm: dict[str, torch.Tensor]  # name -> [k, k] row-normalized adjacency
 
 
-def align_supergraphs(named: dict[str, SuperGraph]) -> AlignedGraphs:
+def align_supergraphs(
+    named: dict[str, SuperGraph], *, exclude_self_loops: bool = False
+) -> AlignedGraphs:
     """Reorder every supergraph to the shared (intersection) label set.
 
     The first entry's label ordering is used as the canonical column/row order
     (pass the teacher first). Labels present in only some models are dropped
     with a warning, so figures always compare the same supernodes.
+
+    If ``exclude_self_loops`` is set, the adjacency diagonal (a supernode routing
+    into itself) is zeroed *before* row-normalization, so intra-supernode mass
+    doesn't dominate the figures. This affects the figures only; the training
+    loss still uses the full matrix.
     """
     label_maps = {name: _label_to_index(sg) for name, sg in named.items()}
     label_sets = [set(m) for m in label_maps.values()]
@@ -234,7 +241,9 @@ def align_supergraphs(named: dict[str, SuperGraph]) -> AlignedGraphs:
     for name, sg in named.items():
         idx = [label_maps[name][lbl] for lbl in ordered]
         adj = sg.supernode_adjacency_matrix.detach().float().cpu()
-        sub = adj[idx][:, idx] if idx else adj[:0, :0]
+        sub = (adj[idx][:, idx] if idx else adj[:0, :0]).clone()
+        if exclude_self_loops and sub.numel():
+            sub.fill_diagonal_(0.0)
         raw[name] = sub
         norm[name] = _normalize_rows(sub)
     return AlignedGraphs(labels=ordered, raw=raw, norm=norm)
@@ -680,6 +689,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Folder of student supernode_*.pdf heatmaps for Fig E.")
     parser.add_argument("--heatmap-all-pages", "--heatmap_all_pages", dest="heatmap_all_pages",
                         action="store_true", help="Render all member pages per supernode PDF (default: first page).")
+    parser.add_argument("--exclude-self-loops", "--exclude_self_loops", "--no-self-loops",
+                        dest="exclude_self_loops", action="store_true",
+                        help="Zero the adjacency diagonal (supernode->itself) before normalizing the "
+                             "figures, so intra-supernode mass doesn't dominate Figs A/B/C.")
     add_graph_build_args(parser)
     return parser
 
@@ -749,7 +762,7 @@ def main() -> None:
         adapters[base_name] = base_adapter
         named_supergraphs[base_name] = base_result.supergraph
 
-    aligned = align_supergraphs(named_supergraphs)
+    aligned = align_supergraphs(named_supergraphs, exclude_self_loops=args.exclude_self_loops)
     logger.info("Aligned %d shared supernodes: %s", len(aligned.labels), aligned.labels)
 
     # ── Figures (each guarded so one failure doesn't abort the rest) ───────
