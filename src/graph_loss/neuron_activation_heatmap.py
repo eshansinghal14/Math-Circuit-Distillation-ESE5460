@@ -220,7 +220,7 @@ def label_neurons_layer_by_layer(
         target_args=target_args,
         anova_range_radius=anova_range_radius,
     )
-    gpu_anova_state = build_gpu_anova_state(anova_rules, device, grid_shape=grid_shape)
+    gpu_anova_state = build_gpu_anova_state(anova_rules, device)
 
     valid_batch_layers = [l for l in sorted_layers if l < len(layer_inputs)]
     if not valid_batch_layers:
@@ -407,12 +407,6 @@ def save_supernode_activation_heatmap_pdf(
         os.makedirs(output_dir, exist_ok=True)
 
     activation_grids = activation_grids.detach().float().cpu()
-    grid_shape = tuple(len(v) for v in arg_values)
-    if torch.isnan(activation_grids).any():
-        from graph_loss.anova_node_labels import fill_nan_nearest_mean
-        N = activation_grids.shape[0]
-        filled_flat = fill_nan_nearest_mean(activation_grids.reshape(N, -1), grid_shape)
-        activation_grids = filled_flat.reshape(N, *grid_shape)
     if activation_grids.shape[0] != len(members):
         raise ValueError(
             f"Expected one activation grid per member, got {activation_grids.shape[0]} "
