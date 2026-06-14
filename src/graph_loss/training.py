@@ -31,6 +31,7 @@ class GraphAuxConfig:
 
     student_anova_range_radius: int = 0
     student_nodes_per_label: int = 10
+    anova_neuron_chunk: int = 256
     teacher_nodes_per_label: int = 10
     student_mlp_input_cache_path: str | None = None
     mlp_input_cache: dict | None = None
@@ -118,6 +119,7 @@ def compute_prompt_graph_loss(
             mlp_input_cache=config.mlp_input_cache,
             node_labels=config.graph_node_labels or [],
             anova_range_radius=config.student_anova_range_radius,
+            anova_neuron_chunk=config.anova_neuron_chunk,
             nodes_per_label=config.student_nodes_per_label,
             dla_model_logits=teacher_dla_logits,
             no_grad_supergraph=True,

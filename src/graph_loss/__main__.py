@@ -95,6 +95,7 @@ def main():
         supernode_heatmap_output_dir=args.supernode_heatmap_output_dir,
         nodes_per_label=args.nodes_per_label,
         anova_range_radius=args.anova_range_radius,
+        anova_neuron_chunk=args.anova_neuron_chunk,
         node_labels=args.graph_node_labels,
         logger=logger,
     )

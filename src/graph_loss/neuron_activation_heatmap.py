@@ -160,6 +160,7 @@ def label_neurons_layer_by_layer(
     *,
     target_args: tuple[int, ...] | None = None,
     anova_range_radius: int = 0,
+    anova_neuron_chunk: int = 256,
 ) -> list:
     """ANOVA-label N neurons across all model layers with pipelined H2D transfers and one D2H flush.
 
@@ -280,27 +281,24 @@ def label_neurons_layer_by_layer(
         neuron_acts_batch = F.silu(gate_out) * up_out  # [n_groups, P, N_max]
         del gate_out, up_out
 
-        layer_grids_gpu: list[torch.Tensor] = []
-        layer_loc_indices: list[int] = []
+        n_labeled_layer = 0
         for g_idx, tp in enumerate(token_positions):
             neurons = layer_group_map[tp]
             n_g = len(neurons)
-            acts = neuron_acts_batch[g_idx, :, :n_g].float()  # [P, n_g]
-            grid = torch.full((n_g, grid_cells), float("nan"), dtype=torch.float32, device=device)
-            grid[:, flat_indices_gpu] = acts.T
-            layer_grids_gpu.append(grid)
-            layer_loc_indices.extend(li for li, _ in neurons)
-
+            acts_g = neuron_acts_batch[g_idx, :, :n_g].float()  # [P, n_g]
+            for c_start in range(0, n_g, anova_neuron_chunk):
+                chunk_neurons = neurons[c_start:c_start + anova_neuron_chunk]
+                acts_c = acts_g[:, c_start:c_start + anova_neuron_chunk]  # [P, chunk]
+                n_c = acts_c.shape[1]
+                grid = torch.full((n_c, grid_cells), float("nan"), dtype=torch.float32, device=device)
+                grid[:, flat_indices_gpu] = acts_c.T
+                chunk_labels = gpu_label_activation_heatmaps(grid, gpu_anova_state, anova_rules)
+                del grid
+                for label_j, (li, _) in enumerate(chunk_neurons):
+                    label_results[li] = chunk_labels[label_j]
+                n_labeled_layer += n_c
         del neuron_acts_batch
-
-        # Run ANOVA for this layer immediately so grids don't accumulate across layers.
-        layer_batch_gpu = torch.cat(layer_grids_gpu, dim=0)
-        del layer_grids_gpu
-        layer_labels = gpu_label_activation_heatmaps(layer_batch_gpu, gpu_anova_state, anova_rules)
-        del layer_batch_gpu
-        for label_j, loc_idx in enumerate(layer_loc_indices):
-            label_results[loc_idx] = layer_labels[label_j]
-        total_neurons_labeled += len(layer_loc_indices)
+        total_neurons_labeled += n_labeled_layer
 
     logger.info(
         "  ANOVA labeled %d layers (%d neurons)",
