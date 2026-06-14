@@ -382,7 +382,7 @@ def select_anova_supernodes(
         sorted_rows = sorted(all_scored_rows, key=lambda item: item[1], reverse=True)
 
         if not sorted_rows:
-            if strict and not is_sum_category:
+            if strict and not is_sum_category and category in _base_categories:
                 raise ValueError(
                     f"ANOVA category {category!r} has no positive-variance nodes."
                 )
