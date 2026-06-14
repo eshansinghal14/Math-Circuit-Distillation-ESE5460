@@ -231,6 +231,7 @@ def build_shared_context(
     dtype: torch.dtype | None = None,
     mlp_input_cache: dict | None = None,
     model_name: str | None = None,
+    dataset: str = "22_add",
     nodes_per_label: int = 10,
     anova_range_radius: int = 0,
     node_labels: list[str] | None = None,
@@ -274,9 +275,9 @@ def build_shared_context(
         if mlp_input_cache is None and model_name is not None:
             from graph_loss.precompute_mlp_inputs import build_mlp_input_cache as _build_mlp_cache
             from utils import load_data as _load_data
-            _train_data, _ = _load_data("22_add")
-            _logger.info("Building MLP input cache for 22_add dataset")
-            mlp_input_cache = _build_mlp_cache(adapter, "22_add", model_name, data_dict=_train_data, batch_size=32)
+            _train_data, _ = _load_data(dataset)
+            _logger.info("Building MLP input cache for %s dataset", dataset)
+            mlp_input_cache = _build_mlp_cache(adapter, dataset, model_name, data_dict=_train_data, batch_size=32)
             _logger.info("  Built MLP cache: %d prompts", int(mlp_input_cache.get("meta", {}).get("n_prompts", 0)))
 
         _logger.info("ANOVA-labeling %d pre-selected neurons (layer-by-layer)", ctx.n_neurons)
@@ -572,6 +573,7 @@ def create_graph(
     # ANOVA / supergraph params
     mlp_input_cache: dict | None = None,
     model_name: str | None = None,
+    dataset: str = "22_add",
     supernode_heatmap_output_dir: str | None = None,
     nodes_per_label: int = 10,
     anova_range_radius: int = 0,
@@ -642,6 +644,7 @@ def create_graph(
         dtype=dtype,
         mlp_input_cache=mlp_input_cache,
         model_name=model_name,
+        dataset=dataset,
         nodes_per_label=nodes_per_label,
         anova_range_radius=anova_range_radius,
         node_labels=node_labels,

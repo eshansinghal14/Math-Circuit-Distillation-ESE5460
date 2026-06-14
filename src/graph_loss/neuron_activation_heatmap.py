@@ -317,11 +317,12 @@ def build_neuron_activation_write_result(
     neuron_locations: list[tuple[int, int, int]] | torch.Tensor,
     *,
     mlp_input_cache: dict | None = None,
+    dataset: str = "22_add",
 ) -> ActivationWriteResult:
-    """Return a 2D activation grid for each requested neuron.
+    """Return an activation grid for each requested neuron.
 
     If ``mlp_input_cache`` is provided it is used directly.  Otherwise a
-    temporary MLP input cache is built from the hardcoded 22_add dataset.
+    temporary MLP input cache is built from ``dataset``.
     """
     if isinstance(neuron_locations, torch.Tensor):
         kept_neuron_locations = neuron_locations.detach().cpu()
@@ -330,9 +331,9 @@ def build_neuron_activation_write_result(
 
     if mlp_input_cache is None:
         from graph_loss.precompute_mlp_inputs import build_mlp_input_cache
-        train_data, _ = load_data("22_add")
+        train_data, _ = load_data(dataset)
         model_name = getattr(model.cfg, "model_name", "model")
-        mlp_input_cache = build_mlp_input_cache(model, "22_add", model_name, data_dict=train_data)
+        mlp_input_cache = build_mlp_input_cache(model, dataset, model_name, data_dict=train_data)
 
     try:
         return compute_activation_grid_from_mlp_cache(model, kept_neuron_locations, mlp_input_cache)
@@ -359,11 +360,15 @@ def save_supernode_activation_heatmap_pdf(
     member_dla_kl: dict[int, float] | None = None,
 ) -> str:
     """Save one 2D activation heatmap page per neuron in a supernode, with optional 1D logit influence side panel."""
-    if len(arg_values) != 2:
+    if len(arg_values) < 2:
         raise ValueError(
-            f"save_supernode_activation_heatmap_pdf expects 2D activation grids, "
-            f"got {len(arg_values)} arg dimensions"
+            f"save_supernode_activation_heatmap_pdf expects at least 2 arg dimensions, "
+            f"got {len(arg_values)}"
         )
+    if len(arg_values) > 2:
+        # Project to 2D by averaging over extra dimensions
+        activation_grids = activation_grids.flatten(start_dim=3).mean(dim=-1)
+        arg_values = arg_values[:2]
 
     output_dir = os.path.dirname(output_path)
     if output_dir:

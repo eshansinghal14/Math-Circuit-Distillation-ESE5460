@@ -28,6 +28,11 @@ def main():
         help="HuggingFace model name (e.g. 'meta-llama/Meta-Llama-3.1-8B-Instruct').",
     )
     parser.add_argument("--prompt", required=True, help="Prompt to analyze")
+    parser.add_argument(
+        "--dataset",
+        default="22_add",
+        help="Dataset name under datasets/ used to build the MLP activation cache (e.g. '22_add', '22_add3')",
+    )
     add_graph_build_args(parser)
     parser.add_argument(
         "--frontend-slug",
@@ -67,6 +72,7 @@ def main():
         batch_size=args.attribution_batch_size,
         verbose=args.verbose,
         model_name=args.model,
+        dataset=args.dataset,
         supernode_heatmap_output_dir=args.supernode_heatmap_output_dir,
         nodes_per_label=args.nodes_per_label,
         anova_range_radius=args.anova_range_radius,
