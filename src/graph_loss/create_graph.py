@@ -237,6 +237,7 @@ def build_shared_context(
     node_labels: list[str] | None = None,
     batch_size: int = 512,
     supernode_heatmap_output_dir: str | None = None,
+    refresh_mlp_cache: bool = False,
     logger: logging.Logger | None = None,
 ) -> GraphSharedContext:
     """Phase 1 of the graph pipeline: forward pass, ANOVA labeling, token supernodes.
@@ -277,7 +278,7 @@ def build_shared_context(
             from utils import load_split as _load_split
             _all_data = _load_split(dataset, "all")
             _logger.info("Building MLP input cache for %s/all dataset", dataset)
-            mlp_input_cache = _build_mlp_cache(adapter, dataset, model_name, data_dict=_all_data, batch_size=32)
+            mlp_input_cache = _build_mlp_cache(adapter, dataset, model_name, data_dict=_all_data, batch_size=32, refresh=refresh_mlp_cache)
             _logger.info("  Built MLP cache: %d prompts", int(mlp_input_cache.get("meta", {}).get("n_prompts", 0)))
 
         if mlp_input_cache is not None:
@@ -585,6 +586,7 @@ def create_graph(
     mlp_input_cache: dict | None = None,
     model_name: str | None = None,
     dataset: str = "22_add",
+    refresh_mlp_cache: bool = False,
     supernode_heatmap_output_dir: str | None = None,
     nodes_per_label: int = 10,
     anova_range_radius: int = 0,
@@ -661,6 +663,7 @@ def create_graph(
         node_labels=node_labels,
         batch_size=batch_size,
         supernode_heatmap_output_dir=supernode_heatmap_output_dir,
+        refresh_mlp_cache=refresh_mlp_cache,
         logger=_logger,
     )
 

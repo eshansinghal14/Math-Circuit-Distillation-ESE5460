@@ -73,6 +73,7 @@ def build_mlp_input_cache(
     *,
     data_dict: dict,
     batch_size: int = 64,
+    refresh: bool = False,
 ) -> dict:
     """Build or load an MLP-input cache stored under the system temp directory.
 
@@ -80,10 +81,15 @@ def build_mlp_input_cache(
     and returns it immediately. Otherwise captures residual-stream inputs
     entering each MLP layer via forward pre-hooks, saves to temp, and returns.
     """
+    import shutil
+
     cache_dir = os.path.join(
         tempfile.gettempdir(), "mlp_cache",
         _model_slug(model_name), _dataset_slug(dataset_key),
     )
+    if refresh and os.path.isdir(cache_dir):
+        shutil.rmtree(cache_dir)
+        logger.info("Deleted existing MLP cache at %s", cache_dir)
     meta_path = os.path.join(cache_dir, "meta.pt")
     if os.path.isfile(meta_path):
         return load_mlp_cache_dir(cache_dir)

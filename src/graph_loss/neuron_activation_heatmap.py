@@ -366,8 +366,8 @@ def save_supernode_activation_heatmap_pdf(
             f"got {len(arg_values)}"
         )
     if len(arg_values) > 2:
-        # Project to 2D by averaging over extra dimensions
-        activation_grids = activation_grids.flatten(start_dim=3).mean(dim=-1)
+        # Project to 2D by averaging over extra dimensions (nanmean ignores unfilled grid cells)
+        activation_grids = activation_grids.flatten(start_dim=3).nanmean(dim=-1)
         arg_values = arg_values[:2]
 
     output_dir = os.path.dirname(output_path)

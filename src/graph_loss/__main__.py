@@ -35,6 +35,13 @@ def main():
     )
     add_graph_build_args(parser)
     parser.add_argument(
+        "--refresh-mlp-cache",
+        "--refresh_mlp_cache",
+        dest="refresh_mlp_cache",
+        action="store_true",
+        help="Delete and rebuild the MLP input cache even if one already exists.",
+    )
+    parser.add_argument(
         "--frontend-slug",
         "--frontend_slug",
         dest="frontend_slug",
@@ -73,6 +80,7 @@ def main():
         verbose=args.verbose,
         model_name=args.model,
         dataset=args.dataset,
+        refresh_mlp_cache=args.refresh_mlp_cache,
         supernode_heatmap_output_dir=args.supernode_heatmap_output_dir,
         nodes_per_label=args.nodes_per_label,
         anova_range_radius=args.anova_range_radius,
