@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from itertools import combinations
 
 import torch
 
@@ -141,30 +142,32 @@ def build_anova_basis_rules(
         mask = arg1_box & arg2_box
         rules.append(BasisRule(_joint_range_label(arg1_values, arg2_values, mask), mask, category="arg1 range and arg2 range"))
 
-    # Pairwise sum ranges: heatmap-scored, specificity-ranked (not DLA).
-    for _i in range(len(arg_values)):
-        for _j in range(_i + 1, len(arg_values)):
-            pair_sums = grids[_i] + grids[_j]
-            pair_category = f"arg{_i + 1} arg{_j + 1} sum range"
-            pair_prefix = f"arg{_i + 1}+arg{_j + 1}"
-            if target_args is not None and len(target_args) > _j:
-                center = int(target_args[_i] + target_args[_j])
+    # Combination sum ranges for all subsets of size 2..N.
+    # Size 2 gives pairwise sums; size N gives the full sum (also covered by "sum range").
+    for combo_size in range(2, len(arg_values) + 1):
+        for combo_indices in combinations(range(len(arg_values)), combo_size):
+            combo_sums = sum(grids[i] for i in combo_indices)
+            combo_category = " ".join(f"arg{i + 1}" for i in combo_indices) + " sum range"
+            combo_prefix = "+".join(f"arg{i + 1}" for i in combo_indices)
+            all_known = target_args is not None and len(target_args) > max(combo_indices)
+            if all_known:
+                center = int(sum(int(target_args[i]) for i in combo_indices))
                 if anova_range_radius:
-                    mask = (pair_sums >= center - anova_range_radius) & (pair_sums <= center + anova_range_radius)
-                    label = _mask_interval_label(pair_prefix, pair_sums, mask)
+                    mask = (combo_sums >= center - anova_range_radius) & (combo_sums <= center + anova_range_radius)
+                    label = _mask_interval_label(combo_prefix, combo_sums, mask)
                 else:
-                    mask = pair_sums == center
-                    label = _format_interval_label(pair_prefix, center, center)
-                rules.append(BasisRule(label, mask, category=pair_category))
+                    mask = combo_sums == center
+                    label = _format_interval_label(combo_prefix, center, center)
+                rules.append(BasisRule(label, mask, category=combo_category))
             else:
-                for center in sorted({int(v) for v in pair_sums.flatten().tolist()}):
+                for center in sorted({int(v) for v in combo_sums.flatten().tolist()}):
                     if anova_range_radius:
-                        mask = (pair_sums >= center - anova_range_radius) & (pair_sums <= center + anova_range_radius)
-                        label = _mask_interval_label(pair_prefix, pair_sums, mask)
+                        mask = (combo_sums >= center - anova_range_radius) & (combo_sums <= center + anova_range_radius)
+                        label = _mask_interval_label(combo_prefix, combo_sums, mask)
                     else:
-                        mask = pair_sums == center
-                        label = _format_interval_label(pair_prefix, center, center)
-                    rules.append(BasisRule(label, mask, category=pair_category))
+                        mask = combo_sums == center
+                        label = _format_interval_label(combo_prefix, center, center)
+                    rules.append(BasisRule(label, mask, category=combo_category))
 
     if len(arg_values) >= 2:
         # Sum of ALL arguments across every dimension.

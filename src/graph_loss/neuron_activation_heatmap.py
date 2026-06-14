@@ -344,7 +344,7 @@ HEATMAP_VALUE_LABEL = "activation"
 
 _ARG_SINGLE_RE = re.compile(r"^arg(\d+)\s+(?:range|units)(?:\s+\d+)?$")
 _ARG_JOINT_RE = re.compile(r"^arg(\d+)\s+(?:range|units)\s+and\s+arg(\d+)\s+(?:range|units)$")
-_ARG_PAIR_SUM_RE = re.compile(r"^arg(\d+)\s+arg(\d+)\s+sum\s+range$")
+_ARG_COMBO_SUM_RE = re.compile(r"^((?:arg\d+\s+)+)sum\s+range$")
 
 
 def _parse_category_dims(category: str | None, n_dims: int) -> list[int]:
@@ -368,11 +368,12 @@ def _parse_category_dims(category: str | None, n_dims: int) -> list[int]:
         dims = sorted({int(m.group(1)) - 1, int(m.group(2)) - 1})
         valid = [d for d in dims if d < n_dims]
         return valid if len(valid) >= 2 else list(range(n_dims))
-    m = _ARG_PAIR_SUM_RE.match(category)
+    # Handles "arg1 arg2 sum range", "arg1 arg3 sum range", "arg1 arg2 arg3 sum range", etc.
+    m = _ARG_COMBO_SUM_RE.match(category)
     if m:
-        dims = sorted({int(m.group(1)) - 1, int(m.group(2)) - 1})
+        dims = sorted({int(x) - 1 for x in re.findall(r"arg(\d+)", m.group(1))})
         valid = [d for d in dims if d < n_dims]
-        return valid if len(valid) >= 2 else list(range(n_dims))
+        return valid if valid else list(range(n_dims))
     return list(range(n_dims))
 
 
