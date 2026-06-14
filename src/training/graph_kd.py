@@ -71,6 +71,7 @@ class GraphKDConfig:
     graph_node_labels: List[str] = field(default_factory=list)
     anova_range_radius: int = 0
     mlp_cache_batch_size: int = 32
+    anova_neuron_chunk: int = 256
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -149,6 +150,7 @@ class GraphKDTrainer:
             teacher_mlp_input_cache=teacher_mlp_cache,
             graph_node_labels=config.graph_node_labels if config.graph_node_labels else None,
             student_anova_range_radius=config.anova_range_radius,
+            anova_neuron_chunk=config.anova_neuron_chunk,
             dataset_name=config.dataset,
         )
 
@@ -365,6 +367,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int, default=32, dest="cache_batch_size",
         help="Prompt batch size when building the MLP activation cache (default: 32).",
     )
+    group.add_argument(
+        "--anova-neuron-chunk", "--anova_neuron_chunk",
+        type=int, default=256, dest="anova_neuron_chunk",
+        help="Neurons processed per ANOVA batch (reduce to avoid GPU OOM on large grids, default: 256).",
+    )
     return parser
 
 
@@ -407,6 +414,7 @@ def main() -> None:
             graph_node_labels=graph_node_labels,
             anova_range_radius=args.anova_range_radius,
             mlp_cache_batch_size=args.cache_batch_size,
+            anova_neuron_chunk=args.anova_neuron_chunk,
         ),
         train_data,
         test_data,

@@ -234,6 +234,7 @@ def build_shared_context(
     dataset: str | None = None,
     nodes_per_label: int = 10,
     anova_range_radius: int = 0,
+    anova_neuron_chunk: int = 256,
     node_labels: list[str] | None = None,
     batch_size: int = 512,
     cache_batch_size: int = 32,
@@ -306,6 +307,7 @@ def build_shared_context(
             mlp_input_cache,
             target_args=target_args,
             anova_range_radius=anova_range_radius,
+            anova_neuron_chunk=anova_neuron_chunk,
         )
     else:
         # Still parse target_args so create_graph_at_position has them for DLA calls.
@@ -598,6 +600,7 @@ def create_graph(
     supernode_heatmap_output_dir: str | None = None,
     nodes_per_label: int = 10,
     anova_range_radius: int = 0,
+    anova_neuron_chunk: int = 256,
     node_labels: list[str] | None = None,
     dla_model_logits: torch.Tensor | None = None,
     no_grad_supergraph: bool = False,
@@ -668,6 +671,7 @@ def create_graph(
         dataset=dataset,
         nodes_per_label=nodes_per_label,
         anova_range_radius=anova_range_radius,
+        anova_neuron_chunk=anova_neuron_chunk,
         node_labels=node_labels,
         batch_size=batch_size,
         cache_batch_size=cache_batch_size,
