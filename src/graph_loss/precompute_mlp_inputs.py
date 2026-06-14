@@ -153,8 +153,7 @@ def build_mlp_input_cache(
 
         prompt_idx += bs
         n_batches += 1
-        if prompt_idx % max(batch_size * 10, 50) == 0 or prompt_idx == n_prompts:
-            logger.info("  Cached %d / %d prompts", prompt_idx, n_prompts)
+        logger.info("  Cached %d / %d prompts", prompt_idx, n_prompts)
 
     logger.info("Saving MLP input cache to %s (concatenating %d batches)", cache_dir, n_batches)
     for layer_idx in range(n_layers):
