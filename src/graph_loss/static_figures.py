@@ -129,6 +129,7 @@ def build_supergraph(
     prompt: str,
     cfg: BuildConfig,
     *,
+    model_name: str | None = None,
     dla_model_logits: torch.Tensor | None = None,
     heatmap_output_dir: str | None = None,
 ) -> GraphPipelineResult:
@@ -137,6 +138,10 @@ def build_supergraph(
     Mirrors the non-CoT teacher/student build in ``backward_batch_graph_loss``:
     attribution runs under ``enable_grad`` (autograd.grad needs it) but the
     result is detached since figures never backprop.
+
+    ``model_name`` is required when ANOVA labels are requested (it keys the MLP
+    input cache that ANOVA labeling needs; without it the cache is never built
+    and no ANOVA supernodes are produced).
     """
     with torch.enable_grad():
         result = create_graph(
@@ -150,6 +155,7 @@ def build_supergraph(
             anova_range_radius=cfg.anova_range_radius,
             node_labels=cfg.graph_node_labels,
             dataset=cfg.dataset,
+            model_name=model_name,
             dla_model_logits=dla_model_logits,
             detach_result=True,
             no_grad_supergraph=True,
@@ -727,7 +733,7 @@ def main() -> None:
     teacher_adapter = HFLlamaGraphAdapter(teacher_model, teacher_tok, _model_device_of(teacher_model))
     teacher_dla = last_token_logits(teacher_adapter, args.prompt)
     logger.info("Building teacher supergraph")
-    teacher_result = build_supergraph(teacher_adapter, args.prompt, cfg)
+    teacher_result = build_supergraph(teacher_adapter, args.prompt, cfg, model_name=args.teacher)
 
     # ── Student (trained) ─────────────────────────────────────────────────
     logger.info("Loading student: %s", args.student)
@@ -737,6 +743,7 @@ def main() -> None:
     logger.info("Building student supergraph")
     student_result = build_supergraph(
         student_adapter, args.prompt, cfg,
+        model_name=args.student,
         dla_model_logits=teacher_dla.to(_model_device_of(student_model)),
     )
 
@@ -756,6 +763,7 @@ def main() -> None:
         logger.info("Building base student supergraph")
         base_result = build_supergraph(
             base_adapter, args.prompt, cfg,
+            model_name=args.student_base,
             dla_model_logits=teacher_dla.to(_model_device_of(base_model)),
         )
         results[base_name] = base_result
