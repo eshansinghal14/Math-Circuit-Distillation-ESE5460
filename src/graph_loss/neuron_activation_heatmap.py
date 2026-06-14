@@ -445,6 +445,12 @@ def save_supernode_activation_heatmap_pdf(
             score_line = ("\n" + "  ".join(score_parts)) if score_parts else ""
             page_title = f"{title}{label_text}\nNeuron {neuron_id} ({location_text}){norm_text}{score_line}"
 
+            number_unembed = (
+                member_number_unembed.get(graph_neuron_idx)
+                if member_number_unembed is not None
+                else None
+            )
+
             if len(plot_dims) == 1:
                 # 1-D heatmap strip: average over all other dims, display as 1-row imshow.
                 d = plot_dims[0]
@@ -530,12 +536,6 @@ def save_supernode_activation_heatmap_pdf(
                 grid_2d = torch.nanmean(grid_2d, dim=dim)
             xs_2d = arg_values[d0]
             ys_2d = arg_values[d1]
-
-            number_unembed = (
-                member_number_unembed.get(graph_neuron_idx)
-                if member_number_unembed is not None
-                else None
-            )
 
             if number_unembed is None:
                 fig, ax = plt.subplots(figsize=(8, 6))
