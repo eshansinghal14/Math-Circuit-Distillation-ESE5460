@@ -35,6 +35,14 @@ def main():
     )
     add_graph_build_args(parser)
     parser.add_argument(
+        "--cache-batch-size",
+        "--cache_batch_size",
+        dest="cache_batch_size",
+        type=int,
+        default=32,
+        help="Prompt batch size when building the MLP activation cache (default: 32).",
+    )
+    parser.add_argument(
         "--refresh-mlp-cache",
         "--refresh_mlp_cache",
         dest="refresh_mlp_cache",
@@ -83,6 +91,7 @@ def main():
         model_name=args.model,
         dataset=args.dataset,
         refresh_mlp_cache=args.refresh_mlp_cache,
+        cache_batch_size=args.cache_batch_size,
         supernode_heatmap_output_dir=args.supernode_heatmap_output_dir,
         nodes_per_label=args.nodes_per_label,
         anova_range_radius=args.anova_range_radius,
