@@ -407,6 +407,12 @@ def save_supernode_activation_heatmap_pdf(
         os.makedirs(output_dir, exist_ok=True)
 
     activation_grids = activation_grids.detach().float().cpu()
+    grid_shape = tuple(len(v) for v in arg_values)
+    if torch.isnan(activation_grids).any():
+        from graph_loss.anova_node_labels import fill_nan_nearest_mean
+        N = activation_grids.shape[0]
+        filled_flat = fill_nan_nearest_mean(activation_grids.reshape(N, -1), grid_shape)
+        activation_grids = filled_flat.reshape(N, *grid_shape)
     if activation_grids.shape[0] != len(members):
         raise ValueError(
             f"Expected one activation grid per member, got {activation_grids.shape[0]} "
