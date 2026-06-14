@@ -258,6 +258,18 @@ def collate_fn(examples: List[Dict[str, Any]], pad_id: int) -> Dict[str, Any]:
 _TRAIN_SPLIT_SIZE = 7000
 
 
+def load_split(dataset: str, split: str) -> Dict:
+    """Return a single split (e.g. 'all', 'train', 'test') from DIR_ROOT/datasets/{dataset}/{split}.json."""
+    path = os.path.join(DIR_ROOT, "datasets", dataset, f"{split}.json")
+    with open(path, encoding="utf-8") as f:
+        rows = json.load(f)
+    out: Dict[str, Union[int, str]] = {}
+    for row in rows:
+        v = row["a_str"]
+        out[str(row["q_str"])] = int(v) if isinstance(v, (int, bool)) or (isinstance(v, str) and v.lstrip("-").isdigit()) else str(v)
+    return out
+
+
 def load_data(dataset: str, test_limit: Optional[int] = None) -> Tuple[Dict, Dict]:
     """Return (train_data, test_data) dicts for a local dataset under DIR_ROOT/datasets/."""
     datasets_base = os.path.join(DIR_ROOT, "datasets")

@@ -274,10 +274,10 @@ def build_shared_context(
 
         if mlp_input_cache is None and model_name is not None:
             from graph_loss.precompute_mlp_inputs import build_mlp_input_cache as _build_mlp_cache
-            from utils import load_data as _load_data
-            _train_data, _ = _load_data(dataset)
-            _logger.info("Building MLP input cache for %s dataset", dataset)
-            mlp_input_cache = _build_mlp_cache(adapter, dataset, model_name, data_dict=_train_data, batch_size=32)
+            from utils import load_split as _load_split
+            _all_data = _load_split(dataset, "all")
+            _logger.info("Building MLP input cache for %s/all dataset", dataset)
+            mlp_input_cache = _build_mlp_cache(adapter, dataset, model_name, data_dict=_all_data, batch_size=32)
             _logger.info("  Built MLP cache: %d prompts", int(mlp_input_cache.get("meta", {}).get("n_prompts", 0)))
 
         if mlp_input_cache is not None:

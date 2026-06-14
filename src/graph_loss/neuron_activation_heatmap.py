@@ -15,7 +15,6 @@ import torch
 import torch.nn.functional as F
 
 from graph_loss.utils import ActivationWriteResult
-from utils import load_data
 
 
 def _parse_numeric_args(prompt: str) -> tuple[int, ...]:
@@ -331,9 +330,10 @@ def build_neuron_activation_write_result(
 
     if mlp_input_cache is None:
         from graph_loss.precompute_mlp_inputs import build_mlp_input_cache
-        train_data, _ = load_data(dataset)
+        from utils import load_split
+        all_data = load_split(dataset, "all")
         model_name = getattr(model.cfg, "model_name", "model")
-        mlp_input_cache = build_mlp_input_cache(model, dataset, model_name, data_dict=train_data)
+        mlp_input_cache = build_mlp_input_cache(model, dataset, model_name, data_dict=all_data)
 
     try:
         return compute_activation_grid_from_mlp_cache(model, kept_neuron_locations, mlp_input_cache)
