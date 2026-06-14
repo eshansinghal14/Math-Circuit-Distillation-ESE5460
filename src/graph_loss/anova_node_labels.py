@@ -167,10 +167,12 @@ def build_anova_basis_rules(
                     rules.append(BasisRule(label, mask, category=pair_category))
 
     if len(arg_values) >= 2:
-        sums = grids[0] + grids[1]
+        # Sum of ALL arguments across every dimension.
+        sums = sum(grids)
+        all_args_known = target_args is not None and len(target_args) >= len(arg_values)
         sum_centers = (
-            [int(target_args[0] + target_args[1])]
-            if target_args is not None and len(target_args) >= 2
+            [int(sum(int(target_args[d]) for d in range(len(arg_values))))]
+            if all_args_known
             else sorted({int(v) for v in sums.flatten().tolist()})
         )
         for center in sum_centers:
@@ -182,8 +184,8 @@ def build_anova_basis_rules(
                 label = _format_interval_label("sum", center, center)
             rules.append(BasisRule(label, mask, category="sum range"))
         sum_unit_digits = (
-            [int(target_args[0] + target_args[1]) % 10]
-            if target_args is not None and len(target_args) >= 2
+            [int(sum(int(target_args[d]) for d in range(len(arg_values)))) % 10]
+            if all_args_known
             else list(range(10))
         )
         for unit_digit in sum_unit_digits:

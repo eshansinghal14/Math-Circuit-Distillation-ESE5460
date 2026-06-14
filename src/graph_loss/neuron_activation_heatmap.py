@@ -9,6 +9,7 @@ from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
+import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 import torch
@@ -343,6 +344,39 @@ def build_neuron_activation_write_result(
 
 HEATMAP_VALUE_LABEL = "activation"
 
+_ARG_SINGLE_RE = re.compile(r"^arg(\d+)\s+(?:range|units)(?:\s+\d+)?$")
+_ARG_JOINT_RE = re.compile(r"^arg(\d+)\s+(?:range|units)\s+and\s+arg(\d+)\s+(?:range|units)$")
+_ARG_PAIR_SUM_RE = re.compile(r"^arg(\d+)\s+arg(\d+)\s+sum\s+range$")
+
+
+def _parse_category_dims(category: str | None, n_dims: int) -> list[int]:
+    """Return sorted dim indices (0-based) that are active for this ANOVA category.
+
+    The returned list drives heatmap dimensionality: len 1 → line plot, 2 → imshow, 3 → 3-D scatter.
+    Remaining dims are averaged out before plotting.
+    """
+    if category is None or n_dims <= 1:
+        return list(range(n_dims))
+    if category in ("sum range", "sum units"):
+        return list(range(n_dims))
+    if category == "carry":
+        return [i for i in [0, 1] if i < n_dims]
+    m = _ARG_SINGLE_RE.match(category)
+    if m:
+        d = int(m.group(1)) - 1
+        return [d] if d < n_dims else list(range(n_dims))
+    m = _ARG_JOINT_RE.match(category)
+    if m:
+        dims = sorted({int(m.group(1)) - 1, int(m.group(2)) - 1})
+        valid = [d for d in dims if d < n_dims]
+        return valid if len(valid) >= 2 else list(range(n_dims))
+    m = _ARG_PAIR_SUM_RE.match(category)
+    if m:
+        dims = sorted({int(m.group(1)) - 1, int(m.group(2)) - 1})
+        valid = [d for d in dims if d < n_dims]
+        return valid if len(valid) >= 2 else list(range(n_dims))
+    return list(range(n_dims))
+
 
 def save_supernode_activation_heatmap_pdf(
     activation_grids: torch.Tensor,
@@ -352,6 +386,7 @@ def save_supernode_activation_heatmap_pdf(
     *,
     output_path: str,
     title: str,
+    supernode_category: str | None = None,
     member_labels: dict[int, list[str]] | None = None,
     member_number_unembed: dict[int, tuple[list[int], torch.Tensor]] | None = None,
     member_specificity: dict[int, float] | None = None,
@@ -359,13 +394,14 @@ def save_supernode_activation_heatmap_pdf(
     member_var_spec: dict[int, tuple[float, float]] | None = None,
     member_dla_kl: dict[int, float] | None = None,
 ) -> str:
-    """Save one 2D activation heatmap page per neuron in a supernode, with optional 1D logit influence side panel."""
+    """Save one activation heatmap page per neuron: 1-D line, 2-D imshow, or 3-D scatter based on supernode_category."""
     n_dims = len(arg_values)
-    if n_dims < 2:
+    if n_dims < 1:
         raise ValueError(
-            f"save_supernode_activation_heatmap_pdf expects at least 2 arg dimensions, "
-            f"got {n_dims}"
+            f"save_supernode_activation_heatmap_pdf expects at least 1 arg dimension, got {n_dims}"
         )
+
+    plot_dims = _parse_category_dims(supernode_category, n_dims)
 
     output_dir = os.path.dirname(output_path)
     if output_dir:
@@ -387,9 +423,6 @@ def save_supernode_activation_heatmap_pdf(
             f"idx={graph_neuron_idx} layer={layer} token={token_pos} neuron={neuron_id}",
             neuron_id,
         )
-
-    xs = arg_values[0]
-    ys = arg_values[1]
 
     with PdfPages(output_path) as pdf:
         for member_idx, activation_grid in enumerate(activation_grids):
@@ -413,33 +446,71 @@ def save_supernode_activation_heatmap_pdf(
             score_line = ("\n" + "  ".join(score_parts)) if score_parts else ""
             page_title = f"{title}{label_text}\nNeuron {neuron_id} ({location_text}){norm_text}{score_line}"
 
-            if n_dims >= 3:
-                # 3D scatter: one point per (arg1, arg2, arg3) cell, coloured by activation
-                import numpy as np
+            if len(plot_dims) == 1:
+                # 1-D line plot: average over all other dims.
+                d = plot_dims[0]
+                grid_1d = activation_grid
+                for dim in sorted([i for i in range(n_dims) if i != d], reverse=True):
+                    grid_1d = torch.nanmean(grid_1d, dim=dim)
+                x_vals = arg_values[d]
+                fig, ax = plt.subplots(figsize=(8, 4))
+                if torch.isnan(grid_1d).all():
+                    ax.text(0.5, 0.5, "No valid activations", ha="center", va="center")
+                    ax.set_axis_off()
+                else:
+                    y_np = grid_1d.numpy()
+                    valid_mask = ~np.isnan(y_np)
+                    ax.plot(
+                        [x_vals[i] for i in range(len(x_vals)) if valid_mask[i]],
+                        y_np[valid_mask],
+                        "o-", color="steelblue", linewidth=1.5, markersize=4,
+                    )
+                    ax.set_xlabel(f"arg{d + 1}")
+                    ax.set_ylabel(HEATMAP_VALUE_LABEL)
+                    ax.grid(True, alpha=0.3)
+                ax.set_title(page_title)
+                fig.tight_layout()
+                pdf.savefig(fig)
+                plt.close(fig)
+                continue
+
+            if len(plot_dims) >= 3:
+                # 3-D scatter: use first three plot dims, average any extras.
+                d0, d1, d2 = plot_dims[0], plot_dims[1], plot_dims[2]
+                grid_3d = activation_grid
+                for dim in sorted([i for i in range(n_dims) if i not in {d0, d1, d2}], reverse=True):
+                    grid_3d = torch.nanmean(grid_3d, dim=dim)
                 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
-                zs = arg_values[2]
-                xs_g, ys_g, zs_g = np.meshgrid(xs, ys, zs, indexing="ij")
-                c_flat = activation_grid[:, :, :].numpy().ravel() if n_dims == 3 else activation_grid.flatten(start_dim=2).nanmean(dim=-1).numpy().ravel()
-                x_flat, y_flat, z_flat = xs_g.ravel(), ys_g.ravel(), zs_g.ravel()
+                xs_3d, ys_3d, zs_3d = arg_values[d0], arg_values[d1], arg_values[d2]
+                xs_g, ys_g, zs_g = np.meshgrid(xs_3d, ys_3d, zs_3d, indexing="ij")
+                c_flat = grid_3d.numpy().ravel()
                 valid = ~np.isnan(c_flat)
                 fig = plt.figure(figsize=(10, 8))
                 ax3d = fig.add_subplot(111, projection="3d")
                 if valid.any():
                     sc = ax3d.scatter(
-                        x_flat[valid], y_flat[valid], z_flat[valid],
+                        xs_g.ravel()[valid], ys_g.ravel()[valid], zs_g.ravel()[valid],
                         c=c_flat[valid], cmap="viridis", alpha=0.7,
                     )
                     fig.colorbar(sc, ax=ax3d, label=HEATMAP_VALUE_LABEL, shrink=0.6)
                 else:
                     ax3d.text(0.5, 0.5, 0.5, "No valid activations", ha="center", va="center")
-                ax3d.set_xlabel("arg 1")
-                ax3d.set_ylabel("arg 2")
-                ax3d.set_zlabel("arg 3")
+                ax3d.set_xlabel(f"arg{d0 + 1}")
+                ax3d.set_ylabel(f"arg{d1 + 1}")
+                ax3d.set_zlabel(f"arg{d2 + 1}")
                 ax3d.set_title(page_title)
                 fig.tight_layout()
                 pdf.savefig(fig)
                 plt.close(fig)
                 continue
+
+            # 2-D heatmap: average over any non-plot dims, then imshow.
+            d0, d1 = plot_dims[0], plot_dims[1]
+            grid_2d = activation_grid
+            for dim in sorted([i for i in range(n_dims) if i not in {d0, d1}], reverse=True):
+                grid_2d = torch.nanmean(grid_2d, dim=dim)
+            xs_2d = arg_values[d0]
+            ys_2d = arg_values[d1]
 
             number_unembed = (
                 member_number_unembed.get(graph_neuron_idx)
@@ -459,20 +530,20 @@ def save_supernode_activation_heatmap_pdf(
                 )
                 ax, side_ax = axes
 
-            if torch.isnan(activation_grid).all():
+            if torch.isnan(grid_2d).all():
                 ax.text(0.5, 0.5, "No valid activations", ha="center", va="center")
                 ax.set_axis_off()
             else:
-                heatmap = activation_grid.T.contiguous()
+                heatmap = grid_2d.T.contiguous()
                 image = ax.imshow(
                     heatmap.numpy(),
                     origin="lower",
                     aspect="auto",
-                    extent=[min(xs), max(xs), min(ys), max(ys)],
+                    extent=[min(xs_2d), max(xs_2d), min(ys_2d), max(ys_2d)],
                 )
                 fig.colorbar(image, ax=ax, label=HEATMAP_VALUE_LABEL)
-                ax.set_xlabel("arg 1")
-                ax.set_ylabel("arg 2")
+                ax.set_xlabel(f"arg{d0 + 1}")
+                ax.set_ylabel(f"arg{d1 + 1}")
 
             ax.set_title(page_title)
 

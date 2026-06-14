@@ -725,6 +725,7 @@ def build_super_graph(
                     f"supernode_{supernode_idx}.pdf",
                 ),
                 title=f"supernode {supernode_idx}: {category}",
+                supernode_category=category,
                 member_labels=member_labels,
                 member_norm_props=member_norm_props,
                 member_var_spec=member_var_spec,
