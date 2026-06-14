@@ -220,7 +220,7 @@ def label_neurons_layer_by_layer(
         target_args=target_args,
         anova_range_radius=anova_range_radius,
     )
-    gpu_anova_state = build_gpu_anova_state(anova_rules, device)
+    gpu_anova_state = build_gpu_anova_state(anova_rules, device, grid_shape=grid_shape)
 
     valid_batch_layers = [l for l in sorted_layers if l < len(layer_inputs)]
     if not valid_batch_layers:

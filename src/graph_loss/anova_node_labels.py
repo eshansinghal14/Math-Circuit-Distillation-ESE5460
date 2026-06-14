@@ -205,6 +205,46 @@ def build_anova_basis_rules(
     return rules
 
 
+def fill_nan_nearest_mean(acts_flat: torch.Tensor, grid_shape: tuple[int, ...], k: int = 3) -> torch.Tensor:
+    """Replace NaN cells in [N, M] with the mean activation of the K nearest non-NaN grid cells.
+
+    NaN positions are assumed identical across all N neurons (missing prompts, not neuron-specific).
+    Distances are computed in integer grid-index space.
+    """
+    nan_mask = torch.isnan(acts_flat[0])  # [M], shared across all neurons
+    if not nan_mask.any():
+        return acts_flat
+    valid_mask = ~nan_mask
+    if not valid_mask.any():
+        return acts_flat
+
+    M = acts_flat.shape[1]
+    dev = acts_flat.device
+    n_dims = len(grid_shape)
+
+    # Build (M, n_dims) coordinate tensor from flat indices
+    coords = torch.zeros(M, n_dims, device=dev, dtype=torch.float32)
+    remaining = torch.arange(M, device=dev, dtype=torch.long)
+    for dim in range(n_dims - 1, -1, -1):
+        coords[:, dim] = (remaining % grid_shape[dim]).float()
+        remaining = remaining // grid_shape[dim]
+
+    nan_coords   = coords[nan_mask]    # [num_nan,   n_dims]
+    valid_coords = coords[valid_mask]  # [num_valid, n_dims]
+
+    dists   = torch.cdist(nan_coords, valid_coords)            # [num_nan, num_valid]
+    k_use   = min(k, int(valid_coords.shape[0]))
+    _, topk = dists.topk(k_use, dim=1, largest=False)          # [num_nan, k]
+
+    valid_acts = acts_flat[:, valid_mask]                      # [N, num_valid]
+    fill_vals  = valid_acts[:, topk].mean(dim=2)               # [N, num_nan]
+
+    result = acts_flat.clone()
+    nan_idx = nan_mask.nonzero(as_tuple=True)[0]
+    result[:, nan_idx] = fill_vals
+    return result
+
+
 def explained_variance_score(activation_grid: torch.Tensor, mask: torch.Tensor) -> float:
     """Return variance explained by the centered binary mask projection."""
     if activation_grid.shape != mask.shape:
@@ -243,7 +283,7 @@ def _batch_explained_variance_scores(acts_flat: torch.Tensor, masks_flat: torch.
     return torch.where(denom > 0, proj.square() / denom, torch.zeros_like(proj)).clamp(0, 1)
 
 
-def build_gpu_anova_state(rules: list[BasisRule], device: torch.device) -> dict:
+def build_gpu_anova_state(rules: list[BasisRule], device: torch.device, *, grid_shape: tuple[int, ...] | None = None) -> dict:
     """Pre-allocate GPU tensors and precompute category mappings for the ANOVA pipeline.
 
     Derives the category list dynamically from the supplied rules so that datasets
@@ -315,6 +355,7 @@ def build_gpu_anova_state(rules: list[BasisRule], device: torch.device) -> dict:
         "combo_competitor_cols": combo_competitor_cols,
         "all_categories": all_categories,
         "base_categories": base_categories,
+        "grid_shape": grid_shape,
     }
 
 
@@ -352,11 +393,17 @@ def gpu_label_activation_heatmaps(
     base_categories  = gpu_state["base_categories"]
     dev              = acts_flat_gpu.device
 
-    # --- GPU: explained variance [N, R] ---
-    valid_mask = ~torch.isnan(acts_flat_gpu[0])
-    acts_v  = acts_flat_gpu[:, valid_mask].float()
-    masks_v = masks_flat_gpu[:, valid_mask]
-    scores  = _batch_explained_variance_scores(acts_v, masks_v)  # [N, R]
+    # --- GPU: fill missing activations then score over the full grid ---
+    grid_shape = gpu_state.get("grid_shape")
+    if grid_shape is not None:
+        acts_flat_gpu = fill_nan_nearest_mean(acts_flat_gpu, grid_shape)
+        acts_v  = acts_flat_gpu.float()
+        masks_v = masks_flat_gpu
+    else:
+        valid_mask = ~torch.isnan(acts_flat_gpu[0])
+        acts_v  = acts_flat_gpu[:, valid_mask].float()
+        masks_v = masks_flat_gpu[:, valid_mask]
+    scores = _batch_explained_variance_scores(acts_v, masks_v)  # [N, R]
 
     # --- GPU: scatter-max rules → categories [N, C] ---
     cat_scores = torch.zeros(N, C, device=dev)
