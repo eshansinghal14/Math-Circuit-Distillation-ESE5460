@@ -447,27 +447,28 @@ def save_supernode_activation_heatmap_pdf(
             page_title = f"{title}{label_text}\nNeuron {neuron_id} ({location_text}){norm_text}{score_line}"
 
             if len(plot_dims) == 1:
-                # 1-D line plot: average over all other dims.
+                # 1-D heatmap strip: average over all other dims, display as 1-row imshow.
                 d = plot_dims[0]
                 grid_1d = activation_grid
                 for dim in sorted([i for i in range(n_dims) if i != d], reverse=True):
                     grid_1d = torch.nanmean(grid_1d, dim=dim)
                 x_vals = arg_values[d]
-                fig, ax = plt.subplots(figsize=(8, 4))
+                fig, ax = plt.subplots(figsize=(8, 2))
                 if torch.isnan(grid_1d).all():
                     ax.text(0.5, 0.5, "No valid activations", ha="center", va="center")
                     ax.set_axis_off()
                 else:
-                    y_np = grid_1d.numpy()
-                    valid_mask = ~np.isnan(y_np)
-                    ax.plot(
-                        [x_vals[i] for i in range(len(x_vals)) if valid_mask[i]],
-                        y_np[valid_mask],
-                        "o-", color="steelblue", linewidth=1.5, markersize=4,
+                    strip = grid_1d.unsqueeze(0).numpy()  # (1, N)
+                    image = ax.imshow(
+                        strip,
+                        origin="lower",
+                        aspect="auto",
+                        extent=[min(x_vals), max(x_vals), -0.5, 0.5],
+                        cmap="viridis",
                     )
+                    fig.colorbar(image, ax=ax, label=HEATMAP_VALUE_LABEL)
                     ax.set_xlabel(f"arg{d + 1}")
-                    ax.set_ylabel(HEATMAP_VALUE_LABEL)
-                    ax.grid(True, alpha=0.3)
+                    ax.set_yticks([])
                 ax.set_title(page_title)
                 fig.tight_layout()
                 pdf.savefig(fig)
