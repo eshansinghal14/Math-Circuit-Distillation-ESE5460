@@ -386,8 +386,16 @@ def select_anova_supernodes(
                 raise ValueError(
                     f"ANOVA category {category!r} has no positive-variance nodes."
                 )
+            explicitly_requested = allowed_labels is not None and category in allowed_labels
             if is_sum_category:
                 logger.info("  ANOVA label %s: no DLA-scored candidates", category)
+            elif explicitly_requested and category not in _base_categories:
+                logger.warning(
+                    "  ANOVA label %r: no positive-variance nodes — this may not be a valid "
+                    "category name. Valid dynamic categories include 'arg1 range', "
+                    "'arg1 arg2 sum range', 'sum range', etc.",
+                    category,
+                )
             else:
                 logger.info("  ANOVA label %s: no positive-variance nodes", category)
             continue
