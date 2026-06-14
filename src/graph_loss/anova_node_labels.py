@@ -1,4 +1,10 @@
-"""ANOVA-style labels for neuron activation heatmaps."""
+"""ANOVA-style labels for neuron activation heatmaps.
+
+Activation heatmaps are N-D where N = number of args in the prompt/dataset.
+2-arg prompts → 2D heatmaps; 3-arg prompts → 3D heatmaps.
+The grid dimensionality comes from the MLP input cache (dataset), so the
+dataset passed via --dataset must have the same arg count as the prompt.
+"""
 
 from __future__ import annotations
 

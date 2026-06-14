@@ -280,6 +280,17 @@ def build_shared_context(
             mlp_input_cache = _build_mlp_cache(adapter, dataset, model_name, data_dict=_train_data, batch_size=32)
             _logger.info("  Built MLP cache: %d prompts", int(mlp_input_cache.get("meta", {}).get("n_prompts", 0)))
 
+        if mlp_input_cache is not None:
+            _cache_args = mlp_input_cache.get("meta", {}).get("numeric_args_by_prompt", [[]])
+            _cache_n_dims = len(_cache_args[0]) if _cache_args else 0
+            if _cache_n_dims != len(target_args):
+                _logger.warning(
+                    "Dataset has %d-arg prompts but current prompt has %d args — "
+                    "arg%d+ ANOVA rules will not be generated. "
+                    "Pass --dataset with a %d-arg dataset.",
+                    _cache_n_dims, len(target_args), _cache_n_dims + 1, len(target_args),
+                )
+
         _logger.info("ANOVA-labeling %d pre-selected neurons (layer-by-layer)", ctx.n_neurons)
         label_results = label_neurons_layer_by_layer(
             adapter,
