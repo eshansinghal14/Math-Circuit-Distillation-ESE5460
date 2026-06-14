@@ -22,7 +22,7 @@ def generate_math_dataset(
     samples: Optional[int] = None,
     test_split: Optional[float] = None,
     prompt: Optional[str] = None,
-    save_all: bool = False,
+    all_samples: Optional[int] = None,
 ) -> None:
     if len(digits) < 2:
         raise ValueError("digits must have at least 2 elements.")
@@ -84,12 +84,15 @@ def generate_math_dataset(
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4)
 
-    if save_all:
-        all_pairs: List[tuple] = []
-        for nums in itertools.product(*[range(10**d) for d in digits]):
-            for op in operations:
-                all_pairs.append(build_pair(list(nums), op))
-        all_rows = [{"q_str": q, "a_str": a} for q, a in all_pairs]
+    if all_samples is not None:
+        nums_array = np.column_stack([
+            np.random.randint(0, 10 ** d, size=all_samples) for d in digits
+        ])
+        ops = [random.choice(operations) for _ in range(all_samples)]
+        all_rows = [
+            {"q_str": q, "a_str": a}
+            for q, a in (build_pair(nums_array[i].tolist(), ops[i]) for i in range(all_samples))
+        ]
         _write(os.path.join(out_dir, "all.json"), all_rows)
 
     if test_split is not None:
@@ -122,8 +125,8 @@ if __name__ == "__main__":
                         help="Fraction for test set, e.g. 0.5")
     parser.add_argument("--prompt", type=str, default=None,
                         help="Constant string prepended to every equation")
-    parser.add_argument("--save-all", action="store_true", default=False,
-                        help="Also save all.json with the full problem dataset")
+    parser.add_argument("--all-samples", type=int, default=None,
+                        help="Number of random samples to save in all.json")
     args = parser.parse_args()
 
     generate_math_dataset(
@@ -135,5 +138,5 @@ if __name__ == "__main__":
         samples=args.samples,
         test_split=args.test_split,
         prompt=args.prompt,
-        save_all=args.save_all,
+        all_samples=args.all_samples,
     )

@@ -360,15 +360,12 @@ def save_supernode_activation_heatmap_pdf(
     member_dla_kl: dict[int, float] | None = None,
 ) -> str:
     """Save one 2D activation heatmap page per neuron in a supernode, with optional 1D logit influence side panel."""
-    if len(arg_values) < 2:
+    n_dims = len(arg_values)
+    if n_dims < 2:
         raise ValueError(
             f"save_supernode_activation_heatmap_pdf expects at least 2 arg dimensions, "
-            f"got {len(arg_values)}"
+            f"got {n_dims}"
         )
-    if len(arg_values) > 2:
-        # Project to 2D by averaging over extra dimensions (nanmean ignores unfilled grid cells)
-        activation_grids = activation_grids.flatten(start_dim=3).nanmean(dim=-1)
-        arg_values = arg_values[:2]
 
     output_dir = os.path.dirname(output_path)
     if output_dir:
@@ -415,6 +412,35 @@ def save_supernode_activation_heatmap_pdf(
                     score_parts.append(f"dla_kl={kl:.3f}")
             score_line = ("\n" + "  ".join(score_parts)) if score_parts else ""
             page_title = f"{title}{label_text}\nNeuron {neuron_id} ({location_text}){norm_text}{score_line}"
+
+            if n_dims >= 3:
+                # 3D scatter: one point per (arg1, arg2, arg3) cell, coloured by activation
+                import numpy as np
+                from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+                zs = arg_values[2]
+                xs_g, ys_g, zs_g = np.meshgrid(xs, ys, zs, indexing="ij")
+                c_flat = activation_grid[:, :, :].numpy().ravel() if n_dims == 3 else activation_grid.flatten(start_dim=2).nanmean(dim=-1).numpy().ravel()
+                x_flat, y_flat, z_flat = xs_g.ravel(), ys_g.ravel(), zs_g.ravel()
+                valid = ~np.isnan(c_flat)
+                fig = plt.figure(figsize=(10, 8))
+                ax3d = fig.add_subplot(111, projection="3d")
+                if valid.any():
+                    sc = ax3d.scatter(
+                        x_flat[valid], y_flat[valid], z_flat[valid],
+                        c=c_flat[valid], cmap="viridis", alpha=0.7,
+                    )
+                    fig.colorbar(sc, ax=ax3d, label=HEATMAP_VALUE_LABEL, shrink=0.6)
+                else:
+                    ax3d.text(0.5, 0.5, 0.5, "No valid activations", ha="center", va="center")
+                ax3d.set_xlabel("arg 1")
+                ax3d.set_ylabel("arg 2")
+                ax3d.set_zlabel("arg 3")
+                ax3d.set_title(page_title)
+                fig.tight_layout()
+                pdf.savefig(fig)
+                plt.close(fig)
+                continue
+
             number_unembed = (
                 member_number_unembed.get(graph_neuron_idx)
                 if member_number_unembed is not None

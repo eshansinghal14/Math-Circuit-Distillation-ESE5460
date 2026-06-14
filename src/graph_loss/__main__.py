@@ -30,8 +30,8 @@ def main():
     parser.add_argument("--prompt", required=True, help="Prompt to analyze")
     parser.add_argument(
         "--dataset",
-        default="22_add",
-        help="Dataset name under datasets/ used to build the MLP activation cache (e.g. '22_add', '22_add3')",
+        default=None,
+        help="Dataset name under datasets/ used to build the MLP activation cache (e.g. '22_add', '22_add3'). Required when --graph-node-labels is specified.",
     )
     add_graph_build_args(parser)
     parser.add_argument(
@@ -58,6 +58,8 @@ def main():
         ),
     )
     args = parser.parse_args()
+    if args.graph_node_labels and args.dataset is None:
+        parser.error("--dataset is required when --graph-node-labels is specified")
     if args.supernode_heatmap_output_dir:
         if not os.path.isabs(args.supernode_heatmap_output_dir):
             args.supernode_heatmap_output_dir = os.path.join(DIR_ROOT, args.supernode_heatmap_output_dir)

@@ -231,7 +231,7 @@ def build_shared_context(
     dtype: torch.dtype | None = None,
     mlp_input_cache: dict | None = None,
     model_name: str | None = None,
-    dataset: str = "22_add",
+    dataset: str | None = None,
     nodes_per_label: int = 10,
     anova_range_radius: int = 0,
     node_labels: list[str] | None = None,
@@ -270,6 +270,12 @@ def build_shared_context(
     target_args: list = []
 
     if need_anova:
+        if mlp_input_cache is None and dataset is None:
+            raise ValueError(
+                "--dataset is required when --graph-node-labels is specified and no "
+                "mlp_input_cache is pre-supplied."
+            )
+
         decoded = adapter.tokenizer.decode(input_ids.detach().cpu().tolist())
         target_args = parse_numeric_args(decoded)
 
@@ -585,7 +591,7 @@ def create_graph(
     # ANOVA / supergraph params
     mlp_input_cache: dict | None = None,
     model_name: str | None = None,
-    dataset: str = "22_add",
+    dataset: str | None = None,
     refresh_mlp_cache: bool = False,
     supernode_heatmap_output_dir: str | None = None,
     nodes_per_label: int = 10,
