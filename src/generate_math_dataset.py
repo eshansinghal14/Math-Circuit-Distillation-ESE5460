@@ -85,7 +85,12 @@ def generate_math_dataset(
             json.dump(data, f, indent=4)
 
     if save_all:
-        _write(os.path.join(out_dir, "all.json"), rows)
+        all_pairs: List[tuple] = []
+        for nums in itertools.product(*[range(10**d) for d in digits]):
+            for op in operations:
+                all_pairs.append(build_pair(list(nums), op))
+        all_rows = [{"q_str": q, "a_str": a} for q, a in all_pairs]
+        _write(os.path.join(out_dir, "all.json"), all_rows)
 
     if test_split is not None:
         if not (0.0 < test_split <= 1.0):
