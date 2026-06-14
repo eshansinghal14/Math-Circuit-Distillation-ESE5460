@@ -70,6 +70,7 @@ class GraphKDConfig:
     track_grad_norms: bool = False
     graph_node_labels: List[str] = field(default_factory=list)
     anova_range_radius: int = 0
+    mlp_cache_batch_size: int = 32
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -124,10 +125,12 @@ class GraphKDTrainer:
         if config.graph_node_labels:
             from graph_loss.precompute_mlp_inputs import build_mlp_input_cache as _build_mlp_cache
             student_mlp_cache = _build_mlp_cache(
-                self.student_adapter, config.dataset, config.model, data_dict=train_data
+                self.student_adapter, config.dataset, config.model,
+                data_dict=train_data, batch_size=config.mlp_cache_batch_size,
             )
             teacher_mlp_cache = _build_mlp_cache(
-                self.teacher_adapter, config.dataset, config.teacher, data_dict=train_data
+                self.teacher_adapter, config.dataset, config.teacher,
+                data_dict=train_data, batch_size=config.mlp_cache_batch_size,
             )
 
         self.graph_config = GraphAuxConfig(
@@ -357,6 +360,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     group.add_argument("--anova-range-radius", "--anova_range_radius", type=int, default=0,
                        dest="anova_range_radius")
+    group.add_argument(
+        "--cache-batch-size", "--cache_batch_size",
+        type=int, default=32, dest="cache_batch_size",
+        help="Prompt batch size when building the MLP activation cache (default: 32).",
+    )
     return parser
 
 
@@ -398,6 +406,7 @@ def main() -> None:
             track_grad_norms=args.track_grad_norms,
             graph_node_labels=graph_node_labels,
             anova_range_radius=args.anova_range_radius,
+            mlp_cache_batch_size=args.cache_batch_size,
         ),
         train_data,
         test_data,
