@@ -22,6 +22,7 @@ def generate_math_dataset(
     samples: Optional[int] = None,
     test_split: Optional[float] = None,
     prompt: Optional[str] = None,
+    save_all: bool = False,
 ) -> None:
     if len(digits) < 2:
         raise ValueError("digits must have at least 2 elements.")
@@ -83,6 +84,9 @@ def generate_math_dataset(
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4)
 
+    if save_all:
+        _write(os.path.join(out_dir, "all.json"), rows)
+
     if test_split is not None:
         if not (0.0 < test_split <= 1.0):
             raise ValueError("test_split must be in (0, 1].")
@@ -113,6 +117,8 @@ if __name__ == "__main__":
                         help="Fraction for test set, e.g. 0.5")
     parser.add_argument("--prompt", type=str, default=None,
                         help="Constant string prepended to every equation")
+    parser.add_argument("--save-all", action="store_true", default=False,
+                        help="Also save all.json with the full problem dataset")
     args = parser.parse_args()
 
     generate_math_dataset(
@@ -124,4 +130,5 @@ if __name__ == "__main__":
         samples=args.samples,
         test_split=args.test_split,
         prompt=args.prompt,
+        save_all=args.save_all,
     )
