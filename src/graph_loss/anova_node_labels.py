@@ -142,9 +142,9 @@ def build_anova_basis_rules(
         mask = arg1_box & arg2_box
         rules.append(BasisRule(_joint_range_label(arg1_values, arg2_values, mask), mask, category="arg1 range and arg2 range"))
 
-    # Combination sum ranges for all subsets of size 2..N.
-    # Size 2 gives pairwise sums; size N gives the full sum (also covered by "sum range").
-    for combo_size in range(2, len(arg_values) + 1):
+    # Combination sum ranges for all subsets of size 2..N-1.
+    # The full N-arg sum is already covered by the dedicated "sum range" category below.
+    for combo_size in range(2, len(arg_values)):
         for combo_indices in combinations(range(len(arg_values)), combo_size):
             combo_sums = sum(grids[i] for i in combo_indices)
             combo_category = " ".join(f"arg{i + 1}" for i in combo_indices) + " sum range"

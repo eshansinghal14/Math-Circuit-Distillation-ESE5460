@@ -485,8 +485,14 @@ def save_supernode_activation_heatmap_pdf(
                 xs_g, ys_g, zs_g = np.meshgrid(xs_3d, ys_3d, zs_3d, indexing="ij")
                 c_flat = grid_3d.numpy().ravel()
                 valid = ~np.isnan(c_flat)
-                fig = plt.figure(figsize=(10, 8))
-                ax3d = fig.add_subplot(111, projection="3d")
+                if number_unembed is None:
+                    fig = plt.figure(figsize=(10, 8))
+                    ax3d = fig.add_subplot(111, projection="3d")
+                    side_ax_3d = None
+                else:
+                    fig = plt.figure(figsize=(16, 8))
+                    ax3d = fig.add_subplot(1, 2, 1, projection="3d")
+                    side_ax_3d = fig.add_subplot(1, 2, 2)
                 if valid.any():
                     sc = ax3d.scatter(
                         xs_g.ravel()[valid], ys_g.ravel()[valid], zs_g.ravel()[valid],
@@ -499,6 +505,19 @@ def save_supernode_activation_heatmap_pdf(
                 ax3d.set_ylabel(f"arg{d1 + 1}")
                 ax3d.set_zlabel(f"arg{d2 + 1}")
                 ax3d.set_title(page_title)
+                if side_ax_3d is not None and number_unembed is not None:
+                    number_values, unembed_values = number_unembed
+                    unembed_heatmap = unembed_values.detach().float().cpu().unsqueeze(0)
+                    image = side_ax_3d.imshow(
+                        unembed_heatmap.numpy(),
+                        origin="lower",
+                        aspect="auto",
+                        extent=[min(number_values), max(number_values), 0, 1],
+                    )
+                    fig.colorbar(image, ax=side_ax_3d, label="W_out @ W_U")
+                    side_ax_3d.set_xlabel("number token")
+                    side_ax_3d.set_yticks([])
+                    side_ax_3d.set_title("number-token unembed")
                 fig.tight_layout()
                 pdf.savefig(fig)
                 plt.close(fig)
