@@ -698,17 +698,64 @@ def plot_heatmap_montage(
 # ---------------------------------------------------------------------------
 
 
-def _flow_positions(labels: list[str]) -> dict[int, tuple[float, float]]:
-    """Tiered layout: arg inputs at bottom, sum/dla outputs at top, rest in the middle."""
+# Plain-English meaning of each supernode label, for the Fig F legend.
+CATEGORY_DESCRIPTIONS = {
+    "arg1 range": "magnitude of the 1st operand",
+    "arg1 units": "ones digit of the 1st operand",
+    "arg2 range": "magnitude of the 2nd operand",
+    "arg2 units": "ones digit of the 2nd operand",
+    "arg3 range": "magnitude of the 3rd operand",
+    "arg3 units": "ones digit of the 3rd operand",
+    "arg1 units and arg2 units": "joint ones digits of both operands",
+    "arg1 range and arg2 range": "joint magnitudes of both operands",
+    "carry": "whether a carry occurs",
+    "sum range": "magnitude of the sum",
+    "sum units": "ones digit of the sum",
+    "dla": "direct contribution to the output logits",
+}
+
+
+def _describe_label(label: str) -> str:
+    key = label.lower().strip()
+    if key in CATEGORY_DESCRIPTIONS:
+        return CATEGORY_DESCRIPTIONS[key]
+    if key.startswith("arg:"):
+        return f"neurons aligned to input token '{label.split(':', 1)[1]}'"
+    return label
+
+
+def _wrap_label(label: str) -> str:
+    return label.replace(" and ", "\n& ")
+
+
+def _flow_positions(labels: list[str]) -> tuple[dict[int, tuple[float, float]], int]:
+    """Tiered layout: arg inputs at bottom, sum/dla outputs at top, rest in the middle.
+
+    Returns the positions plus the busiest tier size (for dynamic node sizing).
+    """
     low = [l.lower() for l in labels]
     bottom = [i for i, l in enumerate(low) if l.startswith("arg")]
     top = [i for i, l in enumerate(low) if "sum" in l or "dla" in l]
     mid = [i for i in range(len(labels)) if i not in bottom and i not in top]
     pos: dict[int, tuple[float, float]] = {}
-    for y, members in ((0.12, bottom), (0.5, mid), (0.86, top)):
+    for y, members in ((0.16, bottom), (0.5, mid), (0.84, top)):
         for k, i in enumerate(members):
             pos[i] = ((k + 1) / (len(members) + 1), y)
-    return pos
+    busiest = max((len(bottom), len(mid), len(top)), default=1)
+    return pos, busiest
+
+
+def _box_perimeter_point(
+    center: tuple[float, float], toward: tuple[float, float], half: float, margin: float
+) -> tuple[float, float]:
+    """Point on the square node border (toward another node), nudged out by ``margin``."""
+    cx, cy = center
+    dx, dy = toward[0] - cx, toward[1] - cy
+    m = max(abs(dx), abs(dy))
+    if m == 0:
+        return center
+    scale = (half + margin) / m
+    return (cx + dx * scale, cy + dy * scale)
 
 
 def plot_circuit_with_heatmaps(
@@ -718,6 +765,7 @@ def plot_circuit_with_heatmaps(
     adapters: dict[str, HFLlamaGraphAdapter],
     mlp_caches: dict[str, dict],
     names: list[str],
+    prompt: str,
     out_dir: str,
     weight_threshold: float = 0.04,
 ) -> None:
@@ -749,13 +797,18 @@ def plot_circuit_with_heatmaps(
             for li, lbl in enumerate(labels)
         }
 
-    pos = _flow_positions(labels)
-    thumb = 0.15
-    fig, axes = plt.subplots(1, len(names), figsize=(6.5 * len(names), 7.0))
-    if len(names) == 1:
-        axes = [axes]
+    pos, busiest = _flow_positions(labels)
+    # Dynamic node size: leave a clear gap between the busiest row's nodes.
+    thumb = min(0.13, 0.62 / (busiest + 1))
+    half = thumb / 2.0
 
-    for ax, name in zip(axes, names):
+    fig, axes = plt.subplots(
+        1, len(names) + 1, figsize=(5.6 * len(names) + 2.4, 6.6),
+        gridspec_kw={"width_ratios": [1] * len(names) + [0.5]},
+    )
+    panel_axes, legend_ax = axes[:-1], axes[-1]
+
+    for ax, name in zip(panel_axes, names):
         norm = aligned.norm[name]
         for tgt in range(len(labels)):
             for src in range(len(labels)):
@@ -764,17 +817,20 @@ def plot_circuit_with_heatmaps(
                 w = float(norm[tgt, src].item())
                 if w < weight_threshold:
                     continue
+                start = _box_perimeter_point(pos[src], pos[tgt], half, 0.006)
+                end = _box_perimeter_point(pos[tgt], pos[src], half, 0.006)
                 ax.add_patch(FancyArrowPatch(
-                    pos[src], pos[tgt], arrowstyle="-|>", mutation_scale=10,
-                    lw=0.4 + 5.0 * w, alpha=min(1.0, 0.2 + w), color="#555",
-                    connectionstyle="arc3,rad=0.06", shrinkA=26, shrinkB=26, zorder=1,
+                    start, end, arrowstyle="-|>", mutation_scale=11,
+                    lw=0.4 + 5.0 * w, alpha=min(1.0, 0.25 + w), color="#555",
+                    connectionstyle="arc3,rad=0.05", shrinkA=0, shrinkB=0, zorder=1,
                 ))
         ax.set_xlim(0, 1)
         ax.set_ylim(0, 1)
+        ax.set_aspect("equal")
         ax.set_axis_off()
         ax.set_title(name, fontsize=12)
         for li, (x, y) in pos.items():
-            inset = ax.inset_axes([x - thumb / 2, y - thumb / 2, thumb, thumb])
+            inset = ax.inset_axes([x - half, y - half, thumb, thumb])
             arr = grids[name][li]
             if arr is not None and getattr(arr, "ndim", 0) == 2:
                 inset.imshow(arr.T, origin="lower", aspect="auto", cmap="viridis")
@@ -785,11 +841,23 @@ def plot_circuit_with_heatmaps(
             for sp in inset.spines.values():
                 sp.set_edgecolor("#2b6cb0")
                 sp.set_linewidth(1.3)
-            ax.text(x, y - thumb / 2 - 0.015, labels[li], ha="center", va="top",
-                    fontsize=6.5, zorder=3)
+            # Stagger captions on the busy bottom row to avoid overlap.
+            extra = 0.045 if (y < 0.3 and li % 2 == 1) else 0.0
+            ax.text(x, y - half - 0.012 - extra, _wrap_label(labels[li]),
+                    ha="center", va="top", fontsize=6.0, zorder=3)
 
-    fig.suptitle("Computation flow with supernode activation heatmaps "
-                 "(node = mean activation over members)", fontsize=13)
+    # Legend column: what each supernode computes.
+    legend_ax.set_axis_off()
+    legend_ax.set_title("supernode meaning", fontsize=9, loc="left")
+    lines = [f"• {labels[i]}:\n   {_describe_label(labels[i])}" for i in range(len(labels))]
+    legend_ax.text(0.0, 0.98, "\n".join(lines), va="top", ha="left", fontsize=6.5,
+                   transform=legend_ax.transAxes)
+
+    fig.suptitle(
+        f"Computation flow for  \u201c{prompt}\u201d\n"
+        "node = mean activation over member neurons; edge width \u221d routing weight",
+        fontsize=12,
+    )
     _save(fig, out_dir, "figF_circuit_heatmaps")
     plt.close(fig)
 
@@ -932,7 +1000,7 @@ def main() -> None:
             mlp_caches=mlp_caches)),
         ("Fig F flow+heatmaps", lambda: plot_circuit_with_heatmaps(
             aligned, results=results, adapters=adapters, mlp_caches=mlp_caches,
-            names=fig_names, out_dir=out_dir)),
+            names=fig_names, prompt=args.prompt, out_dir=out_dir)),
     ]
     for label, fn in figures:
         try:
