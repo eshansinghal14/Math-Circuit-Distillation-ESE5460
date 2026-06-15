@@ -802,13 +802,11 @@ def plot_circuit_with_heatmaps(
     thumb = min(0.13, 0.62 / (busiest + 1))
     half = thumb / 2.0
 
-    fig, axes = plt.subplots(
-        1, len(names) + 1, figsize=(5.6 * len(names) + 2.4, 6.6),
-        gridspec_kw={"width_ratios": [1] * len(names) + [0.5]},
-    )
-    panel_axes, legend_ax = axes[:-1], axes[-1]
+    fig, axes = plt.subplots(1, len(names), figsize=(5.8 * len(names), 6.8))
+    if len(names) == 1:
+        axes = [axes]
 
-    for ax, name in zip(panel_axes, names):
+    for ax, name in zip(axes, names):
         norm = aligned.norm[name]
         for tgt in range(len(labels)):
             for src in range(len(labels)):
@@ -841,23 +839,16 @@ def plot_circuit_with_heatmaps(
             for sp in inset.spines.values():
                 sp.set_edgecolor("#2b6cb0")
                 sp.set_linewidth(1.3)
-            # Stagger captions on the busy bottom row to avoid overlap.
-            extra = 0.045 if (y < 0.3 and li % 2 == 1) else 0.0
+            # Inline node caption (label + plain-English meaning), staggered on
+            # the busy bottom row to avoid horizontal overlap.
+            extra = 0.05 if (y < 0.3 and li % 2 == 1) else 0.0
             ax.text(x, y - half - 0.012 - extra, _wrap_label(labels[li]),
-                    ha="center", va="top", fontsize=6.0, zorder=3)
+                    ha="center", va="top", fontsize=6.2, weight="medium", zorder=3)
+            ax.text(x, y - half - 0.012 - extra - 0.052, _describe_label(labels[li]),
+                    ha="center", va="top", fontsize=5.0, style="italic",
+                    color="#444", zorder=3)
 
-    # Legend column: what each supernode computes.
-    legend_ax.set_axis_off()
-    legend_ax.set_title("supernode meaning", fontsize=9, loc="left")
-    lines = [f"• {labels[i]}:\n   {_describe_label(labels[i])}" for i in range(len(labels))]
-    legend_ax.text(0.0, 0.98, "\n".join(lines), va="top", ha="left", fontsize=6.5,
-                   transform=legend_ax.transAxes)
-
-    fig.suptitle(
-        f"Computation flow for  \u201c{prompt}\u201d\n"
-        "node = mean activation over member neurons; edge width \u221d routing weight",
-        fontsize=12,
-    )
+    fig.suptitle(f"Computation flow for  \u201c{prompt}\u201d", fontsize=13)
     _save(fig, out_dir, "figF_circuit_heatmaps")
     plt.close(fig)
 
