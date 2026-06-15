@@ -71,7 +71,7 @@ class GraphKDConfig:
     graph_node_labels: List[str] = field(default_factory=list)
     anova_range_radius: int = 0
     mlp_cache_batch_size: int = 32
-    anova_neuron_chunk: int = 256
+    anova_neuron_chunk: int | None = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -369,8 +369,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     group.add_argument(
         "--anova-neuron-chunk", "--anova_neuron_chunk",
-        type=int, default=256, dest="anova_neuron_chunk",
-        help="Neurons processed per ANOVA batch (reduce to avoid GPU OOM on large grids, default: 256).",
+        type=int, default=None, dest="anova_neuron_chunk",
+        help="Neurons processed per ANOVA batch (reduce to avoid GPU OOM on large grids; default: all at once).",
     )
     return parser
 

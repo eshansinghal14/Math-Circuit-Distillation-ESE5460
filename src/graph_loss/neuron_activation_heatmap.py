@@ -160,7 +160,7 @@ def label_neurons_layer_by_layer(
     *,
     target_args: tuple[int, ...] | None = None,
     anova_range_radius: int = 0,
-    anova_neuron_chunk: int = 256,
+    anova_neuron_chunk: int | None = None,
 ) -> list:
     """ANOVA-label N neurons across all model layers with pipelined H2D transfers and one D2H flush.
 
@@ -286,9 +286,10 @@ def label_neurons_layer_by_layer(
             neurons = layer_group_map[tp]
             n_g = len(neurons)
             acts_g = neuron_acts_batch[g_idx, :, :n_g].float()  # [P, n_g]
-            for c_start in range(0, n_g, anova_neuron_chunk):
-                chunk_neurons = neurons[c_start:c_start + anova_neuron_chunk]
-                acts_c = acts_g[:, c_start:c_start + anova_neuron_chunk]  # [P, chunk]
+            chunk_size = anova_neuron_chunk if anova_neuron_chunk is not None else n_g
+            for c_start in range(0, n_g, chunk_size):
+                chunk_neurons = neurons[c_start:c_start + chunk_size]
+                acts_c = acts_g[:, c_start:c_start + chunk_size]  # [P, chunk]
                 n_c = acts_c.shape[1]
                 grid = torch.full((n_c, grid_cells), float("nan"), dtype=torch.float32, device=device)
                 grid[:, flat_indices_gpu] = acts_c.T

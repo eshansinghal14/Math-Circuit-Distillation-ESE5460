@@ -116,8 +116,8 @@ def add_graph_build_args(parser: argparse.ArgumentParser) -> None:
         "--anova_neuron_chunk",
         dest="anova_neuron_chunk",
         type=int,
-        default=256,
-        help="Neurons processed per ANOVA batch (reduce to avoid GPU OOM on large grids, default: 256).",
+        default=None,
+        help="Neurons processed per ANOVA batch (reduce to avoid GPU OOM on large grids; default: all at once).",
     )
     parser.add_argument(
         "--graph-node-labels",
