@@ -333,7 +333,7 @@ def select_anova_supernodes(
         and target_args is not None
         and len(target_args) >= 2
     )
-    target_sum = int(target_args[0] + target_args[1]) if use_dla else 0
+    target_sum = int(sum(target_args)) if use_dla else 0
 
     selected_member_ids: set[int] = set()
     supernodes: list[list[int]] = []

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import time
+
+logger = logging.getLogger(__name__)
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
@@ -31,7 +34,7 @@ class GraphAuxConfig:
 
     student_anova_range_radius: int = 0
     student_nodes_per_label: int = 10
-    anova_neuron_chunk: int = 256
+    anova_neuron_chunk: int | None = None
     teacher_nodes_per_label: int = 10
     student_mlp_input_cache_path: str | None = None
     mlp_input_cache: dict | None = None
@@ -207,12 +210,18 @@ def compute_prompt_graph_loss(
             parts.append(f"  teacher has unexpected extra supernodes: {sorted(extra_in_teacher)}")
         if missing_from_teacher:
             parts.append(f"  teacher is missing expected supernodes:  {sorted(missing_from_teacher)}")
-        raise RuntimeError(
-            f"Teacher/student supernode label mismatch for prompt={prompt!r}.\n"
-            + "\n".join(parts)
-            + f"\n  Student labels: {sorted(student_label_set)}"
-            + f"\n  Teacher labels: {sorted(teacher_label_set)}"
+        logger.warning(
+            "Teacher/student supernode label mismatch for prompt=%r — mismatched nodes excluded.\n%s\n  Student labels: %s\n  Teacher labels: %s",
+            prompt,
+            "\n".join(parts),
+            sorted(student_label_set),
+            sorted(teacher_label_set),
         )
+        # Restrict both sides to the intersection so the loss is computed
+        # only over commonly-labeled supernodes.
+        common_labels = student_label_set & teacher_label_set
+        s_label_to_sid = {lbl: sid for lbl, sid in s_label_to_sid.items() if lbl in common_labels}
+        t_label_to_tid = {lbl: tid for lbl, tid in t_label_to_tid.items() if lbl in common_labels}
 
     mapping = {
         tid: {s_label_to_sid[labels[0]]}

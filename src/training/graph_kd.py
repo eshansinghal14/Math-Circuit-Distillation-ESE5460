@@ -71,7 +71,7 @@ class GraphKDConfig:
     graph_node_labels: List[str] = field(default_factory=list)
     anova_range_radius: int = 0
     mlp_cache_batch_size: int = 32
-    anova_neuron_chunk: int = 256
+    anova_neuron_chunk: int | None = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -218,6 +218,11 @@ class GraphKDTrainer:
                 sel = random.sample(range(len(prompts)), cfg.n_graph_prompts)
                 prompts = [prompts[i] for i in sel]
                 answers = [answers[i] for i in sel]
+            if cfg.track_grad_norms:
+                grads_before = {
+                    n: p.grad.detach().clone() if p.grad is not None else None
+                    for n, p in self.model.named_parameters()
+                }
             graph_loss_tensor, _ = backward_batch_graph_loss(
                 prompts=prompts,
                 answers=answers,
@@ -228,6 +233,14 @@ class GraphKDTrainer:
                 loss_scale=cfg.lambda_graph / grad_accum,
             )
             graph_val = float(graph_loss_tensor.item())
+            if cfg.track_grad_norms:
+                graph_gnorm_sq = 0.0
+                for n, p in self.model.named_parameters():
+                    if p.grad is not None:
+                        before = grads_before.get(n)
+                        delta = p.grad - before if before is not None else p.grad
+                        graph_gnorm_sq += delta.norm(2).item() ** 2
+                accum_graph_gnorm += graph_gnorm_sq ** 0.5
 
             micro_step += 1
 
@@ -240,9 +253,7 @@ class GraphKDTrainer:
             accum_graph += graph_val
 
             if micro_step % grad_accum == 0:
-                total_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), _GRAD_CLIP)
-                if cfg.track_grad_norms:
-                    accum_graph_gnorm += float(total_norm)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), _GRAD_CLIP)
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
@@ -369,8 +380,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     group.add_argument(
         "--anova-neuron-chunk", "--anova_neuron_chunk",
-        type=int, default=256, dest="anova_neuron_chunk",
-        help="Neurons processed per ANOVA batch (reduce to avoid GPU OOM on large grids, default: 256).",
+        type=int, default=None, dest="anova_neuron_chunk",
+        help="Neurons processed per ANOVA batch (reduce to avoid GPU OOM on large grids; default: all at once).",
     )
     return parser
 

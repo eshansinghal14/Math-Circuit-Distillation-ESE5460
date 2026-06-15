@@ -160,7 +160,7 @@ def label_neurons_layer_by_layer(
     *,
     target_args: tuple[int, ...] | None = None,
     anova_range_radius: int = 0,
-    anova_neuron_chunk: int = 256,
+    anova_neuron_chunk: int | None = None,
 ) -> list:
     """ANOVA-label N neurons across all model layers with pipelined H2D transfers and one D2H flush.
 
@@ -286,9 +286,10 @@ def label_neurons_layer_by_layer(
             neurons = layer_group_map[tp]
             n_g = len(neurons)
             acts_g = neuron_acts_batch[g_idx, :, :n_g].float()  # [P, n_g]
-            for c_start in range(0, n_g, anova_neuron_chunk):
-                chunk_neurons = neurons[c_start:c_start + anova_neuron_chunk]
-                acts_c = acts_g[:, c_start:c_start + anova_neuron_chunk]  # [P, chunk]
+            chunk_size = anova_neuron_chunk if anova_neuron_chunk is not None else n_g
+            for c_start in range(0, n_g, chunk_size):
+                chunk_neurons = neurons[c_start:c_start + chunk_size]
+                acts_c = acts_g[:, c_start:c_start + chunk_size]  # [P, chunk]
                 n_c = acts_c.shape[1]
                 grid = torch.full((n_c, grid_cells), float("nan"), dtype=torch.float32, device=device)
                 grid[:, flat_indices_gpu] = acts_c.T
@@ -445,6 +446,12 @@ def save_supernode_activation_heatmap_pdf(
             score_line = ("\n" + "  ".join(score_parts)) if score_parts else ""
             page_title = f"{title}{label_text}\nNeuron {neuron_id} ({location_text}){norm_text}{score_line}"
 
+            number_unembed = (
+                member_number_unembed.get(graph_neuron_idx)
+                if member_number_unembed is not None
+                else None
+            )
+
             if len(plot_dims) == 1:
                 # 1-D heatmap strip: average over all other dims, display as 1-row imshow.
                 d = plot_dims[0]
@@ -485,8 +492,14 @@ def save_supernode_activation_heatmap_pdf(
                 xs_g, ys_g, zs_g = np.meshgrid(xs_3d, ys_3d, zs_3d, indexing="ij")
                 c_flat = grid_3d.numpy().ravel()
                 valid = ~np.isnan(c_flat)
-                fig = plt.figure(figsize=(10, 8))
-                ax3d = fig.add_subplot(111, projection="3d")
+                if number_unembed is None:
+                    fig = plt.figure(figsize=(10, 8))
+                    ax3d = fig.add_subplot(111, projection="3d")
+                    side_ax_3d = None
+                else:
+                    fig = plt.figure(figsize=(16, 8))
+                    ax3d = fig.add_subplot(1, 2, 1, projection="3d")
+                    side_ax_3d = fig.add_subplot(1, 2, 2)
                 if valid.any():
                     sc = ax3d.scatter(
                         xs_g.ravel()[valid], ys_g.ravel()[valid], zs_g.ravel()[valid],
@@ -499,6 +512,19 @@ def save_supernode_activation_heatmap_pdf(
                 ax3d.set_ylabel(f"arg{d1 + 1}")
                 ax3d.set_zlabel(f"arg{d2 + 1}")
                 ax3d.set_title(page_title)
+                if side_ax_3d is not None and number_unembed is not None:
+                    number_values, unembed_values = number_unembed
+                    unembed_heatmap = unembed_values.detach().float().cpu().unsqueeze(0)
+                    image = side_ax_3d.imshow(
+                        unembed_heatmap.numpy(),
+                        origin="lower",
+                        aspect="auto",
+                        extent=[min(number_values), max(number_values), 0, 1],
+                    )
+                    fig.colorbar(image, ax=side_ax_3d, label="W_out @ W_U")
+                    side_ax_3d.set_xlabel("number token")
+                    side_ax_3d.set_yticks([])
+                    side_ax_3d.set_title("number-token unembed")
                 fig.tight_layout()
                 pdf.savefig(fig)
                 plt.close(fig)
@@ -511,12 +537,6 @@ def save_supernode_activation_heatmap_pdf(
                 grid_2d = torch.nanmean(grid_2d, dim=dim)
             xs_2d = arg_values[d0]
             ys_2d = arg_values[d1]
-
-            number_unembed = (
-                member_number_unembed.get(graph_neuron_idx)
-                if member_number_unembed is not None
-                else None
-            )
 
             if number_unembed is None:
                 fig, ax = plt.subplots(figsize=(8, 6))
