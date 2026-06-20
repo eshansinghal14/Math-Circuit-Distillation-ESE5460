@@ -564,6 +564,50 @@ def _heatmap_montage_from_dirs(
     return True
 
 
+def build_model_mlp_cache(
+    adapter: HFLlamaGraphAdapter, model_name: str, dataset: str | None
+) -> dict | None:
+    """Build (or load from disk) the MLP-input cache for one model.
+
+    Reuses the on-disk cache created during ANOVA graph building, so this is
+    cheap on a second call. Returns None if no dataset is available.
+    """
+    if not dataset:
+        return None
+    try:
+        from graph_loss.precompute_mlp_inputs import build_mlp_input_cache
+        from utils import load_split
+
+        data = load_split(dataset, "all")
+        return build_mlp_input_cache(adapter, dataset, model_name, data_dict=data)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not build MLP cache for %s: %s", model_name, exc)
+        return None
+
+
+def aggregate_supernode_grid(
+    adapter: HFLlamaGraphAdapter,
+    graph,
+    members,
+    mlp_cache: dict | None,
+):
+    """Mean activation grid over a supernode's member neurons (2-D np array or None)."""
+    from graph_loss.neuron_activation_heatmap import build_neuron_activation_write_result
+
+    if not members or mlp_cache is None:
+        return None
+    locs = graph.neuron_locations.detach().cpu()[[int(m) for m in members]]
+    try:
+        awr = build_neuron_activation_write_result(adapter, locs, mlp_input_cache=mlp_cache)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Supernode activation grid failed: %s", exc)
+        return None
+    grid = torch.nanmean(awr.activations.float(), dim=0)  # mean over member neurons
+    while grid.dim() > 2:
+        grid = torch.nanmean(grid, dim=-1)
+    return grid.numpy()
+
+
 def _heatmap_montage_regenerate(
     results: dict[str, GraphPipelineResult],
     adapters: dict[str, HFLlamaGraphAdapter],
@@ -572,39 +616,24 @@ def _heatmap_montage_regenerate(
     student: str,
     dataset: str | None,
     out_dir: str,
+    mlp_caches: dict[str, dict] | None = None,
 ) -> bool:
     if not dataset:
         logger.info("Fig E regenerate skipped: --dataset required to build the MLP cache.")
         return False
-    from graph_loss.neuron_activation_heatmap import build_neuron_activation_write_result
 
     plt = _import_pyplot()
     names = [teacher, student]
+    mlp_caches = mlp_caches or {}
 
     def _supernode_grids(name: str):
-        result = results[name]
-        graph = result.graph
-        sg = result.supergraph
-        locations = graph.neuron_locations.detach().cpu()
-        grids = []
-        for members in sg.supernodes:
-            if not members:
-                grids.append(None)
-                continue
-            member_locs = locations[[int(m) for m in members]]
-            try:
-                awr = build_neuron_activation_write_result(
-                    adapters[name].model, member_locs, dataset=dataset
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Heatmap regen failed for %s supernode: %s", name, exc)
-                grids.append(None)
-                continue
-            acts = awr.activations.float()
-            grid = torch.nanmean(acts, dim=0)  # mean over member neurons
-            while grid.dim() > 2:
-                grid = torch.nanmean(grid, dim=-1)
-            grids.append((grid, awr.arg_values))
+        sg = results[name].supergraph
+        graph = results[name].graph
+        cache = mlp_caches.get(name) or build_model_mlp_cache(adapters[name], name, dataset)
+        grids = [
+            aggregate_supernode_grid(adapters[name], graph, members, cache)
+            for members in sg.supernodes
+        ]
         return sg, grids
 
     t_sg, t_grids = _supernode_grids(teacher)
@@ -617,18 +646,13 @@ def _heatmap_montage_regenerate(
     for row, (label, grids) in enumerate((("teacher", t_grids), ("student", s_grids))):
         for col in range(n):
             ax = axes[row][col]
-            cell = grids[col] if col < len(grids) else None
-            if cell is None:
+            arr = grids[col] if col < len(grids) else None
+            if arr is None or getattr(arr, "ndim", 0) != 2:
                 ax.set_axis_off()
             else:
-                grid, arg_values = cell
-                arr = grid.numpy()
-                if arr.ndim == 2:
-                    ax.imshow(arr.T, origin="lower", aspect="auto", cmap="viridis")
-                    ax.set_xlabel("arg1", fontsize=7)
-                    ax.set_ylabel("arg2", fontsize=7)
-                else:
-                    ax.plot(arg_values[0] if arg_values else range(arr.shape[0]), arr)
+                ax.imshow(arr.T, origin="lower", aspect="auto", cmap="viridis")
+                ax.set_xlabel("arg1", fontsize=7)
+                ax.set_ylabel("arg2", fontsize=7)
                 ax.tick_params(labelsize=6)
             if row == 0:
                 title = supernode_label(t_sg, col) if col < len(t_sg.supernodes) else f"supernode {col}"
@@ -654,6 +678,7 @@ def plot_heatmap_montage(
     dataset: str | None,
     out_dir: str,
     all_pages: bool,
+    mlp_caches: dict[str, dict] | None = None,
 ) -> None:
     """Fig E: reuse saved heatmap PDFs if given, otherwise regenerate from the MLP cache."""
     if teacher_heatmap_dir and student_heatmap_dir:
@@ -663,8 +688,169 @@ def plot_heatmap_montage(
             return
         logger.info("Fig E: falling back to regeneration.")
     _heatmap_montage_regenerate(
-        results, adapters, teacher=teacher, student=student, dataset=dataset, out_dir=out_dir
+        results, adapters, teacher=teacher, student=student, dataset=dataset,
+        out_dir=out_dir, mlp_caches=mlp_caches,
     )
+
+
+# ---------------------------------------------------------------------------
+# Fig F: computation flow with activation-heatmap nodes
+# ---------------------------------------------------------------------------
+
+
+# Plain-English meaning of each supernode label, for the Fig F legend.
+CATEGORY_DESCRIPTIONS = {
+    "arg1 range": "magnitude of the 1st operand",
+    "arg1 units": "ones digit of the 1st operand",
+    "arg2 range": "magnitude of the 2nd operand",
+    "arg2 units": "ones digit of the 2nd operand",
+    "arg3 range": "magnitude of the 3rd operand",
+    "arg3 units": "ones digit of the 3rd operand",
+    "arg1 units and arg2 units": "joint ones digits of both operands",
+    "arg1 range and arg2 range": "joint magnitudes of both operands",
+    "carry": "whether a carry occurs",
+    "sum range": "magnitude of the sum",
+    "sum units": "ones digit of the sum",
+    "dla": "direct contribution to the output logits",
+}
+
+
+def _describe_label(label: str) -> str:
+    key = label.lower().strip()
+    if key in CATEGORY_DESCRIPTIONS:
+        return CATEGORY_DESCRIPTIONS[key]
+    if key.startswith("arg:"):
+        return f"neurons aligned to input token '{label.split(':', 1)[1]}'"
+    return label
+
+
+def _wrap_label(label: str) -> str:
+    return label.replace(" and ", "\n& ")
+
+
+def _flow_positions(labels: list[str]) -> tuple[dict[int, tuple[float, float]], int]:
+    """Tiered layout: arg inputs at bottom, sum/dla outputs at top, rest in the middle.
+
+    Returns the positions plus the busiest tier size (for dynamic node sizing).
+    """
+    low = [l.lower() for l in labels]
+    bottom = [i for i, l in enumerate(low) if l.startswith("arg")]
+    top = [i for i, l in enumerate(low) if "sum" in l or "dla" in l]
+    mid = [i for i in range(len(labels)) if i not in bottom and i not in top]
+    pos: dict[int, tuple[float, float]] = {}
+    for y, members in ((0.16, bottom), (0.5, mid), (0.84, top)):
+        for k, i in enumerate(members):
+            pos[i] = ((k + 1) / (len(members) + 1), y)
+    busiest = max((len(bottom), len(mid), len(top)), default=1)
+    return pos, busiest
+
+
+def _box_perimeter_point(
+    center: tuple[float, float], toward: tuple[float, float], half: float, margin: float
+) -> tuple[float, float]:
+    """Point on the square node border (toward another node), nudged out by ``margin``."""
+    cx, cy = center
+    dx, dy = toward[0] - cx, toward[1] - cy
+    m = max(abs(dx), abs(dy))
+    if m == 0:
+        return center
+    scale = (half + margin) / m
+    return (cx + dx * scale, cy + dy * scale)
+
+
+def plot_circuit_with_heatmaps(
+    aligned: AlignedGraphs,
+    *,
+    results: dict[str, GraphPipelineResult],
+    adapters: dict[str, HFLlamaGraphAdapter],
+    mlp_caches: dict[str, dict],
+    names: list[str],
+    prompt: str,
+    out_dir: str,
+    weight_threshold: float = 0.04,
+) -> None:
+    """Fig F: per-model node-link circuit where each supernode node *is* its
+    mean activation heatmap, so the computation flow and supernode membership
+    are validated in one figure (cf. Anthropic's addition attribution graph)."""
+    from matplotlib.patches import FancyArrowPatch
+
+    labels = aligned.labels
+    if not labels:
+        logger.warning("Fig F skipped: no shared supernodes.")
+        return
+    if not any(mlp_caches.get(n) for n in names):
+        logger.info("Fig F skipped: needs an MLP cache (pass --dataset).")
+        return
+
+    plt = _import_pyplot()
+
+    grids: dict[str, dict[int, object]] = {}
+    for name in names:
+        sg = results[name].supergraph
+        graph = results[name].graph
+        l2i = _label_to_index(sg)
+        cache = mlp_caches.get(name)
+        grids[name] = {
+            li: aggregate_supernode_grid(
+                adapters[name], graph, sg.supernodes[l2i[lbl]] if lbl in l2i else [], cache
+            )
+            for li, lbl in enumerate(labels)
+        }
+
+    pos, busiest = _flow_positions(labels)
+    # Dynamic node size: leave a clear gap between the busiest row's nodes.
+    thumb = min(0.13, 0.62 / (busiest + 1))
+    half = thumb / 2.0
+
+    fig, axes = plt.subplots(1, len(names), figsize=(5.8 * len(names), 6.8))
+    if len(names) == 1:
+        axes = [axes]
+
+    for ax, name in zip(axes, names):
+        norm = aligned.norm[name]
+        for tgt in range(len(labels)):
+            for src in range(len(labels)):
+                if tgt == src:
+                    continue
+                w = float(norm[tgt, src].item())
+                if w < weight_threshold:
+                    continue
+                start = _box_perimeter_point(pos[src], pos[tgt], half, 0.006)
+                end = _box_perimeter_point(pos[tgt], pos[src], half, 0.006)
+                ax.add_patch(FancyArrowPatch(
+                    start, end, arrowstyle="-|>", mutation_scale=11,
+                    lw=0.4 + 5.0 * w, alpha=min(1.0, 0.25 + w), color="#555",
+                    connectionstyle="arc3,rad=0.05", shrinkA=0, shrinkB=0, zorder=1,
+                ))
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.set_aspect("equal")
+        ax.set_axis_off()
+        ax.set_title(name, fontsize=12)
+        for li, (x, y) in pos.items():
+            inset = ax.inset_axes([x - half, y - half, thumb, thumb])
+            arr = grids[name][li]
+            if arr is not None and getattr(arr, "ndim", 0) == 2:
+                inset.imshow(arr.T, origin="lower", aspect="auto", cmap="viridis")
+            else:
+                inset.set_facecolor("#eeeeee")
+            inset.set_xticks([])
+            inset.set_yticks([])
+            for sp in inset.spines.values():
+                sp.set_edgecolor("#2b6cb0")
+                sp.set_linewidth(1.3)
+            # Inline node caption (label + plain-English meaning), staggered on
+            # the busy bottom row to avoid horizontal overlap.
+            extra = 0.05 if (y < 0.3 and li % 2 == 1) else 0.0
+            ax.text(x, y - half - 0.012 - extra, _wrap_label(labels[li]),
+                    ha="center", va="top", fontsize=6.2, weight="medium", zorder=3)
+            ax.text(x, y - half - 0.012 - extra - 0.052, _describe_label(labels[li]),
+                    ha="center", va="top", fontsize=5.0, style="italic",
+                    color="#444", zorder=3)
+
+    fig.suptitle(f"Computation flow for  \u201c{prompt}\u201d", fontsize=13)
+    _save(fig, out_dir, "figF_circuit_heatmaps")
+    plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -773,6 +959,19 @@ def main() -> None:
     aligned = align_supergraphs(named_supergraphs, exclude_self_loops=args.exclude_self_loops)
     logger.info("Aligned %d shared supernodes: %s", len(aligned.labels), aligned.labels)
 
+    # ── MLP caches (shared by Fig E regen + Fig F); only when --dataset given ──
+    fig_names = [teacher_name, student_name] + ([base_name] if base_name else [])
+    model_ids = {teacher_name: args.teacher, student_name: args.student}
+    if base_name:
+        model_ids[base_name] = args.student_base
+    mlp_caches: dict[str, dict] = {}
+    if args.dataset:
+        for nm in fig_names:
+            logger.info("Preparing MLP cache for %s", nm)
+            cache = build_model_mlp_cache(adapters[nm], model_ids[nm], args.dataset)
+            if cache is not None:
+                mlp_caches[nm] = cache
+
     # ── Figures (each guarded so one failure doesn't abort the rest) ───────
     figures = [
         ("Fig A adjacency", lambda: plot_adjacency_comparison(
@@ -788,7 +987,11 @@ def main() -> None:
             student_heatmap_dir=args.student_heatmap_dir,
             results=results, adapters=adapters,
             teacher=teacher_name, student=student_name,
-            dataset=args.dataset, out_dir=out_dir, all_pages=args.heatmap_all_pages)),
+            dataset=args.dataset, out_dir=out_dir, all_pages=args.heatmap_all_pages,
+            mlp_caches=mlp_caches)),
+        ("Fig F flow+heatmaps", lambda: plot_circuit_with_heatmaps(
+            aligned, results=results, adapters=adapters, mlp_caches=mlp_caches,
+            names=fig_names, prompt=args.prompt, out_dir=out_dir)),
     ]
     for label, fn in figures:
         try:
