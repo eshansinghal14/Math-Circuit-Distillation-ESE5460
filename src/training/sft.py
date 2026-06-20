@@ -238,7 +238,7 @@ def main() -> None:
             steps=args.steps,
             batch_size=args.batch_size,
             learning_rate=args.lr,
-            save_dir=os.path.join(DIR_ROOT, args.save_dir),
+            save_dir=os.path.join(DIR_ROOT, args.save_dir, args.model.split("/")[-1], args.dataset),
             eval_every_n_steps=args.eval_every_n_steps,
             grad_accum_steps=args.grad_accum_steps,
             max_eval_tokens=args.max_eval_tokens,
