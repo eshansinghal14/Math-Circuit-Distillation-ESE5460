@@ -862,9 +862,12 @@ def build_parser() -> argparse.ArgumentParser:
         description="Render static teacher-vs-student circuit figures for the write-up."
     )
     parser.add_argument("--teacher", required=True, help="Teacher model id or local path.")
-    parser.add_argument("--student", required=True, help="Trained student model id or checkpoint path.")
+    parser.add_argument("--student", default=None,
+                        help="Trained student model id or checkpoint path. If omitted, the figures "
+                             "compare the teacher against --student-base only.")
     parser.add_argument("--student-base", "--student_base", dest="student_base", default=None,
-                        help="Optional untrained base student (model id) for a before/after column.")
+                        help="Untrained base student (model id). Used as a before/after column when "
+                             "--student is given, or as the sole student column when it isn't.")
     parser.add_argument("--prompt", required=True, help="Prompt to attribute, e.g. '36+59='.")
     parser.add_argument("--dataset", default=None,
                         help="Dataset name (datasets/<name>) used only for ANOVA labels / Fig E regeneration.")
@@ -907,9 +910,22 @@ def main() -> None:
         verbose=args.verbose,
     )
 
+    if not args.student and not args.student_base:
+        build_parser().error(
+            "provide --student (trained checkpoint) and/or --student-base (base model)."
+        )
+
     teacher_name = "teacher"
-    student_name = "student"
-    base_name = "base student" if args.student_base else None
+    # The second column is the trained student when given; otherwise the base
+    # student stands in for it. A separate "base student" column is only added
+    # when BOTH a trained student and a base model are supplied.
+    if args.student:
+        student_name = "student"
+        student_id = args.student
+    else:
+        student_name = "base student"
+        student_id = args.student_base
+    base_name = "base student" if (args.student and args.student_base) else None
 
     # ── Teacher ───────────────────────────────────────────────────────────
     logger.info("Loading teacher: %s", args.teacher)
@@ -920,15 +936,15 @@ def main() -> None:
     logger.info("Building teacher supergraph")
     teacher_result = build_supergraph(teacher_adapter, args.prompt, cfg, model_name=args.teacher)
 
-    # ── Student (trained) ─────────────────────────────────────────────────
-    logger.info("Loading student: %s", args.student)
-    student_model, student_tok = load_model(args.student)
+    # ── Student column (trained student, or base student if none given) ────
+    logger.info("Loading %s: %s", student_name, student_id)
+    student_model, student_tok = load_model(student_id)
     student_model.eval()
     student_adapter = HFLlamaGraphAdapter(student_model, student_tok, _model_device_of(student_model))
-    logger.info("Building student supergraph")
+    logger.info("Building %s supergraph", student_name)
     student_result = build_supergraph(
         student_adapter, args.prompt, cfg,
-        model_name=args.student,
+        model_name=student_id,
         dla_model_logits=teacher_dla.to(_model_device_of(student_model)),
     )
 
@@ -938,9 +954,10 @@ def main() -> None:
         teacher_name: teacher_result.supergraph,
         student_name: student_result.supergraph,
     }
+    model_ids = {teacher_name: args.teacher, student_name: student_id}
 
-    # ── Optional untrained base student ────────────────────────────────────
-    if args.student_base:
+    # ── Optional untrained base student (before/after column) ──────────────
+    if base_name:
         logger.info("Loading base student: %s", args.student_base)
         base_model, base_tok = load_model(args.student_base)
         base_model.eval()
@@ -954,15 +971,13 @@ def main() -> None:
         results[base_name] = base_result
         adapters[base_name] = base_adapter
         named_supergraphs[base_name] = base_result.supergraph
+        model_ids[base_name] = args.student_base
 
     aligned = align_supergraphs(named_supergraphs, exclude_self_loops=args.exclude_self_loops)
     logger.info("Aligned %d shared supernodes: %s", len(aligned.labels), aligned.labels)
 
     # ── MLP caches (shared by Fig E regen + Fig F); only when --dataset given ──
     fig_names = [teacher_name, student_name] + ([base_name] if base_name else [])
-    model_ids = {teacher_name: args.teacher, student_name: args.student}
-    if base_name:
-        model_ids[base_name] = args.student_base
     mlp_caches: dict[str, dict] = {}
     if args.dataset:
         for nm in fig_names:
