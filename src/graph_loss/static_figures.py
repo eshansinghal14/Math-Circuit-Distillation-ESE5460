@@ -817,9 +817,10 @@ def plot_circuit_with_heatmaps(
                     continue
                 start = _box_perimeter_point(pos[src], pos[tgt], half, 0.006)
                 end = _box_perimeter_point(pos[tgt], pos[src], half, 0.006)
+                # Widen the thin/thick spread so weak edges stay distinguishable.
                 ax.add_patch(FancyArrowPatch(
-                    start, end, arrowstyle="-|>", mutation_scale=11,
-                    lw=0.4 + 5.0 * w, alpha=min(1.0, 0.25 + w), color="#555",
+                    start, end, arrowstyle="-|>", mutation_scale=9 + 8.0 * w,
+                    lw=0.2 + 6.5 * w, alpha=min(1.0, 0.2 + 1.1 * w), color="#555",
                     connectionstyle="arc3,rad=0.05", shrinkA=0, shrinkB=0, zorder=1,
                 ))
         ax.set_xlim(0, 1)
@@ -839,14 +840,12 @@ def plot_circuit_with_heatmaps(
             for sp in inset.spines.values():
                 sp.set_edgecolor("#2b6cb0")
                 sp.set_linewidth(1.3)
-            # Inline node caption (label + plain-English meaning), staggered on
-            # the busy bottom row to avoid horizontal overlap.
-            extra = 0.05 if (y < 0.3 and li % 2 == 1) else 0.0
-            ax.text(x, y - half - 0.012 - extra, _wrap_label(labels[li]),
-                    ha="center", va="top", fontsize=6.2, weight="medium", zorder=3)
-            ax.text(x, y - half - 0.012 - extra - 0.052, _describe_label(labels[li]),
-                    ha="center", va="top", fontsize=5.0, style="italic",
-                    color="#444", zorder=3)
+            # Inline node label, staggered on the busy bottom row to avoid
+            # horizontal overlap. Plain-English meanings go in the paper text.
+            extra = 0.04 if (y < 0.3 and li % 2 == 1) else 0.0
+            ax.text(x, y - half - 0.014 - extra, _wrap_label(labels[li]),
+                    ha="center", va="top", fontsize=8.5, weight="bold",
+                    color="#1a1a1a", zorder=3)
 
     fig.suptitle(f"Computation flow for  \u201c{prompt}\u201d", fontsize=13)
     _save(fig, out_dir, "figF_circuit_heatmaps")
