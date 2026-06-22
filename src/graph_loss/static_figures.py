@@ -67,14 +67,17 @@ import logging
 import os
 import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 
-from graph_loss.create_graph import GraphPipelineResult, create_graph
-from graph_loss.graph import SuperGraph
-from graph_loss.hf_adapter import HFLlamaGraphAdapter
-from graph_loss.utils import add_graph_build_args
-from utils import DIR_ROOT, load_model
+# Heavy model-stack imports (create_graph, hf_adapter, utils) are done lazily
+# inside the functions that build graphs, so the rendering path (figures from a
+# --plot-cache) can be imported and run with only numpy/matplotlib/torch.
+if TYPE_CHECKING:
+    from graph_loss.create_graph import GraphPipelineResult
+    from graph_loss.graph import SuperGraph
+    from graph_loss.hf_adapter import HFLlamaGraphAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +127,13 @@ def last_token_logits(adapter: HFLlamaGraphAdapter, prompt: str) -> torch.Tensor
     return logits.squeeze(0)[-1].detach()
 
 
+def predicted_answer_token(adapter: HFLlamaGraphAdapter, prompt: str) -> str:
+    """The model's greedy first answer token after ``prompt`` (decoded string)."""
+    logits = last_token_logits(adapter, prompt)
+    tok_id = int(logits.argmax().item())
+    return adapter.tokenizer.decode([tok_id])
+
+
 def build_supergraph(
     adapter: HFLlamaGraphAdapter,
     prompt: str,
@@ -143,6 +153,8 @@ def build_supergraph(
     input cache that ANOVA labeling needs; without it the cache is never built
     and no ANOVA supernodes are produced).
     """
+    from graph_loss.create_graph import create_graph
+
     with torch.enable_grad():
         result = create_graph(
             adapter,
@@ -253,6 +265,58 @@ def align_supergraphs(
         raw[name] = sub
         norm[name] = _normalize_rows(sub)
     return AlignedGraphs(labels=ordered, raw=raw, norm=norm)
+
+
+def save_plot_cache(
+    path: str,
+    *,
+    aligned: AlignedGraphs,
+    grids: dict[str, dict[int, object]],
+    names: list[str],
+    prompt: str,
+    answers: dict[str, str] | None = None,
+    gold: str | None = None,
+) -> None:
+    """Persist everything the figures need (aligned adjacency + Fig F grids +
+    predicted answers) so they can be redrawn without reloading models."""
+    import pickle
+
+    payload = {
+        "labels": aligned.labels,
+        "raw": {k: v.cpu() for k, v in aligned.raw.items()},
+        "norm": {k: v.cpu() for k, v in aligned.norm.items()},
+        "grids": grids,
+        "names": names,
+        "prompt": prompt,
+        "answers": answers or {},
+        "gold": gold,
+    }
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "wb") as f:
+        pickle.dump(payload, f)
+    logger.info("Saved plot cache: %s", path)
+
+
+def load_plot_cache(path: str):
+    """Inverse of :func:`save_plot_cache`.
+
+    Returns ``(aligned, grids, names, prompt, answers, gold)``.
+    """
+    import pickle
+
+    with open(path, "rb") as f:
+        payload = pickle.load(f)
+    aligned = AlignedGraphs(
+        labels=payload["labels"], raw=payload["raw"], norm=payload["norm"]
+    )
+    return (
+        aligned,
+        payload["grids"],
+        payload["names"],
+        payload["prompt"],
+        payload.get("answers") or {},
+        payload.get("gold"),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -738,13 +802,94 @@ def _flow_positions(labels: list[str]) -> tuple[dict[int, tuple[float, float]], 
     top = [i for i, l in enumerate(low) if "sum" in l or "dla" in l]
     mid = [i for i in range(len(labels)) if i not in bottom and i not in top]
     pos: dict[int, tuple[float, float]] = {}
-    # Wider tiers + small horizontal margin so nodes use the full panel width.
-    for y, members in ((0.22, bottom), (0.54, mid), (0.88, top)):
+    # Tiers leave room for the input-prompt band (bottom) and answer band (top):
+    # operand supernodes -> intermediate (carry) -> sum supernodes, read upward.
+    for y, members in ((0.34, bottom), (0.56, mid), (0.76, top)):
         m = len(members)
         for k, i in enumerate(members):
             x = 0.07 + 0.86 * (k + 0.5) / m if m else 0.5
             pos[i] = (x, y)
     busiest = max((len(bottom), len(mid), len(top)), default=1)
+    return pos, busiest
+
+
+def _parse_operands(prompt: str) -> list[str]:
+    """Operand strings from an arithmetic prompt, e.g. '36+59=' -> ['36','59']."""
+    return re.findall(r"\d+", prompt)
+
+
+def _operand_indices(label: str) -> list[int]:
+    """1-based operand indices a supernode label refers to ('arg1 ...' -> [1])."""
+    return [int(m) for m in re.findall(r"arg(\d+)", label.lower())]
+
+
+def _canonical_edges(labels: list[str]) -> list[tuple[int, int]]:
+    """Idealized two-digit-addition pathway as (src, tgt) supernode index pairs.
+
+    Two parallel streams joined by the carry, with the joint "pair/lookup"
+    supernodes as intermediate features (cf. Anthropic's lookup-table features):
+
+      units stream:  arg{i} units -> arg1&arg2 units -> {sum units, carry}
+                     (and arg{i} units -> sum units / carry directly, as skips)
+      magnitude:     arg{i} range -> arg1&arg2 range -> sum range
+                     (and arg{i} range -> sum range directly)
+      carry bridge:  carry -> sum range ;  sum units -> sum range
+    """
+    low = [l.lower() for l in labels]
+
+    def find(pred):
+        return [i for i, l in enumerate(low) if pred(l)]
+
+    units_indiv = find(lambda l: l.startswith("arg") and "units" in l and "and" not in l)
+    range_indiv = find(lambda l: l.startswith("arg") and "range" in l and "and" not in l)
+    joint_units = find(lambda l: "and" in l and "units" in l)
+    joint_range = find(lambda l: "and" in l and "range" in l)
+    sum_units = find(lambda l: "sum" in l and "units" in l)
+    sum_range = find(lambda l: "sum" in l and "range" in l)
+    carry = find(lambda l: l == "carry")
+
+    units_all = units_indiv + joint_units
+    range_all = range_indiv + joint_range
+
+    edges: set[tuple[int, int]] = set()
+    # individual operand features -> their joint "pair" feature
+    for u in units_indiv:
+        edges.update((u, t) for t in joint_units)
+    for r in range_indiv:
+        edges.update((r, t) for t in joint_range)
+    # units stream -> ones digit of the sum and the carry
+    for u in units_all:
+        edges.update((u, t) for t in sum_units)
+        edges.update((u, t) for t in carry)
+    # magnitude stream -> magnitude of the sum
+    for r in range_all:
+        edges.update((r, t) for t in sum_range)
+    # carry bumps the tens; ones-sum propagates into the tens
+    for c in carry:
+        edges.update((c, t) for t in sum_range)
+    for su in sum_units:
+        edges.update((su, t) for t in sum_range)
+    return [(s, t) for s, t in edges if s != t]
+
+
+def _curated_positions(labels: list[str]) -> tuple[dict[int, tuple[float, float]], int]:
+    """Tiered layout for curated mode: individual operand features, then the
+    joint pair/lookup features, then carry, then the sum features (read upward),
+    so the skip-connection flow is legible."""
+    low = [l.lower() for l in labels]
+    indiv = [i for i, l in enumerate(low) if l.startswith("arg") and "and" not in l]
+    joints = [i for i, l in enumerate(low) if "and" in l]
+    carry = [i for i, l in enumerate(low) if l == "carry"]
+    sums = [i for i, l in enumerate(low) if "sum" in l or "dla" in l]
+    other = [i for i in range(len(labels))
+             if i not in indiv and i not in joints and i not in carry and i not in sums]
+    pos: dict[int, tuple[float, float]] = {}
+    for y, members in ((0.27, indiv), (0.47, joints + other), (0.62, carry), (0.80, sums)):
+        m = len(members)
+        for k, i in enumerate(members):
+            x = 0.08 + 0.84 * (k + 0.5) / m if m else 0.5
+            pos[i] = (x, y)
+    busiest = max((len(indiv), len(joints) + len(other), len(sums)), default=1)
     return pos, busiest
 
 
@@ -773,32 +918,16 @@ def _box_perimeter_point(
     return (bx + dx / norm * margin, by + dy / norm * margin)
 
 
-def plot_circuit_with_heatmaps(
-    aligned: AlignedGraphs,
+def build_flow_grids(
+    labels: list[str],
     *,
     results: dict[str, GraphPipelineResult],
     adapters: dict[str, HFLlamaGraphAdapter],
     mlp_caches: dict[str, dict],
     names: list[str],
-    prompt: str,
-    out_dir: str,
-    weight_threshold: float = 0.04,
-) -> None:
-    """Fig F: per-model node-link circuit where each supernode node *is* its
-    mean activation heatmap, so the computation flow and supernode membership
-    are validated in one figure (cf. Anthropic's addition attribution graph)."""
-    from matplotlib.patches import FancyArrowPatch
-
-    labels = aligned.labels
-    if not labels:
-        logger.warning("Fig F skipped: no shared supernodes.")
-        return
-    if not any(mlp_caches.get(n) for n in names):
-        logger.info("Fig F skipped: needs an MLP cache (pass --dataset).")
-        return
-
-    plt = _import_pyplot()
-
+) -> dict[str, dict[int, object]]:
+    """Per-model {label_index -> mean activation grid} for Fig F. Heavy step
+    (needs adapters + MLP cache); cache the result to redraw figures cheaply."""
     grids: dict[str, dict[int, object]] = {}
     for name in names:
         sg = results[name].supergraph
@@ -811,13 +940,68 @@ def plot_circuit_with_heatmaps(
             )
             for li, lbl in enumerate(labels)
         }
+    return grids
 
-    pos, busiest = _flow_positions(labels)
 
-    # Non-square panels (wider than tall) give the busy bottom row horizontal
-    # breathing room. We don't force equal aspect (that was the whitespace
-    # culprit); instead we size thumbnails anisotropically so they stay square.
-    col_w, col_h = 6.6, 5.8
+def plot_circuit_with_heatmaps(
+    aligned: AlignedGraphs,
+    *,
+    grids: dict[str, dict[int, object]],
+    names: list[str],
+    prompt: str,
+    out_dir: str,
+    answers: dict[str, str] | None = None,
+    gold: str | None = None,
+    mode: str = "faithful",
+    weight_threshold: float = 0.04,
+) -> None:
+    """Fig F: per-model node-link circuit where each supernode node *is* its
+    mean activation heatmap, read as an end-to-end flow from the input prompt
+    (bottom) up through operand -> intermediate -> sum supernodes to the model's
+    predicted answer (top). Mirrors Anthropic's addition attribution graph.
+
+    ``mode``:
+      * ``"faithful"`` (default, for the results comparison): draws every
+        above-threshold supernode edge a model actually uses, plus a single
+        prompt box fanning into the operand supernodes.
+      * ``"curated"`` (for the intro/teaser): draws only the idealized addition
+        pathway (edge width still = the model's measured weight, so a model that
+        doesn't implement a step shows a faint/absent edge), and connects each
+        operand token to *its own* supernodes (arg1 <- first operand, etc.),
+        like Anthropic's intentional input wiring.
+
+    ``answers`` maps each model name to its predicted first answer token; with a
+    ``gold`` token the answer box is outlined green when correct and red when
+    wrong, so a base student's broken computation *and* wrong answer show
+    together.
+    """
+    import numpy as np
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import FancyArrowPatch
+
+    labels = aligned.labels
+    if not labels:
+        logger.warning("Fig F skipped: no shared supernodes.")
+        return
+    has_grid = any(
+        any(v is not None for v in grids.get(n, {}).values()) for n in names
+    )
+    if not has_grid:
+        logger.info("Fig F skipped: needs an MLP cache (pass --dataset).")
+        return
+
+    plt = _import_pyplot()
+
+    curated = mode == "curated"
+    pos, busiest = (_curated_positions(labels) if curated else _flow_positions(labels))
+    low = [l.lower() for l in labels]
+    bottom_idx = [i for i, l in enumerate(low) if l.startswith("arg")]
+    top_idx = [i for i, l in enumerate(low) if "sum" in l or "dla" in l]
+    PROMPT_Y, ANSWER_Y = 0.05, 0.93
+
+    # Taller panels: extra vertical room for the prompt and answer bands
+    # (curated mode adds an extra tier, so it gets a bit more height).
+    col_w, col_h = 6.6, (8.2 if curated else 7.2)
     fig, axes = plt.subplots(1, len(names), figsize=(col_w * len(names), col_h))
     if len(names) == 1:
         axes = [axes]
@@ -826,33 +1010,135 @@ def plot_circuit_with_heatmaps(
     thumb_w, thumb_h = side_in / col_w, side_in / col_h
     half_x, half_y = thumb_w / 2.0, thumb_h / 2.0
 
+    # Deliberate, discrete edge tiers (thickness + shade + opacity all step
+    # together) so strong vs. weak routing is unmistakable at a glance.
+    STRONG, MEDIUM = 0.20, 0.10
+    edge_tiers = [
+        ("strong",  STRONG, float("inf"), dict(lw=3.4, alpha=0.95, color="#1a1a1a", mscale=15)),
+        ("medium",  MEDIUM, STRONG,       dict(lw=1.5, alpha=0.75, color="#5a5a5a", mscale=10)),
+        ("weak", weight_threshold, MEDIUM, dict(lw=0.6, alpha=0.5, color="#aaaaaa", mscale=7)),
+    ]
+
+    def _edge_style(w: float):
+        for _, lo, hi, style in edge_tiers:
+            if lo <= w < hi:
+                return style
+        return None
+
+    canonical = _canonical_edges(labels) if curated else None
+    operands = _parse_operands(prompt) if curated else []
+    # Operand-token x positions across the bottom band (curated input wiring).
+    op_x = {}
+    if curated and operands:
+        for k in range(len(operands)):
+            frac = (k + 0.5) / len(operands)
+            op_x[k + 1] = 0.12 + 0.76 * frac
+
+    label_box = dict(boxstyle="round,pad=0.32", fc="white", ec="#bcbcbc", lw=0.8)
+
     for ax, name in zip(axes, names):
         norm = aligned.norm[name]
-        for tgt in range(len(labels)):
-            for src in range(len(labels)):
-                if tgt == src:
-                    continue
+        # Choose which edges to draw: the idealized pathway (curated) or every
+        # above-threshold edge the model uses (faithful).
+        edges = []
+        if curated:
+            # Only draw a canonical edge the model actually carries weight on,
+            # so a model that skips a step simply has no arrow there.
+            for src, tgt in canonical:
                 w = float(norm[tgt, src].item())
-                if w < weight_threshold:
-                    continue
-                start = _box_perimeter_point(pos[src], pos[tgt], half_x, half_y, 0.006)
-                end = _box_perimeter_point(pos[tgt], pos[src], half_x, half_y, 0.006)
-                # Slimmer arrows: keep a thin/thick spread but cap the maximum.
+                style = _edge_style(w)
+                if style is not None:
+                    edges.append((w, src, tgt, style))
+        else:
+            for tgt in range(len(labels)):
+                for src in range(len(labels)):
+                    if tgt == src:
+                        continue
+                    w = float(norm[tgt, src].item())
+                    style = _edge_style(w)
+                    if style is not None:
+                        edges.append((w, src, tgt, style))
+        for w, src, tgt, style in sorted(edges, key=lambda e: e[0]):
+            start = _box_perimeter_point(pos[src], pos[tgt], half_x, half_y, 0.006)
+            end = _box_perimeter_point(pos[tgt], pos[src], half_x, half_y, 0.006)
+            ax.add_patch(FancyArrowPatch(
+                start, end, arrowstyle="-|>", mutation_scale=style["mscale"],
+                lw=style["lw"], alpha=style["alpha"], color=style["color"],
+                linestyle=style.get("ls", "-"),
+                connectionstyle="arc3,rad=0.05", shrinkA=0, shrinkB=0, zorder=1,
+            ))
+
+        if curated and op_x:
+            # Deliberate input wiring: each operand token feeds only its own
+            # supernodes (arg1 <- first operand, joint nodes <- both).
+            for i in bottom_idx:
+                ops = _operand_indices(labels[i]) or list(op_x.keys())
+                for o in ops:
+                    if o not in op_x:
+                        continue
+                    sx = op_x[o]
+                    end = _box_perimeter_point(pos[i], (sx, PROMPT_Y), half_x, half_y, 0.006)
+                    ax.add_patch(FancyArrowPatch(
+                        (sx, PROMPT_Y + 0.02), end, arrowstyle="-|>", mutation_scale=8,
+                        lw=1.1, alpha=0.7, color="#7a7a7a",
+                        connectionstyle="arc3,rad=0.04", shrinkA=0, shrinkB=0, zorder=1,
+                    ))
+            for o, sx in op_x.items():
+                ax.text(sx, PROMPT_Y, operands[o - 1], ha="center", va="center",
+                        fontsize=11, family="monospace", weight="bold", zorder=4,
+                        bbox=dict(boxstyle="round,pad=0.45", fc="#f3f3f3",
+                                  ec="#888888", lw=1.0))
+        else:
+            # Faithful: a single prompt box fans into all operand supernodes.
+            for i in bottom_idx:
+                end = _box_perimeter_point(pos[i], (pos[i][0], PROMPT_Y), half_x, half_y, 0.006)
                 ax.add_patch(FancyArrowPatch(
-                    start, end, arrowstyle="-|>", mutation_scale=7 + 5.0 * w,
-                    lw=min(2.6, 0.15 + 2.6 * w), alpha=min(1.0, 0.25 + 0.9 * w),
-                    color="#555", connectionstyle="arc3,rad=0.05",
-                    shrinkA=0, shrinkB=0, zorder=1,
+                    (pos[i][0], PROMPT_Y + 0.02), end, arrowstyle="-|>", mutation_scale=7,
+                    lw=0.7, alpha=0.45, color="#b0b0b0",
+                    connectionstyle="arc3,rad=0.0", shrinkA=0, shrinkB=0, zorder=1,
                 ))
+            ax.text(0.5, PROMPT_Y, prompt, ha="center", va="center", fontsize=11,
+                    family="monospace", weight="bold", zorder=4,
+                    bbox=dict(boxstyle="round,pad=0.5", fc="#f3f3f3", ec="#888888", lw=1.0))
+
+        # Sum supernodes -> predicted answer (medium connectors).
+        pred = (answers or {}).get(name)
+        if pred is not None:
+            for i in top_idx:
+                start = _box_perimeter_point(pos[i], (pos[i][0], ANSWER_Y), half_x, half_y, 0.006)
+                ax.add_patch(FancyArrowPatch(
+                    start, (pos[i][0], ANSWER_Y - 0.02), arrowstyle="-|>", mutation_scale=10,
+                    lw=1.6, alpha=0.8, color="#5a5a5a",
+                    connectionstyle="arc3,rad=0.0", shrinkA=0, shrinkB=0, zorder=1,
+                ))
+            if gold is None:
+                ec, tc = "#2b6cb0", "#1a1a1a"
+            elif pred.strip() == gold.strip():
+                ec, tc = "#2e7d32", "#2e7d32"   # correct -> green
+            else:
+                ec, tc = "#c62828", "#c62828"   # wrong -> red
+            shown = repr(pred) if pred.strip() != pred else pred
+            ax.text(0.5, ANSWER_Y, shown, ha="center", va="center", fontsize=13,
+                    family="monospace", weight="bold", color=tc, zorder=4,
+                    bbox=dict(boxstyle="round,pad=0.5", fc="white", ec=ec, lw=2.0))
+
         ax.set_xlim(0, 1)
         ax.set_ylim(0, 1)
         ax.set_axis_off()
-        ax.set_title(name, fontsize=12)
+        ax.set_title(name, fontsize=12, pad=14)
         for li, (x, y) in pos.items():
             inset = ax.inset_axes([x - half_x, y - half_y, thumb_w, thumb_h])
             arr = grids[name][li]
             if arr is not None and getattr(arr, "ndim", 0) == 2:
-                inset.imshow(arr.T, origin="lower", aspect="auto", cmap="viridis")
+                # Robust per-image contrast so each activation pattern pops.
+                a = np.asarray(arr, dtype=float)
+                finite = a[np.isfinite(a)]
+                vmin, vmax = (np.percentile(finite, [2, 98]) if finite.size
+                              else (None, None))
+                if vmin is not None and vmax <= vmin:
+                    vmin, vmax = None, None
+                inset.imshow(a.T, origin="lower", aspect="auto", cmap="viridis",
+                             vmin=vmin, vmax=vmax, interpolation="nearest")
             else:
                 inset.set_facecolor("#eeeeee")
             inset.set_xticks([])
@@ -860,15 +1146,27 @@ def plot_circuit_with_heatmaps(
             for sp in inset.spines.values():
                 sp.set_edgecolor("#2b6cb0")
                 sp.set_linewidth(1.3)
-            # Inline node label, staggered into two rows on the busy bottom tier
-            # so adjacent (possibly two-line) captions never collide.
-            extra = 0.055 if (y < 0.3 and li % 2 == 1) else 0.0
-            ax.text(x, y - half_y - 0.018 - extra, _wrap_label(labels[li]),
+            # Node label in a clean caption box below the heatmap, staggered into
+            # two rows on the busy bottom tier so adjacent boxes never collide.
+            extra = 0.055 if (y < 0.45 and li % 2 == 1) else 0.0
+            ax.text(x, y - half_y - 0.016 - extra, _wrap_label(labels[li]),
                     ha="center", va="top", fontsize=7.5, weight="bold",
-                    color="#1a1a1a", zorder=3)
+                    color="#1a1a1a", zorder=3, bbox=label_box)
+
+    legend_handles = [
+        Line2D([0], [0], color=s["color"], lw=s["lw"]) for _, _, _, s in edge_tiers
+    ]
+    legend_labels = [
+        f"strong (\u2265{STRONG:.2f})",
+        f"medium ({MEDIUM:.2f}\u2013{STRONG:.2f})",
+        f"weak (<{MEDIUM:.2f})",
+    ]
+    fig.legend(legend_handles, legend_labels, loc="lower center", ncol=3,
+               frameon=False, fontsize=8.5, title="routing weight (row-normalized)",
+               title_fontsize=8.5, bbox_to_anchor=(0.5, 0.005))
 
     fig.suptitle(f"Computation flow for  \u201c{prompt}\u201d", fontsize=13)
-    fig.subplots_adjust(left=0.02, right=0.98, top=0.92, bottom=0.04, wspace=0.06)
+    fig.subplots_adjust(left=0.02, right=0.98, top=0.93, bottom=0.07, wspace=0.06)
     _save(fig, out_dir, "figF_circuit_heatmaps")
     plt.close(fig)
 
@@ -908,11 +1206,27 @@ def build_parser() -> argparse.ArgumentParser:
                         dest="exclude_self_loops", action="store_true",
                         help="Zero the adjacency diagonal (supernode->itself) before normalizing the "
                              "figures, so intra-supernode mass doesn't dominate Figs A/B/C.")
+    parser.add_argument("--plot-cache", "--plot_cache", dest="plot_cache", default=None,
+                        help="Path to a .pkl of precomputed plot data. If it exists, models/graphs "
+                             "are skipped and figures are redrawn from it; otherwise it is created "
+                             "after building so later reruns are fast.")
+    parser.add_argument("--refresh-cache", "--refresh_cache", dest="refresh_cache",
+                        action="store_true",
+                        help="Rebuild graphs even if --plot-cache exists, then overwrite the cache.")
+    parser.add_argument("--flow-mode", "--flow_mode", dest="flow_mode",
+                        choices=["faithful", "curated"], default="faithful",
+                        help="Fig F style: 'faithful' draws every above-threshold edge a model "
+                             "uses (results comparison); 'curated' draws only the idealized "
+                             "addition pathway with per-operand input wiring (intro/teaser).")
+    from graph_loss.utils import add_graph_build_args
+
     add_graph_build_args(parser)
     return parser
 
 
 def main() -> None:
+    from utils import DIR_ROOT
+
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     args = build_parser().parse_args()
 
@@ -931,10 +1245,38 @@ def main() -> None:
         verbose=args.verbose,
     )
 
+    cache_path = None
+    if args.plot_cache:
+        cache_path = (args.plot_cache if os.path.isabs(args.plot_cache)
+                      else os.path.join(DIR_ROOT, args.plot_cache))
+
+    results: dict[str, GraphPipelineResult] = {}
+    adapters: dict[str, HFLlamaGraphAdapter] = {}
+    mlp_caches: dict[str, dict] = {}
+
+    # ── Fast path: redraw figures straight from a cached payload ───────────
+    if cache_path and os.path.isfile(cache_path) and not args.refresh_cache:
+        logger.info("Loading plot cache (skipping models/graphs): %s", cache_path)
+        aligned, grids, fig_names, prompt, answers, gold = load_plot_cache(cache_path)
+        teacher_name = fig_names[0]
+        student_name = fig_names[1] if len(fig_names) > 1 else fig_names[0]
+        base_name = fig_names[2] if len(fig_names) > 2 else None
+        _run_figures(
+            aligned=aligned, grids=grids, fig_names=fig_names, prompt=prompt,
+            teacher_name=teacher_name, student_name=student_name, base_name=base_name,
+            results=results, adapters=adapters, mlp_caches=mlp_caches,
+            answers=answers, gold=gold, args=args, out_dir=out_dir,
+        )
+        logger.info("Done. Figures written to %s", out_dir)
+        return
+
     if not args.student and not args.student_base:
         build_parser().error(
             "provide --student (trained checkpoint) and/or --student-base (base model)."
         )
+
+    from graph_loss.hf_adapter import HFLlamaGraphAdapter
+    from utils import load_model
 
     teacher_name = "teacher"
     # The second column is the trained student when given; otherwise the base
@@ -999,7 +1341,6 @@ def main() -> None:
 
     # ── MLP caches (shared by Fig E regen + Fig F); only when --dataset given ──
     fig_names = [teacher_name, student_name] + ([base_name] if base_name else [])
-    mlp_caches: dict[str, dict] = {}
     if args.dataset:
         for nm in fig_names:
             logger.info("Preparing MLP cache for %s", nm)
@@ -1007,7 +1348,55 @@ def main() -> None:
             if cache is not None:
                 mlp_caches[nm] = cache
 
-    # ── Figures (each guarded so one failure doesn't abort the rest) ───────
+    # Precompute Fig F grids (the heavy per-supernode aggregation) once.
+    grids = build_flow_grids(
+        aligned.labels, results=results, adapters=adapters,
+        mlp_caches=mlp_caches, names=fig_names,
+    )
+
+    # Each model's greedy first answer token; the teacher's is the gold reference
+    # so a base student that predicts something else is flagged wrong in Fig F.
+    answers = {nm: predicted_answer_token(adapters[nm], args.prompt) for nm in fig_names}
+    gold = answers.get(teacher_name)
+    logger.info("Predicted answers: %s (gold=%r)", answers, gold)
+
+    if cache_path:
+        save_plot_cache(
+            cache_path, aligned=aligned, grids=grids, names=fig_names,
+            prompt=args.prompt, answers=answers, gold=gold,
+        )
+
+    _run_figures(
+        aligned=aligned, grids=grids, fig_names=fig_names, prompt=args.prompt,
+        teacher_name=teacher_name, student_name=student_name, base_name=base_name,
+        results=results, adapters=adapters, mlp_caches=mlp_caches,
+        answers=answers, gold=gold, args=args, out_dir=out_dir,
+    )
+    logger.info("Done. Figures written to %s", out_dir)
+
+
+def _run_figures(
+    *,
+    aligned: AlignedGraphs,
+    grids: dict[str, dict[int, object]],
+    fig_names: list[str],
+    prompt: str,
+    teacher_name: str,
+    student_name: str,
+    base_name: str | None,
+    results: dict[str, GraphPipelineResult],
+    adapters: dict[str, HFLlamaGraphAdapter],
+    mlp_caches: dict[str, dict],
+    args,
+    out_dir: str,
+    answers: dict[str, str] | None = None,
+    gold: str | None = None,
+) -> None:
+    """Render every figure (each guarded so one failure doesn't abort the rest).
+
+    Figs A/B/C/F + Fig E-from-PDFs work from cached data alone; Fig E
+    regeneration additionally needs live ``results``/``adapters``.
+    """
     figures = [
         ("Fig A adjacency", lambda: plot_adjacency_comparison(
             aligned, teacher=teacher_name, student=student_name, base=base_name, out_dir=out_dir)),
@@ -1025,16 +1414,14 @@ def main() -> None:
             dataset=args.dataset, out_dir=out_dir, all_pages=args.heatmap_all_pages,
             mlp_caches=mlp_caches)),
         ("Fig F flow+heatmaps", lambda: plot_circuit_with_heatmaps(
-            aligned, results=results, adapters=adapters, mlp_caches=mlp_caches,
-            names=fig_names, prompt=args.prompt, out_dir=out_dir)),
+            aligned, grids=grids, names=fig_names, prompt=prompt, out_dir=out_dir,
+            answers=answers, gold=gold, mode=getattr(args, "flow_mode", "faithful"))),
     ]
     for label, fn in figures:
         try:
             fn()
         except Exception as exc:  # noqa: BLE001
             logger.exception("%s failed: %s", label, exc)
-
-    logger.info("Done. Figures written to %s", out_dir)
 
 
 def _model_device_of(model) -> torch.device:
