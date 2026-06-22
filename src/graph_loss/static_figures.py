@@ -738,24 +738,39 @@ def _flow_positions(labels: list[str]) -> tuple[dict[int, tuple[float, float]], 
     top = [i for i, l in enumerate(low) if "sum" in l or "dla" in l]
     mid = [i for i in range(len(labels)) if i not in bottom and i not in top]
     pos: dict[int, tuple[float, float]] = {}
-    for y, members in ((0.16, bottom), (0.5, mid), (0.84, top)):
+    # Wider tiers + small horizontal margin so nodes use the full panel width.
+    for y, members in ((0.22, bottom), (0.54, mid), (0.88, top)):
+        m = len(members)
         for k, i in enumerate(members):
-            pos[i] = ((k + 1) / (len(members) + 1), y)
+            x = 0.07 + 0.86 * (k + 0.5) / m if m else 0.5
+            pos[i] = (x, y)
     busiest = max((len(bottom), len(mid), len(top)), default=1)
     return pos, busiest
 
 
 def _box_perimeter_point(
-    center: tuple[float, float], toward: tuple[float, float], half: float, margin: float
+    center: tuple[float, float],
+    toward: tuple[float, float],
+    half_x: float,
+    half_y: float,
+    margin: float,
 ) -> tuple[float, float]:
-    """Point on the square node border (toward another node), nudged out by ``margin``."""
+    """Point on the (possibly non-square) node border toward another node, nudged
+    out by ``margin`` along the connecting direction."""
+    import math
+
     cx, cy = center
     dx, dy = toward[0] - cx, toward[1] - cy
-    m = max(abs(dx), abs(dy))
-    if m == 0:
+    if dx == 0 and dy == 0:
         return center
-    scale = (half + margin) / m
-    return (cx + dx * scale, cy + dy * scale)
+    sx = abs(dx) / half_x if half_x > 0 else math.inf
+    sy = abs(dy) / half_y if half_y > 0 else math.inf
+    s = max(sx, sy)
+    if s == 0:
+        return center
+    bx, by = cx + dx / s, cy + dy / s
+    norm = math.hypot(dx, dy)
+    return (bx + dx / norm * margin, by + dy / norm * margin)
 
 
 def plot_circuit_with_heatmaps(
@@ -798,13 +813,18 @@ def plot_circuit_with_heatmaps(
         }
 
     pos, busiest = _flow_positions(labels)
-    # Dynamic node size: leave a clear gap between the busiest row's nodes.
-    thumb = min(0.13, 0.62 / (busiest + 1))
-    half = thumb / 2.0
 
-    fig, axes = plt.subplots(1, len(names), figsize=(5.8 * len(names), 6.8))
+    # Non-square panels (wider than tall) give the busy bottom row horizontal
+    # breathing room. We don't force equal aspect (that was the whitespace
+    # culprit); instead we size thumbnails anisotropically so they stay square.
+    col_w, col_h = 6.6, 5.8
+    fig, axes = plt.subplots(1, len(names), figsize=(col_w * len(names), col_h))
     if len(names) == 1:
         axes = [axes]
+
+    side_in = min(0.95, 0.72 * col_w / (busiest + 1))  # square thumbnail side, inches
+    thumb_w, thumb_h = side_in / col_w, side_in / col_h
+    half_x, half_y = thumb_w / 2.0, thumb_h / 2.0
 
     for ax, name in zip(axes, names):
         norm = aligned.norm[name]
@@ -815,21 +835,21 @@ def plot_circuit_with_heatmaps(
                 w = float(norm[tgt, src].item())
                 if w < weight_threshold:
                     continue
-                start = _box_perimeter_point(pos[src], pos[tgt], half, 0.006)
-                end = _box_perimeter_point(pos[tgt], pos[src], half, 0.006)
-                # Widen the thin/thick spread so weak edges stay distinguishable.
+                start = _box_perimeter_point(pos[src], pos[tgt], half_x, half_y, 0.006)
+                end = _box_perimeter_point(pos[tgt], pos[src], half_x, half_y, 0.006)
+                # Slimmer arrows: keep a thin/thick spread but cap the maximum.
                 ax.add_patch(FancyArrowPatch(
-                    start, end, arrowstyle="-|>", mutation_scale=9 + 8.0 * w,
-                    lw=0.2 + 6.5 * w, alpha=min(1.0, 0.2 + 1.1 * w), color="#555",
-                    connectionstyle="arc3,rad=0.05", shrinkA=0, shrinkB=0, zorder=1,
+                    start, end, arrowstyle="-|>", mutation_scale=7 + 5.0 * w,
+                    lw=min(2.6, 0.15 + 2.6 * w), alpha=min(1.0, 0.25 + 0.9 * w),
+                    color="#555", connectionstyle="arc3,rad=0.05",
+                    shrinkA=0, shrinkB=0, zorder=1,
                 ))
         ax.set_xlim(0, 1)
         ax.set_ylim(0, 1)
-        ax.set_aspect("equal")
         ax.set_axis_off()
         ax.set_title(name, fontsize=12)
         for li, (x, y) in pos.items():
-            inset = ax.inset_axes([x - half, y - half, thumb, thumb])
+            inset = ax.inset_axes([x - half_x, y - half_y, thumb_w, thumb_h])
             arr = grids[name][li]
             if arr is not None and getattr(arr, "ndim", 0) == 2:
                 inset.imshow(arr.T, origin="lower", aspect="auto", cmap="viridis")
@@ -840,14 +860,15 @@ def plot_circuit_with_heatmaps(
             for sp in inset.spines.values():
                 sp.set_edgecolor("#2b6cb0")
                 sp.set_linewidth(1.3)
-            # Inline node label, staggered on the busy bottom row to avoid
-            # horizontal overlap. Plain-English meanings go in the paper text.
-            extra = 0.04 if (y < 0.3 and li % 2 == 1) else 0.0
-            ax.text(x, y - half - 0.014 - extra, _wrap_label(labels[li]),
-                    ha="center", va="top", fontsize=8.5, weight="bold",
+            # Inline node label, staggered into two rows on the busy bottom tier
+            # so adjacent (possibly two-line) captions never collide.
+            extra = 0.055 if (y < 0.3 and li % 2 == 1) else 0.0
+            ax.text(x, y - half_y - 0.018 - extra, _wrap_label(labels[li]),
+                    ha="center", va="top", fontsize=7.5, weight="bold",
                     color="#1a1a1a", zorder=3)
 
     fig.suptitle(f"Computation flow for  \u201c{prompt}\u201d", fontsize=13)
+    fig.subplots_adjust(left=0.02, right=0.98, top=0.92, bottom=0.04, wspace=0.06)
     _save(fig, out_dir, "figF_circuit_heatmaps")
     plt.close(fig)
 
