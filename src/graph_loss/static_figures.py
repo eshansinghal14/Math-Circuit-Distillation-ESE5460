@@ -127,11 +127,54 @@ def last_token_logits(adapter: HFLlamaGraphAdapter, prompt: str) -> torch.Tensor
     return logits.squeeze(0)[-1].detach()
 
 
-def predicted_answer_token(adapter: HFLlamaGraphAdapter, prompt: str) -> str:
-    """The model's greedy first answer token after ``prompt`` (decoded string)."""
-    logits = last_token_logits(adapter, prompt)
-    tok_id = int(logits.argmax().item())
-    return adapter.tokenizer.decode([tok_id])
+def model_prediction(
+    adapter: HFLlamaGraphAdapter, prompt: str, *, dataset: str | None = None,
+    max_new_tokens: int = 8,
+) -> str:
+    """What the model actually outputs for ``prompt`` under greedy decoding.
+
+    Mirrors ``eval_model``: same raw prompt (BOS + tokens, no chat template for
+    the local math datasets), greedy ``generate``, then ``parse_response`` to the
+    integer answer when a ``dataset`` is given. Falls back to the decoded
+    continuation so a broken model's junk output is shown verbatim.
+    """
+    tok = adapter.tokenizer
+    input_ids = adapter.ensure_tokenized(prompt)
+    if input_ids.dim() == 1:
+        input_ids = input_ids.unsqueeze(0)
+    input_ids = input_ids.to(_model_device(adapter))
+    pad_id = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
+    with torch.no_grad():
+        out = adapter.model.generate(
+            input_ids,
+            attention_mask=torch.ones_like(input_ids),
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            pad_token_id=pad_id,
+        )
+    cont = tok.decode(out[0, input_ids.shape[1]:], skip_special_tokens=True)
+    if dataset:
+        try:
+            from utils import parse_response
+
+            parsed = parse_response(prompt + cont, dataset)
+            if parsed is not None:
+                return str(parsed)
+        except Exception:  # noqa: BLE001
+            pass
+    return cont.strip()
+
+
+def true_answer(prompt: str) -> str | None:
+    """The correct answer to an arithmetic prompt like '36+59=' (or None)."""
+    lhs = prompt.split("=")[0]
+    for op, fn in (("+", lambda xs: sum(xs)),
+                   ("*", lambda xs: __import__("math").prod(xs)),
+                   ("-", lambda xs: xs[0] - sum(xs[1:]))):
+        parts = lhs.split(op)
+        if len(parts) >= 2 and all(p.strip().lstrip("-").isdigit() for p in parts):
+            return str(fn([int(p.strip()) for p in parts]))
+    return None
 
 
 def build_supergraph(
@@ -1354,10 +1397,11 @@ def main() -> None:
         mlp_caches=mlp_caches, names=fig_names,
     )
 
-    # Each model's greedy first answer token; the teacher's is the gold reference
-    # so a base student that predicts something else is flagged wrong in Fig F.
-    answers = {nm: predicted_answer_token(adapters[nm], args.prompt) for nm in fig_names}
-    gold = answers.get(teacher_name)
+    # What each model actually generates (greedy, parsed like eval); correctness
+    # is judged against the true arithmetic answer, falling back to the teacher's.
+    answers = {nm: model_prediction(adapters[nm], args.prompt, dataset=args.dataset)
+               for nm in fig_names}
+    gold = true_answer(args.prompt) or answers.get(teacher_name)
     logger.info("Predicted answers: %s (gold=%r)", answers, gold)
 
     if cache_path:
