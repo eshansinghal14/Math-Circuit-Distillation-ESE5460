@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from graph_loss.attribution.context import HFAttributionContext
-from graph_loss.freeze import frozen_graph_edges
+from graph_loss.freeze import frozen_graph_edges, without_gradient_checkpointing
 from graph_loss.attribution.targets import AttributionTargets, TargetSpec
 from graph_loss.graph import Graph
 
@@ -67,7 +67,7 @@ def setup_attribution(
         handles.append(layer.mlp.register_forward_pre_hook(_pre))
 
     try:
-        with adapter.autocast_context(dtype), frozen_graph_edges(
+        with without_gradient_checkpointing(adapter.model), adapter.autocast_context(dtype), frozen_graph_edges(
             adapter.model,
             freeze_attention=freeze_attention,
             freeze_rms_norm=freeze_rms_norm,

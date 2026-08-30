@@ -113,6 +113,36 @@ def _rms_norm_modules(model: nn.Module) -> list[nn.Module]:
 
 
 @contextlib.contextmanager
+def without_gradient_checkpointing(*models: nn.Module):
+    """Temporarily turn off HF gradient checkpointing on ``models``.
+
+    Attribution is incompatible with it in two ways.  The forwards run inside
+    :func:`frozen_graph_edges` and behind hooks that re-tag activations as graph
+    leaves, but a checkpointed segment is recomputed later during the backward,
+    outside both -- so the recomputed tensors do not match what was saved and
+    torch raises ``CheckpointError``.  Non-reentrant checkpointing also cannot
+    support the double backward that ``create_graph=True`` needs.
+
+    Toggles the per-module flag rather than calling
+    ``gradient_checkpointing_disable()``/``_enable()`` so the model keeps the
+    ``_gradient_checkpointing_func`` it was configured with.
+    """
+    disabled: list[nn.Module] = []
+    try:
+        for model in models:
+            if model is None:
+                continue
+            for module in model.modules():
+                if getattr(module, "gradient_checkpointing", False):
+                    module.gradient_checkpointing = False
+                    disabled.append(module)
+        yield
+    finally:
+        for module in disabled:
+            module.gradient_checkpointing = True
+
+
+@contextlib.contextmanager
 def frozen_graph_edges(
     model: nn.Module,
     *,

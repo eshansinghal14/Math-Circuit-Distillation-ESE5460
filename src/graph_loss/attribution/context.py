@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from graph_loss.freeze import frozen_graph_edges
+from graph_loss.freeze import frozen_graph_edges, without_gradient_checkpointing
 
 if TYPE_CHECKING:
     from graph_loss.hf_adapter import HFLlamaGraphAdapter
@@ -118,7 +118,7 @@ class HFAttributionContext:
             chunk_handles.append(layer.mlp.register_forward_hook(_out))
 
         try:
-            with adapter.autocast_context(self.dtype), frozen_graph_edges(
+            with without_gradient_checkpointing(adapter.model), adapter.autocast_context(self.dtype), frozen_graph_edges(
                 adapter.model,
                 freeze_attention=self.freeze_attention,
                 freeze_rms_norm=self.freeze_rms_norm,
