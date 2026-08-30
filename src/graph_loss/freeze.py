@@ -18,6 +18,18 @@ the forward values bit-identical, so activations, read/write vectors, neuron
 pre-selection and supernode membership are all unaffected -- only the edge
 gradients change.
 
+Being backward-only is exactly why the scope matters.  These context managers
+belong on the forwards whose *gradients become edge values*
+(``HFAttributionContext._expanded_forward``) and on nothing else.  In particular
+``setup_attribution``'s forward must run unfrozen.  It produces only values, so
+freezing it cannot move a single edge; but on the student path the autograd graph
+hanging off its captured MLP inputs is the *only* route from the graph loss back
+to the model weights, because the edge gradients themselves are constants when
+``create_graph=False``.  Freezing there leaves the attribution byte-for-byte
+identical while silently biasing the training gradient -- it zeroes the q/k path
+outright and strips the radial ``x x^T`` correction from every RMSNorm, injecting
+a residual-stream-scaling component that the forward is invariant to.
+
 Freezing attention requires an attention implementation that materialises the
 pattern.  The default SDPA kernel never forms it, so the context manager
 temporarily swaps the model onto a registered eager variant that detaches the

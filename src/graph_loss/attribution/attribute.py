@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from graph_loss.attribution.context import HFAttributionContext
-from graph_loss.freeze import frozen_graph_edges, without_gradient_checkpointing
+from graph_loss.freeze import without_gradient_checkpointing
 from graph_loss.attribution.targets import AttributionTargets, TargetSpec
 from graph_loss.graph import Graph
 
@@ -43,10 +43,12 @@ def setup_attribution(
     Equivalent to ``TransformerLensReplacementModel.setup_attribution``.
 
     ``freeze_attention`` / ``freeze_rms_norm`` stop-gradient the attention pattern
-    and the RMSNorm denominator (see ``graph_loss.freeze``). They are applied to
-    this forward pass and stored on the returned context so the edge-attribution
-    passes use the same linearisation. Forward values are unchanged either way,
-    so neuron pre-selection is identical; only gradients differ.
+    and the RMSNorm denominator (see ``graph_loss.freeze``). They are stored on the
+    returned context and applied *only* to the edge-attribution forwards; this
+    forward deliberately runs unfrozen. Since the freeze is backward-only it cannot
+    alter any value produced here, so the resulting graph is identical either way,
+    while the autograd graph attached to ``mlp_inputs`` -- the student's only
+    gradient path from the graph loss back to the model weights -- stays intact.
     """
     input_batch = input_ids.unsqueeze(0)
     mlp_inputs: dict[int, torch.Tensor] = {}
@@ -67,11 +69,17 @@ def setup_attribution(
         handles.append(layer.mlp.register_forward_pre_hook(_pre))
 
     try:
-        with without_gradient_checkpointing(adapter.model), adapter.autocast_context(dtype), frozen_graph_edges(
-            adapter.model,
-            freeze_attention=freeze_attention,
-            freeze_rms_norm=freeze_rms_norm,
-        ):
+        # NOT wrapped in frozen_graph_edges -- see the docstring above and
+        # graph_loss.freeze. The freeze is backward-only, so it cannot change any
+        # value this pass produces (logits, embed_out, mlp_inputs, and hence the
+        # source/target vectors and neuron pre-selection are bit-identical either
+        # way). All it would change is the autograd graph hanging off mlp_inputs,
+        # which on the student path is the sole route from the graph loss back to
+        # the weights, since the edge gradients are constants when
+        # create_graph=False. Freezing here adds nothing to the attribution and
+        # only biases the training gradient: it zeroes the q/k path outright and
+        # strips the radial correction from every RMSNorm.
+        with without_gradient_checkpointing(adapter.model), adapter.autocast_context(dtype):
             out = adapter.model(
                 input_ids=input_batch,
                 attention_mask=torch.ones_like(input_batch, device=adapter.device),

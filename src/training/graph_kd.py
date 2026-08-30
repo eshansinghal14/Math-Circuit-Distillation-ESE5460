@@ -268,8 +268,20 @@ class GraphKDTrainer:
             accum_graph += graph_val
 
             if micro_step % grad_accum == 0:
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), _GRAD_CLIP)
-                self.optimizer.step()
+                # The graph loss is backpropagated inside backward_batch_graph_loss
+                # with no finiteness check of its own, so guard here: a single
+                # non-finite gradient would otherwise poison the Adam moment
+                # estimates permanently. clip_grad_norm_ turns an infinite total
+                # norm into NaN grads, but those are discarded by the zero_grad
+                # below when the step is skipped.
+                total_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), _GRAD_CLIP)
+                if torch.isfinite(total_norm):
+                    self.optimizer.step()
+                else:
+                    print(
+                        f"  step {self._train_step + 1} | WARN: non-finite grad norm "
+                        f"({total_norm.item()}); skipping optimizer step"
+                    )
                 self.optimizer.zero_grad()
 
                 self._train_step += 1
