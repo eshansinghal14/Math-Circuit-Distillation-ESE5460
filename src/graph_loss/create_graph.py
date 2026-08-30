@@ -240,6 +240,8 @@ def build_shared_context(
     cache_batch_size: int = 32,
     supernode_heatmap_output_dir: str | None = None,
     refresh_mlp_cache: bool = False,
+    freeze_attention: bool = False,
+    freeze_rms_norm: bool = False,
     logger: logging.Logger | None = None,
 ) -> GraphSharedContext:
     """Phase 1 of the graph pipeline: forward pass, ANOVA labeling, token supernodes.
@@ -260,7 +262,14 @@ def build_shared_context(
     _logger = logger or logging.getLogger(__name__)
 
     _logger.info("Running setup_attribution (neuron pre-selection by gradient norm)")
-    ctx = setup_attribution(adapter, input_ids, prop_neurons_per_layer, dtype)
+    ctx = setup_attribution(
+        adapter,
+        input_ids,
+        prop_neurons_per_layer,
+        dtype,
+        freeze_attention=freeze_attention,
+        freeze_rms_norm=freeze_rms_norm,
+    )
     _logger.info("  Pre-selected neurons: %d", ctx.n_neurons)
 
     # An empty list means "no labels requested" => no ANOVA. Only a non-empty
@@ -604,6 +613,8 @@ def create_graph(
     node_labels: list[str] | None = None,
     dla_model_logits: torch.Tensor | None = None,
     no_grad_supergraph: bool = False,
+    freeze_attention: bool = False,
+    freeze_rms_norm: bool = False,
     logger: logging.Logger | None = None,
 ) -> GraphPipelineResult:
     """Run the ANOVA-first graph creation pipeline.
@@ -653,6 +664,12 @@ def create_graph(
             selecting by normalised embedding-gradient mass (= minimum KL divergence
             from the delta distribution at that position).
         no_grad_supergraph: Wrap build_super_graph in torch.no_grad() (training use).
+        freeze_attention: Stop-gradient the attention pattern during edge attribution, so
+            edges reflect only the direct residual-stream path and not QK-mediated paths.
+            Forces an eager attention kernel (slower, more memory than SDPA).
+        freeze_rms_norm: Stop-gradient the RMSNorm reciprocal-norm scale during edge
+            attribution. Both match the direct-path linearisation of the published
+            circuit-tracing methodology; see graph_loss.freeze.
         logger: Optional logger; creates a module-level one if not provided.
 
     Returns:
@@ -677,6 +694,8 @@ def create_graph(
         cache_batch_size=cache_batch_size,
         supernode_heatmap_output_dir=supernode_heatmap_output_dir,
         refresh_mlp_cache=refresh_mlp_cache,
+        freeze_attention=freeze_attention,
+        freeze_rms_norm=freeze_rms_norm,
         logger=_logger,
     )
 

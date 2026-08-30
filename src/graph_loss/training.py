@@ -21,7 +21,7 @@ from graph_loss.loss import compute_graph_loss
 
 @dataclass
 class GraphAuxConfig:
-    lambda_graph: float = 0.1
+    lambda_graph: float = 1.0
     graph_dtype: torch.dtype | None = None
     teacher_prop_neurons_per_layer: float = 0.1
     student_prop_neurons_per_layer: float = 0.1
@@ -40,6 +40,11 @@ class GraphAuxConfig:
     mlp_input_cache: dict | None = None
     activation_write_result_cache: dict = field(default_factory=dict)
     graph_loss_type: Literal["jsd", "kld", "mse", "mse-norm", "mse-scale"] = "jsd"
+    # Stop-gradient the attention pattern / RMSNorm denominator when computing
+    # attribution-graph edges, matching the published direct-path linearisation.
+    # Applied identically to teacher and student. See graph_loss.freeze.
+    freeze_attention: bool = False
+    freeze_rms_norm: bool = False
     graph_node_labels: list[str] | None = None
     teacher_mlp_input_cache: dict | None = None
     tokens_dla_nodes: bool = False
@@ -66,8 +71,11 @@ def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> Super
         )
     rows = []
     for t in range(num_supernodes):
-        total_input = torch.abs(adj_matrix_norm[:, supernodes[t]]).sum(dim=0)
-        internal_input = torch.abs(adj_matrix_norm[supernodes[t]][:, supernodes[t]]).sum(dim=0)
+        # frac_external(n_t): fraction of the absolute-valued *input* weights to n_t
+        # that originate outside the supernode (row sum over incoming edges). Must stay
+        # in sync with build_super_graph in graph.py.
+        total_input = torch.abs(adj_matrix_norm[supernodes[t]]).sum(dim=1)
+        internal_input = torch.abs(adj_matrix_norm[supernodes[t]][:, supernodes[t]]).sum(dim=1)
         frac_external = (total_input - internal_input) / total_input.clamp(min=1e-10)
         row_entries = []
         for s in range(num_supernodes):
@@ -126,6 +134,8 @@ def compute_prompt_graph_loss(
             nodes_per_label=config.student_nodes_per_label,
             dla_model_logits=teacher_dla_logits,
             no_grad_supergraph=True,
+            freeze_attention=config.freeze_attention,
+            freeze_rms_norm=config.freeze_rms_norm,
         )
     except ValueError as e:
         raise RuntimeError(
@@ -367,6 +377,8 @@ def _compare_tokens_loss_for_prompt(
                 build_create_graph=False,
                 detach_result=True,
                 verbose=config.verbose,
+                freeze_attention=config.freeze_attention,
+                freeze_rms_norm=config.freeze_rms_norm,
             )
 
         # Pass prefix_ids directly so the student tokenizes from the same IDs
@@ -459,6 +471,8 @@ def backward_batch_graph_loss(
                     no_grad_supergraph=True,
                     build_create_graph=False,
                     detach_result=True,
+                    freeze_attention=config.freeze_attention,
+                    freeze_rms_norm=config.freeze_rms_norm,
                 )
             prompt_ids = teacher_adapter.tokenizer(
                 prompt, return_tensors="pt", add_special_tokens=False

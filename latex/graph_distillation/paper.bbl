@@ -1,0 +1,54 @@
+\begin{thebibliography}{6}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Ameisen et~al.(2025)Ameisen, Lindsey, Pearce, Gurnee, Turner, Chen,
+  Citro, Abrahams, Carter, Hosmer, Marcus, Sklar, Templeton, Bricken,
+  McDougall, Conerly, Batson, Olah, and Henighan]{ameisen2025circuit}
+Emmanuel Ameisen, Jack Lindsey, Adam Pearce, Wes Gurnee, Nicholas~L. Turner,
+  Brian Chen, Craig Citro, David Abrahams, Shan Carter, Basil Hosmer, Jonathan
+  Marcus, Michael Sklar, Adly Templeton, Trenton Bricken, Callum McDougall,
+  Thomas Conerly, Joshua Batson, Chris Olah, and Tom Henighan.
+\newblock Circuit tracing: Revealing computational graphs in language models.
+\newblock \emph{Transformer Circuits Thread}, 2025.
+\newblock URL
+  \url{https://transformer-circuits.pub/2025/attribution-graphs/methods.html}.
+
+\bibitem[Dunefsky et~al.(2024)Dunefsky, Chlenski, and
+  Nanda]{dunefsky2024transcoders}
+Jacob Dunefsky, Philippe Chlenski, and Neel Nanda.
+\newblock Transcoders find interpretable {LLM} feature circuits.
+\newblock \emph{Advances in Neural Information Processing Systems}, 2024.
+
+\bibitem[Hinton et~al.(2015)Hinton, Vinyals, and Dean]{hinton2015distilling}
+Geoffrey Hinton, Oriol Vinyals, and Jeff Dean.
+\newblock Distilling the knowledge in a neural network, 2015.
+
+\bibitem[Lindsey et~al.(2025)Lindsey, Gurnee, Ameisen, Chen, Pearce, Turner,
+  Citro, Abrahams, Carter, Hosmer, Marcus, Sklar, Templeton, Bricken,
+  McDougall, Conerly, Batson, Olah, and Henighan]{lindsey2025biology}
+Jack Lindsey, Wes Gurnee, Emmanuel Ameisen, Brian Chen, Adam Pearce,
+  Nicholas~L. Turner, Craig Citro, David Abrahams, Shan Carter, Basil Hosmer,
+  Jonathan Marcus, Michael Sklar, Adly Templeton, Trenton Bricken, Callum
+  McDougall, Thomas Conerly, Joshua Batson, Chris Olah, and Tom Henighan.
+\newblock On the biology of a large language model.
+\newblock \emph{Transformer Circuits Thread}, 2025.
+\newblock URL
+  \url{https://transformer-circuits.pub/2025/attribution-graphs/biology.html}.
+
+\bibitem[Nanda(2023)]{nanda2023attribution}
+Neel Nanda.
+\newblock Attribution patching: Activation patching at industrial scale.
+\newblock
+  \url{https://www.neelnanda.io/mechanistic-interpretability/attribution-patching},
+  2023.
+
+\bibitem[Shazeer(2020)]{shazeer2020glu}
+Noam Shazeer.
+\newblock {GLU} variants improve transformer.
+\newblock In \emph{arXiv preprint arXiv:2002.05202}, 2020.
+
+\end{thebibliography}

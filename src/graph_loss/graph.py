@@ -584,8 +584,11 @@ def build_super_graph(
     )
     for t in range(num_supernodes):
         target_members = supernodes[t]
-        total_input = torch.abs(adj_matrix_norm[:, target_members]).sum(dim=0)
-        internal_input = torch.abs(adj_matrix_norm[target_members][:, target_members]).sum(dim=0)
+        # frac_external(n_t): fraction of the absolute-valued *input* weights to n_t
+        # that originate outside the supernode -- a row sum over n_t's incoming edges,
+        # not a column sum over its outgoing ones.
+        total_input = torch.abs(adj_matrix_norm[target_members]).sum(dim=1)
+        internal_input = torch.abs(adj_matrix_norm[target_members][:, target_members]).sum(dim=1)
         frac_external = (total_input - internal_input) / total_input.clamp(min=1e-10)
         for s in range(num_supernodes):
             source_members = supernodes[s]

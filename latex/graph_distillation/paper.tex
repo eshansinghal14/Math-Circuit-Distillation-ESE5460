@@ -1,0 +1,394 @@
+\documentclass{article}
+
+% NeurIPS style. Options: [preprint] for a non-anonymous preprint with line
+% numbers, [final] for camera-ready, no option for anonymised submission.
+\usepackage[preprint]{neurips_2023}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{graphicx}
+
+\usepackage{amsmath, amssymb, bm, mathtools}
+\usepackage[usenames,dvipsnames,svgnames,table]{xcolor}
+\usepackage{float, subcaption, wrapfig}
+
+\newcommand{\vg}[1]{{\color{blue} vg: #1}}
+\newcommand{\ad}[1]{{\color{red} ad: #1}}
+\newcommand{\es}[1]{{\color{OliveGreen} es: #1}}
+\newcommand{\pv}[1]{{\color{purple} pv: #1}}
+% Placeholder marker for sections still to be written.
+\newcommand{\todosec}[1]{{\color{Gray}\emph{[#1]}}}
+
+\DeclareMathOperator{\KL}{KL}
+\DeclareMathOperator{\softmax}{softmax}
+\DeclareMathOperator{\fracext}{frac\_external}
+\DeclareMathOperator{\snadj}{supernode\_adjacency}
+\newcommand{\Teach}{\mathcal{T}}
+\newcommand{\Stud}{\mathcal{S}}
+
+\title{Graph Distillation: Transferring Attribution-Graph Structure\\from a Large Teacher to a Small Student}
+
+\author{%
+  Eshan Singhal\thanks{Equal contribution.} \\
+  \texttt{esinghal@seas.upenn.edu} \\
+  \And
+  Audhav Durai\footnotemark[1] \\
+  \texttt{audhav@wharton.upenn.edu} \\
+  \And
+  Vedant Gaur\footnotemark[1] \\
+  \texttt{vedantg@wharton.upenn.edu} \\
+  \And
+  Praneel Varshney\footnotemark[1] \\
+  \texttt{pvarsh@seas.upenn.edu} \\
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+\todosec{Abstract. One paragraph: the gap between output-level distillation and
+mechanism transfer; graph distillation as a supernode-level structural loss on
+attribution graphs; the Llama-3.1-8B $\to$ Llama-3.2-1B arithmetic setting; headline result.}
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+
+\todosec{Introduction. Why matching outputs need not transfer the teacher's algorithm;
+why attribution graphs give a model-agnostic handle on the mechanism; contributions.}
+
+\section{Related Work}
+\label{sec:related}
+
+\todosec{Related work. Knowledge distillation and feature/representation matching;
+mechanistic interpretability and circuit discovery (attribution patching, transcoders,
+attribution graphs); prior attempts at mechanism-level transfer.}
+
+\section{Method}
+
+\subsection{Overview}
+\label{sec:overview}
+
+Standard knowledge distillation constrains only the \emph{output} of the student and says nothing
+about how that output was produced \citep{hinton2015distilling}. We add a second constraint on the
+\emph{internal computation}: for a given arithmetic prompt we build an attribution graph over MLP
+neurons in each model, coarsen it into a small set of functionally-labelled \emph{supernodes} that
+exist in both models, and require the teacher and the student to route causal influence between
+those supernodes in the same proportions.
+
+Let $\Teach$ be the frozen teacher (Llama-3.1-8B) and $\Stud$ the student (Llama-3.2-1B) with
+trainable parameters $\theta_\Stud$. For a prompt $x$, the pipeline of
+Sections~\ref{sec:attrib}--\ref{sec:superedges} produces one $K \times K$ supernode adjacency
+matrix per model, $W^{\Teach}(x)$ and $W^{\Stud}(x;\theta_\Stud)$, whose row $t$ says
+\emph{where supernode $t$ draws its input from}. Supernodes are identified by a semantic label
+(``ones digit of the second operand'', ``magnitude of the sum'', $\dots$) rather than by neuron
+index, so the rows and columns of the two matrices correspond even though the models differ in
+width, depth, and neuron basis.
+
+Dividing a row by its $\ell_1$ norm turns it into a distribution over sources --- supernode $t$'s
+\emph{routing profile}, the fraction of its incoming causal influence contributed by each other
+supernode. Writing $P_t$ and $Q_t$ for the teacher's and the student's routing profile for
+supernode $t$, and $\mathcal{A}$ for the supernodes present in both models, the graph loss is the
+mean divergence between matched profiles,
+\begin{equation}
+  \mathcal{L}_{\mathrm{graph}}(\theta_\Stud)
+  \;=\;
+  \frac{1}{|\mathcal{A}|}\sum_{t \in \mathcal{A}} \KL\bigl(P_t \,\big\|\, Q_t\bigr),
+  \label{eq:graphloss}
+\end{equation}
+with $P_t$ detached, since the teacher is fixed. The direction matters: forward KL penalises the
+student for failing to reproduce an edge the teacher uses, but is silent wherever the teacher puts
+no mass, so it asks the student to cover the teacher's routing rather than to match it exactly.
+
+The full objective adds \eqref{eq:graphloss} to the ordinary temperature-scaled KD term,
+\begin{equation}
+  \mathcal{L}(\theta_\Stud)
+  \;=\;
+  \underbrace{\frac{\tau^2}{|\mathcal{P}|}\sum_{p \in \mathcal{P}}
+    \KL\Bigl(\softmax\bigl(z^{\Teach}_p/\tau\bigr) \,\Big\|\, \softmax\bigl(z^{\Stud}_p/\tau\bigr)\Bigr)}_{\mathcal{L}_{\mathrm{KD}}}
+  \;+\;
+  \lambda\, \mathcal{L}_{\mathrm{graph}}(\theta_\Stud),
+  \label{eq:total}
+\end{equation}
+where $z_p$ are logits at non-padding position $p$, $\tau = 2$, and $\lambda = 1$.
+
+\subsection{Attribution graphs over MLP neurons}
+\label{sec:attrib}
+
+Our graph construction follows the circuit-tracing methodology of
+\citet{ameisen2025circuit,lindsey2025biology}: represent one forward pass as a directed weighted
+graph whose nodes are localised computational units --- active at a specific layer and token
+position --- and whose edge $A_{ij}$ measures the \emph{direct} linear effect of node $j$ on node
+$i$, holding fixed everything off the direct path.
+
+A node $i$ is a triple $(\ell_i, p_i, n_i)$: layer, token position, neuron index. It carries a
+\emph{write vector} $v^{\mathrm{out}}_i = a_i \cdot W_{\mathrm{down}}[:,n_i]$, what the neuron adds
+to the residual stream, and a \emph{read direction} $v^{\mathrm{in}}_i = \partial a_i / \partial h$,
+the residual-stream direction it responds to. Edges are gradient--activation products, i.e.\
+attribution patching \citep{nanda2023attribution}: for a target node $i$ we form the scalar
+$f_i = \langle h^{(\ell_i)}_{p_i},\, \mathrm{sg}[v^{\mathrm{in}}_i]\rangle$ --- the linearised
+pre-activation of neuron $i$, with the read direction stop-gradiented so that only the \emph{input}
+to the neuron is differentiated --- and set
+\begin{equation}
+  A_{ij} \;=\; \Bigl\langle\, \nabla_{m^{(\ell_j)}_{p_j}} f_i,\;\; v^{\mathrm{out}}_j \,\Bigr\rangle,
+  \label{eq:edge}
+\end{equation}
+where $m^{(\ell_j)}$ is the output of MLP block $\ell_j$. Token-embedding nodes are handled the same
+way with $v^{\mathrm{out}}$ replaced by the embedding vector, and logit nodes use
+$f_c = \langle h^{(L)}_{-1},\, W_U[:,c] - \overline{W_U}\rangle$ with the mean-subtracted
+unembedding column, following \citet{ameisen2025circuit}. The logit targets $c$ are the smallest set
+of top tokens whose probabilities under $\softmax(z/\tau)$, $\tau = 2$, sum to $0.95$, capped at
+ten. Since $n_{\mathrm{pos}} \times d_{\mathrm{mlp}}$ candidate neurons per layer is far too many,
+we keep the top $10\%$ per layer by write-vector norm; activations at the BOS position are zeroed so
+the attention sink is never selected.
+
+\emph{Why raw neurons are enough.} The published pipeline does not attribute to neurons: it first
+replaces every MLP with a cross-layer transcoder, so that nodes are sparse, more nearly
+monosemantic features \citep{dunefsky2024transcoders}. We attribute directly to raw MLP neurons, and
+we think this is sound for three reasons. First, the construction in \eqref{eq:edge} requires only
+that a node's contribution to the residual stream be linear in its activation. MLP neurons satisfy
+this exactly, $v^{\mathrm{out}}_i = a_i W_{\mathrm{down}}[:,n_i]$, so the linearisation is no less
+valid over neurons than over transcoder features. Second, the transcoder is introduced for
+interpretability, not for the validity of the attribution, and it is not free: because it only
+approximately reconstructs the MLP output, the replacement model must carry \emph{error nodes} for
+the reconstruction residual, which absorb attribution and admit no interpretation of their own.
+Attributing to raw neurons leaves no such residual --- the graph is over the computation the model
+actually performs. Third, the real cost is polysemanticity: a single neuron rarely corresponds to
+one human-legible concept. But this is exactly what the supernode step repairs, and it is worth
+noting that the individual feature is not the interpretable object in the published work either ---
+features there are grouped by hand into supernodes before any circuit is read off. We automate that
+grouping (Section~\ref{sec:supernodes}), so in both cases the interpretable unit is the group, and
+in ours the loss \eqref{eq:graphloss} is defined over groups and never over individual nodes.
+
+\subsection{Grouping neurons into supernodes}
+\label{sec:supernodes}
+
+Raw neuron graphs are far too large and too model-specific to compare across a 1B and an 8B model.
+Where supernodes in the published work are drawn by hand from feature visualisations, we replace the
+manual step with an automatic, purely functional criterion, which is what makes the grouping
+reproducible across two different models.
+
+Every neuron is evaluated on a fixed probe set: all two-digit addition prompts
+``\texttt{$a$+$b$=}'' for $a, b \in \{0, \dots, 99\}$, i.e.\ all $10^4$ points of the
+$100 \times 100$ grid. This yields for neuron $i$ an \emph{activation grid}
+$T_i \in \mathbb{R}^{100 \times 100}$, with $T_i[a,b]$ its activation on that prompt --- a direct
+empirical description of what the neuron responds to, as a picture. The node panels of
+Figure~\ref{fig:supergraph} are examples.
+
+We then ask which of a fixed set of arithmetically meaningful partitions of the grid best explains
+that picture. Each candidate is a binary mask $M \in \{0,1\}^{100\times100}$; for a prompt with
+operands $(a^{*}, b^{*})$ and sum $s^{*} = a^{*} + b^{*}$, the categories are
+
+\begin{center}
+\small
+\begin{tabular}{l l @{\qquad} l l}
+\toprule
+category & mask $M[a,b] = 1$ iff & category & mask $M[a,b] = 1$ iff \\
+\midrule
+\texttt{arg1 range} & $a = a^{*}$                    & \texttt{carry}     & $(a \bmod 10) + (b \bmod 10) \ge 10$ \\
+\texttt{arg1 units} & $a \equiv a^{*} \!\!\pmod{10}$ & \texttt{sum range} & $a + b = s^{*}$ \\
+\texttt{arg2 range} & $b = b^{*}$                    & \texttt{sum units} & $a + b \equiv s^{*} \!\!\pmod{10}$ \\
+\texttt{arg2 units} & $b \equiv b^{*} \!\!\pmod{10}$ & \texttt{arg1 units and arg2 units} & composite (see below) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+The score of mask $M$ for neuron $i$ is the fraction of the variance of $T_i$ that the mask
+explains. For a binary regressor this is the squared Pearson correlation, and is exactly the
+one-way ANOVA $\eta^2$ between the two groups the mask induces:
+\begin{equation}
+  s_{i,M}
+  \;=\;
+  \frac{\bigl(\langle T_i - \bar{T}_i,\; M - \bar{M}\rangle\bigr)^2}
+       {\|T_i - \bar{T}_i\|_2^2 \;\cdot\; \|M - \bar{M}\|_2^2}
+  \;\in\; [0,1],
+  \label{eq:anova}
+\end{equation}
+and a category's score $s_i^c$ is the best score over its masks. The composite category
+\texttt{arg1 units and arg2 units} instead scores $\min(s_i^{\texttt{arg1 units}},
+s_i^{\texttt{arg2 units}})$, so it fires only for a neuron sensitive to both ones digits at once.
+Neurons are ranked not by $s_i^c$ but by \emph{specificity}, the margin over the best competing
+category, $\delta_i^c = s_i^c - \max_{c' \neq c} s_i^{c'}$, and supernode $S_c$ is the top
+$n_{\mathrm{per}} = 10$ neurons by $\delta_i^c$. Ranking by margin is what keeps the supernodes
+functionally disjoint: a neuron firing on a broad band of $a$ scores well on several correlated
+categories at once, and only the margin separates a genuine ones-digit detector from a magnitude
+detector that happens to correlate with one.
+
+Two categories are handled differently, because their neurons are defined by what they \emph{write}
+rather than by what they read. For \texttt{sum range} and \texttt{sum units} we rank candidates by
+how closely the neuron's direct logit attribution $\softmax(v^{\mathrm{out}\top}_i W_U)$, restricted
+to the number tokens $0$--$200$, matches the target distribution in KL --- a point mass at $s^{*}$
+for \texttt{sum range}, and uniform over $\{n : n \equiv s^{*} \!\!\pmod{10}\}$ for
+\texttt{sum units}. The same score defines two further \texttt{dla} supernodes, one per sum target,
+collecting the neurons that write those distributions to the output most directly; these are the
+bottom two nodes on each side of Figure~\ref{fig:supergraph}.
+
+Because the same category list produces the same supernode labels in both models, the teacher and
+student supergraphs are aligned automatically; training requires the two label sets to match exactly
+and falls back to their intersection with a warning if they do not.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.84\linewidth]{figures/graph_dist_heatmaps.png}
+  \caption{Supergraphs for the prompt ``\texttt{36+59=}'' in Llama-3.2-1B (left) and
+  Llama-3.1-8B (right). Each node is a supernode from Section~\ref{sec:supernodes}, drawn as the
+  activation grid $T_i$ of one representative member neuron --- its activation across all $10^4$
+  two-digit addition prompts, with operand $a$ on one axis and $b$ on the other --- so that
+  membership and computational role can be read off the same picture. Nodes $\sim\!36$ and
+  $\sim\!59$ are \texttt{arg1/arg2 range}, $\_6$ and $\_9$ are \texttt{arg1/arg2 units},
+  $\mathrm{sum}\sim\!95$ and $\mathrm{sum}=\_5$ are \texttt{sum range} and \texttt{sum units}, and
+  the bottom pair are the corresponding \texttt{dla} supernodes. Edge labels are the supernode
+  weights of \eqref{eq:superedge}; self-loops are within-supernode recurrence. The 8B grids are
+  visibly cleaner: its $\mathrm{sum}\sim\!95$ node is a sharp anti-diagonal ($a + b \approx 95$) and
+  its $\mathrm{sum}=\_5$ node a clean periodic lattice ($a + b \equiv 5 \bmod 10$), whereas the 1B
+  counterparts are diffuse and noisy --- the same structure, represented less separably in the
+  smaller model.}
+  \label{fig:supergraph}
+\end{figure}
+
+\subsection{Supernode edge weights}
+\label{sec:superedges}
+
+Grouping the neurons produces a simplified supergraph, whose edges we compute with the supernode
+adjacency of \citet{ameisen2025circuit},
+\begin{equation}
+  \snadj(t,s)
+  \;=\;
+  \frac{\displaystyle\sum_{n_t \in N_t} \fracext(n_t) \cdot \sum_{n_s \in N_s} A'_{n_t, n_s}}
+       {\displaystyle\sum_{n_t \in N_t} \fracext(n_t)},
+  \label{eq:superedge}
+\end{equation}
+where $N_t$ and $N_s$ are the sets of nodes in supernodes $t$ and $s$, and $n_t$, $n_s$ refer to a
+node in the corresponding supernode. $A'$ is an input-normalised graph adjacency matrix, in which
+the weights of the edges targeting each node are divided by a constant so as to sum to $1$;
+$A'_{n_t, n_s}$ is the normalised weight of the edge into $n_t$ from $n_s$. That normalisation runs
+over \emph{all} nodes --- neurons, token embeddings and logits alike, which are kept in the graph
+precisely so the denominator reflects every path by which a neuron can be influenced, even though
+they are dropped from the supergraph. Finally, $\fracext(n_t)$ is the fraction of the
+absolute-valued input weights to $n_t$ that originate from nodes outside the supernode,
+\begin{equation}
+  \fracext(n_t)
+  \;=\;
+  \frac{\sum_{j \notin N_t} \bigl|A_{n_t, j}\bigr|}{\sum_{j} \bigl|A_{n_t, j}\bigr|}
+  \;=\;
+  1 \;-\; \sum_{n' \in N_t} \bigl|A'_{n_t, n'}\bigr| .
+  \label{eq:fracext}
+\end{equation}
+Weighting by $\fracext$ is what turns \eqref{eq:superedge} into an average rather than a sum: a
+member drawing most of its input from inside its own supernode counts for little, so a supernode
+whose members mainly feed one another cannot dominate its own inbound profile. Because $A'$
+normalises over all nodes while the supergraph spans only supernode columns, the rows of $\snadj$
+do not sum to one --- which is why the routing profiles of Section~\ref{sec:overview} renormalise
+them.
+
+\subsection{Adapting the pipeline to Llama}
+\label{sec:llama}
+
+The published methodology assumes a transcoder replacement model and a TransformerLens-style hook
+API \citep{ameisen2025circuit}. Running it inside a Hugging Face training loop on Llama required
+several changes, most forced by the requirement that the student's graph carry gradients back into
+$\theta_\Stud$.
+
+\emph{Gated MLPs.} Llama's MLP is a SwiGLU block \citep{shazeer2020glu} with no single input matrix.
+With residual-stream input $h$ at the node's position,
+\begin{equation}
+  a_i = \sigma(g_i)\, u_i, \qquad
+  v^{\mathrm{in}}_i = \frac{\partial a_i}{\partial h}
+    = \sigma(g_i)\, W_{\mathrm{up}}[n_i,:] \;+\; u_i\,\sigma'(g_i)\, W_{\mathrm{gate}}[n_i,:],
+  \label{eq:swiglu}
+\end{equation}
+where $g_i = \langle W_{\mathrm{gate}}[n_i,:], h\rangle$, $u_i = \langle W_{\mathrm{up}}[n_i,:],
+h\rangle$ and $\sigma$ is SiLU. The read direction is therefore a product-rule sum of two terms that
+itself depends on the activation, rather than a fixed row of $W_{\mathrm{in}}$.
+
+\emph{Differentiability.} The pre-selection top-$k$ is detached (indices are not differentiable),
+but activations and read/write vectors stay in the ambient autograd context, so gradients flow
+$\mathcal{L}_{\mathrm{graph}} \to \snadj \to A' \to A \to v^{\mathrm{out}} \to W_{\mathrm{down}}$
+back into the model. Supernode \emph{membership} is recomputed each step but treated as fixed
+structure; only the aggregation \eqref{eq:superedge} is rebuilt differentiably, out-of-place, so
+that autograd views survive.
+
+\emph{Shared attribution targets.} Both models are attributed to the \emph{same} logit token set ---
+the teacher's --- and the student's \texttt{dla} supernodes are selected against the teacher's
+logits. Otherwise the two graphs would be built over different output nodes, and would be
+non-stationary early in training when the student's own output distribution is still wrong.
+
+\emph{Known deviation.} The published method freezes attention patterns and normalisation
+denominators when linearising, so edges reflect only the direct path. Our gradients pass through the
+full Hugging Face graph, so attention-softmax and RMSNorm Jacobians are included in
+\eqref{eq:edge}, making our edges slightly less ``direct-effect'' than theirs. We have not measured
+the size of the difference. \es{Honest caveat --- worth an ablation if we have time.}
+
+\subsection{Performance optimisations}
+
+An attribution graph costs one batch-expanded forward pass plus a vector--Jacobian product per node,
+which makes $\mathcal{L}_{\mathrm{graph}}$ far more expensive per prompt than $\mathcal{L}_{\mathrm{KD}}$.
+Four optimisations bring it inside a training loop. \emph{Probe-set caching:} the residual-stream
+input to every MLP over all $10^4$ prompts is computed once per model and cached to disk, keyed by
+model and dataset, then read back layer-by-layer, so every activation grid is recovered from the
+cache rather than by re-running the model. \emph{Analytic pre-selection:} write-vector norms factor
+as $\|v^{\mathrm{out}}_i\|_2 = |a_i|\,\|W_{\mathrm{down}}[:,n_i]\|_2$, so the top-$k$ runs in
+$O(n_{\mathrm{pos}} d_{\mathrm{mlp}})$ space without materialising the
+$[n_{\mathrm{pos}}, d_{\mathrm{mlp}}, d]$ tensor of write vectors. \emph{Batching:} one
+batch-expanded forward pass serves a whole batch of target nodes, and all masks and activation grids
+are scored against each other in a single matmul for \eqref{eq:anova}. \emph{Bounded memory:} only
+$n_{\mathrm{graph}}$ prompts per batch get a graph, and each prompt's graph loss is backpropagated
+and freed before the next graph is built, so peak memory is set by one prompt's attribution graph
+rather than the batch's.
+
+\section{Experimental Setup}
+\label{sec:setup}
+
+\todosec{Experimental setup. Teacher/student pair and checkpoints; training data and splits;
+optimiser, schedule, batch size, $n_{\mathrm{graph}}$; which supernode categories are enabled;
+baselines (SFT, standard KD, KD + graph loss); evaluation metric and prompt format; hardware
+and wall-clock cost per step.}
+
+\section{Results}
+\label{sec:results}
+
+\todosec{Results. Accuracy against the baselines; graph loss and KD loss curves; whether
+supernode routing actually converges toward the teacher's; per-category breakdown of which
+supernodes align and which do not.}
+
+\section{Analysis}
+\label{sec:analysis}
+
+\todosec{Analysis. Qualitative before/after supergraphs for the student; do the student's
+activation grids sharpen over training? Ablations: $\lambda$, KL vs.\ other divergences,
+number of supernodes, $n_{\mathrm{per}}$, and the frozen-attention deviation of
+Section~\ref{sec:llama}.}
+
+\section{Limitations}
+\label{sec:limitations}
+
+\todosec{Limitations. Single task family (two-digit addition) and a single teacher/student pair;
+attribution graphs are built per prompt and only at sampled positions; edge sign is discarded by
+the input normalisation; supernode membership is recomputed but not itself differentiable.}
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+\todosec{Conclusion.}
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\appendix
+
+\section{Additional Details}
+\label{app:details}
+
+\todosec{Appendix. Full hyperparameters; the complete ANOVA category list including the
+composite and combination-sum categories omitted from Section~\ref{sec:supernodes}; additional
+supergraph figures; per-supernode activation-heatmap montages.}
+
+\end{document}

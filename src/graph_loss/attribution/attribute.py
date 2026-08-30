@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from graph_loss.attribution.context import HFAttributionContext
+from graph_loss.freeze import frozen_graph_edges
 from graph_loss.attribution.targets import AttributionTargets, TargetSpec
 from graph_loss.graph import Graph
 
@@ -31,12 +32,21 @@ def setup_attribution(
     input_ids: torch.Tensor,
     prop_neurons_per_layer: float,
     dtype: torch.dtype | None,
+    *,
+    freeze_attention: bool = False,
+    freeze_rms_norm: bool = False,
 ) -> HFAttributionContext:
     """Run the initial single forward pass and return an ``HFAttributionContext``.
 
     Captures MLP inputs and token embeddings via hooks, then selects the
     top-``prop_neurons_per_layer`` neurons per layer by source-vector norm.
     Equivalent to ``TransformerLensReplacementModel.setup_attribution``.
+
+    ``freeze_attention`` / ``freeze_rms_norm`` stop-gradient the attention pattern
+    and the RMSNorm denominator (see ``graph_loss.freeze``). They are applied to
+    this forward pass and stored on the returned context so the edge-attribution
+    passes use the same linearisation. Forward values are unchanged either way,
+    so neuron pre-selection is identical; only gradients differ.
     """
     input_batch = input_ids.unsqueeze(0)
     mlp_inputs: dict[int, torch.Tensor] = {}
@@ -57,7 +67,11 @@ def setup_attribution(
         handles.append(layer.mlp.register_forward_pre_hook(_pre))
 
     try:
-        with adapter.autocast_context(dtype):
+        with adapter.autocast_context(dtype), frozen_graph_edges(
+            adapter.model,
+            freeze_attention=freeze_attention,
+            freeze_rms_norm=freeze_rms_norm,
+        ):
             out = adapter.model(
                 input_ids=input_batch,
                 attention_mask=torch.ones_like(input_batch, device=adapter.device),
@@ -126,6 +140,8 @@ def setup_attribution(
         embed_out=embed_out,
         logits=out.logits,
         dtype=dtype,
+        freeze_attention=freeze_attention,
+        freeze_rms_norm=freeze_rms_norm,
     )
 
 
@@ -262,6 +278,8 @@ def attribute(
     detach_result: bool | None = None,
     skip_logit_attribution: bool = False,
     target_position: int = -1,
+    freeze_attention: bool = False,
+    freeze_rms_norm: bool = False,
 ) -> Graph:
     """Compute a neuron-level attribution graph for ``prompt``.
 
@@ -275,7 +293,14 @@ def attribute(
         raise ValueError("prop_neurons_per_layer must be in (0, 1]")
 
     input_ids = adapter.ensure_tokenized(prompt)
-    ctx = setup_attribution(adapter, input_ids, prop_neurons_per_layer, dtype)
+    ctx = setup_attribution(
+        adapter,
+        input_ids,
+        prop_neurons_per_layer,
+        dtype,
+        freeze_attention=freeze_attention,
+        freeze_rms_norm=freeze_rms_norm,
+    )
     return _attribute_from_context(
         ctx,
         attribution_targets=attribution_targets,

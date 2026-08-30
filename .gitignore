@@ -7,11 +7,13 @@ esinghal.pem
 results/distillation
 results/circuit-discovery/neuron_cossim_topk
 results/clustering
-latex/paper.aux
-latex/paper.log
-latex/paper.out
-latex/paper.fls
-latex/paper.fdb_latexmk
-latex/paper.synctex.gz
+# LaTeX build artifacts (any paper subdirectory). .bbl/.pdf stay tracked.
+latex/**/*.aux
+latex/**/*.log
+latex/**/*.out
+latex/**/*.fls
+latex/**/*.fdb_latexmk
+latex/**/*.synctex.gz
+latex/**/*.blg
 datasets/
 .claude/

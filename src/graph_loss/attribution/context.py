@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from graph_loss.freeze import frozen_graph_edges
+
 if TYPE_CHECKING:
     from graph_loss.hf_adapter import HFLlamaGraphAdapter
 
@@ -31,6 +33,8 @@ class HFAttributionContext:
         embed_out: torch.Tensor,
         logits: torch.Tensor,
         dtype: torch.dtype | None = None,
+        freeze_attention: bool = False,
+        freeze_rms_norm: bool = False,
     ):
         self.adapter = adapter
         self.input_ids = input_ids
@@ -42,6 +46,11 @@ class HFAttributionContext:
         self.embed_out = embed_out
         self.logits = logits
         self.dtype = dtype
+        # Stop-gradient the attention pattern / RMSNorm denominator during edge
+        # attribution, matching the direct-path linearisation of the published
+        # methodology. See graph_loss.freeze.
+        self.freeze_attention = freeze_attention
+        self.freeze_rms_norm = freeze_rms_norm
 
     @property
     def n_neurons(self) -> int:
@@ -69,6 +78,8 @@ class HFAttributionContext:
             embed_out=self.embed_out,
             logits=self.logits,
             dtype=self.dtype,
+            freeze_attention=self.freeze_attention,
+            freeze_rms_norm=self.freeze_rms_norm,
         )
 
     def _expanded_forward(self, batch_len: int):
@@ -107,7 +118,11 @@ class HFAttributionContext:
             chunk_handles.append(layer.mlp.register_forward_hook(_out))
 
         try:
-            with adapter.autocast_context(self.dtype):
+            with adapter.autocast_context(self.dtype), frozen_graph_edges(
+                adapter.model,
+                freeze_attention=self.freeze_attention,
+                freeze_rms_norm=self.freeze_rms_norm,
+            ):
                 chunk_out = adapter.model(
                     input_ids=self.input_ids.expand(batch_len, -1),
                     attention_mask=torch.ones(

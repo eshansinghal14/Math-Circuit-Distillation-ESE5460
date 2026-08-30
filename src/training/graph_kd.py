@@ -72,6 +72,8 @@ class GraphKDConfig:
     student_prop_neurons_per_layer: float = 0.1
     nodes_per_label: int = 10
     graph_loss_type: str = "jsd"
+    freeze_attention: bool = False
+    freeze_rms_norm: bool = False
     top_k_logits: float = 0.95
     teacher_graph_batch_size: int = 512
     student_graph_batch_size: int = 1
@@ -155,6 +157,8 @@ class GraphKDTrainer:
             student_nodes_per_label=config.nodes_per_label,
             teacher_nodes_per_label=config.nodes_per_label,
             graph_loss_type=config.graph_loss_type,
+            freeze_attention=config.freeze_attention,
+            freeze_rms_norm=config.freeze_rms_norm,
             verbose=config.graph_verbose,
             mlp_input_cache=student_mlp_cache,
             teacher_mlp_input_cache=teacher_mlp_cache,
@@ -367,6 +371,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--graph-loss-type", type=str, default="jsd", dest="graph_loss_type",
         choices=["jsd", "kld", "mse", "mse-norm", "mse-scale"],
     )
+    group.add_argument(
+        "--freeze-attention", action="store_true", dest="freeze_attention",
+        help="Stop-gradient the attention pattern when computing attribution-graph edges, "
+             "so edges reflect only the direct residual-stream path. Forces an eager "
+             "attention kernel (slower and more memory than SDPA).",
+    )
+    group.add_argument(
+        "--freeze-rms-norm", action="store_true", dest="freeze_rms_norm",
+        help="Stop-gradient the RMSNorm reciprocal-norm scale when computing "
+             "attribution-graph edges. No speed penalty.",
+    )
     group.add_argument("--top-k-logits", "--top_k_logits", type=float, default=0.95,
                        dest="top_k_logits")
     group.add_argument("--teacher-prop-neurons", type=float, default=0.1,
@@ -431,6 +446,8 @@ def main() -> None:
             lambda_graph=args.lambda_graph,
             nodes_per_label=args.nodes_per_label,
             graph_loss_type=args.graph_loss_type,
+            freeze_attention=args.freeze_attention,
+            freeze_rms_norm=args.freeze_rms_norm,
             top_k_logits=args.top_k_logits,
             teacher_prop_neurons_per_layer=args.teacher_prop_neurons_per_layer,
             student_prop_neurons_per_layer=args.student_prop_neurons_per_layer,

@@ -97,6 +97,8 @@ def main():
         anova_range_radius=args.anova_range_radius,
         anova_neuron_chunk=args.anova_neuron_chunk,
         node_labels=args.graph_node_labels,
+        freeze_attention=args.freeze_attention,
+        freeze_rms_norm=args.freeze_rms_norm,
         logger=logger,
     )
 
