@@ -35,6 +35,28 @@ def main():
     )
     add_graph_build_args(parser)
     parser.add_argument(
+        "--freeze-attention",
+        dest="freeze_attention",
+        action="store_true",
+        help=(
+            "Stop-gradient the attention pattern during edge attribution, so edges "
+            "reflect only the direct residual-stream path rather than also including "
+            "paths where a source node shifts where the target attends. Matches the "
+            "published circuit-tracing linearisation. Forces an eager attention kernel, "
+            "which is slower and uses more memory than SDPA."
+        ),
+    )
+    parser.add_argument(
+        "--freeze-rms-norm",
+        dest="freeze_rms_norm",
+        action="store_true",
+        help=(
+            "Stop-gradient the RMSNorm reciprocal-norm scale during edge attribution, "
+            "dropping the rank-1 Jacobian term that otherwise subtracts the component "
+            "of each edge along the activation direction. No speed penalty."
+        ),
+    )
+    parser.add_argument(
         "--cache-batch-size",
         "--cache_batch_size",
         dest="cache_batch_size",
