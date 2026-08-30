@@ -56,11 +56,33 @@ def make_optimizer(model, lr: float):
     return AdamW(params=model.parameters(), lr=lr, foreach=False)
 
 
-def save_checkpoint(model, tokenizer, save_dir: str) -> None:
-    path = os.path.join(save_dir, "final_checkpoint")
+def save_checkpoint(model, tokenizer, save_dir: str, name: str = "final_checkpoint") -> None:
+    path = os.path.join(save_dir, name)
     os.makedirs(path, exist_ok=True)
     model.save_pretrained(path)
     tokenizer.save_pretrained(path)
+
+
+def maybe_save_periodic_checkpoint(
+    model,
+    tokenizer,
+    save_dir: str,
+    step: int,
+    every: int,
+    last_saved_step: int,
+    history: Dict[str, Any] | None = None,
+) -> int:
+    """Overwrite ``<save_dir>/checkpoint`` once ``every`` steps have passed since the last save.
+
+    Returns the step of the most recent save (unchanged if nothing was written).
+    """
+    if every <= 0 or step - last_saved_step < every:
+        return last_saved_step
+    save_checkpoint(model, tokenizer, save_dir, name="checkpoint")
+    if history is not None:
+        save_history(history, save_dir)
+    print(f"  Saved checkpoint at step {step} -> {os.path.join(save_dir, 'checkpoint')}")
+    return step
 
 
 def save_history(history: Dict[str, Any], save_dir: str) -> None:
@@ -138,6 +160,8 @@ def add_standard_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--lr", type=float, default=1e-6)
     group.add_argument("--save-dir", type=str, default="results/sft")
     group.add_argument("--eval-every-n-steps", type=int, default=1, dest="eval_every_n_steps")
+    group.add_argument("--save-every-n-steps", type=int, default=0, dest="save_every_n_steps",
+                    help="Overwrite <save-dir>/checkpoint every N train steps (0 = disable).")
     group.add_argument("--grad-accum-steps", type=int, default=1, dest="grad_accum_steps")
     group.add_argument("--max-eval-tokens", type=int, default=256, dest="max_eval_tokens")
     group.add_argument("--test-limit", type=int, default=None, dest="test_limit")

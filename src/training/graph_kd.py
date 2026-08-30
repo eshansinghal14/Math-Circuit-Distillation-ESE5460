@@ -29,7 +29,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
 from graph_loss.training import GraphAuxConfig, backward_batch_graph_loss
-from training.utils import add_kd_args, add_standard_args, kl_loss, make_optimizer, save_checkpoint, save_curves, save_history
+from training.utils import (
+    add_kd_args,
+    add_standard_args,
+    kl_loss,
+    make_optimizer,
+    maybe_save_periodic_checkpoint,
+    save_checkpoint,
+    save_curves,
+    save_history,
+)
 
 _DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 _GRAD_CLIP = 1.0
@@ -54,10 +63,11 @@ class GraphKDConfig:
     max_eval_tokens: int = 256
     save_dir: str = "results/graph_kd"
     eval_every_n_steps: int = 1
+    save_every_n_steps: int = 0
     grad_accum_steps: int = 1
     eval_datasets: List[str] = field(default_factory=list)
     # graph loss
-    lambda_graph: float = 0.1
+    lambda_graph: float = 1.0
     teacher_prop_neurons_per_layer: float = 0.1
     student_prop_neurons_per_layer: float = 0.1
     nodes_per_label: int = 10
@@ -156,6 +166,7 @@ class GraphKDTrainer:
 
         self.history: Dict[str, List] = defaultdict(list)
         self._train_step = 0
+        self._last_save_step = 0
 
     def _eval_on(self, model, dataset_name: str, test_dataset: PromptAnswerDataset) -> float:
         cfg = self.config
@@ -268,6 +279,11 @@ class GraphKDTrainer:
                 else:
                     gnorm_str = ""
                 print(f"  step {self._train_step} | KL={accum_kl:.4f} | Graph={accum_graph:.4f}{gnorm_str}")
+                self._last_save_step = maybe_save_periodic_checkpoint(
+                    self.model, self.tokenizer, self.config.save_dir,
+                    self._train_step, self.config.save_every_n_steps,
+                    self._last_save_step, self.history,
+                )
                 accum_kl = 0.0
                 accum_graph = 0.0
                 accum_kl_gnorm = 0.0
@@ -344,7 +360,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_standard_args(parser)
     add_kd_args(parser)
     group = parser.add_argument_group("kd_graph_args")
-    group.add_argument("--lambda-graph", type=float, default=0.1, dest="lambda_graph")
+    group.add_argument("--lambda-graph", type=float, default=1.0, dest="lambda_graph")
     group.add_argument("--nodes-per-label", type=int, default=10, dest="nodes_per_label",
                        help="Neurons per arg-token supernode and DLA supernode.")
     group.add_argument(
@@ -408,6 +424,7 @@ def main() -> None:
             kl_token_chunk_size=args.kl_token_chunk_size,
             save_dir=os.path.join(DIR_ROOT, args.save_dir),
             eval_every_n_steps=args.eval_every_n_steps,
+            save_every_n_steps=args.save_every_n_steps,
             grad_accum_steps=args.grad_accum_steps,
             max_eval_tokens=args.max_eval_tokens,
             eval_datasets=args.eval_datasets,
