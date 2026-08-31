@@ -197,6 +197,8 @@ class GraphKDTrainer:
         accum_graph = 0.0
         accum_kl_gnorm = 0.0
         accum_graph_gnorm = 0.0
+        accum_aligned = 0.0
+        accum_teacher_sn = 0.0
         micro_step = 0
 
         self.optimizer.zero_grad()
@@ -238,7 +240,7 @@ class GraphKDTrainer:
                     n: p.grad.detach().clone() if p.grad is not None else None
                     for n, p in self.model.named_parameters()
                 }
-            graph_loss_tensor, _ = backward_batch_graph_loss(
+            graph_loss_tensor, graph_metrics = backward_batch_graph_loss(
                 prompts=prompts,
                 answers=answers,
                 student_adapter=self.student_adapter,
@@ -248,6 +250,13 @@ class GraphKDTrainer:
                 loss_scale=cfg.lambda_graph / grad_accum,
             )
             graph_val = float(graph_loss_tensor.item())
+            # Supernode alignment counts are the cheapest early warning that the
+            # target has quietly degraded. arg:<token> labels collide whenever a
+            # prompt repeats a digit ("51+12=" has two '1's) and s_label_to_sid
+            # keeps only the last, and any teacher/student label mismatch shrinks
+            # the loss to the intersection -- both silently.
+            accum_aligned += float(graph_metrics.get("aligned_teacher_supernodes", 0.0))
+            accum_teacher_sn += float(graph_metrics.get("teacher_supernodes", 0.0))
             if cfg.track_grad_norms:
                 graph_gnorm_sq = 0.0
                 for n, p in self.model.named_parameters():
@@ -294,7 +303,17 @@ class GraphKDTrainer:
                     gnorm_str = f" | KL_gnorm={accum_kl_gnorm:.4f} | graph_gnorm={accum_graph_gnorm:.4f}"
                 else:
                     gnorm_str = ""
-                print(f"  step {self._train_step} | KL={accum_kl:.4f} | Graph={accum_graph:.4f}{gnorm_str}")
+                align_str = (
+                    f" | supernodes={accum_aligned / grad_accum:.1f}/{accum_teacher_sn / grad_accum:.1f}"
+                    if accum_teacher_sn
+                    else ""
+                )
+                self.history["step_aligned_supernodes"].append(accum_aligned / grad_accum)
+                self.history["step_teacher_supernodes"].append(accum_teacher_sn / grad_accum)
+                print(
+                    f"  step {self._train_step} | KL={accum_kl:.4f} | "
+                    f"Graph={accum_graph:.4f}{align_str}{gnorm_str}"
+                )
                 self._last_save_step = maybe_save_periodic_checkpoint(
                     self.model, self.tokenizer, self.config.save_dir,
                     self._train_step, self.config.save_every_n_steps,
@@ -304,6 +323,8 @@ class GraphKDTrainer:
                 accum_graph = 0.0
                 accum_kl_gnorm = 0.0
                 accum_graph_gnorm = 0.0
+                accum_aligned = 0.0
+                accum_teacher_sn = 0.0
                 n_steps += 1
 
         denom = max(n_steps, 1)
