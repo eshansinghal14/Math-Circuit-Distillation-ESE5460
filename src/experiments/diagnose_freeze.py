@@ -36,7 +36,7 @@ cross-mode JSD   How far apart the two targets are over their shared labels. Nea
                  measured is seed noise rather than mechanism.
 
 Usage:
-    python -m graph_loss.diagnose_freeze --model meta-llama/Meta-Llama-3-8B-Instruct \
+    python -m experiments.diagnose_freeze --model meta-llama/Meta-Llama-3-8B-Instruct \
         --dataset 22_add --n-prompts 8 --nodes-per-label 3
 """
 

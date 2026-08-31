@@ -38,7 +38,7 @@ student).  Reduce --n-prompts before reducing anything else; it does not change
 what is measured, only the batch the gradients are estimated from.
 
 Usage:
-    python -m graph_loss.diagnose_grad \
+    python -m experiments.diagnose_grad \
         --model meta-llama/Llama-3.2-1B-Instruct \
         --teacher meta-llama/Meta-Llama-3-8B-Instruct \
         --dataset 22_add --batch-size 32 --n-prompts 8 --nodes-per-label 3
