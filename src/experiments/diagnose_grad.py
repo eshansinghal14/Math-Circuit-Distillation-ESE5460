@@ -28,14 +28,23 @@ cos(graph, KL)
     contributing information KD does not have, rather than acting as a
     learning-rate multiplier on it.
 
+--modes attributes a direction change to one flag or the other. Every mode is
+measured against the same unfrozen reference, so a run with
+``--modes attn-only,rms-only,frozen`` says whether the attention freeze, the
+RMSNorm freeze, or both together account for the gap -- without a training run
+per hypothesis. If attn-only reproduces frozen's cosine while rms-only sits near
+1.0, the attention pattern is the whole story.
+
 Per-group rows matter because the freeze zeroes different paths in different
 places.  Since the scoping fix, q_proj/k_proj should receive graph gradient in
 *both* modes -- a q/k row that is zero under freeze but nonzero unfrozen means
 the freeze is still leaking into the parameter path somewhere.
 
 Memory: three CPU fp32 copies of the student's gradients (~15 GB for a 1B
-student).  Reduce --n-prompts before reducing anything else; it does not change
-what is measured, only the batch the gradients are estimated from.
+student), independent of how many --modes are requested -- only the unfrozen
+reference stays resident. Reduce --n-prompts before reducing anything else; it
+does not change what is measured, only the batch the gradients are estimated
+from.
 
 Usage:
     python -m experiments.diagnose_grad \
@@ -129,9 +138,29 @@ def main() -> None:
     ap.add_argument("--top-k-logits", type=float, default=0.95)
     ap.add_argument("--temperature", type=float, default=2.0)
     ap.add_argument("--graph-loss-type", default="jsd")
+    ap.add_argument(
+        "--modes",
+        default="frozen",
+        help=(
+            "Comma-separated freeze modes to compare against unfrozen: any of "
+            "attn-only, rms-only, frozen. Every mode is measured against the same "
+            "unfrozen reference, so 'attn-only,rms-only,frozen' attributes the "
+            "direction change to one flag or the other in a single run."
+        ),
+    )
     ap.add_argument("--kl-token-chunk-size", type=int, default=64)
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
+
+    freeze_flags = {
+        "attn-only": (True, False),
+        "rms-only": (False, True),
+        "frozen": (True, True),
+    }
+    modes = [m.strip() for m in args.modes.split(",") if m.strip()]
+    unknown = [m for m in modes if m not in freeze_flags]
+    if unknown:
+        ap.error(f"unknown mode(s) {unknown}; choose from {sorted(freeze_flags)}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     seed_all(args.seed)
@@ -160,7 +189,7 @@ def main() -> None:
     prompts = batch["prompts"][: args.n_prompts]
     answers = batch["answers"][: args.n_prompts]
 
-    def graph_config(freeze: bool) -> GraphAuxConfig:
+    def graph_config(freeze_attention: bool, freeze_rms_norm: bool) -> GraphAuxConfig:
         return GraphAuxConfig(
             lambda_graph=1.0,
             teacher_prop_neurons_per_layer=args.prop_neurons_per_layer,
@@ -170,12 +199,10 @@ def main() -> None:
             student_nodes_per_label=args.nodes_per_label,
             teacher_nodes_per_label=args.nodes_per_label,
             graph_loss_type=args.graph_loss_type,
-            freeze_attention=freeze,
-            freeze_rms_norm=freeze,
+            freeze_attention=freeze_attention,
+            freeze_rms_norm=freeze_rms_norm,
             dataset_name=args.dataset,
         )
-
-    grads: dict[str, dict[str, torch.Tensor]] = {}
 
     # ---- KL term alone -----------------------------------------------------
     student.zero_grad(set_to_none=True)
@@ -186,57 +213,85 @@ def main() -> None:
         t_logits = teacher(input_ids, attention_mask=attention_mask).logits
     kl = kl_loss(s_logits, t_logits, attention_mask, args.temperature, args.kl_token_chunk_size)
     kl.backward()
-    grads["KL"] = _snapshot(student)
+    klg = _snapshot(student)
     del s_logits, t_logits
     print(f"KL = {float(kl.item()):.4f}", flush=True)
 
-    # ---- graph term, each mode --------------------------------------------
-    for label, freeze in (("unfrozen", False), ("frozen", True)):
+    def graph_grad(freeze_attention: bool, freeze_rms_norm: bool, label: str):
         student.zero_grad(set_to_none=True)
+        cfg = graph_config(freeze_attention, freeze_rms_norm)
         loss, _ = backward_batch_graph_loss(
             prompts=prompts,
             answers=answers,
             student_adapter=student_adapter,
             teacher_adapter=teacher_adapter,
-            config=graph_config(freeze),
+            config=cfg,
             device=device,
             loss_scale=1.0,
         )
-        grads[label] = _snapshot(student)
-        print(f"graph {label:8} = {float(loss.item()):.4f}", flush=True)
+        print(f"graph {label:10} = {float(loss.item()):.4f}", flush=True)
+        return _snapshot(student), float(loss.item())
+
+    # Unfrozen is the reference every mode is compared against, so it alone stays
+    # resident; each other mode is compared and then dropped. Peak memory is three
+    # gradient copies regardless of how many modes are requested.
+    unf, unf_loss = graph_grad(False, False, "unfrozen")
+
+    names_by_group: dict[str, list[str]] = {}
+    for n in unf:
+        names_by_group.setdefault(_group_of(n), []).append(n)
+
+    rows = []
+    for mode in modes:
+        fa, fr = freeze_flags[mode]
+        g, loss_val = graph_grad(fa, fr, mode)
+        per_group = {}
+        for label, names in names_by_group.items():
+            per_group[label] = (_norm(g, names), _norm(unf, names), _cosine(g, unf, names))
+        rows.append({
+            "mode": mode,
+            "loss": loss_val,
+            "norm": _norm(g),
+            "cos_unf": _cosine(g, unf),
+            "cos_kl": _cosine(g, klg),
+            "groups": per_group,
+        })
+        del g
 
     student.zero_grad(set_to_none=True)
 
     # ---- report ------------------------------------------------------------
-    fro, unf, klg = grads["frozen"], grads["unfrozen"], grads["KL"]
+    unf_n = _norm(unf)
+    print()
+    print(f"{args.model}  vs  {args.teacher}  |  {args.dataset}"
+          f"  |  {len(prompts)} graph prompts, batch {args.batch_size}")
+    print()
 
-    print(f"\n{args.model}  vs  {args.teacher}  |  {args.dataset}"
-          f"  |  {len(prompts)} graph prompts, batch {args.batch_size}\n")
-    print(f"{'':16} {'||grad||':>12}")
-    for name in ("KL", "unfrozen", "frozen"):
-        print(f"{name:16} {_norm(grads[name]):12.6g}")
-
-    print(f"\ncos(frozen, unfrozen) = {_cosine(fro, unf):+.4f}")
-    print(f"cos(unfrozen, KL)    = {_cosine(unf, klg):+.4f}")
-    print(f"cos(frozen,   KL)    = {_cosine(fro, klg):+.4f}")
-    unf_n, fro_n = _norm(unf), _norm(fro)
-    if unf_n > 0:
-        print(f"||frozen|| / ||unfrozen|| = {fro_n / unf_n:.4f}")
-
-    names_by_group: dict[str, list[str]] = {}
-    for n in set(fro) | set(unf):
-        names_by_group.setdefault(_group_of(n), []).append(n)
-
-    hdr = f"\n{'group':12} {'||frozen||':>12} {'||unfrozen||':>13} {'cos':>8} {'ratio':>8}"
+    hdr = (f"{'':12} {'loss':>8} {'||grad||':>10} {'ratio':>8} "
+           f"{'cos(.,unfrozen)':>16} {'cos(.,KL)':>11}")
     print(hdr)
-    print("-" * (len(hdr) - 1))
-    for label, _ in _GROUPS + [("other", "")]:
-        names = names_by_group.get(label)
-        if not names:
-            continue
-        nf, nu = _norm(fro, names), _norm(unf, names)
-        ratio = nf / nu if nu > 0 else float("nan")
-        print(f"{label:12} {nf:12.5g} {nu:13.5g} {_cosine(fro, unf, names):+8.4f} {ratio:8.4f}")
+    print("-" * len(hdr))
+    print(f"{'KL':12} {float(kl.item()):8.4f} {_norm(klg):10.5g} {'':>8} {'':>16} {'':>11}")
+    print(f"{'unfrozen':12} {unf_loss:8.4f} {unf_n:10.5g} {1.0:8.4f} "
+          f"{1.0:+16.4f} {_cosine(unf, klg):+11.4f}")
+    for r in rows:
+        ratio = r["norm"] / unf_n if unf_n > 0 else float("nan")
+        print(f"{r['mode']:12} {r['loss']:8.4f} {r['norm']:10.5g} {ratio:8.4f} "
+              f"{r['cos_unf']:+16.4f} {r['cos_kl']:+11.4f}")
+
+    for r in rows:
+        print()
+        print(f"{r['mode']} vs unfrozen, per group")
+        ghdr = (f"{'group':12} {'||mode||':>12} {'||unfrozen||':>13} "
+                f"{'cos':>8} {'ratio':>8}")
+        print(ghdr)
+        print("-" * len(ghdr))
+        for label, _needle in _GROUPS + [("other", "")]:
+            if label not in r["groups"]:
+                continue
+            nf, nu, c = r["groups"][label]
+            ratio = nf / nu if nu > 0 else float("nan")
+            print(f"{label:12} {nf:12.5g} {nu:13.5g} {c:+8.4f} {ratio:8.4f}")
 
 
 if __name__ == "__main__":
