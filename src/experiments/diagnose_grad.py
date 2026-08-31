@@ -40,6 +40,11 @@ places.  Since the scoping fix, q_proj/k_proj should receive graph gradient in
 *both* modes -- a q/k row that is zero under freeze but nonzero unfrozen means
 the freeze is still leaking into the parameter path somewhere.
 
+--graph-node-labels selects which supernodes the loss is built from, and must
+match the run being diagnosed. Omitted (the default) means arg-token + DLA
+supernodes; supplying labels switches to ANOVA supernodes and builds an MLP-input
+cache for each model first.
+
 Memory: three CPU fp32 copies of the student's gradients (~15 GB for a 1B
 student), independent of how many --modes are requested -- only the unfrozen
 reference stays resident. Reduce --n-prompts before reducing anything else; it
@@ -134,6 +139,23 @@ def main() -> None:
     ap.add_argument("--n-prompts", type=int, default=8,
                     help="Prompts used for the graph term (training's --n-graph-prompts).")
     ap.add_argument("--nodes-per-label", type=int, default=3)
+    ap.add_argument(
+        "--graph-node-labels", "--graph_node_labels",
+        nargs="+", default=[], dest="graph_node_labels", metavar="LABEL",
+        help=(
+            "ANOVA supernode labels, e.g. 'sum units'. Pass 'all' for every category. "
+            "Omit to use the arg-token + DLA supernodes, which is what graph_kd does "
+            "when its own --graph-node-labels is empty. Must match the training run "
+            "being diagnosed, or the gradients describe a different objective."
+        ),
+    )
+    ap.add_argument("--anova-range-radius", "--anova_range_radius", type=int, default=0,
+                    dest="anova_range_radius")
+    ap.add_argument("--anova-neuron-chunk", "--anova_neuron_chunk", type=int, default=None,
+                    dest="anova_neuron_chunk")
+    ap.add_argument("--cache-batch-size", "--cache_batch_size", type=int, default=32,
+                    dest="cache_batch_size",
+                    help="Prompt batch size when building the MLP input cache.")
     ap.add_argument("--prop-neurons-per-layer", type=float, default=0.1)
     ap.add_argument("--top-k-logits", type=float, default=0.95)
     ap.add_argument("--temperature", type=float, default=2.0)
@@ -189,6 +211,23 @@ def main() -> None:
     prompts = batch["prompts"][: args.n_prompts]
     answers = batch["answers"][: args.n_prompts]
 
+    # ANOVA labelling needs an MLP-input cache per model. Built from the *train*
+    # split via load_data, matching GraphKDTrainer rather than create_graph's own
+    # load_split(dataset, "all") convention -- the point of this script is to
+    # reproduce the training gradient, so it has to mirror the trainer.
+    student_mlp_cache = teacher_mlp_cache = None
+    if args.graph_node_labels:
+        from graph_loss.precompute_mlp_inputs import build_mlp_input_cache
+
+        student_mlp_cache = build_mlp_input_cache(
+            student_adapter, args.dataset, args.model,
+            data_dict=train_data, batch_size=args.cache_batch_size,
+        )
+        teacher_mlp_cache = build_mlp_input_cache(
+            teacher_adapter, args.dataset, args.teacher,
+            data_dict=train_data, batch_size=args.cache_batch_size,
+        )
+
     def graph_config(freeze_attention: bool, freeze_rms_norm: bool) -> GraphAuxConfig:
         return GraphAuxConfig(
             lambda_graph=1.0,
@@ -201,6 +240,11 @@ def main() -> None:
             graph_loss_type=args.graph_loss_type,
             freeze_attention=freeze_attention,
             freeze_rms_norm=freeze_rms_norm,
+            graph_node_labels=args.graph_node_labels or None,
+            student_anova_range_radius=args.anova_range_radius,
+            anova_neuron_chunk=args.anova_neuron_chunk,
+            mlp_input_cache=student_mlp_cache,
+            teacher_mlp_input_cache=teacher_mlp_cache,
             dataset_name=args.dataset,
         )
 

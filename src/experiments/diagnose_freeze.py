@@ -35,6 +35,9 @@ cross-mode JSD   How far apart the two targets are over their shared labels. Nea
                  zero would mean the freeze barely matters here, and the gap you
                  measured is seed noise rather than mechanism.
 
+--graph-node-labels must match the run being characterised: omitted means
+arg-token + DLA supernodes, supplying labels switches to ANOVA supernodes.
+
 Usage:
     python -m experiments.diagnose_freeze --model meta-llama/Meta-Llama-3-8B-Instruct \
         --dataset 22_add --n-prompts 8 --nodes-per-label 3
@@ -142,6 +145,21 @@ def main() -> None:
     ap.add_argument("--nodes-per-label", type=int, default=3,
                     help="Must match the training run's --nodes-per-label.")
     ap.add_argument("--prop-neurons-per-layer", type=float, default=0.1)
+    ap.add_argument(
+        "--graph-node-labels", "--graph_node_labels",
+        nargs="+", default=[], dest="graph_node_labels", metavar="LABEL",
+        help=(
+            "ANOVA supernode labels; pass 'all' for every category. Omit to use the "
+            "arg-token + DLA supernodes. Must match the run being characterised."
+        ),
+    )
+    ap.add_argument("--anova-range-radius", "--anova_range_radius", type=int, default=0,
+                    dest="anova_range_radius")
+    ap.add_argument("--anova-neuron-chunk", "--anova_neuron_chunk", type=int, default=None,
+                    dest="anova_neuron_chunk")
+    ap.add_argument("--cache-batch-size", "--cache_batch_size", type=int, default=32,
+                    dest="cache_batch_size",
+                    help="Prompt batch size when building the MLP input cache.")
     ap.add_argument("--attribution-batch-size", type=int, default=512)
     ap.add_argument("--top-k-logits", type=float, default=0.95)
     ap.add_argument("--temperature", type=float, default=2.0)
@@ -175,6 +193,14 @@ def main() -> None:
                     temperature=args.temperature,
                     batch_size=args.attribution_batch_size,
                     nodes_per_label=args.nodes_per_label,
+                    # With labels set, create_graph builds (and disk-caches) the
+                    # MLP-input cache itself from load_split(dataset, "all").
+                    node_labels=args.graph_node_labels or None,
+                    dataset=args.dataset if args.graph_node_labels else None,
+                    model_name=args.model if args.graph_node_labels else None,
+                    anova_range_radius=args.anova_range_radius,
+                    anova_neuron_chunk=args.anova_neuron_chunk,
+                    cache_batch_size=args.cache_batch_size,
                     no_grad_supergraph=True,
                     build_create_graph=False,
                     detach_result=True,
