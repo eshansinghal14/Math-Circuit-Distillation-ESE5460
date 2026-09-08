@@ -26,6 +26,7 @@
 \newcommand{\todosec}[1]{{\color{Gray}\emph{[#1]}}}
 
 \DeclareMathOperator{\KL}{KL}
+\DeclareMathOperator{\JSD}{JSD}
 \DeclareMathOperator{\softmax}{softmax}
 \DeclareMathOperator{\fracext}{frac\_external}
 \DeclareMathOperator{\snadj}{supernode\_adjacency}
@@ -77,8 +78,9 @@ attribution graphs); prior attempts at mechanism-level transfer.}
 \label{sec:overview}
 
 Standard knowledge distillation constrains only the \emph{output} of the student and says nothing
-about how that output was produced \citep{hinton2015distilling}. We add a second constraint on the
-\emph{internal computation}: for a given arithmetic prompt we build an attribution graph over MLP
+about how that output was produced \citep{hinton2015distilling}. We add a second, orthogonal
+constraint on the \emph{internal computation} (Appendix~\ref{app:orthogonality} discusses in what
+sense it is orthogonal to the output-level loss): for a given arithmetic prompt we build an attribution graph over MLP
 neurons in each model, coarsen it into a small set of functionally-labelled \emph{supernodes} that
 exist in both models, and require the teacher and the student to route causal influence between
 those supernodes in the same proportions.
@@ -96,16 +98,19 @@ Dividing a row by its $\ell_1$ norm turns it into a distribution over sources --
 \emph{routing profile}, the fraction of its incoming causal influence contributed by each other
 supernode. Writing $P_t$ and $Q_t$ for the teacher's and the student's routing profile for
 supernode $t$, and $\mathcal{A}$ for the supernodes present in both models, the graph loss is the
-mean divergence between matched profiles,
+mean Jensen--Shannon divergence between matched profiles,
 \begin{equation}
   \mathcal{L}_{\mathrm{graph}}(\theta_\Stud)
   \;=\;
-  \frac{1}{|\mathcal{A}|}\sum_{t \in \mathcal{A}} \KL\bigl(P_t \,\big\|\, Q_t\bigr),
+  \frac{1}{|\mathcal{A}|}\sum_{t \in \mathcal{A}} \JSD\bigl(P_t \,\big\|\, Q_t\bigr),
+  \qquad
+  \JSD(P \,\|\, Q) = \tfrac12 \KL\bigl(P \,\big\|\, M\bigr) + \tfrac12 \KL\bigl(Q \,\big\|\, M\bigr),
   \label{eq:graphloss}
 \end{equation}
-with $P_t$ detached, since the teacher is fixed. The direction matters: forward KL penalises the
-student for failing to reproduce an edge the teacher uses, but is silent wherever the teacher puts
-no mass, so it asks the student to cover the teacher's routing rather than to match it exactly.
+with $M = \tfrac12(P + Q)$ and $P_t$ detached, since the teacher is fixed. Unlike a one-sided KL,
+the JSD is symmetric --- the student is penalised both for missing an edge the teacher uses and for
+inventing one the teacher does not --- and bounded, so a single edge on which the two models place
+disjoint mass cannot dominate the loss.
 
 The full objective adds \eqref{eq:graphloss} to the ordinary temperature-scaled KD term,
 \begin{equation}
@@ -149,23 +154,15 @@ ten. Since $n_{\mathrm{pos}} \times d_{\mathrm{mlp}}$ candidate neurons per laye
 we keep the top $10\%$ per layer by write-vector norm; activations at the BOS position are zeroed so
 the attention sink is never selected.
 
-\emph{Why raw neurons are enough.} The published pipeline does not attribute to neurons: it first
-replaces every MLP with a cross-layer transcoder, so that nodes are sparse, more nearly
-monosemantic features \citep{dunefsky2024transcoders}. We attribute directly to raw MLP neurons, and
-we think this is sound for three reasons. First, the construction in \eqref{eq:edge} requires only
-that a node's contribution to the residual stream be linear in its activation. MLP neurons satisfy
-this exactly, $v^{\mathrm{out}}_i = a_i W_{\mathrm{down}}[:,n_i]$, so the linearisation is no less
-valid over neurons than over transcoder features. Second, the transcoder is introduced for
-interpretability, not for the validity of the attribution, and it is not free: because it only
-approximately reconstructs the MLP output, the replacement model must carry \emph{error nodes} for
-the reconstruction residual, which absorb attribution and admit no interpretation of their own.
-Attributing to raw neurons leaves no such residual --- the graph is over the computation the model
-actually performs. Third, the real cost is polysemanticity: a single neuron rarely corresponds to
-one human-legible concept. But this is exactly what the supernode step repairs, and it is worth
-noting that the individual feature is not the interpretable object in the published work either ---
-features there are grouped by hand into supernodes before any circuit is read off. We automate that
-grouping (Section~\ref{sec:supernodes}), so in both cases the interpretable unit is the group, and
-in ours the loss \eqref{eq:graphloss} is defined over groups and never over individual nodes.
+\emph{Why raw neurons are enough.} The published pipeline attributes to cross-layer transcoder
+features rather than to neurons \citep{dunefsky2024transcoders}. We attribute directly to raw MLP
+neurons: the construction \eqref{eq:edge} only requires a node's residual-stream contribution to be
+linear in its activation, which neurons satisfy exactly, and it avoids the transcoder's
+approximation error, which must otherwise be carried as uninterpretable \emph{error nodes}. The
+remaining cost is polysemanticity, and that is precisely what the supernode step repairs --- in the
+published work, too, the interpretable unit is a hand-built group of features rather than the
+individual feature. We automate that grouping (Section~\ref{sec:supernodes}), and the loss
+\eqref{eq:graphloss} is defined over groups, never over individual nodes.
 
 \subsection{Grouping neurons into supernodes}
 \label{sec:supernodes}
@@ -173,7 +170,12 @@ in ours the loss \eqref{eq:graphloss} is defined over groups and never over indi
 Raw neuron graphs are far too large and too model-specific to compare across a 1B and an 8B model.
 Where supernodes in the published work are drawn by hand from feature visualisations, we replace the
 manual step with an automatic, purely functional criterion, which is what makes the grouping
-reproducible across two different models.
+reproducible across two different models. We first describe the criterion concretely on our task
+(Section~\ref{sec:supernodes-casestudy}), then the task-agnostic construction it instantiates
+(Section~\ref{sec:supernodes-general}).
+
+\subsubsection{Case study: ANOVA supernodes for two-digit addition}
+\label{sec:supernodes-casestudy}
 
 Every neuron is evaluated on a fixed probe set: all two-digit addition prompts
 ``\texttt{$a$+$b$=}'' for $a, b \in \{0, \dots, 99\}$, i.e.\ all $10^4$ points of the
@@ -192,10 +194,10 @@ operands $(a^{*}, b^{*})$ and sum $s^{*} = a^{*} + b^{*}$, the categories are
 \toprule
 category & mask $M[a,b] = 1$ iff & category & mask $M[a,b] = 1$ iff \\
 \midrule
-\texttt{arg1 range} & $a = a^{*}$                    & \texttt{carry}     & $(a \bmod 10) + (b \bmod 10) \ge 10$ \\
-\texttt{arg1 units} & $a \equiv a^{*} \!\!\pmod{10}$ & \texttt{sum range} & $a + b = s^{*}$ \\
-\texttt{arg2 range} & $b = b^{*}$                    & \texttt{sum units} & $a + b \equiv s^{*} \!\!\pmod{10}$ \\
-\texttt{arg2 units} & $b \equiv b^{*} \!\!\pmod{10}$ & \texttt{arg1 units and arg2 units} & composite (see below) \\
+\texttt{arg1 range} & $a = a^{*}$                    & \texttt{sum range} & $a + b = s^{*}$ \\
+\texttt{arg1 units} & $a \equiv a^{*} \!\!\pmod{10}$ & \texttt{sum units} & $a + b \equiv s^{*} \!\!\pmod{10}$ \\
+\texttt{arg2 range} & $b = b^{*}$                    & \texttt{arg1 units and arg2 units} & composite (see below) \\
+\texttt{arg2 units} & $b \equiv b^{*} \!\!\pmod{10}$ & & \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -235,6 +237,40 @@ Because the same category list produces the same supernode labels in both models
 student supergraphs are aligned automatically; training requires the two label sets to match exactly
 and falls back to their intersection with a warning if they do not.
 
+\subsubsection{The general recipe: supernodes from logit and argument attribution}
+\label{sec:supernodes-general}
+
+The ANOVA categories above are hand-written for two-digit addition, but nothing downstream of the
+grouping depends on where the labels come from: the loss \eqref{eq:graphloss} only needs supernode
+labels that are computable in both models and identical across them. Our general construction
+derives the labels from the prompt itself --- one supernode per input token, plus one for the
+output distribution --- so it transfers to a new task with no masks or probe grids to design.
+
+\emph{Argument supernodes.} For every token position $q$ (BOS excluded) with embedding $E_q$,
+neuron $i$ is scored by $\bigl|\langle v^{\mathrm{in}}_i, E_q\rangle\bigr|$ --- an inner-product
+proxy for the direct attribution edge \eqref{eq:edge} from the token-embedding node at $q$ into the
+neuron's linearised pre-activation, costing no extra backward pass. Each neuron's scores are then
+normalised across positions into a distribution, so a neuron counts toward a position only through
+the \emph{share} of its total embedding alignment concentrated there; this favours neurons
+selectively tied to one token over neurons whose read direction is simply large. The supernode for
+position $q$ is the top $n_{\mathrm{per}}$ neurons by that share, and its label is the token string
+itself (\texttt{arg:36}, \texttt{arg:+}, \texttt{arg:59}, \texttt{arg:=}).
+
+\emph{The output supernode.} At the answer position, each neuron's direct logit attribution
+$\softmax\bigl(v^{\mathrm{out}\top}_i W_U\bigr)$ is scored by its KL divergence from the reference
+output distribution $\softmax(z/\tau)$, restricted to the reference's top $100$ tokens and
+renormalised. The $n_{\mathrm{per}}$ closest neurons form a single \texttt{dla} supernode --- the
+neurons that most directly write the answer distribution --- generalising the DLA ranking used for
+the sum categories above from a hand-specified target to the model's actual output. During
+training the reference logits $z$ are the teacher's for both models (Appendix~\ref{app:llama}),
+which anchors the student's \texttt{dla} supernode to a stationary target.
+
+Every label is derived from the prompt tokens and reference logits the two models share, so the
+teacher and student supergraphs align automatically on any prompt. This construction is the default
+in our training runs; the ANOVA categories of Section~\ref{sec:supernodes-casestudy} remain
+available as an opt-in whitelist, and produce the task-level supergraphs of
+Figure~\ref{fig:supergraph}.
+
 \begin{figure}[t]
   \centering
   \includegraphics[width=0.84\linewidth]{figures/graph_dist_heatmaps.png}
@@ -257,8 +293,7 @@ and falls back to their intersection with a warning if they do not.
 \subsection{Supernode edge weights}
 \label{sec:superedges}
 
-Grouping the neurons produces a simplified supergraph, whose edges we compute with the supernode
-adjacency of \citet{ameisen2025circuit},
+The supergraph's edges are the supernode adjacency of \citet{ameisen2025circuit},
 \begin{equation}
   \snadj(t,s)
   \;=\;
@@ -266,31 +301,90 @@ adjacency of \citet{ameisen2025circuit},
        {\displaystyle\sum_{n_t \in N_t} \fracext(n_t)},
   \label{eq:superedge}
 \end{equation}
-where $N_t$ and $N_s$ are the sets of nodes in supernodes $t$ and $s$, and $n_t$, $n_s$ refer to a
-node in the corresponding supernode. $A'$ is an input-normalised graph adjacency matrix, in which
-the weights of the edges targeting each node are divided by a constant so as to sum to $1$;
-$A'_{n_t, n_s}$ is the normalised weight of the edge into $n_t$ from $n_s$. That normalisation runs
-over \emph{all} nodes --- neurons, token embeddings and logits alike, which are kept in the graph
-precisely so the denominator reflects every path by which a neuron can be influenced, even though
-they are dropped from the supergraph. Finally, $\fracext(n_t)$ is the fraction of the
-absolute-valued input weights to $n_t$ that originate from nodes outside the supernode,
-\begin{equation}
-  \fracext(n_t)
-  \;=\;
-  \frac{\sum_{j \notin N_t} \bigl|A_{n_t, j}\bigr|}{\sum_{j} \bigl|A_{n_t, j}\bigr|}
-  \;=\;
-  1 \;-\; \sum_{n' \in N_t} \bigl|A'_{n_t, n'}\bigr| .
-  \label{eq:fracext}
-\end{equation}
-Weighting by $\fracext$ is what turns \eqref{eq:superedge} into an average rather than a sum: a
-member drawing most of its input from inside its own supernode counts for little, so a supernode
-whose members mainly feed one another cannot dominate its own inbound profile. Because $A'$
-normalises over all nodes while the supergraph spans only supernode columns, the rows of $\snadj$
-do not sum to one --- which is why the routing profiles of Section~\ref{sec:overview} renormalise
-them.
+where $N_t$ and $N_s$ are the member nodes of supernodes $t$ and $s$, and $A'$ is the graph
+adjacency with each node's incoming weights normalised to sum to one over \emph{all} sources ---
+neurons, token embeddings and logits alike. The weight $\fracext(n_t)$ is the fraction of a
+member's absolute inbound weight that comes from outside its own supernode, so members that mainly
+feed one another count for little and a supernode cannot dominate its own inbound profile. Because
+$A'$ normalises over all nodes while the supergraph spans only supernode columns, the rows of
+$\snadj$ do not sum to one, which is why the routing profiles of Section~\ref{sec:overview}
+renormalise them.
 
-\subsection{Adapting the pipeline to Llama}
-\label{sec:llama}
+Implementation details --- adapting the attribution pipeline to Llama's gated MLPs and Hugging Face
+autograd, and the optimisations that make it fast enough for a training loop --- are given in
+Appendices~\ref{app:llama} and~\ref{app:perf}.
+
+\section{Experimental Setup}
+\label{sec:setup}
+
+\todosec{Experimental setup. Teacher/student pair and checkpoints; training data and splits;
+optimiser, schedule, batch size, $n_{\mathrm{graph}}$; which supernode categories are enabled;
+baselines (SFT, standard KD, KD + graph loss); evaluation metric and prompt format; hardware
+and wall-clock cost per step.}
+
+\section{Results}
+\label{sec:results}
+
+\todosec{Results. Accuracy against the baselines; graph loss and KD loss curves; whether
+supernode routing actually converges toward the teacher's; per-category breakdown of which
+supernodes align and which do not.}
+
+\section{Analysis}
+\label{sec:analysis}
+
+\todosec{Analysis. Qualitative before/after supergraphs for the student; do the student's
+activation grids sharpen over training? Ablations: $\lambda$, JSD vs.\ other divergences,
+number of supernodes, $n_{\mathrm{per}}$, and the linearisation ablation of
+Appendix~\ref{app:freeze}.}
+
+\section{Limitations}
+\label{sec:limitations}
+
+\todosec{Limitations. Single task family (two-digit addition) and a single teacher/student pair;
+attribution graphs are built per prompt and only at sampled positions; edge sign is discarded by
+the input normalisation; supernode membership is recomputed but not itself differentiable.}
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+\todosec{Conclusion.}
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\appendix
+
+\section{Orthogonality of the Graph and KD Losses}
+\label{app:orthogonality}
+
+The KD loss constrains only the output distribution and is invariant to which internal circuit
+produces it; the graph loss constrains routing between supernodes and is close to invariant to the
+output. If that separation is real, the two gradients should be close to orthogonal in parameter
+space rather than one being a reparameterisation of the other.
+
+We measure this directly. At the student's initial checkpoint we compute
+$\nabla_{\theta_\Stud}\mathcal{L}_{\mathrm{KD}}$ over one batch of 32 prompts and
+$\nabla_{\theta_\Stud}\mathcal{L}_{\mathrm{graph}}$ over 8 prompts, and take the cosine between
+them. Across all four linearisation variants of Appendix~\ref{app:freeze} the cosine lies in
+$[-0.024, -0.008]$: the two terms are orthogonal to within a fraction of a degree of $90^\circ$,
+and the near-orthogonality is a property of the objective rather than of one particular
+linearisation.
+
+This also resolves an apparent puzzle about magnitudes. At $\lambda_{\mathrm{graph}}=1$ the graph
+gradient has norm $3.65$ against the KD gradient's $50.41$, so at the $\lambda_{\mathrm{graph}}$
+actually used in training the graph term is smaller by more than two orders of magnitude, yet it
+changes downstream accuracy substantially (Appendix~\ref{app:freeze}). Orthogonality explains why:
+AdamW normalises per parameter, so in the large subspace where the KD gradient is near zero the
+graph term is the only signal present and receives a full-size step regardless of its global norm.
+The graph loss does not accelerate KD along KD's own direction --- there is no such component to
+accelerate --- it moves the student in directions output-level distillation never explores.
+
+\es{Measured at initialisation only. Tracking the cosine over training, and on a second
+teacher/student pair, is still to do.}
+
+
+\section{Adapting the Pipeline to Llama}
+\label{app:llama}
 
 The published methodology assumes a transcoder replacement model and a TransformerLens-style hook
 API \citep{ameisen2025circuit}. Running it inside a Hugging Face training loop on Llama required
@@ -321,13 +415,156 @@ the teacher's --- and the student's \texttt{dla} supernodes are selected against
 logits. Otherwise the two graphs would be built over different output nodes, and would be
 non-stationary early in training when the student's own output distribution is still wrong.
 
-\emph{Known deviation.} The published method freezes attention patterns and normalisation
-denominators when linearising, so edges reflect only the direct path. Our gradients pass through the
-full Hugging Face graph, so attention-softmax and RMSNorm Jacobians are included in
-\eqref{eq:edge}, making our edges slightly less ``direct-effect'' than theirs. We have not measured
-the size of the difference. \es{Honest caveat --- worth an ablation if we have time.}
+\emph{Linearisation.} The published method freezes attention patterns and normalisation
+denominators when linearising, so that edges reflect only the direct residual-stream path. We
+implement both freezes as backward-only stop-gradients and make each independently selectable, so
+\eqref{eq:edge} can be evaluated either with the direct-path linearisation or through the full
+Hugging Face Jacobian. Appendix~\ref{app:freeze} measures what the choice costs: it changes the
+gradient's direction rather than its magnitude, and the direct-path linearisation is the better
+training signal on every metric we tracked.
 
-\subsection{Performance optimisations}
+\section{The Direct-Path Linearisation as a Training Signal}
+\label{app:freeze}
+
+Circuit tracing freezes attention patterns and RMSNorm denominators so that an edge is the
+contribution of the direct path alone \citep{ameisen2025circuit}. That choice is made for
+interpretability: it renders the graph locally linear in the node activations and therefore
+readable. It is not obvious that it is also the right choice when the graph is a regression target
+rather than a figure, since the frozen edge omits real causal influence --- paths on which a source
+node shifts \emph{where} a target attends, and the rank-one RMSNorm term that projects out the
+component of each edge along the activation direction. This appendix measures the difference.
+
+\subsection{Implementation}
+
+Both freezes are backward-only. Detaching a multiplicative factor leaves every forward value
+bit-identical, so activations, read and write vectors, neuron pre-selection and supernode membership
+are unchanged; only the gradients that become edge weights differ. Freezing attention additionally
+requires a kernel that materialises the pattern, since the default fused kernel never forms it.
+
+One implementation detail is load-bearing. Attribution involves two forward passes: one whose
+captured MLP inputs carry gradient back to $\theta_\Stud$, and one whose \emph{backward} produces
+the edge values of \eqref{eq:edge}. The freeze belongs only on the second. Applied to the first it
+cannot change any edge --- being backward-only, it changes no forward value --- but it silently
+biases training, zeroing the gradient to $W_Q$ and $W_K$ outright and stripping the rank-one
+correction from every RMSNorm on the path back to the weights. We hit this: with the freeze on both
+passes, in-distribution accuracy collapsed from $0.634$ to $0.090$ within twenty steps while the KD
+loss continued to fall.
+
+\subsection{Gradient geometry}
+
+Table~\ref{tab:freeze-grad} reports the graph gradient under each variant at the student's initial
+checkpoint, against the unfrozen gradient and against the KD gradient.
+
+\begin{table}[h]
+  \centering
+  \caption{Graph-loss gradient under each linearisation, at the student's initial checkpoint;
+  22\_add, 8 graph prompts, $\lambda_{\mathrm{graph}}=1$. Cosines are against the unfrozen graph
+  gradient and against the KD gradient.}
+  \label{tab:freeze-grad}
+  \begin{tabular}{lccccc}
+    \toprule
+    & $\mathcal{L}$ & $\|g\|$ & $\|g\|/\|g_{\mathrm{unfr}}\|$ & $\cos(g, g_{\mathrm{unfr}})$ & $\cos(g, g_{\mathrm{KD}})$ \\
+    \midrule
+    $\mathcal{L}_{\mathrm{KD}}$ & 2.0254 & 50.41 & --- & --- & --- \\
+    \midrule
+    unfrozen                    & 0.3405 & 3.647 & 1.000 & $+1.0000$ & $-0.0236$ \\
+    attention frozen            & 0.3501 & 4.059 & 1.113 & $+0.6276$ & $-0.0103$ \\
+    RMSNorm frozen              & 0.3722 & 3.991 & 1.094 & $+0.7652$ & $-0.0153$ \\
+    both frozen                 & 0.3745 & 3.856 & 1.057 & $+0.6984$ & $-0.0082$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Two things stand out. First, the freeze changes direction, not strength: every frozen variant is
+$40^\circ$ to $51^\circ$ away from the unfrozen gradient while being \emph{larger} in norm. The
+unfrozen total-effect gradient is the smallest of the four, which is what destructive interference
+between paths produces --- freezing removes the cancellation rather than removing signal. Second,
+the two freezes partially cancel each other: freezing both gives a smaller gradient than either
+alone and an angle between the two, so their deviations from the unfrozen gradient are
+anti-correlated. A plausible mechanism is that the RMSNorm freeze injects radial (pure-scale)
+sensitivity that the true Jacobian projects out, while the attention freeze deletes the QK path,
+which is the channel most responsive to scale because a radial perturbation rescales the query and
+so sharpens or flattens the softmax.
+
+\subsection{Training ablation}
+
+Table~\ref{tab:freeze-train} trains all four variants for 15 steps under otherwise identical
+settings, evaluating in-distribution on two-digit addition and out-of-distribution on four
+arithmetic families never seen in training.
+
+\begin{table}[h]
+  \centering
+  \caption{Distillation accuracy under each linearisation. Peak column is the maximum
+  in-distribution accuracy over the run; remaining columns are at step 15. OOD is the mean of the
+  four right-hand columns. Single seed.}
+  \label{tab:freeze-train}
+  \begin{tabular}{lcccccc}
+    \toprule
+    & 22\_add (peak) & OOD & 222\_add & 2222\_add & 33\_add & 21\_mult \\
+    \midrule
+    student, untrained & 0.6340 & 0.1395 & 0.1034 & 0.0236 & 0.3189 & 0.1120 \\
+    teacher            & 0.9562 & ---    & ---    & ---    & ---    & ---    \\
+    \midrule
+    unfrozen           & 0.9588 & 0.2560 & 0.1698 & 0.0206 & 0.2686 & 0.5650 \\
+    attention frozen   & 0.9678 & 0.2582 & 0.1748 & 0.0210 & 0.2621 & 0.5750 \\
+    RMSNorm frozen     & 0.9792 & 0.3474 & 0.2681 & 0.0298 & 0.3598 & 0.7320 \\
+    both frozen        & \textbf{0.9824} & \textbf{0.3582} & \textbf{0.2840} & \textbf{0.0352} & \textbf{0.3714} & \textbf{0.7420} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{figures/freeze_ablation.pdf}
+  \caption{Accuracy against training step for the four linearisations. Hue carries the RMSNorm
+  freeze and line style the attention freeze, so the 2$\times$2 design is visible as two pairs: the
+  RMSNorm-frozen runs separate from the other two within a few steps and stay separated. The dashed
+  rule marks the untrained student on every panel and the dotted rule in the left panel marks the
+  teacher. In-distribution accuracy peaks around step 6--7 and then declines in all four runs, while
+  out-of-distribution accuracy is still climbing at step 15 for the two runs without the RMSNorm
+  freeze; the right panel shows those same two runs ending \emph{below} the untrained student on
+  three-digit addition, which the two RMSNorm-frozen runs do not.}
+  \label{fig:freeze-ablation}
+\end{figure}
+
+
+Figure~\ref{fig:freeze-ablation} plots the trajectories. Both metrics rank the four variants identically and monotonically: freezing more is better, and the
+direct-path linearisation is best. The RMSNorm freeze is the large effect ($+0.091$ OOD on its own,
+$+0.100$ on top of the attention freeze) and the attention freeze a small consistent bonus
+($+0.002$ alone, $+0.011$ on top of RMSNorm); the two are mildly super-additive on OOD, since
+additivity would predict $0.3496$ against the $0.3582$ observed.
+
+The sharpest evidence is a sign change rather than a difference of means. On 33\_add and 2222\_add,
+the two variants without the RMSNorm freeze end \emph{below} the untrained student ($0.2686$ and
+$0.2621$ against a $0.3189$ baseline; $0.0206$ and $0.0210$ against $0.0236$), while both variants
+with it end above. Without the RMSNorm freeze, graph distillation degrades those two families;
+with it, they improve.
+
+\subsection{What predicts quality, and what does not}
+
+Cosine to the unfrozen gradient does \emph{not} predict downstream quality, and is close to
+anti-predictive: it ranks the unfrozen gradient highest by construction, and the unfrozen variant is
+the worst of the four. Proximity to the total-effect gradient is not the property that matters.
+
+The initial value of $\mathcal{L}_{\mathrm{graph}}$ does order all four variants correctly on both
+metrics --- the harder the teacher's supergraph is to match at initialisation, the better the
+student ends up --- which is consistent with the interference account above, since the freezes
+expose structure that path cancellation averages away in the total effect. With four points this is
+an observation rather than a result, but it is free: the quantity is already in the training log at
+step one.
+
+\subsection{Caveats}
+
+Single seed, and 15 steps. In-distribution accuracy peaks at step 6--7 in all four runs and declines
+afterwards, while OOD accuracy is still rising at step 15 for the two variants without the RMSNorm
+freeze, so their OOD numbers are lower bounds. The gap between the two best variants ($0.011$ OOD)
+is within what a single seed can plausibly produce; the gap between the RMSNorm-frozen and
+unfrozen variants ($0.091$ OOD, plus the two sign changes) is not. 2222\_add is close to unlearned
+in every configuration. \es{Seeds and longer runs before this table goes in the camera-ready.}
+
+
+\section{Performance Optimisations}
+\label{app:perf}
 
 An attribution graph costs one batch-expanded forward pass plus a vector--Jacobian product per node,
 which makes $\mathcal{L}_{\mathrm{graph}}$ far more expensive per prompt than $\mathcal{L}_{\mathrm{KD}}$.
@@ -343,46 +580,6 @@ are scored against each other in a single matmul for \eqref{eq:anova}. \emph{Bou
 $n_{\mathrm{graph}}$ prompts per batch get a graph, and each prompt's graph loss is backpropagated
 and freed before the next graph is built, so peak memory is set by one prompt's attribution graph
 rather than the batch's.
-
-\section{Experimental Setup}
-\label{sec:setup}
-
-\todosec{Experimental setup. Teacher/student pair and checkpoints; training data and splits;
-optimiser, schedule, batch size, $n_{\mathrm{graph}}$; which supernode categories are enabled;
-baselines (SFT, standard KD, KD + graph loss); evaluation metric and prompt format; hardware
-and wall-clock cost per step.}
-
-\section{Results}
-\label{sec:results}
-
-\todosec{Results. Accuracy against the baselines; graph loss and KD loss curves; whether
-supernode routing actually converges toward the teacher's; per-category breakdown of which
-supernodes align and which do not.}
-
-\section{Analysis}
-\label{sec:analysis}
-
-\todosec{Analysis. Qualitative before/after supergraphs for the student; do the student's
-activation grids sharpen over training? Ablations: $\lambda$, KL vs.\ other divergences,
-number of supernodes, $n_{\mathrm{per}}$, and the frozen-attention deviation of
-Section~\ref{sec:llama}.}
-
-\section{Limitations}
-\label{sec:limitations}
-
-\todosec{Limitations. Single task family (two-digit addition) and a single teacher/student pair;
-attribution graphs are built per prompt and only at sampled positions; edge sign is discarded by
-the input normalisation; supernode membership is recomputed but not itself differentiable.}
-
-\section{Conclusion}
-\label{sec:conclusion}
-
-\todosec{Conclusion.}
-
-\bibliographystyle{plainnat}
-\bibliography{references}
-
-\appendix
 
 \section{Additional Details}
 \label{app:details}
