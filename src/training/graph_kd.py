@@ -79,7 +79,7 @@ class GraphKDConfig:
     student_graph_batch_size: int = 1
     n_graph_prompts: Optional[int] = None
     graph_verbose: bool = False
-    track_grad_norms: bool = False
+    track_grad_metrics: bool = False
     graph_node_labels: List[str] = field(default_factory=list)
     anova_range_radius: int = 0
     mlp_cache_batch_size: int = 32
@@ -197,6 +197,9 @@ class GraphKDTrainer:
         accum_graph = 0.0
         accum_kl_gnorm = 0.0
         accum_graph_gnorm = 0.0
+        accum_cos = 0.0
+        accum_flip = 0.0
+        accum_clip = 0.0
         accum_aligned = 0.0
         accum_teacher_sn = 0.0
         micro_step = 0
@@ -207,6 +210,17 @@ class GraphKDTrainer:
                 break
             input_ids = batch["input_ids"].to(_DEVICE)
             attention_mask = batch["attention_mask"].to(_DEVICE)
+
+            # With grad_accum == 1 the optimizer has just zeroed .grad, so the
+            # gradient after kl.backward() *is* this step's KL gradient and no
+            # snapshot is needed. With accumulation it is not, so record the
+            # carried-over gradient and subtract it back out below.
+            grads_at_start = None
+            if cfg.track_grad_metrics and grad_accum > 1:
+                grads_at_start = {
+                    n: p.grad.detach().clone()
+                    for n, p in self.model.named_parameters() if p.grad is not None
+                }
 
             # ── KL loss ───────────────────────────────────────────────────────
             student_logits = self.model(input_ids, attention_mask=attention_mask).logits
@@ -222,11 +236,6 @@ class GraphKDTrainer:
             kl_finite = torch.isfinite(kl)
             if kl_finite:
                 kl.backward()
-                if cfg.track_grad_norms:
-                    accum_kl_gnorm += sum(
-                        p.grad.data.norm(2).item() ** 2
-                        for p in self.model.parameters() if p.grad is not None
-                    ) ** 0.5
 
             # ── Graph loss ────────────────────────────────────────────────────
             prompts: List[str] = batch["prompts"]
@@ -235,7 +244,7 @@ class GraphKDTrainer:
                 sel = random.sample(range(len(prompts)), cfg.n_graph_prompts)
                 prompts = [prompts[i] for i in sel]
                 answers = [answers[i] for i in sel]
-            if cfg.track_grad_norms:
+            if cfg.track_grad_metrics:
                 grads_before = {
                     n: p.grad.detach().clone() if p.grad is not None else None
                     for n, p in self.model.named_parameters()
@@ -257,14 +266,42 @@ class GraphKDTrainer:
             # the loss to the intersection -- both silently.
             accum_aligned += float(graph_metrics.get("aligned_teacher_supernodes", 0.0))
             accum_teacher_sn += float(graph_metrics.get("teacher_supernodes", 0.0))
-            if cfg.track_grad_norms:
-                graph_gnorm_sq = 0.0
+            if cfg.track_grad_metrics:
+                # grads_before is the gradient after the KL backward and before the
+                # graph backward, so the graph contribution is exactly the delta
+                # across backward_batch_graph_loss. Everything below accumulates as
+                # scalars in one pass, so it costs no memory beyond that snapshot.
+                # The graph gradient here is already scaled by lambda_graph, since
+                # loss_scale carries it -- so these norms compare what actually
+                # reaches the optimizer, not the two losses in the abstract.
+                dot = kl_sq = graph_sq = 0.0
+                flipped = total_elems = 0
                 for n, p in self.model.named_parameters():
-                    if p.grad is not None:
-                        before = grads_before.get(n)
-                        delta = p.grad - before if before is not None else p.grad
-                        graph_gnorm_sq += delta.norm(2).item() ** 2
-                accum_graph_gnorm += graph_gnorm_sq ** 0.5
+                    if p.grad is None:
+                        continue
+                    before = grads_before.get(n)
+                    if before is None:
+                        before = torch.zeros_like(p.grad)
+                    g_kl = before.float()
+                    if grads_at_start is not None:
+                        start = grads_at_start.get(n)
+                        if start is not None:
+                            g_kl = g_kl - start.float()
+                    g_graph = (p.grad - before).float()
+                    dot += float((g_kl * g_graph).sum().item())
+                    kl_sq += float((g_kl * g_kl).sum().item())
+                    graph_sq += float((g_graph * g_graph).sum().item())
+                    # Adam normalises per parameter, so what decides whether the
+                    # graph term changes an update is not its norm but whether it
+                    # flips the sign. This is the quantity that explains how a term
+                    # orders of magnitude smaller in norm still moves the model.
+                    flipped += int((torch.sign(g_kl + g_graph) != torch.sign(g_kl)).sum().item())
+                    total_elems += g_kl.numel()
+                denom = (kl_sq ** 0.5) * (graph_sq ** 0.5)
+                accum_kl_gnorm += kl_sq ** 0.5
+                accum_graph_gnorm += graph_sq ** 0.5
+                accum_cos += dot / denom if denom > 0 else 0.0
+                accum_flip += flipped / total_elems if total_elems else 0.0
 
             micro_step += 1
 
@@ -284,6 +321,7 @@ class GraphKDTrainer:
                 # norm into NaN grads, but those are discarded by the zero_grad
                 # below when the step is skipped.
                 total_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), _GRAD_CLIP)
+                accum_clip = float(total_norm)
                 if torch.isfinite(total_norm):
                     self.optimizer.step()
                 else:
@@ -299,8 +337,25 @@ class GraphKDTrainer:
                 self.history["step_graph_loss"].append(accum_graph)
                 total_kl += accum_kl
                 total_graph += accum_graph
-                if cfg.track_grad_norms:
-                    gnorm_str = f" | KL_gnorm={accum_kl_gnorm:.4f} | graph_gnorm={accum_graph_gnorm:.4f}"
+                if cfg.track_grad_metrics:
+                    mean_cos = accum_cos / grad_accum
+                    mean_flip = accum_flip / grad_accum
+                    ratio = accum_graph_gnorm / accum_kl_gnorm if accum_kl_gnorm else float("nan")
+                    mean_clip = accum_clip
+                    for key, val in (
+                        ("step_kl_gnorm", accum_kl_gnorm),
+                        ("step_graph_gnorm", accum_graph_gnorm),
+                        ("step_grad_ratio", ratio),
+                        ("step_grad_cosine", mean_cos),
+                        ("step_grad_signflip", mean_flip),
+                        ("step_clip_norm", mean_clip),
+                    ):
+                        self.history[key].append(val)
+                    gnorm_str = (
+                        f" | |g_KL|={accum_kl_gnorm:.4f} | |g_graph|={accum_graph_gnorm:.4f}"
+                        f" | ratio={ratio:.4f} | cos={mean_cos:+.4f}"
+                        f" | signflip={mean_flip:.3f} | clip={mean_clip:.3f}"
+                    )
                 else:
                     gnorm_str = ""
                 align_str = (
@@ -323,6 +378,9 @@ class GraphKDTrainer:
                 accum_graph = 0.0
                 accum_kl_gnorm = 0.0
                 accum_graph_gnorm = 0.0
+                accum_cos = 0.0
+                accum_flip = 0.0
+                accum_clip = 0.0
                 accum_aligned = 0.0
                 accum_teacher_sn = 0.0
                 n_steps += 1
@@ -428,8 +486,16 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--n-graph-prompts", type=int, default=None, dest="n_graph_prompts",
                        help="Max prompts per batch to compute graph loss for (None = all).")
     group.add_argument("--graph-verbose", action="store_true", dest="graph_verbose")
-    group.add_argument("--track-grad-norms", action="store_true", dest="track_grad_norms",
-                       help="Print KL and graph grad norms each step.")
+    group.add_argument(
+        "--track-grad-metrics", "--track_grad_metrics", "--track-grad-norms",
+        action="store_true", dest="track_grad_metrics",
+        help="Per-step gradient diagnostics, also recorded in the history: the KL and "
+             "graph gradient norms and their ratio (the graph norm is post-lambda_graph, "
+             "so it is what actually reaches the optimizer), cos(graph, KD) -- which "
+             "Appendix A measures only at initialisation -- the fraction of parameter "
+             "entries whose update sign the graph term flips, and the pre-clip total "
+             "gradient norm against the 1.0 clip threshold. --track-grad-norms still works.",
+    )
     group.add_argument(
         "--graph-node-labels", "--graph_node_labels",
         nargs="+", default=[], dest="graph_node_labels", metavar="LABEL",
@@ -488,7 +554,7 @@ def main() -> None:
             student_graph_batch_size=args.student_graph_batch_size,
             n_graph_prompts=args.n_graph_prompts,
             graph_verbose=args.graph_verbose,
-            track_grad_norms=args.track_grad_norms,
+            track_grad_metrics=args.track_grad_metrics,
             graph_node_labels=graph_node_labels,
             anova_range_radius=args.anova_range_radius,
             mlp_cache_batch_size=args.cache_batch_size,
