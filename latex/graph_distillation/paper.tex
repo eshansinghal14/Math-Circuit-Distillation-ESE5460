@@ -362,13 +362,27 @@ produces it; the graph loss constrains routing between supernodes and is close t
 output. If that separation is real, the two gradients should be close to orthogonal in parameter
 space rather than one being a reparameterisation of the other.
 
-We measure this directly. At the student's initial checkpoint we compute
+We measure this directly (Figure~\ref{fig:orthogonality}). At the student's initial checkpoint we compute
 $\nabla_{\theta_\Stud}\mathcal{L}_{\mathrm{KD}}$ over one batch of 32 prompts and
 $\nabla_{\theta_\Stud}\mathcal{L}_{\mathrm{graph}}$ over 8 prompts, and take the cosine between
 them. Across all four linearisation variants of Appendix~\ref{app:freeze} the cosine lies in
-$[-0.024, -0.008]$: the two terms are orthogonal to within a fraction of a degree of $90^\circ$,
+$[-0.024, -0.008]$: every variant lies between $90.5^\circ$ and $91.4^\circ$,
 and the near-orthogonality is a property of the objective rather than of one particular
 linearisation.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{figures/orthogonality.pdf}
+  \caption{The graph gradient is both small and sideways. \emph{Above}: the two gradients drawn to
+  scale on equal axes, so the angle is not distorted; the arc is the unfrozen variant, and the other
+  three linearisations lie between $90.5^\circ$ and $91.4^\circ$. \emph{Below}: the same cosines on a
+  $[-1, 1]$ line. The four points are offset vertically only to separate values that coincide to
+  within $0.015$; the offset carries no meaning. The grey bar is the same measure taken between two
+  graph-loss linearisations ($0.63$ to $0.77$, Appendix~\ref{app:freeze}), included because without
+  a yardstick a reader cannot tell whether $-0.02$ is near zero or merely small.}
+  \label{fig:orthogonality}
+\end{figure}
+
 
 This also resolves an apparent puzzle about magnitudes. At $\lambda_{\mathrm{graph}}=1$ the graph
 gradient has norm $3.65$ against the KD gradient's $50.41$, so at the $\lambda_{\mathrm{graph}}$
