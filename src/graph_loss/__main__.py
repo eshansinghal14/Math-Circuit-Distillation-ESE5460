@@ -6,11 +6,8 @@ from graph_loss.create_graph import (
     GraphPipelineResult,
     create_graph,
 )
-from graph_loss.frontend_assets.frontend_export import (
-    default_frontend_output_dir,
-    export_supergraph_frontend,
-)
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
+from graph_loss.supergraph_viz import render_supergraph, show_figure
 from graph_loss.utils import add_graph_build_args
 from utils import DIR_ROOT, load_model
 
@@ -72,10 +69,17 @@ def main():
         help="Delete and rebuild the MLP input cache even if one already exists.",
     )
     parser.add_argument(
-        "--frontend-slug",
-        "--frontend_slug",
-        dest="frontend_slug",
-        help="Optional slug for the generated frontend graph_data/<slug>.json file",
+        "--figure-name",
+        "--figure_name",
+        dest="figure_name",
+        help="Optional file name (without extension) for the saved supergraph figure",
+    )
+    parser.add_argument(
+        "--figure-output-dir",
+        "--figure_output_dir",
+        dest="figure_output_dir",
+        default=os.path.join(DIR_ROOT, "results", "supergraph_figures"),
+        help="Directory for the rendered supergraph figure (default: results/supergraph_figures)",
     )
     parser.add_argument(
         "--supernode-heatmap-output-dir",
@@ -93,8 +97,8 @@ def main():
     if args.supernode_heatmap_output_dir:
         if not os.path.isabs(args.supernode_heatmap_output_dir):
             args.supernode_heatmap_output_dir = os.path.join(DIR_ROOT, args.supernode_heatmap_output_dir)
-
-    frontend_output_dir = str(default_frontend_output_dir())
+    if not os.path.isabs(args.figure_output_dir):
+        args.figure_output_dir = os.path.join(DIR_ROOT, args.figure_output_dir)
 
     logger.info("Loading model: %s", args.model)
     hf_model, tokenizer = load_model(args.model)
@@ -124,20 +128,16 @@ def main():
         logger=logger,
     )
 
-    logger.info("Exporting supergraph frontend to %s", frontend_output_dir)
-    graph_data_path = export_supergraph_frontend(
+    logger.info("Rendering supergraph figure to %s", args.figure_output_dir)
+    figure_path = render_supergraph(
         result.graph,
         result.supergraph,
-        output_dir=frontend_output_dir,
-        slug=args.frontend_slug,
+        output_dir=args.figure_output_dir,
+        name=args.figure_name,
         model_name=args.model,
-        tokenizer=adapter.tokenizer,
     )
-    logger.info("Saved frontend graph data: %s", graph_data_path)
-    logger.info(
-        "Open %s to view the visualization",
-        os.path.join(frontend_output_dir, "index.html"),
-    )
+    logger.info("Saved supergraph figure: %s", figure_path)
+    show_figure(figure_path)
 
     logger.info("Done")
 

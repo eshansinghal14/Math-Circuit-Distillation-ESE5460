@@ -555,6 +555,7 @@ with it end above. Without the RMSNorm freeze, graph distillation degrades those
 with it, they improve.
 
 \subsection{What predicts quality, and what does not}
+\label{sec:freeze-predictors}
 
 Cosine to the unfrozen gradient does \emph{not} predict downstream quality, and is close to
 anti-predictive: it ranks the unfrozen gradient highest by construction, and the unfrozen variant is
@@ -567,9 +568,93 @@ expose structure that path cancellation averages away in the total effect. With 
 an observation rather than a result, but it is free: the quantity is already in the training log at
 step one.
 
+\subsection{Gradient dynamics over training}
+\label{sec:freeze-dynamics}
+
+All four runs were repeated with per-step gradient instrumentation. Training is seeded and the
+data order is deterministic, so accuracy reproduced bit-for-bit and the instrumentation is free.
+Figure~\ref{fig:grad-metrics} plots the result and Table~\ref{tab:freeze-dynamics} summarises it.
+
+\emph{Orthogonality is maintained, not merely initial.} The step-one cosine is $-0.0237$, against
+the $-0.0236$ that Appendix~\ref{app:orthogonality} measures by a separate route at the same
+checkpoint. Over fifteen steps it oscillates within roughly $[-0.033, +0.049]$ in every variant and
+never drifts, so the mean absolute cosine stays below $0.006$. The near-orthogonality of
+$\mathcal{L}_{\mathrm{graph}}$ and $\mathcal{L}_{\mathrm{KD}}$ is therefore a property of the
+objective throughout training rather than an artefact of initialisation.
+
+\emph{The graph term progressively takes over.} $\|\nabla\mathcal{L}_{\mathrm{KD}}\|$ falls by a
+factor of $14.6$ over fifteen steps, from $50.4$ to $3.5$, while
+$\|\nabla\mathcal{L}_{\mathrm{graph}}\|$ stays flat near $1.5$. Their ratio therefore climbs from
+about $0.05$ to between $0.38$ and $0.53$, and the fraction of parameter entries whose update sign
+the graph term decides rises from $0.02$ to $0.12$. Nobody chose this schedule: it is a consequence
+of KD converging faster than the graph objective.
+
+It also lines up with the accuracy curves. In-distribution accuracy peaks at step 6--7, where the
+ratio is around $0.10$--$0.15$, and declines from there, while out-of-distribution accuracy goes on
+rising to step 11--15 (Figure~\ref{fig:freeze-ablation}). As the graph term gains relative weight,
+the student trades in-distribution fit for out-of-distribution generalisation --- which is what two
+near-orthogonal objectives should do, since a single trajectory cannot maximise both.
+
+\begin{table}[h]
+  \centering
+  \caption{Per-step gradient metrics, averaged over the fifteen steps. The graph norm is already
+  scaled by $\lambda_{\mathrm{graph}}$, so these are the quantities that reach the optimiser.}
+  \label{tab:freeze-dynamics}
+  \begin{tabular}{lccccc}
+    \toprule
+    & $\|g_{\mathrm{KD}}\|$ & $\|g_{\mathrm{graph}}\|$ & ratio & $\cos$ & sign flips \\
+    \midrule
+    unfrozen         & 15.62 & 1.726 & 0.184 & $+0.0053$ & 0.0750 \\
+    attention frozen & 15.62 & 1.579 & 0.175 & $+0.0042$ & 0.0712 \\
+    RMSNorm frozen   & 15.66 & 1.762 & 0.189 & $+0.0025$ & 0.0747 \\
+    both frozen      & 15.63 & 1.887 & 0.213 & $+0.0007$ & 0.0774 \\
+    \midrule
+    spread across variants & 0.3\% & 17.7\% & 20.1\% & --- & 8.3\% \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\emph{No aggregate gradient statistic separates the four variants.} This is the substantive
+negative result of the instrumentation. The linearisations differ by $33.5\%$ in relative
+out-of-distribution accuracy, but by $0.3\%$ in KD gradient norm --- as they must, being the same
+objective --- and by only $8.3\%$ in sign flips and $20.1\%$ in ratio. Two of the metrics carry
+orderings that are simply wrong: sign flips place the unfrozen run, the worst performer, second.
+The cosine with the KD gradient -- a different quantity from the cosine with the unfrozen
+gradient in Section~\ref{sec:freeze-predictors} -- is the one whose ordering matches accuracy for all four
+variants, more
+orthogonal being better, but the spread between runs ($0.0047$) is smaller than the standard error
+implied by the step-to-step scatter within a single run ($0.0055$), so it cannot be claimed.
+
+Whatever distinguishes the linearisations is therefore not the size of the graph gradient, nor its
+alignment with the KD gradient, but which parameters it moves --- and scalar summaries are blind to
+that by construction. The per-group figures in Table~\ref{tab:freeze-grad} point the same way: the
+RMSNorm freeze almost doubles the gradient reaching the normalisation weights (ratio $1.93$) while
+the global norm barely moves at all.
+
+One incidental observation: the pre-clip gradient norm falls from $50.5$ to $3.8$ and so exceeds the
+clip threshold of $1.0$ at every step of every run. Gradient clipping is not a rarely-triggered
+safety valve here but a permanent rescaling --- one that AdamW largely undoes, since per-parameter
+normalisation cancels a uniform scale factor.
+
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{figures/grad_metrics.pdf}
+  \caption{Per-step gradient metrics for the four linearisations, encoded as in
+  Figure~\ref{fig:freeze-ablation}. \emph{All four variants are drawn on every panel and lie almost
+  exactly on top of one another} --- that overlap is the point, not a plotting artefact. The KD
+  gradient collapses by a factor of $14.6$ while the graph gradient stays flat, so their ratio
+  climbs tenfold and the share of update signs the graph term decides rises from $2\%$ to $12\%$,
+  none of it by design. The cosine oscillates about zero throughout and never drifts. Yet these
+  four runs differ by a third in out-of-distribution accuracy, so what separates them is not
+  visible in any of these aggregates.}
+  \label{fig:grad-metrics}
+\end{figure}
+
+
 \subsection{Caveats}
 
-Single seed, and 15 steps. In-distribution accuracy peaks at step 6--7 in all four runs and declines
+Single seed, 15 steps, and a single supernode construction -- the arg-token and DLA supernodes of Section~\ref{sec:supernodes-general}, not the ANOVA supernodes. The freeze acts on the edge coefficients, before supernodes are formed, so the RMSNorm result should transfer; the attention result is less safe to extrapolate, since arg-token supernodes are positional and attention is the only mechanism that moves information between positions. In-distribution accuracy peaks at step 6--7 in all four runs and declines
 afterwards, while OOD accuracy is still rising at step 15 for the two variants without the RMSNorm
 freeze, so their OOD numbers are lower bounds. The gap between the two best variants ($0.011$ OOD)
 is within what a single seed can plausibly produce; the gap between the RMSNorm-frozen and

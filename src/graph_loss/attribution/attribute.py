@@ -170,8 +170,8 @@ def _attribute_from_context(
 
     Always includes token embedding and logit target nodes in the adjacency matrix.
     Token and logit nodes are needed for the frac_external calculation in
-    build_super_graph; they are excluded from the final supergraph and frontend
-    visualization downstream.
+    build_super_graph; they are excluded from the final supergraph and its
+    rendered figure downstream.
 
     Callers that want to run ANOVA labeling before edge attribution should call
     setup_attribution() → select_anova_supernodes() → ctx.filter(mask) → this function.
