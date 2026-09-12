@@ -35,6 +35,14 @@ cross-mode JSD   How far apart the two targets are over their shared labels. Nea
                  zero would mean the freeze barely matters here, and the gap you
                  measured is seed noise rather than mechanism.
 
+--modes attributes a change in the target to one freeze or the other. Every mode
+is characterised against the same unfrozen reference, so a run with
+``--modes attn-only,rms-only,frozen`` says whether the attention freeze, the
+RMSNorm freeze, or both together move the thing the loss regresses onto. That is
+a different question from how far each moves the gradient, which
+``diagnose_grad.py`` answers -- and the two can disagree: a linearisation can
+swing the gradient hard while barely touching the normalised target.
+
 --graph-node-labels must match the run being characterised: omitted means
 arg-token + DLA supernodes, supplying labels switches to ANOVA supernodes.
 
@@ -164,7 +172,27 @@ def main() -> None:
     ap.add_argument("--top-k-logits", type=float, default=0.95)
     ap.add_argument("--temperature", type=float, default=2.0)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument(
+        "--modes",
+        default="frozen",
+        help=(
+            "Comma-separated freeze modes to compare against unfrozen: any of "
+            "attn-only, rms-only, frozen. Every mode is characterised against the "
+            "same unfrozen reference, so 'attn-only,rms-only,frozen' attributes a "
+            "change in the target to one flag or the other in a single run."
+        ),
+    )
     args = ap.parse_args()
+
+    freeze_flags = {
+        "attn-only": (True, False),
+        "rms-only": (False, True),
+        "frozen": (True, True),
+    }
+    selected = [m.strip() for m in args.modes.split(",") if m.strip()]
+    unknown = [m for m in selected if m not in freeze_flags]
+    if unknown:
+        ap.error(f"unknown mode(s) {unknown}; choose from {sorted(freeze_flags)}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, tokenizer = load_model(args.model)
@@ -176,9 +204,12 @@ def main() -> None:
     random.Random(args.seed).shuffle(prompts)
     prompts = prompts[: args.n_prompts]
 
-    modes = {"unfrozen": (False, False), "frozen": (True, True)}
+    # Unfrozen is always present: it is the reference every other mode is
+    # characterised against.
+    modes = {"unfrozen": (False, False)}
+    modes.update({m: freeze_flags[m] for m in selected})
     per_mode: dict[str, list[dict]] = {m: [] for m in modes}
-    cross_jsd: list[float] = []
+    cross_jsd: dict[str, list[float]] = {m: [] for m in selected}
 
     for i, prompt in enumerate(prompts):
         results = {}
@@ -209,9 +240,10 @@ def main() -> None:
                 )
             per_mode[name].append(_stats(results[name]))
 
-        pair = _aligned_dists(results["unfrozen"], results["frozen"])
-        if pair is not None:
-            cross_jsd.append(_jsd(*pair))
+        for name in selected:
+            pair = _aligned_dists(results["unfrozen"], results[name])
+            if pair is not None:
+                cross_jsd[name].append(_jsd(*pair))
         print(f"  [{i + 1}/{len(prompts)}] {prompt!r}", flush=True)
         del results
         if device.type == "cuda":
@@ -227,24 +259,27 @@ def main() -> None:
     hdr = (
         f"{'':10} {'entropy':>8} {'uniform':>8} {'frac_tok':>9} {'frac_bos':>9}"
         f" {'fe_mean':>8} {'fe_std':>7} {'labels':>10} {'neurons':>8}"
+        f" {'JSD vs unfr':>12}"
     )
     print(hdr)
     print("-" * len(hdr))
     for name, rows in per_mode.items():
         labels = f"{avg(rows, 'n_distinct_labels'):.1f}/{avg(rows, 'n_supernodes'):.1f}"
+        js = cross_jsd.get(name)
+        jsd_cell = f"{sum(js) / len(js):12.4f}" if js else f"{'--':>12}"
         print(
             f"{name:10} {avg(rows, 'entropy'):8.4f} {avg(rows, 'uniform'):8.4f}"
             f" {avg(rows, 'frac_tok'):9.4f} {avg(rows, 'frac_bos'):9.4f}"
             f" {avg(rows, 'fe_mean'):8.4f} {avg(rows, 'fe_std'):7.4f}"
-            f" {labels:>10} {avg(rows, 'n_neurons'):8.0f}"
+            f" {labels:>10} {avg(rows, 'n_neurons'):8.0f}{jsd_cell}"
         )
 
-    if cross_jsd:
-        mean_jsd = sum(cross_jsd) / len(cross_jsd)
-        print(
-            f"\ncross-mode JSD(unfrozen, frozen) over shared labels: {mean_jsd:.4f}"
-            f"  (0 = identical target, log 2 = 0.6931 = disjoint)"
-        )
+    print()
+    print("JSD vs unfr is the mean row-wise JSD between that mode's target and the")
+    print("unfrozen target over shared supernode labels: 0 = identical target,")
+    print("log 2 = 0.6931 = disjoint. It says how far the linearisation moves the")
+    print("thing the loss regresses onto, which is a different question from how far")
+    print("it moves the gradient (experiments/diagnose_grad.py).")
 
 
 if __name__ == "__main__":

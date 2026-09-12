@@ -13,7 +13,7 @@ python -m experiments.<name> --help
 | script | question it answers |
 | --- | --- |
 | `diagnose_grad.py` | Does the edge freeze change the graph gradient's **direction** or only its **magnitude**? Computes the KL, unfrozen-graph and frozen-graph gradients at one checkpoint and reports norms and pairwise cosines, globally and per parameter group. `cos(graph, KL)` also says how much of the graph term KD already implies. |
-| `diagnose_freeze.py` | Is the frozen supergraph a **weaker regression target**? Builds the trainer's supergraph twice per prompt, frozen and unfrozen, and reports row entropy against uniform, attribution mass on token/BOS nodes, `frac_external` spread, distinct-vs-total supernode labels, and the cross-mode JSD. |
+| `diagnose_freeze.py` | Is the frozen supergraph a **weaker regression target**? Builds the trainer's supergraph once per prompt per `--modes` entry plus an unfrozen reference, and reports row entropy against uniform, attribution mass on token/BOS nodes, `frac_external` spread, distinct-vs-total supernode labels, and the JSD between each mode's target and the unfrozen one. `--modes` takes `attn-only`, `rms-only` and `frozen`, so one run separates the two freezes. |
 
 Both take `--graph-node-labels`, and it **must match the run being diagnosed**:
 omitted means arg-token + DLA supernodes (what `graph_kd` uses when its own
