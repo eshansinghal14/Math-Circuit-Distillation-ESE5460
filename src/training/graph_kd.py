@@ -74,6 +74,7 @@ class GraphKDConfig:
     graph_loss_type: str = "jsd"
     freeze_attention: bool = False
     freeze_rms_norm: bool = False
+    constant_node_weighting: bool = False
     top_k_logits: float = 0.95
     teacher_graph_batch_size: int = 512
     student_graph_batch_size: int = 1
@@ -159,6 +160,7 @@ class GraphKDTrainer:
             graph_loss_type=config.graph_loss_type,
             freeze_attention=config.freeze_attention,
             freeze_rms_norm=config.freeze_rms_norm,
+            constant_node_weighting=config.constant_node_weighting,
             verbose=config.graph_verbose,
             mlp_input_cache=student_mlp_cache,
             teacher_mlp_input_cache=teacher_mlp_cache,
@@ -487,6 +489,17 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Max prompts per batch to compute graph loss for (None = all).")
     group.add_argument("--graph-verbose", action="store_true", dest="graph_verbose")
     group.add_argument(
+        "--constant-node-weighting", "--constant_node_weighting",
+        action="store_true", dest="constant_node_weighting",
+        help="Replace frac_external with 1 in the supernode aggregation, so a supernode "
+             "edge is a plain mean over its members instead of a frac_external-weighted "
+             "one. Applied to teacher and student alike. The RMSNorm freeze already drives "
+             "frac_external to ~0.995 with its spread collapsing roughly tenfold, which "
+             "makes the weighting nearly inert; this flag isolates that effect from the "
+             "linearisation, so it can be run unfrozen to test whether the weighting "
+             "rather than the freeze is what matters.",
+    )
+    group.add_argument(
         "--track-grad-metrics", "--track_grad_metrics", "--track-grad-norms",
         action="store_true", dest="track_grad_metrics",
         help="Per-step gradient diagnostics, also recorded in the history: the KL and "
@@ -547,6 +560,7 @@ def main() -> None:
             graph_loss_type=args.graph_loss_type,
             freeze_attention=args.freeze_attention,
             freeze_rms_norm=args.freeze_rms_norm,
+            constant_node_weighting=args.constant_node_weighting,
             top_k_logits=args.top_k_logits,
             teacher_prop_neurons_per_layer=args.teacher_prop_neurons_per_layer,
             student_prop_neurons_per_layer=args.student_prop_neurons_per_layer,

@@ -423,6 +423,7 @@ def create_graph_at_position(
     detach_result: bool | None = None,
     skip_logit_attribution: bool = False,
     no_grad_supergraph: bool = False,
+    constant_node_weighting: bool = False,
     verbose: bool = False,
     logger: logging.Logger | None = None,
 ) -> GraphPipelineResult:
@@ -558,6 +559,7 @@ def create_graph_at_position(
             supernodes=supernodes,
             supernode_labels=all_supernode_labels,
             node_labels=node_labels_filtered,
+            constant_node_weighting=constant_node_weighting,
             supernode_heatmap_output_dir=shared.supernode_heatmap_output_dir,
             activation_write_result=shared.activation_write_result,
             awr_index_map=awr_index_map,
@@ -613,6 +615,7 @@ def create_graph(
     node_labels: list[str] | None = None,
     dla_model_logits: torch.Tensor | None = None,
     no_grad_supergraph: bool = False,
+    constant_node_weighting: bool = False,
     freeze_attention: bool = False,
     freeze_rms_norm: bool = False,
     logger: logging.Logger | None = None,
@@ -711,6 +714,7 @@ def create_graph(
         detach_result=detach_result,
         skip_logit_attribution=skip_logit_attribution,
         no_grad_supergraph=no_grad_supergraph,
+        constant_node_weighting=constant_node_weighting,
         verbose=verbose,
         logger=_logger,
     )

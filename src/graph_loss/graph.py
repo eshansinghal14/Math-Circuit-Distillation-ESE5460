@@ -558,6 +558,7 @@ def build_super_graph(
     supernodes: list[list[int]],
     supernode_labels: list[list[str]],
     node_labels: dict[int, list[str]] | None = None,
+    constant_node_weighting: bool = False,
     supernode_heatmap_output_dir: str | None = None,
     activation_write_result: ActivationWriteResult | None = None,
     awr_index_map: dict[int, int] | None = None,
@@ -589,7 +590,10 @@ def build_super_graph(
         # not a column sum over its outgoing ones.
         total_input = torch.abs(adj_matrix_norm[target_members]).sum(dim=1)
         internal_input = torch.abs(adj_matrix_norm[target_members][:, target_members]).sum(dim=1)
-        frac_external = (total_input - internal_input) / total_input.clamp(min=1e-10)
+        if constant_node_weighting:
+            frac_external = torch.ones_like(total_input)
+        else:
+            frac_external = (total_input - internal_input) / total_input.clamp(min=1e-10)
         for s in range(num_supernodes):
             source_members = supernodes[s]
             sum_A = adj_matrix_norm[target_members][:, source_members].sum(dim=1)

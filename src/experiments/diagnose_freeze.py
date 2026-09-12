@@ -274,13 +274,6 @@ def main() -> None:
             f" {labels:>10} {avg(rows, 'n_neurons'):8.0f}{jsd_cell}"
         )
 
-    print()
-    print("JSD vs unfr is the mean row-wise JSD between that mode's target and the")
-    print("unfrozen target over shared supernode labels: 0 = identical target,")
-    print("log 2 = 0.6931 = disjoint. It says how far the linearisation moves the")
-    print("thing the loss regresses onto, which is a different question from how far")
-    print("it moves the gradient (experiments/diagnose_grad.py).")
-
 
 if __name__ == "__main__":
     main()

@@ -45,6 +45,10 @@ class GraphAuxConfig:
     # Applied identically to teacher and student. See graph_loss.freeze.
     freeze_attention: bool = False
     freeze_rms_norm: bool = False
+    # Replace frac_external with 1 in the supernode aggregation, making an edge a
+    # plain mean over members. Must be applied to teacher and student alike or the
+    # two supergraphs are not comparable.
+    constant_node_weighting: bool = False
     graph_node_labels: list[str] | None = None
     teacher_mlp_input_cache: dict | None = None
     tokens_dla_nodes: bool = False
@@ -53,7 +57,9 @@ class GraphAuxConfig:
     dataset_name: str = "local"
 
 
-def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> SuperGraph:
+def _aggregate_supergraph_adjacency(
+    graph, supernodes: list[list[int]], constant_node_weighting: bool = False
+) -> SuperGraph:
     """Aggregate a differentiable graph adjacency using fixed supernode membership.
 
     Uses torch.stack (out-of-place) instead of in-place setitem so that the
@@ -76,7 +82,10 @@ def _aggregate_supergraph_adjacency(graph, supernodes: list[list[int]]) -> Super
         # in sync with build_super_graph in graph.py.
         total_input = torch.abs(adj_matrix_norm[supernodes[t]]).sum(dim=1)
         internal_input = torch.abs(adj_matrix_norm[supernodes[t]][:, supernodes[t]]).sum(dim=1)
-        frac_external = (total_input - internal_input) / total_input.clamp(min=1e-10)
+        if constant_node_weighting:
+            frac_external = torch.ones_like(total_input)
+        else:
+            frac_external = (total_input - internal_input) / total_input.clamp(min=1e-10)
         row_entries = []
         for s in range(num_supernodes):
             sum_A = adj_matrix_norm[supernodes[t]][:, supernodes[s]].sum(dim=1)
@@ -136,6 +145,7 @@ def compute_prompt_graph_loss(
             no_grad_supergraph=True,
             freeze_attention=config.freeze_attention,
             freeze_rms_norm=config.freeze_rms_norm,
+            constant_node_weighting=config.constant_node_weighting,
         )
     except ValueError as e:
         raise RuntimeError(
@@ -180,6 +190,7 @@ def compute_prompt_graph_loss(
     student_supergraph = _aggregate_supergraph_adjacency(
         student_graph,
         student_supergraph_structure.supernodes,
+        constant_node_weighting=config.constant_node_weighting,
     )
     student_supergraph = student_supergraph._replace(
         supernode_labels=student_supergraph_structure.supernode_labels,
@@ -379,6 +390,7 @@ def _compare_tokens_loss_for_prompt(
                 verbose=config.verbose,
                 freeze_attention=config.freeze_attention,
                 freeze_rms_norm=config.freeze_rms_norm,
+                constant_node_weighting=config.constant_node_weighting,
             )
 
         # Pass prefix_ids directly so the student tokenizes from the same IDs
@@ -473,6 +485,7 @@ def backward_batch_graph_loss(
                     detach_result=True,
                     freeze_attention=config.freeze_attention,
                     freeze_rms_norm=config.freeze_rms_norm,
+                    constant_node_weighting=config.constant_node_weighting,
                 )
             prompt_ids = teacher_adapter.tokenizer(
                 prompt, return_tensors="pt", add_special_tokens=False
