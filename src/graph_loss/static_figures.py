@@ -13,7 +13,7 @@ Quick start (run from ``src/``)::
         --student results/graph_kd \
         --prompt "36+59=" \
         --out-dir results/figures \
-        --history results/graph_kd/training_history.json \
+        --history results/graph_kd/graph_kd.json \
         --teacher-heatmap-dir "/.../FINAL_RESULTS/36+59_heatmaps/llama_8b" \
         --student-heatmap-dir "/.../FINAL_RESULTS/36+59_heatmaps/llama_1b"
 
@@ -40,7 +40,7 @@ Figure guide (what each panel demonstrates in the write-up)
   ``--target-supernode``). This is the literal per-node KL operand: it shows the
   student putting mass on the same sources as the teacher.
 * Fig D  ``figD_training_curves`` — KL loss, graph loss, and accuracy vs step
-  read from a trainer's ``training_history.json`` (with the teacher accuracy
+  read from a trainer's history JSON (``<save_dir>/<folder name>.json``) (with the teacher accuracy
   baseline drawn in). Demonstrates convergence over training.
 * Fig E  ``figE_heatmap_montage`` — per-supernode activation heatmaps, teacher
   row above student row, paired by supernode index. Two sources: pass
@@ -1238,7 +1238,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-supernode", "--target_supernode", dest="target_supernode", default=None,
                         help="Target supernode label for Fig C (default: the 'dla' node).")
     parser.add_argument("--history", default=None,
-                        help="Path to a training_history.json for Fig D (training curves).")
+                        help="Path to a trainer history JSON (<save_dir>/<folder name>.json) for Fig D (training curves).")
     parser.add_argument("--teacher-heatmap-dir", "--teacher_heatmap_dir", dest="teacher_heatmap_dir", default=None,
                         help="Folder of teacher supernode_*.pdf heatmaps for Fig E.")
     parser.add_argument("--student-heatmap-dir", "--student_heatmap_dir", dest="student_heatmap_dir", default=None,

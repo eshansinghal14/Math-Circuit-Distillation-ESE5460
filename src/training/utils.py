@@ -85,9 +85,15 @@ def maybe_save_periodic_checkpoint(
     return step
 
 
+def history_path(save_dir: str) -> str:
+    """``<save_dir>/<folder name>.json`` -- the run's history is named after its output folder."""
+    folder = os.path.basename(os.path.normpath(os.path.abspath(save_dir)))
+    return os.path.join(save_dir, f"{folder}.json")
+
+
 def save_history(history: Dict[str, Any], save_dir: str) -> None:
     os.makedirs(save_dir, exist_ok=True)
-    path = os.path.join(save_dir, "training_history.json")
+    path = history_path(save_dir)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(dict(history), f, indent=2)
         f.flush()
