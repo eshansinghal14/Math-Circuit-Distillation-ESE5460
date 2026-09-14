@@ -26,14 +26,20 @@ from utils import (
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from training.utils import (
+    ParamChangeCanary,
     add_kd_args,
     add_standard_args,
+    describe_run_setup,
     kl_loss,
+    load_student,
+    log_first_step_canary,
     make_optimizer,
     maybe_save_periodic_checkpoint,
+    run_config_record,
     save_checkpoint,
     save_curves,
     save_history,
+    student_autocast,
 )
 
 _DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -79,11 +85,9 @@ class StandardKDTrainer:
         self.config = config
         seed_all(_SEED)
 
-        self.model, self.tokenizer = load_model(config.model)
-        if hasattr(self.model.config, "use_cache"):
-            self.model.config.use_cache = False
-        if hasattr(self.model, "gradient_checkpointing_enable"):
-            self.model.gradient_checkpointing_enable()
+        # fp32 master weights with a bf16 autocast forward; see training/utils.py.
+        # The teacher is inference-only and stays bf16.
+        self.model, self.tokenizer = load_student(config.model)
 
         self.teacher, _ = load_model(config.teacher)
         self.teacher.eval()
@@ -112,9 +116,17 @@ class StandardKDTrainer:
         self._train_step = 0
         self._last_save_step = 0
 
+    def _autocast(self):
+        return student_autocast()
+
     def _eval_on(self, model, dataset_name: str, test_dataset: PromptAnswerDataset) -> float:
         cfg = self.config
-        return eval_model(model, self.tokenizer, test_dataset, dataset_name, cfg.batch_size, cfg.max_eval_tokens)
+        # A no-op for the bf16 teacher.
+        with self._autocast():
+            return eval_model(
+                model, self.tokenizer, test_dataset, dataset_name,
+                cfg.batch_size, cfg.max_eval_tokens,
+            )
 
     def _eval(self) -> float:
         return self._eval_on(self.model, self.config.dataset, self.test_dataset)
@@ -141,7 +153,8 @@ class StandardKDTrainer:
             input_ids = batch["input_ids"].to(_DEVICE)
             attention_mask = batch["attention_mask"].to(_DEVICE)
 
-            student_logits = self.model(input_ids, attention_mask=attention_mask).logits
+            with self._autocast():
+                student_logits = self.model(input_ids, attention_mask=attention_mask).logits
 
             with torch.no_grad():
                 teacher_logits = self.teacher(input_ids, attention_mask=attention_mask).logits
@@ -163,8 +176,11 @@ class StandardKDTrainer:
 
             if micro_step % grad_accum == 0:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), _GRAD_CLIP)
+                canary = ParamChangeCanary(self.model) if self._train_step == 0 else None
                 self.optimizer.step()
                 self.optimizer.zero_grad()
+                if canary is not None:
+                    log_first_step_canary(canary.report(self.model), self.history)
 
                 self._train_step += 1
                 self.history["train_step"].append(self._train_step)
@@ -184,6 +200,9 @@ class StandardKDTrainer:
     def train(self) -> Dict[str, List]:
         cfg = self.config
         os.makedirs(cfg.save_dir, exist_ok=True)
+
+        self.history["config"] = run_config_record(cfg, self.model, self.optimizer)
+        print(describe_run_setup(self.history["config"]))
 
         print("Evaluating baseline...")
         baseline_acc = self._eval()

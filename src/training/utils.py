@@ -3,12 +3,182 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import dataclasses
 import json
 import os
 from typing import Any, Dict, List
 
 import torch
 import torch.nn.functional as F
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Student precision
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Every trainer loads the student through load_student, runs its forward under
+# student_autocast and optimises it with make_optimizer, so SFT, standard KD and
+# graph KD share one precision regime and their curves are comparable. There is
+# deliberately no flag for any of it. The regime is the standard AMP split: fp32
+# master weights, fp32 .grad, bf16 autocast forward, fp32 Adam moments.
+#
+# bf16 weights had two separate failures, both silent:
+#
+# 1. Weight updates were rounded away. bf16 carries ~0.39% relative precision, so
+#    at lr=1e-5 an Adam step is well under half a ULP for any weight above ~0.004
+#    in magnitude. Only ~15.6% of a N(0, 0.02) linear layer changed per step, and
+#    RMSNorm gains (~1.0) never moved at any lr up to 1e-4. Training was a sparse
+#    fine-tune of the smallest weights, not a slower version of full fine-tuning.
+# 2. The graph gradient was rounded away on accumulation. backward_batch_graph_loss
+#    backprops one prompt at a time, so the graph term arrives as ~32 small adds
+#    into a .grad already holding the far larger KD gradient; each add lands below
+#    half a ULP and is dropped. Retention was 66 / 78 / 91 / 100% at lambda
+#    0.03 / 0.1 / 0.3 / 1.0.
+#
+# The bitsandbytes 8-bit AdamW that make_optimizer used to pick whenever it was
+# importable is out for a related reason: it stores the Adam moments in a
+# blockwise dynamic 8-bit format whose relative resolution is ~3-13% for a
+# typical element, coarser than the 0.5-6% of the gradient the graph term
+# contributes. fp32 moments cost ~7.5 GB more on a 1B student and remove the
+# question.
+
+STUDENT_DTYPE = torch.float32
+AUTOCAST_DTYPE = torch.bfloat16
+
+
+def load_student(model_name: str):
+    """Load the trainable student in fp32 master weights.
+
+    Also disables the KV cache and turns on gradient checkpointing, which every
+    trainer wants. The forward must then run under :func:`student_autocast`.
+    """
+    from utils import load_model
+
+    model, tokenizer = load_model(model_name, dtype=STUDENT_DTYPE)
+    if hasattr(model.config, "use_cache"):
+        model.config.use_cache = False
+    if hasattr(model, "gradient_checkpointing_enable"):
+        model.gradient_checkpointing_enable()
+    return model, tokenizer
+
+
+def student_autocast():
+    """bf16 autocast for the student forward and for eval.
+
+    Generation needs no gradients, so eval runs under the same context; fp32
+    generation would double its cost. A no-op off CUDA, and for a bf16 teacher.
+    """
+    if not torch.cuda.is_available():
+        return contextlib.nullcontext()
+    return torch.autocast(device_type="cuda", dtype=AUTOCAST_DTYPE)
+
+
+def make_optimizer(model, lr: float):
+    """torch AdamW with fp32 moments. See the precision note at the top of this file."""
+    from torch.optim import AdamW
+    return AdamW(params=model.parameters(), lr=lr, foreach=False)
+
+
+def run_config_record(config, model, optimizer) -> Dict[str, Any]:
+    """Resolved run configuration for the history JSON.
+
+    History files used to record curves but not what produced them, which made a
+    lambda=0.1 run indistinguishable from an ablation. This is every dataclass
+    field plus the things the dataclass cannot know: the dtype the student actually
+    loaded in, the optimizer class actually constructed, and library versions.
+    """
+    record: Dict[str, Any] = dataclasses.asdict(config)
+    first = next(model.parameters())
+    record["student_dtype"] = str(first.dtype).removeprefix("torch.")
+    record["student_autocast"] = (
+        str(AUTOCAST_DTYPE).removeprefix("torch.") if torch.cuda.is_available() else "none"
+    )
+    record["student_n_params"] = sum(p.numel() for p in model.parameters())
+    record["optimizer_class"] = type(optimizer).__qualname__
+    record["torch_version"] = torch.__version__
+    try:
+        import transformers
+        record["transformers_version"] = transformers.__version__
+    except ImportError:
+        pass
+    try:
+        import bitsandbytes
+        record["bitsandbytes_version"] = bitsandbytes.__version__
+    except Exception:
+        pass
+    record["device"] = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
+    return record
+
+
+def describe_run_setup(record: Dict[str, Any]) -> str:
+    """One line for the log: precision regime, optimizer, parameter count."""
+    return (
+        f"Student: {record['student_dtype']} weights, autocast={record['student_autocast']}"
+        f" | optimizer={record['optimizer_class']}"
+        f" | {record['student_n_params']:,} params"
+    )
+
+
+class ParamChangeCanary:
+    """Fraction of parameter entries that the first optimizer step actually changes.
+
+    The direct test for the bf16 rounding failure above: with fp32 weights every
+    entry with a nonzero gradient moves, so the fraction should be near 1.0 and the
+    RMSNorm gains near 1.0 too. In bf16 at lr=1e-5 it was ~0.16 overall and 0.0 for
+    the gains. Samples a stride of each tensor rather than copying the model, so it
+    costs a few MB and is run once.
+    """
+
+    _SAMPLE = 8192
+
+    def __init__(self, model) -> None:
+        self._before: Dict[str, torch.Tensor] = {}
+        self._ndim: Dict[str, int] = {}
+        for name, p in model.named_parameters():
+            if not p.requires_grad:
+                continue
+            flat = p.detach().flatten()
+            stride = max(1, flat.numel() // self._SAMPLE)
+            self._before[name] = flat[::stride].to("cpu", copy=True)
+            self._ndim[name] = p.ndim
+
+    def report(self, model) -> Dict[str, float]:
+        changed = total = 0
+        changed_gain = total_gain = 0
+        for name, p in model.named_parameters():
+            before = self._before.get(name)
+            if before is None:
+                continue
+            flat = p.detach().flatten()
+            stride = max(1, flat.numel() // self._SAMPLE)
+            after = flat[::stride].to("cpu")
+            n = before.numel()
+            c = int((after != before).sum().item())
+            changed += c
+            total += n
+            if self._ndim[name] == 1:
+                changed_gain += c
+                total_gain += n
+        return {
+            "params_changed_step1": changed / max(total, 1),
+            "norm_gains_changed_step1": changed_gain / max(total_gain, 1),
+        }
+
+
+def log_first_step_canary(report: Dict[str, float], history: Dict[str, Any]) -> None:
+    """Print and record the first-step change fractions; warn when they say bf16."""
+    for key, val in report.items():
+        history[key] = val
+    frac = report["params_changed_step1"]
+    gains = report["norm_gains_changed_step1"]
+    print(f"  step 1 | params changed: {frac:.1%} | norm gains changed: {gains:.1%}")
+    if frac < 0.5:
+        print(
+            "  step 1 | WARN: most parameter entries did not change on the first step. "
+            "The update is being rounded away: the student is not in fp32, or the lr "
+            "is far below the weight precision. Nothing downstream of this is trustworthy."
+        )
 
 
 def kl_loss(
@@ -40,20 +210,6 @@ def kl_loss(
         total = total + (p_t * (log_p_t - log_q_s)).sum()
 
     return total / valid.numel() * (t**2)
-
-
-def make_optimizer(model, lr: float):
-    """Return a bitsandbytes 8-bit PagedAdamW if available, else standard AdamW."""
-    import importlib
-    bnb = None
-    try:
-        bnb = importlib.import_module("bitsandbytes")
-    except ImportError:
-        pass
-    if bnb is not None:
-        return bnb.optim.PagedAdamW8bit(params=model.parameters(), lr=lr)
-    from torch.optim import AdamW
-    return AdamW(params=model.parameters(), lr=lr, foreach=False)
 
 
 def save_checkpoint(model, tokenizer, save_dir: str, name: str = "final_checkpoint") -> None:
