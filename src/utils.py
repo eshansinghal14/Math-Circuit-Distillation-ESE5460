@@ -89,7 +89,7 @@ def patch_tokenizer_no_special_tokens(tokenizer):
     return tokenizer
 
 
-def load_model(model_name):
+def load_model(model_name, *, dtype: torch.dtype = torch.bfloat16):
     from transformers.utils import logging as hf_logging
     hf_logging.set_verbosity_error()
     hf_logging.disable_progress_bar()
@@ -129,7 +129,7 @@ def load_model(model_name):
     try:
         model = AutoModelForCausalLM.from_pretrained(
             load_path,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=dtype,
             **local_kwargs,
         ).to(device)
         tokenizer = AutoTokenizer.from_pretrained(load_path, **local_kwargs)

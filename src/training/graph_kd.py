@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import re
 import random
@@ -81,6 +82,7 @@ class GraphKDConfig:
     n_graph_prompts: Optional[int] = None
     graph_verbose: bool = False
     track_grad_metrics: bool = False
+    student_bf16: bool = False
     graph_node_labels: List[str] = field(default_factory=list)
     anova_range_radius: int = 0
     mlp_cache_batch_size: int = 32
@@ -102,7 +104,21 @@ class GraphKDTrainer:
         self.config = config
         seed_all(_SEED)
 
-        self.model, self.tokenizer = load_model(config.model)
+        # The student holds fp32 master weights, so .grad is fp32 and the forward runs
+        # under autocast(bf16). In bf16 the graph term was being silently rounded away:
+        # backward_batch_graph_loss backprops one prompt at a time, so the graph
+        # gradient arrives as ~32 separate accumulations into a .grad that already
+        # holds the far larger KD gradient. Each contribution is ~1/32 of an already
+        # small term, which puts it below half-ULP of the buffer for most elements and
+        # drops it entirely -- a systematic loss, not unbiased noise. A single add of
+        # the same total survives fine; it is the repeated accumulation that destroys
+        # it. On the lambda sweep the surviving graph gradient was 66 / 78 / 91 / 100%
+        # of its true magnitude at lambda 0.03 / 0.1 / 0.3 / 1.0, and a 32-add bf16
+        # simulation reproduces that shape (49 / 84 / 105 / 101%) while fp32 recovers
+        # 100% at every lambda. The teacher is inference-only and keeps bf16.
+        self.model, self.tokenizer = load_model(
+            config.model, dtype=torch.bfloat16 if config.student_bf16 else torch.float32
+        )
         if hasattr(self.model.config, "use_cache"):
             self.model.config.use_cache = False
         if hasattr(self.model, "gradient_checkpointing_enable"):
@@ -149,6 +165,7 @@ class GraphKDTrainer:
 
         self.graph_config = GraphAuxConfig(
             lambda_graph=config.lambda_graph,
+            graph_dtype=torch.bfloat16,
             teacher_prop_neurons_per_layer=config.teacher_prop_neurons_per_layer,
             student_prop_neurons_per_layer=config.student_prop_neurons_per_layer,
             top_k_logits=config.top_k_logits,
@@ -174,9 +191,21 @@ class GraphKDTrainer:
         self._train_step = 0
         self._last_save_step = 0
 
+    def _autocast(self):
+        """bf16 autocast for the student forward when it holds fp32 master weights."""
+        if self.config.student_bf16 or _DEVICE.type != "cuda":
+            return contextlib.nullcontext()
+        return torch.autocast(device_type=_DEVICE.type, dtype=torch.bfloat16)
+
     def _eval_on(self, model, dataset_name: str, test_dataset: PromptAnswerDataset) -> float:
         cfg = self.config
-        return eval_model(model, self.tokenizer, test_dataset, dataset_name, cfg.batch_size, cfg.max_eval_tokens)
+        # Generation needs no gradients, so run it in bf16 regardless of the master
+        # weight dtype; fp32 generation would roughly double eval cost for nothing.
+        with self._autocast():
+            return eval_model(
+                model, self.tokenizer, test_dataset, dataset_name,
+                cfg.batch_size, cfg.max_eval_tokens,
+            )
 
     def _eval(self) -> float:
         return self._eval_on(self.model, self.config.dataset, self.test_dataset)
@@ -225,7 +254,8 @@ class GraphKDTrainer:
                 }
 
             # ── KL loss ───────────────────────────────────────────────────────
-            student_logits = self.model(input_ids, attention_mask=attention_mask).logits
+            with self._autocast():
+                student_logits = self.model(input_ids, attention_mask=attention_mask).logits
 
             with torch.no_grad():
                 teacher_logits = self.teacher(input_ids, attention_mask=attention_mask).logits
@@ -489,6 +519,13 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Max prompts per batch to compute graph loss for (None = all).")
     group.add_argument("--graph-verbose", action="store_true", dest="graph_verbose")
     group.add_argument(
+        "--student-bf16", "--student_bf16", action="store_true", dest="student_bf16",
+        help="Load the student in bf16 instead of fp32 master weights. Saves memory but "
+             "accumulates gradients in bf16, whose ~0.39%% relative precision rounds away "
+             "a graph term that is a smaller fraction of the KD gradient than that -- "
+             "which is the case for lambda_graph below roughly 0.3. Escape hatch for OOM.",
+    )
+    group.add_argument(
         "--constant-node-weighting", "--constant_node_weighting",
         action="store_true", dest="constant_node_weighting",
         help="Replace frac_external with 1 in the supernode aggregation, so a supernode "
@@ -561,6 +598,7 @@ def main() -> None:
             freeze_attention=args.freeze_attention,
             freeze_rms_norm=args.freeze_rms_norm,
             constant_node_weighting=args.constant_node_weighting,
+            student_bf16=args.student_bf16,
             top_k_logits=args.top_k_logits,
             teacher_prop_neurons_per_layer=args.teacher_prop_neurons_per_layer,
             student_prop_neurons_per_layer=args.student_prop_neurons_per_layer,
