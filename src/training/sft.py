@@ -33,6 +33,8 @@ from training.utils import (
     log_first_step_canary,
     make_optimizer,
     maybe_save_periodic_checkpoint,
+    resume_checkpoint_dir,
+    resume_training_state,
     run_config_record,
     save_checkpoint,
     save_curves,
@@ -86,6 +88,7 @@ class SFTConfig:
     save_every_n_steps: int = 0
     grad_accum_steps: int = 1
     eval_datasets: List[str] = field(default_factory=list)
+    resume: bool = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -104,7 +107,9 @@ class SFTTrainer:
         seed_all(_SEED)
 
         # fp32 master weights with a bf16 autocast forward; see training/utils.py.
-        self.model, self.tokenizer = load_student(config.model)
+        # --resume loads the weights the periodic checkpoint saved instead.
+        student_src = resume_checkpoint_dir(config.save_dir) if config.resume else config.model
+        self.model, self.tokenizer = load_student(student_src)
 
         dataset = PromptAnswerDataset(config.dataset, train_data, self.tokenizer)
         self.test_dataset = PromptAnswerDataset(config.dataset, test_data, self.tokenizer)
@@ -125,6 +130,11 @@ class SFTTrainer:
         self.history: Dict[str, List] = defaultdict(list)
         self._train_step = 0
         self._last_save_step = 0
+        if config.resume:
+            step, history = resume_training_state(self.optimizer, config.save_dir)
+            self.history = defaultdict(list, history)
+            self._train_step = step
+            self._last_save_step = step
 
     def _autocast(self):
         return student_autocast()
@@ -190,6 +200,7 @@ class SFTTrainer:
                     self.model, self.tokenizer, self.config.save_dir,
                     self._train_step, self.config.save_every_n_steps,
                     self._last_save_step, self.history,
+                    optimizer=self.optimizer,
                 )
                 accum_loss = 0.0
                 n_steps += 1
@@ -200,18 +211,27 @@ class SFTTrainer:
         cfg = self.config
         os.makedirs(cfg.save_dir, exist_ok=True)
 
-        self.history["config"] = run_config_record(cfg, self.model, self.optimizer)
-        print(describe_run_setup(self.history["config"]))
+        if cfg.resume:
+            # The config record and baselines were taken by the original run and
+            # came back with the history; re-running the baseline eval would
+            # score the checkpoint, not the untrained student.
+            if self.history.get("config"):
+                print(describe_run_setup(self.history["config"]))
+            self.history["resumed_at_step"].append(self._train_step)
+            print(f"Resuming at step {self._train_step}/{cfg.steps}; skipping baseline eval.")
+        else:
+            self.history["config"] = run_config_record(cfg, self.model, self.optimizer)
+            print(describe_run_setup(self.history["config"]))
 
-        print("Evaluating baseline...")
-        baseline_acc = self._eval()
-        self.history["student_baseline"] = baseline_acc
-        self.history["accuracy"].append(baseline_acc)
-        self.history["accuracy_step"].append(0)
-        print(f"  Baseline accuracy: {baseline_acc:.4f}")
-        for ds, acc in self._eval_all_extra().items():
-            self.history[f"accuracy_{ds}"].append(acc)
-            print(f"  Baseline [{ds}]: {acc:.4f}")
+            print("Evaluating baseline...")
+            baseline_acc = self._eval()
+            self.history["student_baseline"] = baseline_acc
+            self.history["accuracy"].append(baseline_acc)
+            self.history["accuracy_step"].append(0)
+            print(f"  Baseline accuracy: {baseline_acc:.4f}")
+            for ds, acc in self._eval_all_extra().items():
+                self.history[f"accuracy_{ds}"].append(acc)
+                print(f"  Baseline [{ds}]: {acc:.4f}")
 
         sample = self.loader.dataset[0]
         print("─" * 60)
@@ -274,6 +294,7 @@ def main() -> None:
             grad_accum_steps=args.grad_accum_steps,
             max_eval_tokens=args.max_eval_tokens,
             eval_datasets=args.eval_datasets,
+            resume=args.resume,
         ),
         train_data,
         test_data,

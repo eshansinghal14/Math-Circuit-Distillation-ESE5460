@@ -35,6 +35,8 @@ from training.utils import (
     log_first_step_canary,
     make_optimizer,
     maybe_save_periodic_checkpoint,
+    resume_checkpoint_dir,
+    resume_training_state,
     run_config_record,
     save_checkpoint,
     save_curves,
@@ -68,6 +70,7 @@ class StandardKDConfig:
     save_every_n_steps: int = 0
     grad_accum_steps: int = 1
     eval_datasets: List[str] = field(default_factory=list)
+    resume: bool = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -87,7 +90,9 @@ class StandardKDTrainer:
 
         # fp32 master weights with a bf16 autocast forward; see training/utils.py.
         # The teacher is inference-only and stays bf16.
-        self.model, self.tokenizer = load_student(config.model)
+        # --resume loads the weights the periodic checkpoint saved instead.
+        student_src = resume_checkpoint_dir(config.save_dir) if config.resume else config.model
+        self.model, self.tokenizer = load_student(student_src)
 
         self.teacher, _ = load_model(config.teacher)
         self.teacher.eval()
@@ -115,6 +120,11 @@ class StandardKDTrainer:
         self.history: Dict[str, List] = defaultdict(list)
         self._train_step = 0
         self._last_save_step = 0
+        if config.resume:
+            step, history = resume_training_state(self.optimizer, config.save_dir)
+            self.history = defaultdict(list, history)
+            self._train_step = step
+            self._last_save_step = step
 
     def _autocast(self):
         return student_autocast()
@@ -191,6 +201,7 @@ class StandardKDTrainer:
                     self.model, self.tokenizer, self.config.save_dir,
                     self._train_step, self.config.save_every_n_steps,
                     self._last_save_step, self.history,
+                    optimizer=self.optimizer,
                 )
                 accum_loss = 0.0
                 n_steps += 1
@@ -201,21 +212,30 @@ class StandardKDTrainer:
         cfg = self.config
         os.makedirs(cfg.save_dir, exist_ok=True)
 
-        self.history["config"] = run_config_record(cfg, self.model, self.optimizer)
-        print(describe_run_setup(self.history["config"]))
+        if cfg.resume:
+            # The config record and baselines were taken by the original run and
+            # came back with the history; re-running the baseline eval would
+            # score the checkpoint, not the untrained student.
+            if self.history.get("config"):
+                print(describe_run_setup(self.history["config"]))
+            self.history["resumed_at_step"].append(self._train_step)
+            print(f"Resuming at step {self._train_step}/{cfg.steps}; skipping baseline eval.")
+        else:
+            self.history["config"] = run_config_record(cfg, self.model, self.optimizer)
+            print(describe_run_setup(self.history["config"]))
 
-        print("Evaluating baseline...")
-        baseline_acc = self._eval()
-        self.history["student_baseline"] = baseline_acc
-        self.history["accuracy"].append(baseline_acc)
-        self.history["accuracy_step"].append(0)
-        print(f"  Student baseline accuracy: {baseline_acc:.4f}")
-        teacher_baseline_acc = self._eval_teacher()
-        self.history["teacher_baseline"] = teacher_baseline_acc
-        print(f"  Teacher baseline accuracy: {teacher_baseline_acc:.4f}")
-        for ds, acc in self._eval_all_extra().items():
-            self.history[f"accuracy_{ds}"].append(acc)
-            print(f"  Student baseline [{ds}]: {acc:.4f}")
+            print("Evaluating baseline...")
+            baseline_acc = self._eval()
+            self.history["student_baseline"] = baseline_acc
+            self.history["accuracy"].append(baseline_acc)
+            self.history["accuracy_step"].append(0)
+            print(f"  Student baseline accuracy: {baseline_acc:.4f}")
+            teacher_baseline_acc = self._eval_teacher()
+            self.history["teacher_baseline"] = teacher_baseline_acc
+            print(f"  Teacher baseline accuracy: {teacher_baseline_acc:.4f}")
+            for ds, acc in self._eval_all_extra().items():
+                self.history[f"accuracy_{ds}"].append(acc)
+                print(f"  Student baseline [{ds}]: {acc:.4f}")
 
         sample = self.loader.dataset[0]
         print("─" * 60)
@@ -247,7 +267,7 @@ class StandardKDTrainer:
             print(f"  [eval] step {self._train_step}/{cfg.steps} | Acc={acc:.4f}{extra_str}")
 
         save_history(self.history, cfg.save_dir)
-        save_curves(self.history, cfg.save_dir, loss_key="step_kl_loss", loss_label="KL Loss")
+        save_curves(self.history, cfg.save_dir, losses=[("step_kl_loss", "KL Loss")])
         save_checkpoint(self.model, self.tokenizer, cfg.save_dir)
         print(f"Results saved to: {cfg.save_dir}")
         return dict(self.history)
@@ -285,6 +305,7 @@ def main() -> None:
             grad_accum_steps=args.grad_accum_steps,
             max_eval_tokens=args.max_eval_tokens,
             eval_datasets=args.eval_datasets,
+            resume=args.resume,
         ),
         train_data,
         test_data,

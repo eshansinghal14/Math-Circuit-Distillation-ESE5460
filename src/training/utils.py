@@ -7,8 +7,10 @@ import contextlib
 import dataclasses
 import json
 import os
-from typing import Any, Dict, List
+import random
+from typing import Any, Dict, List, Sequence, Tuple
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -212,11 +214,99 @@ def kl_loss(
     return total / valid.numel() * (t**2)
 
 
-def save_checkpoint(model, tokenizer, save_dir: str, name: str = "final_checkpoint") -> None:
+# ─────────────────────────────────────────────────────────────────────────────
+# Checkpoints and resume
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Two kinds of checkpoint are written. ``<save_dir>/final_checkpoint`` is the
+# deliverable: weights and tokenizer only, loadable with from_pretrained. The
+# periodic ``<save_dir>/checkpoint`` exists so an interrupted run can continue,
+# so next to the weights it also carries ``training_state.pt``: the optimizer
+# state (fp32 Adam moments, ~2x the parameter count), the train step, the
+# history so the curves continue, and the RNG state. ``--resume`` loads the
+# weights from that folder and restores the rest through resume_training_state.
+
+TRAINING_STATE_FILE = "training_state.pt"
+PERIODIC_CHECKPOINT_NAME = "checkpoint"
+
+
+def _rng_state() -> Dict[str, Any]:
+    state: Dict[str, Any] = {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch": torch.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        state["cuda"] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def _restore_rng_state(state: Dict[str, Any]) -> None:
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch"])
+    if torch.cuda.is_available() and "cuda" in state:
+        torch.cuda.set_rng_state_all(state["cuda"])
+
+
+def save_checkpoint(
+    model,
+    tokenizer,
+    save_dir: str,
+    name: str = "final_checkpoint",
+    *,
+    optimizer=None,
+    step: int | None = None,
+    history: Dict[str, Any] | None = None,
+) -> None:
+    """Write weights and tokenizer to ``<save_dir>/<name>``.
+
+    When ``optimizer`` is given the folder also gets ``training_state.pt`` with
+    the optimizer state, step, history and RNG state, which is what makes the
+    periodic checkpoint resumable. The final checkpoint omits it.
+    """
     path = os.path.join(save_dir, name)
     os.makedirs(path, exist_ok=True)
     model.save_pretrained(path)
     tokenizer.save_pretrained(path)
+    if optimizer is None:
+        return
+    state = {
+        "optimizer": optimizer.state_dict(),
+        "step": int(step or 0),
+        "history": dict(history) if history is not None else {},
+        "rng": _rng_state(),
+    }
+    final = os.path.join(path, TRAINING_STATE_FILE)
+    tmp = final + ".tmp"
+    torch.save(state, tmp)
+    os.replace(tmp, final)
+
+
+def resume_checkpoint_dir(save_dir: str) -> str:
+    """The periodic checkpoint folder a resumed run loads its student from."""
+    path = os.path.join(save_dir, PERIODIC_CHECKPOINT_NAME)
+    if not os.path.isfile(os.path.join(path, TRAINING_STATE_FILE)):
+        raise FileNotFoundError(
+            f"--resume needs {os.path.join(path, TRAINING_STATE_FILE)}; run with "
+            f"--save-every-n-steps > 0 first so a resumable checkpoint exists."
+        )
+    return path
+
+
+def resume_training_state(optimizer, save_dir: str) -> Tuple[int, Dict[str, Any]]:
+    """Restore optimizer, RNG and history from ``<save_dir>/checkpoint``.
+
+    Returns ``(step, history)``. The optimizer must already wrap the parameters
+    of the model that was loaded from the same folder.
+    """
+    path = os.path.join(resume_checkpoint_dir(save_dir), TRAINING_STATE_FILE)
+    state = torch.load(path, map_location="cpu", weights_only=False)
+    optimizer.load_state_dict(state["optimizer"])
+    _restore_rng_state(state["rng"])
+    step = int(state["step"])
+    print(f"Resumed optimizer, RNG and history from {path} at step {step}")
+    return step, state["history"]
 
 
 def maybe_save_periodic_checkpoint(
@@ -227,17 +317,22 @@ def maybe_save_periodic_checkpoint(
     every: int,
     last_saved_step: int,
     history: Dict[str, Any] | None = None,
+    optimizer=None,
 ) -> int:
     """Overwrite ``<save_dir>/checkpoint`` once ``every`` steps have passed since the last save.
 
+    Passing ``optimizer`` makes the checkpoint resumable (see save_checkpoint).
     Returns the step of the most recent save (unchanged if nothing was written).
     """
     if every <= 0 or step - last_saved_step < every:
         return last_saved_step
-    save_checkpoint(model, tokenizer, save_dir, name="checkpoint")
+    save_checkpoint(
+        model, tokenizer, save_dir, name=PERIODIC_CHECKPOINT_NAME,
+        optimizer=optimizer, step=step, history=history,
+    )
     if history is not None:
         save_history(history, save_dir)
-    print(f"  Saved checkpoint at step {step} -> {os.path.join(save_dir, 'checkpoint')}")
+    print(f"  Saved checkpoint at step {step} -> {os.path.join(save_dir, PERIODIC_CHECKPOINT_NAME)}")
     return step
 
 
@@ -259,9 +354,10 @@ def save_history(history: Dict[str, Any], save_dir: str) -> None:
 def save_curves(
     history: Dict[str, List],
     save_dir: str,
-    loss_key: str = "step_ce_loss",
-    loss_label: str = "CE Loss",
+    losses: Sequence[Tuple[str, str]] = (("step_ce_loss", "CE Loss"),),
 ) -> None:
+    """Write ``<save_dir>/training_curves.png``: one panel per ``(history key, title)``
+    in ``losses`` against the train step, then an accuracy panel."""
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -269,19 +365,23 @@ def save_curves(
     except ImportError:
         return
     steps = history.get("train_step", [])
-    ce_series = history.get(loss_key, [])
     acc_series = history.get("accuracy", [])
     acc_steps = history.get("accuracy_step", list(range(1, len(acc_series) + 1)))
     extra_acc_keys = sorted(k for k in history if k.startswith("accuracy_") and k != "accuracy_step")
     use_legend = bool(extra_acc_keys)
     if not steps:
         return
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-    axes[0].plot(steps[: len(ce_series)], ce_series, marker="o", markersize=2)
-    axes[0].set_title(loss_label)
-    axes[0].grid(True, alpha=0.3)
+    n_panels = len(losses) + 1
+    fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 4))
+    for ax, (loss_key, loss_label) in zip(axes, losses):
+        series = history.get(loss_key, [])
+        ax.plot(steps[: len(series)], series, marker="o", markersize=2)
+        ax.set_title(loss_label)
+        ax.set_xlabel("train step")
+        ax.grid(True, alpha=0.3)
+    acc_ax = axes[-1]
     if acc_series:
-        axes[1].plot(
+        acc_ax.plot(
             acc_steps[: len(acc_series)], acc_series,
             marker="o", markersize=2,
             label="main" if use_legend else None,
@@ -290,15 +390,16 @@ def save_curves(
         ds_name = key[len("accuracy_"):]
         extra_series = history.get(key, [])
         if extra_series:
-            axes[1].plot(
+            acc_ax.plot(
                 acc_steps[: len(extra_series)], extra_series,
                 marker="o", markersize=2, label=ds_name,
             )
-    axes[1].set_title("Accuracy")
-    axes[1].set_ylim(0, 1)
-    axes[1].grid(True, alpha=0.3)
+    acc_ax.set_title("Accuracy")
+    acc_ax.set_xlabel("train step")
+    acc_ax.set_ylim(0, 1)
+    acc_ax.grid(True, alpha=0.3)
     if use_legend:
-        axes[1].legend(fontsize=7, loc="lower right")
+        acc_ax.legend(fontsize=7, loc="lower right")
     fig.tight_layout()
     fig.savefig(os.path.join(save_dir, "training_curves.png"), dpi=150)
     plt.close(fig)
@@ -323,7 +424,11 @@ def add_standard_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--save-dir", type=str, default="results/sft")
     group.add_argument("--eval-every-n-steps", type=int, default=1, dest="eval_every_n_steps")
     group.add_argument("--save-every-n-steps", type=int, default=0, dest="save_every_n_steps",
-                    help="Overwrite <save-dir>/checkpoint every N train steps (0 = disable).")
+                    help="Overwrite <save-dir>/checkpoint (weights + optimizer state) every N "
+                         "train steps (0 = disable).")
+    group.add_argument("--resume", action="store_true",
+                    help="Continue from <save-dir>/checkpoint: loads the student weights, "
+                         "optimizer state, step and history saved by --save-every-n-steps.")
     group.add_argument("--grad-accum-steps", type=int, default=1, dest="grad_accum_steps")
     group.add_argument("--max-eval-tokens", type=int, default=256, dest="max_eval_tokens")
     group.add_argument("--test-limit", type=int, default=None, dest="test_limit")
