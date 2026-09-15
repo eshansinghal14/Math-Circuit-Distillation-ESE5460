@@ -477,6 +477,19 @@ Hugging Face Jacobian. Appendix~\ref{app:freeze} measures what the choice costs:
 gradient's direction rather than its magnitude, and the direct-path linearisation is the better
 training signal on every metric we tracked.
 
+\emph{Precision.} The graph gradient is small next to the KD gradient --- $0.5$--$6\%$ of its
+norm for $\lambda \in [0.01, 0.3]$ (Appendix~\ref{app:lambda}) --- and it arrives one prompt at
+a time, since each prompt's graph is backpropagated and freed before the next is built
+(Appendix~\ref{app:perf}). With bf16 parameters those $\sim$32 partial sums each land below half
+a unit in the last place of a \texttt{.grad} buffer that already holds the KD gradient, and are
+rounded away: we measured only $66$--$100\%$ of the graph gradient surviving accumulation,
+decreasing with $\lambda$, which silently compressed a $\lambda$ sweep toward its top. bf16
+weights lose the update itself as well, since an AdamW step at $10^{-6}$--$10^{-5}$ is under half
+a ULP for most weights. The student therefore holds fp32 master weights and fp32 optimiser
+moments and runs its forward under bf16 autocast; the inference-only teacher stays bf16. The test
+that this is enough is the step-one check of Appendix~\ref{app:lambda}: summaries of the graph
+gradient that are invariant to its scale must agree across $\lambda$, and now do.
+
 \section{The Direct-Path Linearisation as a Training Signal}
 \label{app:freeze}
 
@@ -766,7 +779,7 @@ The sweep doubles as a precision check on the training stack. At step one the ru
 so any scale-invariant summary of the graph gradient must agree across $\lambda$; both
 $\|g_{\mathrm{graph}}\| / \lambda$ and $\cos(g_{\mathrm{graph}}, g_{\mathrm{KD}})$ do, to four
 decimals ($2.82$ and $-0.041$). Under the bf16 gradient accumulation of an earlier version of the
-stack they did not: the graph gradient, which arrives one prompt at a time into a buffer already
+stack (Appendix~\ref{app:llama}) they did not: the graph gradient, which arrives one prompt at a time into a buffer already
 holding the far larger KD gradient, was rounded away more severely the smaller $\lambda$ was,
 which biased that regime against small $\lambda$. The $\lambda = 1$ results of
 Appendix~\ref{app:freeze} were measured there and are being re-run. Single seed; $\lambda = 1$ is
