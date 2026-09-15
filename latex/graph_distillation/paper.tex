@@ -1,8 +1,18 @@
 \documentclass{article}
 
-% NeurIPS style. Options: [preprint] for a non-anonymous preprint with line
-% numbers, [final] for camera-ready, no option for anonymised submission.
-\usepackage[preprint]{neurips_2023}
+% ICLR 2027 style (iclr2027_conference.sty, .bst, fancyhdr.sty and natbib.sty
+% are the official files from github.com/ICLR/Master-Template/iclr2027). The
+% submission is anonymised by default: the author block below is replaced by
+% "Anonymous authors" until \iclrfinalcopy is uncommented before
+% \begin{document}. Main text is limited to 9 pages at submission, 10 for the
+% camera-ready; the AI use, ethics and reproducibility statements, references
+% and appendices do not count. The template's math_commands.tex is deliberately
+% not \input: it defines \vg and would clobber the comment macro below.
+%
+% The style loads eso-pic, which loads xcolor with no options; the named-colour
+% options the comment macros need must therefore be passed before the style.
+\PassOptionsToPackage{usenames,dvipsnames,svgnames,table}{xcolor}
+\usepackage{iclr2027_conference,times}
 
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
@@ -15,7 +25,7 @@
 \usepackage{graphicx}
 
 \usepackage{amsmath, amssymb, bm, mathtools}
-\usepackage[usenames,dvipsnames,svgnames,table]{xcolor}
+\usepackage{xcolor} % options passed above, before the ICLR style
 \usepackage{float, subcaption, wrapfig}
 
 \newcommand{\vg}[1]{{\color{blue} vg: #1}}
@@ -35,19 +45,26 @@
 
 \title{Graph Distillation: Transferring Attribution-Graph Structure\\from a Large Teacher to a Small Student}
 
+% Shown only in the camera-ready (\iclrfinalcopy); the submission is anonymous.
 \author{%
   Eshan Singhal\thanks{Equal contribution.} \\
+  University of Pennsylvania \\
   \texttt{esinghal@seas.upenn.edu} \\
   \And
   Audhav Durai\footnotemark[1] \\
+  University of Pennsylvania \\
   \texttt{audhav@wharton.upenn.edu} \\
   \And
   Vedant Gaur\footnotemark[1] \\
+  University of Pennsylvania \\
   \texttt{vedantg@wharton.upenn.edu} \\
   \And
   Praneel Varshney\footnotemark[1] \\
+  University of Pennsylvania \\
   \texttt{pvarsh@seas.upenn.edu} \\
 }
+
+%\iclrfinalcopy % Uncomment for the camera-ready version, but NOT for submission.
 
 \begin{document}
 
@@ -349,8 +366,31 @@ the input normalisation; supernode membership is recomputed but not itself diffe
 
 \todosec{Conclusion.}
 
-\bibliographystyle{plainnat}
+% ICLR 2027: the AI use statement is required; the ethics and reproducibility
+% statements are recommended. None of the three counts toward the page limit,
+% and all go at the end of the main text, before the references.
+
+\subsection*{AI use statement}
+
+\todosec{AI use statement (required by ICLR 2027; see the AI Policy for Authors).
+State which of the tasks with required disclosure generative AI was used for and
+which it was not, how AI-assisted work was reviewed, and that the authors take
+responsibility for the final content.}
+
+\subsection*{Ethics statement}
+
+\todosec{Ethics statement (recommended). Synthetic arithmetic data, public model
+checkpoints, no human subjects; note anything the Code of Ethics asks about.}
+
+\subsection*{Reproducibility statement}
+
+\todosec{Reproducibility statement (recommended). Point to the appendices that
+carry the full hyperparameters, the training precision regime, the supernode
+construction and the diagnostics, and to the anonymised code in the supplementary
+material.}
+
 \bibliography{references}
+\bibliographystyle{iclr2027_conference}
 
 \appendix
 
