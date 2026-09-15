@@ -393,16 +393,11 @@ class GraphKDTrainer:
                     )
                 else:
                     gnorm_str = ""
-                align_str = (
-                    f" | supernodes={accum_aligned / grad_accum:.1f}/{accum_teacher_sn / grad_accum:.1f}"
-                    if accum_teacher_sn
-                    else ""
-                )
                 self.history["step_aligned_supernodes"].append(accum_aligned / grad_accum)
                 self.history["step_teacher_supernodes"].append(accum_teacher_sn / grad_accum)
                 print(
                     f"  step {self._train_step} | KL={accum_kl:.4f} | "
-                    f"Graph={accum_graph:.4f}{align_str}{gnorm_str}"
+                    f"Graph={accum_graph:.4f}{gnorm_str}"
                 )
                 self._last_save_step = maybe_save_periodic_checkpoint(
                     self.model, self.tokenizer, self.config.save_dir,
