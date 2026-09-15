@@ -15,6 +15,8 @@ from typing import Any, Dict, List, Sequence, Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch.utils._python_dispatch import TorchDispatchMode
+from torch.utils.flop_counter import flop_registry as _TORCH_FLOP_REGISTRY
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -185,6 +187,65 @@ def log_first_step_canary(report: Dict[str, float], history: Dict[str, Any]) -> 
         )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# FLOP counting
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class FlopCounter(TorchDispatchMode):
+    """Sum the FLOPs of every matmul, attention and convolution kernel dispatched
+    while the mode is active, forward and backward alike.
+
+    Uses torch's own per-op formulas (``torch.utils.flop_counter.flop_registry``,
+    the ones ``FlopCounterMode`` applies) but not ``FlopCounterMode`` itself: that
+    class also runs a ``ModuleTracker`` whose backward hooks call
+    ``_will_engine_execute_node`` on leaf tensors, which raises inside
+    ``torch.autograd.grad`` on the detached-leaf MLP outputs the attribution
+    forwards differentiate to. Elementwise work (norms, activations, softmax, the
+    optimizer update) is not counted, matching the usual model-FLOPs convention.
+    A dispatch mode routes every aten op through Python, so keep it active only
+    around the compute being measured and expect a few microseconds per op.
+
+    One instance may be entered several times in sequence; ``flops`` accumulates
+    across entries until ``reset``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.flops = 0
+
+    def reset(self) -> None:
+        self.flops = 0
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+        out = func(*args, **kwargs)
+        formula = _TORCH_FLOP_REGISTRY.get(getattr(func, "_overloadpacket", None))
+        if formula is not None:
+            self.flops += int(formula(*args, **kwargs, out_val=out))
+        return out
+
+
+class _NullFlopCounter:
+    """Stand-in for FlopCounter when --track-flops is off: no dispatch mode, no cost."""
+
+    flops = 0
+
+    def reset(self) -> None:
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        return False
+
+
+def step_flop_counter(enabled: bool):
+    """A FlopCounter when ``enabled``, otherwise a no-op with the same interface."""
+    return FlopCounter() if enabled else _NullFlopCounter()
+
+
 def kl_loss(
     student_logits: torch.Tensor,
     teacher_logits: torch.Tensor,
@@ -316,6 +377,7 @@ def save_checkpoint(
     optimizer=None,
     step: int | None = None,
     history: Dict[str, Any] | None = None,
+    extra_state: Dict[str, Any] | None = None,
 ) -> None:
     """Write weights and tokenizer to ``<save_dir>/<name>``.
 
@@ -325,7 +387,9 @@ def save_checkpoint(
     staged as ``<name>.tmp`` and swapped in only once every file is written, so
     an interrupted save leaves the previous complete checkpoint untouched rather
     than new weights next to an old optimizer state. The final checkpoint omits
-    the training state.
+    the training state. ``extra_state`` is any further trainer state that must
+    travel with the optimizer (a representation trainer's projector, say); it is
+    stored verbatim under ``"extra"`` and handed back by resume_training_state.
     """
     path = os.path.join(save_dir, name)
     if optimizer is None:
@@ -346,6 +410,7 @@ def save_checkpoint(
         "history": dict(history) if history is not None else {},
         "rng": _rng_state(),
         "weights_fingerprint": weights_fingerprint(model),
+        "extra": extra_state,
     }
     with open(os.path.join(stage, TRAINING_STATE_FILE), "wb") as f:
         torch.save(state, f)
@@ -375,10 +440,11 @@ def resume_checkpoint_dir(save_dir: str) -> str:
     return path
 
 
-def resume_training_state(model, optimizer, save_dir: str) -> Tuple[int, Dict[str, Any]]:
+def resume_training_state(model, optimizer, save_dir: str) -> Tuple[int, Dict[str, Any], Any]:
     """Restore optimizer, RNG and history from ``<save_dir>/checkpoint``.
 
-    Returns ``(step, history)``. ``model`` must be the student loaded from that
+    Returns ``(step, history, extra)`` where ``extra`` is whatever the saver
+    passed as ``extra_state`` (None if nothing). ``model`` must be the student loaded from that
     same folder and ``optimizer`` must wrap its parameters. The model is hashed
     and checked against the fingerprint stored with the optimizer state, so a
     checkpoint whose weights and training state came from different saves is
@@ -399,7 +465,7 @@ def resume_training_state(model, optimizer, save_dir: str) -> Tuple[int, Dict[st
     _restore_rng_state(state["rng"])
     step = int(state["step"])
     print(f"Resumed optimizer, RNG and history from {path} at step {step}; weights verified")
-    return step, state["history"]
+    return step, state["history"], state.get("extra")
 
 
 # Fields that legitimately differ between the original launch and a resume.
@@ -441,17 +507,19 @@ def maybe_save_periodic_checkpoint(
     last_saved_step: int,
     history: Dict[str, Any] | None = None,
     optimizer=None,
+    extra_state: Dict[str, Any] | None = None,
 ) -> int:
     """Overwrite ``<save_dir>/checkpoint`` once ``every`` steps have passed since the last save.
 
-    Passing ``optimizer`` makes the checkpoint resumable (see save_checkpoint).
+    Passing ``optimizer`` makes the checkpoint resumable (see save_checkpoint);
+    ``extra_state`` rides along in the training state.
     Returns the step of the most recent save (unchanged if nothing was written).
     """
     if every <= 0 or step - last_saved_step < every:
         return last_saved_step
     save_checkpoint(
         model, tokenizer, save_dir, name=PERIODIC_CHECKPOINT_NAME,
-        optimizer=optimizer, step=step, history=history,
+        optimizer=optimizer, step=step, history=history, extra_state=extra_state,
     )
     if history is not None:
         save_history(history, save_dir)
@@ -533,6 +601,15 @@ def add_kd_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--teacher", type=str, required=True)
     group.add_argument("--temperature", type=float, default=2.0)
     group.add_argument("--kl-token-chunk-size", type=int, default=64, dest="kl_token_chunk_size")
+    group.add_argument(
+        "--track-flops", "--track_flops", action="store_true", dest="track_flops",
+        help="Count the FLOPs of every matmul, attention and convolution kernel in each "
+             "train step's forward and backward passes (teacher forward and, for graph "
+             "KD, both attribution graphs included) and record the per-step total as "
+             "step_flops in the history. Elementwise ops and the optimizer update are "
+             "not counted. Routes every op through a Python dispatch mode, so a step "
+             "gets slower by a few microseconds per kernel it launches.",
+    )
 
 
 def add_standard_args(parser: argparse.ArgumentParser) -> None:

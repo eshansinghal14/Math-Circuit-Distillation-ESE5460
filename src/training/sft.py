@@ -132,7 +132,7 @@ class SFTTrainer:
         self._train_step = 0
         self._last_save_step = 0
         if config.resume:
-            step, history = resume_training_state(self.model, self.optimizer, config.save_dir)
+            step, history, _ = resume_training_state(self.model, self.optimizer, config.save_dir)
             self.history = defaultdict(list, history)
             self._train_step = step
             self._last_save_step = step

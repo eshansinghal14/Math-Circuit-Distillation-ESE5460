@@ -42,6 +42,7 @@ from training.utils import (
     save_checkpoint,
     save_curves,
     save_history,
+    step_flop_counter,
     student_autocast,
 )
 
@@ -72,6 +73,7 @@ class StandardKDConfig:
     grad_accum_steps: int = 1
     eval_datasets: List[str] = field(default_factory=list)
     resume: bool = False
+    track_flops: bool = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -122,7 +124,7 @@ class StandardKDTrainer:
         self._train_step = 0
         self._last_save_step = 0
         if config.resume:
-            step, history = resume_training_state(self.model, self.optimizer, config.save_dir)
+            step, history, _ = resume_training_state(self.model, self.optimizer, config.save_dir)
             self.history = defaultdict(list, history)
             self._train_step = step
             self._last_save_step = step
@@ -155,25 +157,32 @@ class StandardKDTrainer:
         total_loss = 0.0
         n_steps = 0
         accum_loss = 0.0
+        accum_flops = 0
         micro_step = 0
+        # Matmul / attention FLOPs of each micro-step's forward and backward
+        # passes; a no-op unless --track-flops. Entered around the compute only,
+        # so the eval and the optimizer step stay outside it.
+        flop_counter = step_flop_counter(cfg.track_flops)
 
         self.optimizer.zero_grad()
         for batch in self.loader:
             if max_steps is not None and n_steps >= max_steps:
                 break
+            flop_counter.reset()
             input_ids = batch["input_ids"].to(_DEVICE)
             attention_mask = batch["attention_mask"].to(_DEVICE)
 
-            with self._autocast():
-                student_logits = self.model(input_ids, attention_mask=attention_mask).logits
+            with flop_counter:
+                with self._autocast():
+                    student_logits = self.model(input_ids, attention_mask=attention_mask).logits
 
-            with torch.no_grad():
-                teacher_logits = self.teacher(input_ids, attention_mask=attention_mask).logits
+                with torch.no_grad():
+                    teacher_logits = self.teacher(input_ids, attention_mask=attention_mask).logits
 
-            loss = kl_loss(
-                student_logits, teacher_logits, attention_mask,
-                cfg.temperature, cfg.kl_token_chunk_size,
-            ) / grad_accum
+                loss = kl_loss(
+                    student_logits, teacher_logits, attention_mask,
+                    cfg.temperature, cfg.kl_token_chunk_size,
+                ) / grad_accum
 
             if not torch.isfinite(loss):
                 micro_step += 1
@@ -181,8 +190,10 @@ class StandardKDTrainer:
                     self.optimizer.zero_grad()
                 continue
 
-            loss.backward()
+            with flop_counter:
+                loss.backward()
             accum_loss += float(loss.item())
+            accum_flops += flop_counter.flops
             micro_step += 1
 
             if micro_step % grad_accum == 0:
@@ -197,7 +208,12 @@ class StandardKDTrainer:
                 self.history["train_step"].append(self._train_step)
                 self.history["step_kl_loss"].append(accum_loss)
                 total_loss += accum_loss
-                print(f"  step {self._train_step} | KL={accum_loss:.4f}")
+                if cfg.track_flops:
+                    self.history["step_flops"].append(accum_flops)
+                    flops_str = f" | FLOPs={accum_flops:.3e}"
+                else:
+                    flops_str = ""
+                print(f"  step {self._train_step} | KL={accum_loss:.4f}{flops_str}")
                 self._last_save_step = maybe_save_periodic_checkpoint(
                     self.model, self.tokenizer, self.config.save_dir,
                     self._train_step, self.config.save_every_n_steps,
@@ -205,6 +221,7 @@ class StandardKDTrainer:
                     optimizer=self.optimizer,
                 )
                 accum_loss = 0.0
+                accum_flops = 0
                 n_steps += 1
 
         return {"kl_loss": total_loss / max(n_steps, 1)}
@@ -311,6 +328,7 @@ def main() -> None:
             max_eval_tokens=args.max_eval_tokens,
             eval_datasets=args.eval_datasets,
             resume=args.resume,
+            track_flops=args.track_flops,
         ),
         train_data,
         test_data,

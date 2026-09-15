@@ -46,6 +46,7 @@ from training.utils import (
     save_checkpoint,
     save_curves,
     save_history,
+    step_flop_counter,
     student_autocast,
 )
 
@@ -91,6 +92,7 @@ class GraphKDConfig:
     n_graph_prompts: Optional[int] = None
     graph_verbose: bool = False
     track_grad_metrics: bool = False
+    track_flops: bool = False
     graph_node_labels: List[str] = field(default_factory=list)
     anova_range_radius: int = 0
     mlp_cache_batch_size: int = 32
@@ -189,7 +191,7 @@ class GraphKDTrainer:
         self._train_step = 0
         self._last_save_step = 0
         if config.resume:
-            step, history = resume_training_state(self.model, self.optimizer, config.save_dir)
+            step, history, _ = resume_training_state(self.model, self.optimizer, config.save_dir)
             self.history = defaultdict(list, history)
             self._train_step = step
             self._last_save_step = step
@@ -233,12 +235,18 @@ class GraphKDTrainer:
         accum_clip = 0.0
         accum_aligned = 0.0
         accum_teacher_sn = 0.0
+        accum_flops = 0
         micro_step = 0
+        # Matmul / attention FLOPs of each micro-step's forward and backward
+        # passes; a no-op unless --track-flops. Entered around the compute only,
+        # so the eval and the optimizer step stay outside it.
+        flop_counter = step_flop_counter(cfg.track_flops)
 
         self.optimizer.zero_grad()
         for batch in self.loader:
             if max_steps is not None and n_steps >= max_steps:
                 break
+            flop_counter.reset()
             input_ids = batch["input_ids"].to(_DEVICE)
             attention_mask = batch["attention_mask"].to(_DEVICE)
 
@@ -254,20 +262,21 @@ class GraphKDTrainer:
                 }
 
             # ── KL loss ───────────────────────────────────────────────────────
-            with self._autocast():
-                student_logits = self.model(input_ids, attention_mask=attention_mask).logits
+            with flop_counter:
+                with self._autocast():
+                    student_logits = self.model(input_ids, attention_mask=attention_mask).logits
 
-            with torch.no_grad():
-                teacher_logits = self.teacher(input_ids, attention_mask=attention_mask).logits
+                with torch.no_grad():
+                    teacher_logits = self.teacher(input_ids, attention_mask=attention_mask).logits
 
-            kl = kl_loss(
-                student_logits, teacher_logits, attention_mask,
-                cfg.temperature, cfg.kl_token_chunk_size,
-            ) / grad_accum
+                kl = kl_loss(
+                    student_logits, teacher_logits, attention_mask,
+                    cfg.temperature, cfg.kl_token_chunk_size,
+                ) / grad_accum
 
-            kl_finite = torch.isfinite(kl)
-            if kl_finite:
-                kl.backward()
+                kl_finite = torch.isfinite(kl)
+                if kl_finite:
+                    kl.backward()
 
             # ── Graph loss ────────────────────────────────────────────────────
             prompts: List[str] = batch["prompts"]
@@ -281,15 +290,16 @@ class GraphKDTrainer:
                     n: p.grad.detach().clone() if p.grad is not None else None
                     for n, p in self.model.named_parameters()
                 }
-            graph_loss_tensor, graph_metrics = backward_batch_graph_loss(
-                prompts=prompts,
-                answers=answers,
-                student_adapter=self.student_adapter,
-                teacher_adapter=self.teacher_adapter,
-                config=self.graph_config,
-                device=_DEVICE,
-                loss_scale=cfg.lambda_graph / grad_accum,
-            )
+            with flop_counter:
+                graph_loss_tensor, graph_metrics = backward_batch_graph_loss(
+                    prompts=prompts,
+                    answers=answers,
+                    student_adapter=self.student_adapter,
+                    teacher_adapter=self.teacher_adapter,
+                    config=self.graph_config,
+                    device=_DEVICE,
+                    loss_scale=cfg.lambda_graph / grad_accum,
+                )
             graph_val = float(graph_loss_tensor.item())
             # Supernode alignment counts are the cheapest early warning that the
             # target has quietly degraded. arg:<token> labels collide whenever a
@@ -344,6 +354,7 @@ class GraphKDTrainer:
 
             accum_kl += float(kl.item())
             accum_graph += graph_val
+            accum_flops += flop_counter.flops
 
             if micro_step % grad_accum == 0:
                 # The graph loss is backpropagated inside backward_batch_graph_loss
@@ -395,9 +406,14 @@ class GraphKDTrainer:
                     gnorm_str = ""
                 self.history["step_aligned_supernodes"].append(accum_aligned / grad_accum)
                 self.history["step_teacher_supernodes"].append(accum_teacher_sn / grad_accum)
+                if cfg.track_flops:
+                    self.history["step_flops"].append(accum_flops)
+                    flops_str = f" | FLOPs={accum_flops:.3e}"
+                else:
+                    flops_str = ""
                 print(
                     f"  step {self._train_step} | KL={accum_kl:.4f} | "
-                    f"Graph={accum_graph:.4f}{gnorm_str}"
+                    f"Graph={accum_graph:.4f}{gnorm_str}{flops_str}"
                 )
                 self._last_save_step = maybe_save_periodic_checkpoint(
                     self.model, self.tokenizer, self.config.save_dir,
@@ -414,6 +430,7 @@ class GraphKDTrainer:
                 accum_clip = 0.0
                 accum_aligned = 0.0
                 accum_teacher_sn = 0.0
+                accum_flops = 0
                 n_steps += 1
 
         denom = max(n_steps, 1)
@@ -618,6 +635,7 @@ def main() -> None:
             n_graph_prompts=args.n_graph_prompts,
             graph_verbose=args.graph_verbose,
             track_grad_metrics=args.track_grad_metrics,
+            track_flops=args.track_flops,
             graph_node_labels=graph_node_labels,
             anova_range_radius=args.anova_range_radius,
             mlp_cache_batch_size=args.cache_batch_size,
