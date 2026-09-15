@@ -702,80 +702,36 @@ unfrozen variants ($0.091$ OOD, plus the two sign changes) is not. 2222\_add is 
 in every configuration. \es{Seeds and longer runs before this table goes in the camera-ready.}
 
 
-\section{Choosing the Graph-Loss Weight}
+\section{Sensitivity to the Graph-Loss Weight}
 \label{app:lambda}
 
-The weight $\lambda$ on $\mathcal{L}_{\mathrm{graph}}$ in \eqref{eq:total} is the one
-hyperparameter the method adds, and it turns out to be the one that matters most. This appendix
-sweeps it over $\lambda \in \{0.01, 0.1, 0.3\}$ under otherwise identical settings, against a
-$\lambda = 0$ control that is ordinary output-level distillation through the same pipeline, and
-reports accuracy, the loss and gradient trajectories, and a precision check that the sweep itself
-makes possible.
-
-\subsection{Setup}
-\label{sec:lambda-setup}
-
-All runs distil Llama-3.1-8B into Llama-3.2-1B on two-digit addition at batch size 32, learning
-rate $10^{-6}$, temperature $\tau = 2$, gradient clipping at $1.0$, and a shared seed, so every
-run sees the same batches in the same order. The three graph-distillation runs train for 100
-steps. The graph term uses the arg-token and DLA supernodes of
-Section~\ref{sec:supernodes-general} with three neurons per supernode, the JSD of
-\eqref{eq:graphloss}, the full Jacobian (neither freeze of Appendix~\ref{app:freeze}), and
-$\fracext$-weighted aggregation; every prompt in the batch contributes a graph. The control sets
-$\lambda = 0$, which reduces \eqref{eq:total} to standard knowledge distillation, and trains for
-300 steps so that its peak is not cut off. The student holds fp32 master weights with a bf16
-autocast forward and is optimised by AdamW with fp32 moments; the teacher is inference-only in
-bf16. In-distribution accuracy is measured on held-out two-digit addition and out-of-distribution
-accuracy on the four families of Appendix~\ref{app:freeze}, every step for $\lambda = 0.01$,
-every second step for $\lambda = 0.1$ and $0.3$, and every fifth step for the control.
-
-\subsection{Accuracy}
-\label{sec:lambda-accuracy}
-
-Table~\ref{tab:lambda-acc} summarises the trajectories that Figure~\ref{fig:lambda-sweep} plots,
-Table~\ref{tab:lambda-ood} and Figure~\ref{fig:lambda-ood} break them out by
-out-of-distribution family.
+The weight $\lambda$ in \eqref{eq:total} is the one hyperparameter the method adds. We sweep
+$\lambda \in \{0.01, 0.1, 0.3\}$ against a $\lambda = 0$ control, which is standard knowledge
+distillation through the same pipeline, with everything else held fixed: learning rate
+$10^{-6}$, batch size 32, $\tau = 2$, a shared seed so every run sees the same batches, and the
+unfrozen arg-token and DLA supernodes of Section~\ref{sec:supernodes-general} with three neurons
+each. The graph runs train for 100 steps; the control trains for 300 so that its peak is not cut
+off. Table~\ref{tab:lambda} and Figure~\ref{fig:lambda} report the result.
 
 \begin{table}[h]
   \centering
-  \caption{Accuracy under each graph-loss weight and under standard KD, single seed.
-  \emph{Dip} is the minimum in-distribution accuracy over steps 1--30 and \emph{recovery} the
-  first step at which in-distribution accuracy is back at or above the untrained student's
-  $0.6404$. \emph{Peak} columns give the maximum over the run with the step at which it occurs;
-  \emph{at 100} columns are at step 100, the last step of the graph-distillation runs. The KD-only
-  run continued to step 300, where it stood at $0.8978$ and $0.1704$. OOD is the mean of the four
-  families.}
-  \label{tab:lambda-acc}
-  \begin{tabular}{lcccccc}
+  \small
+  \caption{Accuracy under each graph-loss weight, single seed. Peak columns are the maximum over
+  the run, with the step in parentheses; family columns are at step 100; \emph{dip} is the
+  minimum in-distribution accuracy over steps 1--30 and \emph{recovery} the first step back at or
+  above the untrained student. The control ran to step 300. Entries below the untrained student
+  are in italics.}
+  \label{tab:lambda}
+  \begin{tabular}{lcccccccc}
     \toprule
-    & dip (step) & recovery & 22\_add peak (step) & 22\_add at 100 & OOD peak (step) & OOD at 100 \\
+    & 22\_add (peak) & OOD (peak) & OOD (100) & 222\_add & 2222\_add & 33\_add & 21\_mult & dip / recovery \\
     \midrule
-    KD only ($\lambda = 0$) & 0.180 (20) & 70 & 0.9376 (195) & 0.8682 & 0.1928 (195) & 0.1587 \\
+    student, untrained & 0.6404 & 0.1421 & --- & 0.1050 & 0.0244 & 0.3199 & 0.1190 & --- \\
     \midrule
-    $\lambda = 0.01$ & 0.207 (20) & 55 & 0.9732 (100) & 0.9732 & 0.2569 (98) & 0.2564 \\
-    $\lambda = 0.1$  & 0.384 (18) & 28 & \textbf{0.9862} (98) & \textbf{0.9862} & \textbf{0.3774} (100) & \textbf{0.3774} \\
-    $\lambda = 0.3$  & \textbf{0.547} (10) & \textbf{18} & 0.9570 (76) & 0.8580 & 0.3684 (84) & 0.3362 \\
-    \bottomrule
-  \end{tabular}
-\end{table}
-
-\begin{table}[h]
-  \centering
-  \caption{Out-of-distribution accuracy by family at step 100. The untrained student is the
-  reference; entries below it are in italics. The KD-only run never exceeds the untrained student
-  on 2222\_add or 33\_add at any of its 300 steps.}
-  \label{tab:lambda-ood}
-  \begin{tabular}{lcccc}
-    \toprule
-    & 222\_add & 2222\_add & 33\_add & 21\_mult \\
-    \midrule
-    student, untrained & 0.1050 & 0.0244 & 0.3199 & 0.1190 \\
-    \midrule
-    KD only ($\lambda = 0$) & \emph{0.0973} & \emph{0.0072} & \emph{0.1923} & 0.3380 \\
-    \midrule
-    $\lambda = 0.01$ & 0.2083 & \emph{0.0174} & \emph{0.2930} & 0.5070 \\
-    $\lambda = 0.1$  & \textbf{0.3845} & 0.0614 & \textbf{0.3807} & \textbf{0.6830} \\
-    $\lambda = 0.3$  & 0.3032 & \textbf{0.0696} & 0.3391 & 0.6330 \\
+    KD only ($\lambda = 0$) & 0.9376 (195) & 0.1928 (195) & 0.1587 & \emph{0.0973} & \emph{0.0072} & \emph{0.1923} & 0.3380 & 0.180 / 70 \\
+    $\lambda = 0.01$ & 0.9732 (100) & 0.2569 (98) & 0.2564 & 0.2083 & \emph{0.0174} & \emph{0.2930} & 0.5070 & 0.207 / 55 \\
+    $\lambda = 0.1$ & \textbf{0.9862} (98) & \textbf{0.3774} (100) & \textbf{0.3774} & \textbf{0.3845} & 0.0614 & \textbf{0.3807} & \textbf{0.6830} & 0.384 / 28 \\
+    $\lambda = 0.3$ & 0.9570 (76) & 0.3684 (84) & 0.3362 & 0.3032 & \textbf{0.0696} & 0.3391 & 0.6330 & \textbf{0.547 / 18} \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -783,135 +739,38 @@ out-of-distribution family.
 \begin{figure}[h]
   \centering
   \includegraphics[width=\textwidth]{figures/lambda_sweep.pdf}
-  \caption{Training under three graph-loss weights, one hue stepped light to dark with
-  increasing $\lambda$, against standard KD in dashed grey. \emph{Top:} in-distribution and mean
-  out-of-distribution accuracy against training step; the dashed rule is the untrained student
-  and the dotted rule the teacher. Every run first falls below the untrained student and then
-  recovers, and the dip is shallower and earlier the larger $\lambda$ is, with KD alone the
-  deepest and slowest. KD alone is shown to step 100 to share the axis; it ran to 300 and its
-  later values are in Table~\ref{tab:lambda-acc}. \emph{Bottom left:} the graph loss as a 9-step
-  centred rolling mean; the three runs are nearly indistinguishable and all fall by about $0.03$
-  over the run. \emph{Bottom right:} the ratio of graph to KD gradient norm on a log axis. The
-  three lines are parallel and a decade apart per decade of $\lambda$, as they must be if the
-  graph gradient is delivered intact, and all climb through training as the KD gradient shrinks.
-  The control has no graph term and does not appear in the bottom row.}
-  \label{fig:lambda-sweep}
+  \caption{Sensitivity to $\lambda$. One hue stepped light to dark with increasing $\lambda$;
+  standard KD in dashed grey, shown to step 100 to share the axis. \emph{Left, centre:}
+  in-distribution and mean out-of-distribution accuracy against training step; the dashed rule is
+  the untrained student and the dotted rule the teacher. \emph{Right:} peak mean
+  out-of-distribution accuracy against $\lambda$ on a log axis, with the control's 300-step peak
+  as the dashed reference.}
+  \label{fig:lambda}
 \end{figure}
 
-\begin{figure}[h]
-  \centering
-  \includegraphics[width=\textwidth]{figures/lambda_sweep_ood.pdf}
-  \caption{The four out-of-distribution families separately, encoded as in
-  Figure~\ref{fig:lambda-sweep}; the dashed rule is the untrained student on each family. The dip
-  and its dependence on $\lambda$ are visible in every family, most sharply on three-digit
-  addition, where KD alone and $\lambda = 0.01$ have not recovered the untrained student's
-  accuracy by step 100 and $\lambda = 0.1$ has.}
-  \label{fig:lambda-ood}
-\end{figure}
+Three things hold across every metric and every family. First, output-level distillation alone
+does not generalise in this setting: the control peaks at $0.938$ in-distribution and $0.193$
+mean OOD, and at no point in 300 steps recovers the untrained student on three-digit or
+four-operand addition, whereas every graph run beats it on every family at step 100 and
+$\lambda = 0.1$ nearly doubles its OOD peak. Second, every run first falls below the untrained
+student and then recovers, and the dip is monotone in $\lambda$ --- a minimum of $0.180$,
+$0.207$, $0.384$ and $0.547$ at $\lambda = 0$, $0.01$, $0.1$ and $0.3$, recovered after 70, 55,
+28 and 18 steps --- so the dip belongs to the KD objective and the graph term shortens it.
+Third, larger $\lambda$ rises faster but peaks earlier and then declines: $\lambda = 0.3$ peaks
+between steps 76 and 84 and gives back $0.03$ OOD by step 100, while $\lambda = 0.1$ was still
+improving when it ended. The response is therefore an inverted U whose top is broad relative to
+a single seed --- $\lambda = 0.1$ and $0.3$ differ by $0.009$ OOD at their peaks across a
+threefold change in $\lambda$ --- and we use $\lambda = 0.1$ throughout.
 
-Four things are consistent across every metric and every family.
-
-\emph{Output-level distillation alone does not generalise.} Under the identical pipeline with the
-graph term removed, the student reaches $0.868$ in-distribution and $0.159$ mean OOD at step 100,
-and $0.938$ and $0.193$ at its best, at step 195 of 300, before declining. Its OOD peak is
-\emph{below the untrained student's} on two of the four families: at no point in 300 steps does it
-recover the $0.3199$ it started with on three-digit addition or the $0.0244$ on four-operand
-addition. Every graph-distillation run beats it on every family at step 100, and $\lambda = 0.1$
-beats its 300-step peak by $0.048$ in-distribution and by $0.185$, nearly twofold, on mean OOD.
-
-\emph{The graph term protects against the early collapse.} Every run first loses accuracy under
-distillation and then regains it, and the depth of that dip is monotone in $\lambda$: the
-in-distribution minimum is $0.180$, $0.207$, $0.384$ and $0.547$ at $\lambda = 0$, $0.01$, $0.1$
-and $0.3$, and recovery to the untrained student's accuracy takes 70, 55, 28 and 18 steps. The
-same ordering holds on every out-of-distribution family (Figure~\ref{fig:lambda-ood}). Since the
-runs share batches and differ only in $\lambda$, the effect is attributable to the graph term
-alone, and the control shows that the dip itself belongs to the KD objective: the graph term
-shortens it but does not cause it.
-
-\emph{Larger $\lambda$ rises faster, peaks earlier, and declines earlier.} $\lambda = 0.3$ reaches
-its in-distribution peak of $0.957$ at step 76 and its OOD peak of $0.368$ at step 84, and then
-declines on both axes to $0.858$ and $0.336$ at step 100. $\lambda = 0.1$ was still improving on
-both axes when the run ended, so its final values of $0.986$ and $0.377$ are lower bounds on its
-peak. $\lambda = 0.01$ lags throughout and ends at $0.256$ OOD.
-
-\emph{$\lambda = 0.1$ is the best setting at 100 steps.} It has the highest in-distribution
-accuracy, the highest mean OOD accuracy, and leads on three of the four families; $\lambda = 0.3$
-leads only on four-operand addition, and by $0.008$. The gap between $\lambda = 0.1$ and
-$\lambda = 0.3$ at their respective OOD peaks is $0.009$, inside what a single seed can produce, so
-the claim is that $0.1$ is a good weight, not that it is the optimum. We use it for every later
-experiment.
-
-\subsection{Gradient dynamics, and a precision check}
-\label{sec:lambda-gradients}
-
-Every run was trained with the per-step gradient instrumentation of
-Section~\ref{sec:freeze-dynamics}. Table~\ref{tab:lambda-grad} reports the step-one values and the
-run means.
-
-\begin{table}[h]
-  \centering
-  \caption{Gradient metrics under each graph-loss weight. The step-one columns are measured on
-  identical weights, since no update has yet been applied, and the two quantities that are
-  invariant to the scale of the graph gradient --- $\|g_{\mathrm{graph}}\| / \lambda$ and the
-  cosine --- must therefore agree across rows. They do, to four decimals. The graph norm is
-  already scaled by $\lambda$; \emph{ratio} is $\|g_{\mathrm{graph}}\| / \|g_{\mathrm{KD}}\|$.}
-  \label{tab:lambda-grad}
-  \begin{tabular}{lcccccccc}
-    \toprule
-    & \multicolumn{4}{c}{step 1} & \multicolumn{3}{c}{mean over 100 steps} \\
-    \cmidrule(lr){2-5} \cmidrule(lr){6-8}
-    $\lambda$ & $\|g_{\mathrm{KD}}\|$ & $\|g_{\mathrm{graph}}\|$ & $\|g_{\mathrm{graph}}\|/\lambda$ & $\cos$ & ratio & $\cos$ & sign flips \\
-    \midrule
-    0.01 & 50.5263 & 0.0282 & 2.82 & $-0.0412$ & 0.0050 & $+0.0077$ & 0.0020 \\
-    0.1  & 50.5263 & 0.2820 & 2.82 & $-0.0410$ & 0.0397 & $+0.0035$ & 0.0158 \\
-    0.3  & 50.5263 & 0.8458 & 2.82 & $-0.0412$ & 0.1146 & $+0.0004$ & 0.0445 \\
-    \bottomrule
-  \end{tabular}
-\end{table}
-
-\emph{The precision check.} At step one the three runs have identical weights, so the raw graph
-gradient is identical and any scale-invariant summary of it must agree across $\lambda$. Both do:
-$\|g_{\mathrm{graph}}\| / \lambda$ is $2.82$ in every row and the cosine is $-0.041$ in every row.
-This is not a formality. An earlier version of this stack accumulated gradients in bf16, and there
-the same check failed: $\|g_{\mathrm{graph}}\| / \lambda$ rose monotonically with $\lambda$ across
-a fourfold range and the cosine collapsed from $-0.024$ toward zero as $\lambda$ fell, because the
-graph gradient --- which arrives one prompt at a time into a buffer already holding the far larger
-KD gradient --- was being rounded away on accumulation, more severely the smaller it was. The
-effective weights in that regime were compressed toward the top of the sweep, and any
-$\lambda$ comparison made under it was biased against small $\lambda$. The check in
-Table~\ref{tab:lambda-grad} is what certifies that the sweep here compares what it claims to.
-
-\emph{The graph term takes over as KD converges.} $\|g_{\mathrm{KD}}\|$ falls from $50.5$ to
-about $3$ over the run in every case, while the graph gradient stays roughly flat, so the ratio
-rises by an order of magnitude: from $0.0006$, $0.006$ and $0.017$ at step one to $0.004$, $0.046$
-and $0.19$ at step 100. The fraction of parameter entries whose update sign the graph term decides
-scales with it, ending near $0.5\%$, $2\%$ and $4.5\%$. This is the same schedule that
-Section~\ref{sec:freeze-dynamics} observed at $\lambda = 1$ under the earlier precision regime, and
-it explains why $\lambda = 0.3$ turns down first: its graph term reaches a given share of the
-update earliest.
-
-\emph{The graph loss itself moves little.} Its 10-step mean falls from about $0.31$ to about
-$0.29$ in every run, and the three trajectories are nearly indistinguishable
-(Figure~\ref{fig:lambda-sweep}, bottom left) even though their gradient ratios differ by a factor
-of thirty. The accuracy differences in Table~\ref{tab:lambda-acc} are therefore not explained by
-how far the graph loss is driven down; they come from the direction the graph term adds to each
-update. The cosine to the KD gradient stays near zero throughout, with run means between $+0.0004$
-and $+0.0077$, consistent with Appendix~\ref{app:orthogonality}.
-
-\subsection{Caveats}
-\label{sec:lambda-caveats}
-
-Single seed throughout, so the ordering among the three graph-loss weights is suggestive rather
-than established; the gap to the control is not, being an order of magnitude larger than the
-gaps among them. The sweep does not include $\lambda = 1$, the value Appendix~\ref{app:freeze}
-used under the earlier precision regime, where it produced the fastest rise and the earliest
-collapse; the ordering observed here suggests the same, but it has not been re-measured.
-$\lambda = 0.1$ had not reached its peak at 100 steps, so the margin over $\lambda = 0.3$ at their
-respective peaks is not yet known, and the comparison of its step-100 values against the control's
-step-195 peak favours the control if anything. The dip that every run passes through, including
-the control, is a property of the distillation objective at this learning rate; where it comes
-from is not addressed here.
-
+The sweep doubles as a precision check on the training stack. At step one the runs share weights,
+so any scale-invariant summary of the graph gradient must agree across $\lambda$; both
+$\|g_{\mathrm{graph}}\| / \lambda$ and $\cos(g_{\mathrm{graph}}, g_{\mathrm{KD}})$ do, to four
+decimals ($2.82$ and $-0.041$). Under the bf16 gradient accumulation of an earlier version of the
+stack they did not: the graph gradient, which arrives one prompt at a time into a buffer already
+holding the far larger KD gradient, was rounded away more severely the smaller $\lambda$ was,
+which biased that regime against small $\lambda$. The $\lambda = 1$ results of
+Appendix~\ref{app:freeze} were measured there and are being re-run. Single seed; $\lambda = 1$ is
+not included here.
 
 \section{Performance Optimisations}
 \label{app:perf}
