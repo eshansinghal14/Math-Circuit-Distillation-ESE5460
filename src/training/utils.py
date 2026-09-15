@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import contextlib
 import dataclasses
+import hashlib
 import json
 import os
 import random
+import shutil
 from typing import Any, Dict, List, Sequence, Tuple
 
 import numpy as np
@@ -218,16 +220,72 @@ def kl_loss(
 # Checkpoints and resume
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# Two kinds of checkpoint are written. ``<save_dir>/final_checkpoint`` is the
-# deliverable: weights and tokenizer only, loadable with from_pretrained. The
+# Two kinds of checkpoint are written, both only when --save-every-n-steps > 0;
+# by default a run leaves just its history JSON and curves. ``<save_dir>/final_checkpoint``
+# is the deliverable: weights and tokenizer only, loadable with from_pretrained. The
 # periodic ``<save_dir>/checkpoint`` exists so an interrupted run can continue,
 # so next to the weights it also carries ``training_state.pt``: the optimizer
 # state (fp32 Adam moments, ~2x the parameter count), the train step, the
 # history so the curves continue, and the RNG state. ``--resume`` loads the
 # weights from that folder and restores the rest through resume_training_state.
+#
+# The weights and the training state must come from the same save. They once
+# did not: a lambda_graph=0.3 run resumed "at step 15" with weights that were
+# clearly further along (KL, grad norm and accuracy all jumped to values the
+# run only reached much later), so the ~5 GB weights file and the ~10 GB state
+# file in ``checkpoint/`` had been written by different saves -- a crash or a
+# lost Drive flush partway through one of them leaves exactly that. Two guards:
+#
+# 1. The periodic checkpoint is written to ``checkpoint.tmp`` in full and only
+#    then swapped into place, so ``checkpoint/`` is always one complete save.
+# 2. ``training_state.pt`` carries a per-parameter hash of the weights it was
+#    saved with, and resume_training_state refuses to continue unless the
+#    weights it just loaded hash to the same values. A stale, partial or
+#    precision-rounded weights file fails loudly instead of training on.
 
 TRAINING_STATE_FILE = "training_state.pt"
 PERIODIC_CHECKPOINT_NAME = "checkpoint"
+
+
+def weights_fingerprint(model) -> Dict[str, str]:
+    """Per-parameter digest of the raw parameter bytes, keyed by parameter name.
+
+    Hashes the exact bytes (plus shape and dtype), so it changes after any
+    optimizer step and after any dtype round trip. One parameter is moved to the
+    CPU at a time; ~5 GB of fp32 weights takes a few seconds.
+    """
+    out: Dict[str, str] = {}
+    for name, param in model.named_parameters():
+        t = param.detach().contiguous().cpu()
+        h = hashlib.blake2b(digest_size=16)
+        h.update(f"{tuple(t.shape)}:{t.dtype}".encode())
+        h.update(np.ascontiguousarray(t.numpy()).reshape(-1).view(np.uint8))
+        out[name] = h.hexdigest()
+    return out
+
+
+def verify_weights_fingerprint(model, expected: Dict[str, str], where: str) -> None:
+    """Raise unless ``model``'s parameters hash to ``expected`` (see weights_fingerprint)."""
+    got = weights_fingerprint(model)
+    changed = [n for n in expected if n in got and got[n] != expected[n]]
+    missing = [n for n in expected if n not in got]
+    extra = [n for n in got if n not in expected]
+    if not (changed or missing or extra):
+        return
+    lines = [
+        f"Refusing to resume: the weights loaded from {where} are not the weights its "
+        f"{TRAINING_STATE_FILE} was saved with, so the optimizer state and the model would "
+        f"be from different points in training.",
+        f"  {len(changed)}/{len(expected)} parameters differ, {len(missing)} missing, "
+        f"{len(extra)} unexpected.",
+    ]
+    for n in (changed + missing + extra)[:5]:
+        lines.append(f"    {n}")
+    lines.append(
+        "  The checkpoint folder is inconsistent (a save that did not finish, or a stale weights "
+        "file). Delete it and restart the run, or resume from a checkpoint that passes this check."
+    )
+    raise RuntimeError("\n".join(lines))
 
 
 def _rng_state() -> Dict[str, Any]:
@@ -262,25 +320,48 @@ def save_checkpoint(
     """Write weights and tokenizer to ``<save_dir>/<name>``.
 
     When ``optimizer`` is given the folder also gets ``training_state.pt`` with
-    the optimizer state, step, history and RNG state, which is what makes the
-    periodic checkpoint resumable. The final checkpoint omits it.
+    the optimizer state, step, history, RNG state and a hash of the weights,
+    which is what makes the periodic checkpoint resumable. That whole folder is
+    staged as ``<name>.tmp`` and swapped in only once every file is written, so
+    an interrupted save leaves the previous complete checkpoint untouched rather
+    than new weights next to an old optimizer state. The final checkpoint omits
+    the training state.
     """
     path = os.path.join(save_dir, name)
-    os.makedirs(path, exist_ok=True)
-    model.save_pretrained(path)
-    tokenizer.save_pretrained(path)
     if optimizer is None:
+        os.makedirs(path, exist_ok=True)
+        model.save_pretrained(path)
+        tokenizer.save_pretrained(path)
         return
+
+    stage = path + ".tmp"
+    if os.path.isdir(stage):
+        shutil.rmtree(stage)
+    os.makedirs(stage)
+    model.save_pretrained(stage)
+    tokenizer.save_pretrained(stage)
     state = {
         "optimizer": optimizer.state_dict(),
         "step": int(step or 0),
         "history": dict(history) if history is not None else {},
         "rng": _rng_state(),
+        "weights_fingerprint": weights_fingerprint(model),
     }
-    final = os.path.join(path, TRAINING_STATE_FILE)
-    tmp = final + ".tmp"
-    torch.save(state, tmp)
-    os.replace(tmp, final)
+    with open(os.path.join(stage, TRAINING_STATE_FILE), "wb") as f:
+        torch.save(state, f)
+        f.flush()
+        os.fsync(f.fileno())
+
+    # Swap the staged folder in. The previous checkpoint is only removed after
+    # the new one is in place, so at every instant ``path`` is a complete save.
+    old = path + ".old"
+    if os.path.isdir(old):
+        shutil.rmtree(old)
+    if os.path.isdir(path):
+        os.rename(path, old)
+    os.rename(stage, path)
+    if os.path.isdir(old):
+        shutil.rmtree(old, ignore_errors=True)
 
 
 def resume_checkpoint_dir(save_dir: str) -> str:
@@ -294,19 +375,61 @@ def resume_checkpoint_dir(save_dir: str) -> str:
     return path
 
 
-def resume_training_state(optimizer, save_dir: str) -> Tuple[int, Dict[str, Any]]:
+def resume_training_state(model, optimizer, save_dir: str) -> Tuple[int, Dict[str, Any]]:
     """Restore optimizer, RNG and history from ``<save_dir>/checkpoint``.
 
-    Returns ``(step, history)``. The optimizer must already wrap the parameters
-    of the model that was loaded from the same folder.
+    Returns ``(step, history)``. ``model`` must be the student loaded from that
+    same folder and ``optimizer`` must wrap its parameters. The model is hashed
+    and checked against the fingerprint stored with the optimizer state, so a
+    checkpoint whose weights and training state came from different saves is
+    rejected instead of resumed.
     """
-    path = os.path.join(resume_checkpoint_dir(save_dir), TRAINING_STATE_FILE)
+    ckpt_dir = resume_checkpoint_dir(save_dir)
+    path = os.path.join(ckpt_dir, TRAINING_STATE_FILE)
     state = torch.load(path, map_location="cpu", weights_only=False)
+    fingerprint = state.get("weights_fingerprint")
+    if fingerprint is None:
+        raise RuntimeError(
+            f"{path} has no weights fingerprint, so it cannot be checked against the weights in "
+            f"{ckpt_dir}. It was written before that check existed; restart the run rather than "
+            f"resuming from it."
+        )
+    verify_weights_fingerprint(model, fingerprint, ckpt_dir)
     optimizer.load_state_dict(state["optimizer"])
     _restore_rng_state(state["rng"])
     step = int(state["step"])
-    print(f"Resumed optimizer, RNG and history from {path} at step {step}")
+    print(f"Resumed optimizer, RNG and history from {path} at step {step}; weights verified")
     return step, state["history"]
+
+
+# Fields that legitimately differ between the original launch and a resume.
+_RESUME_CONFIG_IGNORED = {
+    "resume", "device", "torch_version", "transformers_version", "bitsandbytes_version",
+}
+
+
+def record_resumed_config(
+    history: Dict[str, Any], config, model, optimizer,
+) -> Dict[str, Tuple[Any, Any]]:
+    """Append the resumed run's resolved config to ``history["config_resumed"]``.
+
+    The history only ever recorded the config of the original launch, so a resume
+    with a different learning rate, temperature or batch size was invisible in
+    the JSON. Returns ``{field: (original, resumed)}`` for every training field
+    that differs and prints them as a warning.
+    """
+    record = run_config_record(config, model, optimizer)
+    history.setdefault("config_resumed", []).append(record)
+    original = history.get("config") or {}
+    diffs = {
+        k: (original[k], v) for k, v in record.items()
+        if k in original and k not in _RESUME_CONFIG_IGNORED and original[k] != v
+    }
+    if diffs:
+        print("WARNING: resumed run's config differs from the original launch:")
+        for k, (before, after) in diffs.items():
+            print(f"    {k}: {before!r} -> {after!r}")
+    return diffs
 
 
 def maybe_save_periodic_checkpoint(
@@ -425,9 +548,11 @@ def add_standard_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--eval-every-n-steps", type=int, default=1, dest="eval_every_n_steps")
     group.add_argument("--save-every-n-steps", type=int, default=0, dest="save_every_n_steps",
                     help="Overwrite <save-dir>/checkpoint (weights + optimizer state) every N "
-                         "train steps (0 = disable).")
+                         "train steps. 0 (the default) writes no weights at all, neither the "
+                         "periodic checkpoint nor <save-dir>/final_checkpoint; the history JSON "
+                         "and curves are always written.")
     group.add_argument("--resume", action="store_true",
-                    help="Continue from <save-dir>/checkpoint: loads the student weights, "
+                    help="Continue from <save-dir>/checkpoint: loads and verifies the student weights, "
                          "optimizer state, step and history saved by --save-every-n-steps.")
     group.add_argument("--grad-accum-steps", type=int, default=1, dest="grad_accum_steps")
     group.add_argument("--max-eval-tokens", type=int, default=256, dest="max_eval_tokens")

@@ -33,6 +33,7 @@ from training.utils import (
     log_first_step_canary,
     make_optimizer,
     maybe_save_periodic_checkpoint,
+    record_resumed_config,
     resume_checkpoint_dir,
     resume_training_state,
     run_config_record,
@@ -131,7 +132,7 @@ class SFTTrainer:
         self._train_step = 0
         self._last_save_step = 0
         if config.resume:
-            step, history = resume_training_state(self.optimizer, config.save_dir)
+            step, history = resume_training_state(self.model, self.optimizer, config.save_dir)
             self.history = defaultdict(list, history)
             self._train_step = step
             self._last_save_step = step
@@ -217,6 +218,7 @@ class SFTTrainer:
             # score the checkpoint, not the untrained student.
             if self.history.get("config"):
                 print(describe_run_setup(self.history["config"]))
+            record_resumed_config(self.history, cfg, self.model, self.optimizer)
             self.history["resumed_at_step"].append(self._train_step)
             print(f"Resuming at step {self._train_step}/{cfg.steps}; skipping baseline eval.")
         else:
@@ -261,7 +263,10 @@ class SFTTrainer:
 
         save_history(self.history, cfg.save_dir)
         save_curves(self.history, cfg.save_dir)
-        save_checkpoint(self.model, self.tokenizer, cfg.save_dir)
+        if cfg.save_every_n_steps > 0:
+            save_checkpoint(self.model, self.tokenizer, cfg.save_dir)
+        else:
+            print("--save-every-n-steps not set; not writing the trained model")
         print(f"Results saved to: {cfg.save_dir}")
         return dict(self.history)
 
