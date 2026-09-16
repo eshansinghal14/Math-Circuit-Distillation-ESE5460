@@ -847,10 +847,10 @@ class RepKDTrainer:
             self.history, cfg.save_dir,
             losses=[("step_kl_loss", "KL Loss"), ("step_rep_loss", f"{self.REP_NAME} Loss")],
         )
-        if cfg.save_every_n_steps > 0:
+        if cfg.save_every_n_steps != 0:
             save_checkpoint(self.model, self.tokenizer, cfg.save_dir)
         else:
-            print("--save-every-n-steps not set; not writing the trained model")
+            print("--save-every-n-steps is 0; not writing the trained model")
         print(f"Results saved to: {cfg.save_dir}")
         return dict(self.history)
 

@@ -286,7 +286,8 @@ def kl_loss(
 # Checkpoints and resume
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# Two kinds of checkpoint are written, both only when --save-every-n-steps > 0;
+# Two kinds of checkpoint are written: the periodic one only when --save-every-n-steps > 0,
+# the final one whenever it is nonzero (-1 means final only);
 # by default a run leaves just its history JSON and curves. ``<save_dir>/final_checkpoint``
 # is the deliverable: weights and tokenizer only, loadable with from_pretrained. The
 # periodic ``<save_dir>/checkpoint`` exists so an interrupted run can continue,
@@ -906,10 +907,10 @@ def add_standard_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--save-dir", type=str, default="results/sft")
     group.add_argument("--eval-every-n-steps", type=int, default=1, dest="eval_every_n_steps")
     group.add_argument("--save-every-n-steps", type=int, default=0, dest="save_every_n_steps",
-                    help="Overwrite <save-dir>/checkpoint (weights + optimizer state) every N "
-                         "train steps. 0 (the default) writes no weights at all, neither the "
-                         "periodic checkpoint nor <save-dir>/final_checkpoint; the history JSON "
-                         "and curves are always written.")
+                    help="N > 0: overwrite <save-dir>/checkpoint (weights + optimizer state) every N "
+                         "train steps and write <save-dir>/final_checkpoint at the end. -1: no "
+                         "periodic checkpoint, final_checkpoint only. 0 (the default): no weights "
+                         "at all. The history JSON and curves are always written.")
     group.add_argument("--resume", action="store_true",
                     help="Continue from <save-dir>/checkpoint: loads and verifies the student weights, "
                          "optimizer state, step and history saved by --save-every-n-steps.")

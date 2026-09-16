@@ -263,10 +263,10 @@ class SFTTrainer:
 
         save_history(self.history, cfg.save_dir)
         save_curves(self.history, cfg.save_dir)
-        if cfg.save_every_n_steps > 0:
+        if cfg.save_every_n_steps != 0:
             save_checkpoint(self.model, self.tokenizer, cfg.save_dir)
         else:
-            print("--save-every-n-steps not set; not writing the trained model")
+            print("--save-every-n-steps is 0; not writing the trained model")
         print(f"Results saved to: {cfg.save_dir}")
         return dict(self.history)
 
