@@ -62,6 +62,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from graph_loss.freeze import without_gradient_checkpointing
 from training.utils import (
+    DEFAULT_SEED,
     ParamChangeCanary,
     describe_run_setup,
     kl_loss,
@@ -76,12 +77,13 @@ from training.utils import (
     save_checkpoint,
     save_curves,
     save_history,
+    step_flop_counter,
     student_autocast,
 )
 
 _DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 _GRAD_CLIP = 1.0
-_SEED = 42
+_SEED = DEFAULT_SEED
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -414,6 +416,8 @@ class RepKDConfig:
     grad_accum_steps: int = 1
     eval_datasets: List[str] = field(default_factory=list)
     resume: bool = False
+    seed: int = _SEED
+    track_flops: bool = False
     # representation term
     lambda_rep: float = 0.1
     layer_map: str = "uniform"
@@ -461,7 +465,7 @@ class RepKDTrainer:
         test_data: Dict[str, Any],
     ) -> None:
         self.config = config
-        seed_all(_SEED)
+        seed_all(config.seed)
 
         # fp32 master weights with a bf16 autocast forward; see training/utils.py.
         # The teacher is inference-only and stays bf16.
@@ -627,7 +631,12 @@ class RepKDTrainer:
         n_steps = 0
         acc: Dict[str, float] = defaultdict(float)
         accum_clip = 0.0
+        accum_flops = 0
         micro_step = 0
+
+        # Counts matmul/attention FLOPs of the forward and backward passes; a no-op
+        # unless --track-flops. Entered around the compute only, as in standard_kd.
+        flop_counter = step_flop_counter(cfg.track_flops)
 
         self.optimizer.zero_grad()
         for batch in self.loader:
@@ -636,20 +645,22 @@ class RepKDTrainer:
             input_ids = batch["input_ids"].to(_DEVICE)
             attention_mask = batch["attention_mask"].to(_DEVICE)
             response_mask = batch["response_mask"].to(_DEVICE)
+            flop_counter.reset()
 
-            s_logits, t_logits, s_cap, t_cap = self._forward_pair(input_ids, attention_mask)
+            with flop_counter:
+                s_logits, t_logits, s_cap, t_cap = self._forward_pair(input_ids, attention_mask)
             self._check_student_grads(s_cap)
-
-            kl = kl_loss(
-                s_logits, t_logits, attention_mask,
-                cfg.temperature, cfg.kl_token_chunk_size,
-            ) / grad_accum
 
             token_mask = matched_token_mask(
                 attention_mask, response_mask, cfg.match_positions, cfg.keep_first_position,
             )
-            with _fp32_math():
-                rep, comps = self._rep_loss(s_cap, t_cap, token_mask)
+            with flop_counter:
+                kl = kl_loss(
+                    s_logits, t_logits, attention_mask,
+                    cfg.temperature, cfg.kl_token_chunk_size,
+                ) / grad_accum
+                with _fp32_math():
+                    rep, comps = self._rep_loss(s_cap, t_cap, token_mask)
             rep = rep / grad_accum
 
             if not (torch.isfinite(kl) and torch.isfinite(rep)):
@@ -666,9 +677,11 @@ class RepKDTrainer:
                 # separate graph forward. grads_start handles carried-over
                 # accumulation the same way.
                 grads_start = self._snapshot_grads() if grad_accum > 1 else None
-                kl.backward(retain_graph=True)
+                with flop_counter:
+                    kl.backward(retain_graph=True)
                 grads_mid = self._snapshot_grads()
-                (cfg.lambda_rep * rep).backward()
+                with flop_counter:
+                    (cfg.lambda_rep * rep).backward()
                 dot = kl_sq = rep_sq = 0.0
                 flipped = total_elems = 0
                 for n, p in self.model.named_parameters():
@@ -694,7 +707,9 @@ class RepKDTrainer:
                 del grads_mid, grads_start
             else:
                 total = kl + cfg.lambda_rep * rep if cfg.lambda_rep > 0 else kl
-                total.backward()
+                with flop_counter:
+                    total.backward()
+            accum_flops += flop_counter.flops
 
             acc["kl"] += float(kl.item())
             acc["rep"] += float(rep.item())
@@ -747,9 +762,13 @@ class RepKDTrainer:
                         f" | ratio={ratio:.4f} | cos={mean_cos:+.4f}"
                         f" | signflip={mean_flip:.3f} | clip={accum_clip:.3f}"
                     )
+                flops_str = ""
+                if cfg.track_flops:
+                    self.history["step_flops"].append(accum_flops)
+                    flops_str = f" | FLOPs={accum_flops:.3e}"
                 print(
                     f"  step {self._train_step} | KL={acc['kl']:.4f} | "
-                    f"{self.REP_NAME}={acc['rep']:.4f}{comp_str}{gnorm_str}"
+                    f"{self.REP_NAME}={acc['rep']:.4f}{comp_str}{gnorm_str}{flops_str}"
                 )
                 self._last_save_step = maybe_save_periodic_checkpoint(
                     self.model, self.tokenizer, cfg.save_dir,
@@ -759,6 +778,7 @@ class RepKDTrainer:
                 )
                 acc.clear()
                 accum_clip = 0.0
+                accum_flops = 0
                 n_steps += 1
 
         denom = max(n_steps, 1)
@@ -860,6 +880,8 @@ def base_config_kwargs(args: argparse.Namespace, dir_root: str) -> Dict[str, Any
         max_eval_tokens=args.max_eval_tokens,
         eval_datasets=args.eval_datasets,
         resume=args.resume,
+        seed=args.seed,
+        track_flops=args.track_flops,
         lambda_rep=args.lambda_rep,
         layer_map=args.layer_map,
         match_layers=args.match_layers,

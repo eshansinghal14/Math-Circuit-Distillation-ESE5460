@@ -38,7 +38,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from training.representation import (
     _DEVICE,
-    _SEED,
     ActivationCapture,
     HiddenProjector,
     LstsqStats,
@@ -83,7 +82,7 @@ class BertKDTrainer(RepKDTrainer):
         # The projector's random init and the calibration batches consumed the
         # global RNG; re-seed so the training batch order matches the other
         # trainers, which draw their first batch straight after seed_all.
-        seed_all(_SEED)
+        seed_all(cfg.seed)
 
     def _needs_attention(self) -> bool:
         return self.config.attn_weight > 0  # type: ignore[attr-defined]
