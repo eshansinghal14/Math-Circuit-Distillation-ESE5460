@@ -26,6 +26,7 @@ from utils import (
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from training.utils import (
+    DEFAULT_SEED,
     ParamChangeCanary,
     add_standard_args,
     describe_run_setup,
@@ -45,7 +46,7 @@ from training.utils import (
 
 _DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 _GRAD_CLIP = 1.0
-_SEED = 42
+_SEED = DEFAULT_SEED
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -90,6 +91,7 @@ class SFTConfig:
     grad_accum_steps: int = 1
     eval_datasets: List[str] = field(default_factory=list)
     resume: bool = False
+    seed: int = _SEED
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -105,7 +107,7 @@ class SFTTrainer:
         test_data: Dict[str, Any],
     ) -> None:
         self.config = config
-        seed_all(_SEED)
+        seed_all(config.seed)
 
         # fp32 master weights with a bf16 autocast forward; see training/utils.py.
         # --resume loads the weights the periodic checkpoint saved instead.
@@ -300,6 +302,7 @@ def main() -> None:
             max_eval_tokens=args.max_eval_tokens,
             eval_datasets=args.eval_datasets,
             resume=args.resume,
+            seed=args.seed,
         ),
         train_data,
         test_data,

@@ -26,6 +26,7 @@ from utils import (
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from training.utils import (
+    DEFAULT_SEED,
     ParamChangeCanary,
     add_kd_args,
     add_standard_args,
@@ -48,7 +49,7 @@ from training.utils import (
 
 _DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 _GRAD_CLIP = 1.0
-_SEED = 42
+_SEED = DEFAULT_SEED
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -74,6 +75,7 @@ class StandardKDConfig:
     eval_datasets: List[str] = field(default_factory=list)
     resume: bool = False
     track_flops: bool = False
+    seed: int = _SEED
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -89,7 +91,7 @@ class StandardKDTrainer:
         test_data: Dict[str, Any],
     ) -> None:
         self.config = config
-        seed_all(_SEED)
+        seed_all(config.seed)
 
         # fp32 master weights with a bf16 autocast forward; see training/utils.py.
         # The teacher is inference-only and stays bf16.
@@ -329,6 +331,7 @@ def main() -> None:
             eval_datasets=args.eval_datasets,
             resume=args.resume,
             track_flops=args.track_flops,
+            seed=args.seed,
         ),
         train_data,
         test_data,

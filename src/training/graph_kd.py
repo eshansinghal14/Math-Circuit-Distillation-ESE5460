@@ -30,6 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
 from graph_loss.training import GraphAuxConfig, backward_batch_graph_loss
 from training.utils import (
+    DEFAULT_SEED,
     ParamChangeCanary,
     add_kd_args,
     add_standard_args,
@@ -52,7 +53,7 @@ from training.utils import (
 
 _DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 _GRAD_CLIP = 1.0
-_SEED = 42
+_SEED = DEFAULT_SEED
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -77,6 +78,7 @@ class GraphKDConfig:
     grad_accum_steps: int = 1
     eval_datasets: List[str] = field(default_factory=list)
     resume: bool = False
+    seed: int = _SEED
     # graph loss
     lambda_graph: float = 1.0
     teacher_prop_neurons_per_layer: float = 0.1
@@ -113,7 +115,7 @@ class GraphKDTrainer:
         test_data: Dict[str, Any],
     ) -> None:
         self.config = config
-        seed_all(_SEED)
+        seed_all(config.seed)
 
         # fp32 master weights with a bf16 autocast forward, shared with SFT and
         # standard KD so the three are comparable. The graph term is the reason this
@@ -187,7 +189,7 @@ class GraphKDTrainer:
             anova_neuron_chunk=config.anova_neuron_chunk,
             dataset_name=config.dataset,
             scramble_teacher_graph=config.scramble_teacher_graph,
-            scramble_seed=_SEED,
+            scramble_seed=config.seed,
         )
 
         self.history: Dict[str, List] = defaultdict(list)
@@ -652,6 +654,7 @@ def main() -> None:
             max_eval_tokens=args.max_eval_tokens,
             eval_datasets=args.eval_datasets,
             resume=args.resume,
+            seed=args.seed,
             lambda_graph=args.lambda_graph,
             nodes_per_label=args.nodes_per_label,
             graph_loss_type=args.graph_loss_type,

@@ -51,6 +51,8 @@ from torch.utils.flop_counter import flop_registry as _TORCH_FLOP_REGISTRY
 
 STUDENT_DTYPE = torch.float32
 AUTOCAST_DTYPE = torch.bfloat16
+# Every trainer seeds python, numpy and torch with this unless --seed says otherwise.
+DEFAULT_SEED = 42
 
 
 def load_student(model_name: str):
@@ -123,6 +125,7 @@ def describe_run_setup(record: Dict[str, Any]) -> str:
         f"Student: {record['student_dtype']} weights, autocast={record['student_autocast']}"
         f" | optimizer={record['optimizer_class']}"
         f" | {record['student_n_params']:,} params"
+        + (f" | seed={record['seed']}" if "seed" in record else "")
     )
 
 
@@ -534,63 +537,189 @@ def history_path(save_dir: str) -> str:
     return os.path.join(save_dir, f"{folder}.json")
 
 
+# Key under which a history JSON keeps every seed that has written to its folder.
+HISTORY_RUNS_KEY = "runs"
+_SAME_FILE_CONFIG_IGNORED = _RESUME_CONFIG_IGNORED | {"seed", "save_dir"}
+
+
+def history_seed(history: Dict[str, Any]) -> int:
+    """The seed a history was produced with; files predating --seed ran at DEFAULT_SEED."""
+    config = history.get("config")
+    if isinstance(config, dict) and config.get("seed") is not None:
+        return int(config["seed"])
+    return DEFAULT_SEED
+
+
+def load_history_runs(path: str) -> Dict[str, Dict[str, Any]]:
+    """Every run in a history JSON, keyed by seed (as a string).
+
+    A file written before multi-seed support holds one run at top level and no
+    ``runs`` key; it comes back as that single run under its seed.
+    """
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    runs = data.get(HISTORY_RUNS_KEY)
+    if isinstance(runs, dict) and runs:
+        return dict(runs)
+    top = {k: v for k, v in data.items() if k != HISTORY_RUNS_KEY}
+    return {str(history_seed(top)): top} if top else {}
+
+
 def save_history(history: Dict[str, Any], save_dir: str) -> None:
+    """Write the run's history to ``history_path(save_dir)``, keeping other seeds.
+
+    Layout: the top level is this run's history, unchanged, so every reader that
+    expects one flat history keeps working and sees whichever seed wrote last.
+    ``runs`` maps every seed that has written to this folder, this one included,
+    to its history; re-running a seed replaces its entry. Runs sharing a file
+    should differ only in their seed; a config mismatch is reported, never fatal.
+    The file is staged and swapped in so a crash mid-write cannot drop the other
+    seeds.
+    """
     os.makedirs(save_dir, exist_ok=True)
     path = history_path(save_dir)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(dict(history), f, indent=2)
+    this = {k: v for k, v in dict(history).items() if k != HISTORY_RUNS_KEY}
+    seed = str(history_seed(this))
+    runs: Dict[str, Dict[str, Any]] = {}
+    if os.path.exists(path):
+        try:
+            runs = load_history_runs(path)
+        except (OSError, ValueError) as e:
+            print(f"WARN: could not read {path} ({e}); any other seeds it held are not kept")
+    this_config = this.get("config")
+    if isinstance(this_config, dict):
+        for other_seed, other in runs.items():
+            other_config = other.get("config")
+            if other_seed == seed or not isinstance(other_config, dict):
+                continue
+            diffs = sorted(
+                k for k in set(this_config) | set(other_config)
+                if k not in _SAME_FILE_CONFIG_IGNORED and this_config.get(k) != other_config.get(k)
+            )
+            if diffs:
+                print(
+                    f"WARN: {path} already holds seed {other_seed} with a different config "
+                    f"({', '.join(diffs)}); merging anyway, but seeds sharing a file should "
+                    f"differ only in their seed"
+                )
+    runs[seed] = this
+    out = dict(this)
+    out[HISTORY_RUNS_KEY] = runs
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(out, f, indent=2)
         f.flush()
         os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def _ema(series: Sequence[float], alpha: float) -> List[float]:
+    """Exponential moving average seeded with the first value, so the start is not dragged to zero."""
+    out: List[float] = []
+    m: float | None = None
+    for v in series:
+        m = float(v) if m is None else alpha * float(v) + (1.0 - alpha) * m
+        out.append(m)
+    return out
+
+
+def _seed_sort_key(seed: str):
+    return (0, int(seed)) if seed.lstrip("-").isdigit() else (1, seed)
 
 
 def save_curves(
     history: Dict[str, List],
     save_dir: str,
     losses: Sequence[Tuple[str, str]] = (("step_ce_loss", "CE Loss"),),
+    ema_alpha: float = 0.1,
 ) -> None:
     """Write ``<save_dir>/training_curves.png``: one panel per ``(history key, title)``
-    in ``losses`` against the train step, then an accuracy panel."""
+    in ``losses`` against the train step, then an accuracy panel.
+
+    Every seed recorded in the folder's history JSON (see save_history) is drawn:
+    losses as a faint raw trace under an EMA with smoothing ``ema_alpha``, one
+    colour per seed; accuracies one colour per dataset, with the per-seed traces
+    faint and their mean over seeds bold once there is more than one seed.
+    ``history`` is the run that just finished and is used alone if the JSON is
+    unreadable.
+    """
     try:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
     except ImportError:
         return
-    steps = history.get("train_step", [])
-    acc_series = history.get("accuracy", [])
-    acc_steps = history.get("accuracy_step", list(range(1, len(acc_series) + 1)))
-    extra_acc_keys = sorted(k for k in history if k.startswith("accuracy_") and k != "accuracy_step")
-    use_legend = bool(extra_acc_keys)
-    if not steps:
+    runs: Dict[str, Dict[str, Any]] = {}
+    path = history_path(save_dir)
+    if os.path.exists(path):
+        try:
+            runs = load_history_runs(path)
+        except (OSError, ValueError):
+            runs = {}
+    runs[str(history_seed(history))] = dict(history)
+    seeds = sorted(runs, key=_seed_sort_key)
+    multi = len(seeds) > 1
+    if not any(runs[s].get("train_step") for s in seeds):
         return
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
     n_panels = len(losses) + 1
     fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 4))
     for ax, (loss_key, loss_label) in zip(axes, losses):
-        series = history.get(loss_key, [])
-        ax.plot(steps[: len(series)], series, marker="o", markersize=2)
-        ax.set_title(loss_label)
+        for i, seed in enumerate(seeds):
+            h = runs[seed]
+            series = h.get(loss_key, [])
+            steps = h.get("train_step", [])
+            if not series or not steps:
+                continue
+            x = steps[: len(series)]
+            series = series[: len(x)]
+            c = colors[i % len(colors)]
+            ax.plot(x, series, color=c, alpha=0.25, linewidth=0.8)
+            ax.plot(
+                x, _ema(series, ema_alpha), color=c, linewidth=1.8,
+                label=f"seed {seed}" if multi else None,
+            )
+        ax.set_title(f"{loss_label} (EMA {ema_alpha:g}, raw faint)")
         ax.set_xlabel("train step")
         ax.grid(True, alpha=0.3)
+        if multi:
+            ax.legend(fontsize=7)
     acc_ax = axes[-1]
-    if acc_series:
-        acc_ax.plot(
-            acc_steps[: len(acc_series)], acc_series,
-            marker="o", markersize=2,
-            label="main" if use_legend else None,
-        )
-    for key in extra_acc_keys:
-        ds_name = key[len("accuracy_"):]
-        extra_series = history.get(key, [])
-        if extra_series:
+    acc_keys = ["accuracy"] + sorted({
+        k for h in runs.values() for k in h
+        if k.startswith("accuracy_") and k != "accuracy_step"
+    })
+    use_legend = len(acc_keys) > 1
+    for j, key in enumerate(acc_keys):
+        name = "main" if key == "accuracy" else key[len("accuracy_"):]
+        c = colors[j % len(colors)]
+        per_seed: List[Tuple[List, List]] = []
+        for seed in seeds:
+            h = runs[seed]
+            series = h.get(key, [])
+            if not series:
+                continue
+            acc_steps = h.get("accuracy_step", list(range(1, len(series) + 1)))
+            x = acc_steps[: len(series)]
+            series = series[: len(x)]
+            per_seed.append((x, series))
             acc_ax.plot(
-                acc_steps[: len(extra_series)], extra_series,
-                marker="o", markersize=2, label=ds_name,
+                x, series, color=c, marker="o", markersize=2,
+                alpha=0.35 if multi else 1.0, linewidth=0.8 if multi else 1.5,
+                label=None if multi else (name if use_legend else None),
+            )
+        if multi and per_seed:
+            n = min(len(s) for _, s in per_seed)
+            mean = [sum(s[i] for _, s in per_seed) / len(per_seed) for i in range(n)]
+            acc_ax.plot(
+                per_seed[0][0][:n], mean, color=c, linewidth=2.0,
+                label=f"{name} (mean of {len(per_seed)} seeds)",
             )
     acc_ax.set_title("Accuracy")
     acc_ax.set_xlabel("train step")
     acc_ax.set_ylim(0, 1)
     acc_ax.grid(True, alpha=0.3)
-    if use_legend:
+    if use_legend or multi:
         acc_ax.legend(fontsize=7, loc="lower right")
     fig.tight_layout()
     fig.savefig(os.path.join(save_dir, "training_curves.png"), dpi=150)
@@ -638,3 +767,9 @@ def add_standard_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--grad-accum-steps", type=int, default=1, dest="grad_accum_steps")
     group.add_argument("--max-eval-tokens", type=int, default=256, dest="max_eval_tokens")
     group.add_argument("--test-limit", type=int, default=None, dest="test_limit")
+    group.add_argument("--seed", type=int, default=DEFAULT_SEED,
+                    help="Seed for python, numpy and torch: data order, any sampling, and "
+                         "(graph KD) the scramble permutations. Runs with different seeds into "
+                         "the same --save-dir accumulate under \"runs\" in the folder's history "
+                         "JSON, the top level being the last run, and are overlaid in "
+                         "training_curves.png. Default 42.")
