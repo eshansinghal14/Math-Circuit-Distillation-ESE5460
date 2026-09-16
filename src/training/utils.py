@@ -540,7 +540,11 @@ def history_path(save_dir: str) -> str:
 
 # Key under which a history JSON keeps every seed that has written to its folder.
 HISTORY_RUNS_KEY = "runs"
-_SAME_FILE_CONFIG_IGNORED = _RESUME_CONFIG_IGNORED | {"seed", "save_dir"}
+# Seeds sharing a history file must have trained the same way; settings that only
+# change what is written or measured on the side are not differences.
+_SAME_FILE_CONFIG_IGNORED = _RESUME_CONFIG_IGNORED | {
+    "seed", "save_dir", "save_every_n_steps", "track_flops", "track_grad_metrics", "graph_verbose",
+}
 
 
 # Keys a trainer may store in the ``shared`` dict run_seeds threads through its
