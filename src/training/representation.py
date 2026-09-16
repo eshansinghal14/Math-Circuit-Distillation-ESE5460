@@ -862,8 +862,8 @@ class RepKDTrainer:
         return dict(self.history)
 
 
-def base_config_kwargs(args: argparse.Namespace, dir_root: str) -> Dict[str, Any]:
-    """The RepKDConfig fields every representation trainer's CLI shares."""
+def base_config_kwargs(args: argparse.Namespace, dir_root: str, seed: int | None = None) -> Dict[str, Any]:
+    """The RepKDConfig fields every representation trainer's CLI shares; ``seed`` overrides the CLI's first."""
     return dict(
         model=args.model,
         teacher=args.teacher,
@@ -880,7 +880,7 @@ def base_config_kwargs(args: argparse.Namespace, dir_root: str) -> Dict[str, Any
         max_eval_tokens=args.max_eval_tokens,
         eval_datasets=args.eval_datasets,
         resume=args.resume,
-        seed=args.seed,
+        seed=args.seeds[0] if seed is None else seed,
         track_flops=args.track_flops,
         lambda_rep=args.lambda_rep,
         layer_map=args.layer_map,

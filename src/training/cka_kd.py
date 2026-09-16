@@ -36,7 +36,7 @@ from training.representation import (
     base_config_kwargs,
     linear_cka,
 )
-from training.utils import add_kd_args, add_standard_args
+from training.utils import add_kd_args, add_standard_args, run_seeds
 
 
 @dataclass
@@ -86,12 +86,15 @@ def main() -> None:
     args = build_parser().parse_args()
     train_data, test_data = load_data(args.dataset, test_limit=args.test_limit)
     print(f"Train: {len(train_data)} | Test: {len(test_data)}")
-    trainer = CKAKDTrainer(
-        CKAKDConfig(**base_config_kwargs(args, DIR_ROOT)),
-        train_data,
-        test_data,
-    )
-    trainer.train()
+
+    def build(seed: int):
+        return CKAKDTrainer(
+            CKAKDConfig(**base_config_kwargs(args, DIR_ROOT, seed=seed)),
+            train_data,
+            test_data,
+        )
+
+    run_seeds(args.seeds, args.resume, build)
 
 
 if __name__ == "__main__":

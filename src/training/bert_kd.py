@@ -50,7 +50,7 @@ from training.representation import (
     hidden_state_loss,
     matched_token_mask,
 )
-from training.utils import add_kd_args, add_standard_args
+from training.utils import add_kd_args, add_standard_args, run_seeds
 
 
 @dataclass
@@ -206,22 +206,25 @@ def main() -> None:
     args = build_parser().parse_args()
     train_data, test_data = load_data(args.dataset, test_limit=args.test_limit)
     print(f"Train: {len(train_data)} | Test: {len(test_data)}")
-    trainer = BertKDTrainer(
-        BertKDConfig(
-            **base_config_kwargs(args, DIR_ROOT),
-            hidden_loss=args.hidden_loss,
-            hidden_weight=args.hidden_weight,
-            attn_weight=args.attn_weight,
-            attn_match=args.attn_match,
-            proj_init=args.proj_init,
-            proj_lr=args.proj_lr,
-            proj_init_batches=args.proj_init_batches,
-            proj_ridge=args.proj_ridge,
-        ),
-        train_data,
-        test_data,
-    )
-    trainer.train()
+
+    def build(seed: int):
+        return BertKDTrainer(
+            BertKDConfig(
+                **base_config_kwargs(args, DIR_ROOT, seed=seed),
+                hidden_loss=args.hidden_loss,
+                hidden_weight=args.hidden_weight,
+                attn_weight=args.attn_weight,
+                attn_match=args.attn_match,
+                proj_init=args.proj_init,
+                proj_lr=args.proj_lr,
+                proj_init_batches=args.proj_init_batches,
+                proj_ridge=args.proj_ridge,
+            ),
+            train_data,
+            test_data,
+        )
+
+    run_seeds(args.seeds, args.resume, build)
 
 
 if __name__ == "__main__":

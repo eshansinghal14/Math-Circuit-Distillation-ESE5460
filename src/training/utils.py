@@ -5,12 +5,13 @@ from __future__ import annotations
 import argparse
 import contextlib
 import dataclasses
+import gc
 import hashlib
 import json
 import os
 import random
 import shutil
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -51,7 +52,7 @@ from torch.utils.flop_counter import flop_registry as _TORCH_FLOP_REGISTRY
 
 STUDENT_DTYPE = torch.float32
 AUTOCAST_DTYPE = torch.bfloat16
-# Every trainer seeds python, numpy and torch with this unless --seed says otherwise.
+# Every trainer seeds python, numpy and torch with this unless --seeds says otherwise.
 DEFAULT_SEED = 42
 
 
@@ -542,8 +543,37 @@ HISTORY_RUNS_KEY = "runs"
 _SAME_FILE_CONFIG_IGNORED = _RESUME_CONFIG_IGNORED | {"seed", "save_dir"}
 
 
+def run_seeds(seeds: Sequence[int], resume: bool, build_trainer: Callable[[int], Any]) -> List[Dict[str, Any]]:
+    """Train once per seed, in order, and return each run's history.
+
+    ``build_trainer(seed)`` constructs a fresh trainer (models included) for that
+    seed; it is torn down and CUDA memory released before the next one starts, so
+    a list of seeds costs no more peak memory than a single run. Seeds are
+    de-duplicated, keeping first occurrence. ``--resume`` continues one specific
+    checkpoint and so is refused with more than one seed.
+    """
+    seeds = list(dict.fromkeys(int(s) for s in seeds))
+    if not seeds:
+        raise ValueError("--seeds needs at least one seed")
+    if resume and len(seeds) > 1:
+        raise ValueError("--resume continues a single run's checkpoint; pass exactly one seed with it")
+    histories: List[Dict[str, Any]] = []
+    for i, seed in enumerate(seeds, 1):
+        if len(seeds) > 1:
+            print(f"\n=== seed {seed} ({i}/{len(seeds)}) ===")
+        trainer = build_trainer(seed)
+        try:
+            histories.append(trainer.train())
+        finally:
+            del trainer
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+    return histories
+
+
 def history_seed(history: Dict[str, Any]) -> int:
-    """The seed a history was produced with; files predating --seed ran at DEFAULT_SEED."""
+    """The seed a history was produced with; files predating --seeds ran at DEFAULT_SEED."""
     config = history.get("config")
     if isinstance(config, dict) and config.get("seed") is not None:
         return int(config["seed"])
@@ -770,9 +800,11 @@ def add_standard_args(parser: argparse.ArgumentParser) -> None:
                          "datasets (4-digit answers, worst case one digit per token), 256 for gsm8k/svamp. "
                          "1 truncates any digit-by-digit answer and caps 33_add, which needs two tokens.")
     group.add_argument("--test-limit", type=int, default=None, dest="test_limit")
-    group.add_argument("--seed", type=int, default=DEFAULT_SEED,
-                    help="Seed for python, numpy and torch: data order, any sampling, and "
-                         "(graph KD) the scramble permutations. Runs with different seeds into "
-                         "the same --save-dir accumulate under \"runs\" in the folder's history "
-                         "JSON, the top level being the last run, and are overlaid in "
-                         "training_curves.png. Default 42.")
+    group.add_argument("--seeds", "--seed", type=int, nargs="+", default=[DEFAULT_SEED], dest="seeds",
+                    help="One or more seeds for python, numpy and torch: data order, any sampling, "
+                         "and (graph KD) the scramble permutations. The trainer runs once per seed, "
+                         "in order, reloading the models in between. Every seed writes into the same "
+                         "--save-dir: the history JSON keeps each under \"runs\", the top level being "
+                         "the last run, and training_curves.png overlays them. The saved model and "
+                         "periodic checkpoint are per folder, so the last seed's overwrite the "
+                         "earlier ones. --resume needs exactly one seed. Default 42.")

@@ -36,6 +36,7 @@ from training.utils import (
     maybe_save_periodic_checkpoint,
     record_resumed_config,
     resume_checkpoint_dir,
+    run_seeds,
     resume_training_state,
     run_config_record,
     save_checkpoint,
@@ -288,26 +289,29 @@ def main() -> None:
     args = build_parser().parse_args()
     train_data, test_data = load_data(args.dataset, test_limit=args.test_limit)
     print(f"Train: {len(train_data)} | Test: {len(test_data)}")
-    trainer = SFTTrainer(
-        SFTConfig(
-            model=args.model,
-            dataset=args.dataset,
-            steps=args.steps,
-            batch_size=args.batch_size,
-            learning_rate=args.lr,
-            save_dir=os.path.join(DIR_ROOT, args.save_dir, args.model.split("/")[-1], args.dataset),
-            eval_every_n_steps=args.eval_every_n_steps,
-            save_every_n_steps=args.save_every_n_steps,
-            grad_accum_steps=args.grad_accum_steps,
-            max_eval_tokens=args.max_eval_tokens,
-            eval_datasets=args.eval_datasets,
-            resume=args.resume,
-            seed=args.seed,
-        ),
-        train_data,
-        test_data,
-    )
-    trainer.train()
+
+    def build(seed: int):
+        return SFTTrainer(
+            SFTConfig(
+                model=args.model,
+                dataset=args.dataset,
+                steps=args.steps,
+                batch_size=args.batch_size,
+                learning_rate=args.lr,
+                save_dir=os.path.join(DIR_ROOT, args.save_dir, args.model.split("/")[-1], args.dataset),
+                eval_every_n_steps=args.eval_every_n_steps,
+                save_every_n_steps=args.save_every_n_steps,
+                grad_accum_steps=args.grad_accum_steps,
+                max_eval_tokens=args.max_eval_tokens,
+                eval_datasets=args.eval_datasets,
+                resume=args.resume,
+                seed=seed,
+            ),
+            train_data,
+            test_data,
+        )
+
+    run_seeds(args.seeds, args.resume, build)
 
 
 if __name__ == "__main__":
