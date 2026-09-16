@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import random
 import time
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,15 @@ class GraphAuxConfig:
     compare_n_tokens: int | None = None
     compare_ans_token: bool = False
     dataset_name: str = "local"
+    # Control arm: scramble the teacher's target so it carries no information
+    # about the teacher's routing while staying the same kind of object. Each
+    # row of the K x K supernode adjacency is permuted by a fixed derangement of
+    # its columns, one per row index, drawn once per K from scramble_seed and
+    # reused for every prompt, so the fake target is consistent and learnable
+    # rather than fresh noise. See scramble_teacher_rows.
+    scramble_teacher_graph: bool = False
+    scramble_seed: int = 0
+    scramble_permutations: dict = field(default_factory=dict)
 
 
 def _aggregate_supergraph_adjacency(
@@ -100,6 +110,52 @@ def _aggregate_supergraph_adjacency(
         supernode_adjacency_matrix=supernode_adj_matrix,
         supernodes=supernodes,
     )
+
+
+def _derangements(k: int, rng: random.Random) -> list[list[int]]:
+    """One random derangement of ``range(k)`` per row index.
+
+    A derangement has no fixed point, so no entry of a scrambled row stays at
+    its true source. ``k < 2`` has no derangement and gets the identity.
+    """
+    perms: list[list[int]] = []
+    for _ in range(k):
+        if k < 2:
+            perms.append(list(range(k)))
+            continue
+        while True:
+            p = list(range(k))
+            rng.shuffle(p)
+            if all(p[i] != i for i in range(k)):
+                perms.append(p)
+                break
+    return perms
+
+
+def scramble_teacher_rows(W_T: torch.Tensor, config: GraphAuxConfig) -> torch.Tensor:
+    """Permute each row of the teacher's supernode adjacency by a fixed derangement.
+
+    Row ``t`` of ``W_T`` is the teacher's routing profile for supernode ``t``:
+    how much of its inbound weight comes from each source supernode. Scrambling
+    reassigns those weights to the wrong sources, so the target keeps the
+    teacher's numbers and per-row sparsity but says nothing about which
+    supernode routes to which. The permutations are drawn once per matrix size
+    ``K`` from ``config.scramble_seed`` and cached on the config, so every prompt
+    of the same shape is scrambled the same way for the whole run. Arg-token
+    supernode members are not bound to their token's position (they are chosen
+    by read direction), so there is no a-priori causal support to respect and
+    the whole row is permuted.
+    """
+    if W_T.ndim != 2 or W_T.shape[0] != W_T.shape[1]:
+        raise ValueError(f"Expected a square supernode adjacency, got {tuple(W_T.shape)}")
+    k = int(W_T.shape[0])
+    perms = config.scramble_permutations.get(k)
+    if perms is None:
+        perms = _derangements(k, random.Random(config.scramble_seed * 1_000_003 + k))
+        config.scramble_permutations[k] = perms
+        print(f"  [graph] scrambled teacher target: K={k}, row permutations {perms}")
+    idx = torch.tensor(perms, device=W_T.device, dtype=torch.long)
+    return torch.gather(W_T, 1, idx)
 
 
 def compute_prompt_graph_loss(
@@ -253,12 +309,24 @@ def compute_prompt_graph_loss(
     teacher_ids = list(range(len(teacher_supergraph.supernodes)))
     student_ids = list(range(len(student_supergraph.supernodes)))
 
+    W_S = student_supergraph.supernode_adjacency_matrix
+    W_T = teacher_supergraph.supernode_adjacency_matrix.detach().to(
+        device=W_S.device, dtype=W_S.dtype,
+    )
+    real_target_loss: torch.Tensor | None = None
+    if config.scramble_teacher_graph:
+        # Keep measuring the loss against the real target (no gradient) so a
+        # scrambled run shows whether the student drifts from the teacher's routing.
+        with torch.no_grad():
+            real_target_loss, _ = compute_graph_loss(
+                W_T, W_S.detach(), mapping, teacher_ids, student_ids,
+                similarity=config.graph_loss_type,
+            )
+        W_T = scramble_teacher_rows(W_T, config)
+
     graph_loss, loss_breakdown = compute_graph_loss(
-        teacher_supergraph.supernode_adjacency_matrix.detach().to(
-            device=student_supergraph.supernode_adjacency_matrix.device,
-            dtype=student_supergraph.supernode_adjacency_matrix.dtype,
-        ),
-        student_supergraph.supernode_adjacency_matrix,
+        W_T,
+        W_S,
         mapping,
         teacher_ids,
         student_ids,
@@ -272,6 +340,8 @@ def compute_prompt_graph_loss(
         "aligned_teacher_supernodes": sum(1 for tid in teacher_ids if mapping.get(tid)),
         **loss_breakdown,
     }
+    if real_target_loss is not None:
+        metrics["edge_loss_real_target"] = float(real_target_loss.item())
 
     return graph_loss, metrics
 

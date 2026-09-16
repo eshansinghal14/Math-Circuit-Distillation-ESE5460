@@ -93,6 +93,7 @@ class GraphKDConfig:
     graph_verbose: bool = False
     track_grad_metrics: bool = False
     track_flops: bool = False
+    scramble_teacher_graph: bool = False
     graph_node_labels: List[str] = field(default_factory=list)
     anova_range_radius: int = 0
     mlp_cache_batch_size: int = 32
@@ -185,6 +186,8 @@ class GraphKDTrainer:
             student_anova_range_radius=config.anova_range_radius,
             anova_neuron_chunk=config.anova_neuron_chunk,
             dataset_name=config.dataset,
+            scramble_teacher_graph=config.scramble_teacher_graph,
+            scramble_seed=_SEED,
         )
 
         self.history: Dict[str, List] = defaultdict(list)
@@ -235,6 +238,7 @@ class GraphKDTrainer:
         accum_clip = 0.0
         accum_aligned = 0.0
         accum_teacher_sn = 0.0
+        accum_graph_real = 0.0
         accum_flops = 0
         micro_step = 0
         # Matmul / attention FLOPs of each micro-step's forward and backward
@@ -308,6 +312,7 @@ class GraphKDTrainer:
             # the loss to the intersection -- both silently.
             accum_aligned += float(graph_metrics.get("aligned_teacher_supernodes", 0.0))
             accum_teacher_sn += float(graph_metrics.get("teacher_supernodes", 0.0))
+            accum_graph_real += float(graph_metrics.get("edge_loss_real_target", 0.0))
             if cfg.track_grad_metrics:
                 # grads_before is the gradient after the KL backward and before the
                 # graph backward, so the graph contribution is exactly the delta
@@ -406,6 +411,16 @@ class GraphKDTrainer:
                     gnorm_str = ""
                 self.history["step_aligned_supernodes"].append(accum_aligned / grad_accum)
                 self.history["step_teacher_supernodes"].append(accum_teacher_sn / grad_accum)
+                if cfg.scramble_teacher_graph:
+                    # The loss the scrambled run is *not* training on: the student
+                    # against the real teacher target, for drift monitoring.
+                    self.history["step_graph_loss_real_target"].append(accum_graph_real)
+                    self.history["scramble_permutations"] = {
+                        str(k): v for k, v in self.graph_config.scramble_permutations.items()
+                    }
+                    scramble_str = f" | Graph(real target)={accum_graph_real:.4f}"
+                else:
+                    scramble_str = ""
                 if cfg.track_flops:
                     self.history["step_flops"].append(accum_flops)
                     flops_str = f" | FLOPs={accum_flops:.3e}"
@@ -413,7 +428,7 @@ class GraphKDTrainer:
                     flops_str = ""
                 print(
                     f"  step {self._train_step} | KL={accum_kl:.4f} | "
-                    f"Graph={accum_graph:.4f}{gnorm_str}{flops_str}"
+                    f"Graph={accum_graph:.4f}{scramble_str}{gnorm_str}{flops_str}"
                 )
                 self._last_save_step = maybe_save_periodic_checkpoint(
                     self.model, self.tokenizer, self.config.save_dir,
@@ -430,6 +445,7 @@ class GraphKDTrainer:
                 accum_clip = 0.0
                 accum_aligned = 0.0
                 accum_teacher_sn = 0.0
+                accum_graph_real = 0.0
                 accum_flops = 0
                 n_steps += 1
 
@@ -478,6 +494,7 @@ class GraphKDTrainer:
             f"Graph-KD | student={cfg.model} | teacher={cfg.teacher} | dataset={cfg.dataset}"
             f" | steps={cfg.steps} | lr={cfg.learning_rate} | temp={cfg.temperature}"
             f" | lambda_graph={cfg.lambda_graph} | nodes_per_label={cfg.nodes_per_label}"
+            + (" | CONTROL: scrambled teacher graph" if cfg.scramble_teacher_graph else "")
         )
 
         while self._train_step < cfg.steps:
@@ -591,6 +608,20 @@ def build_parser() -> argparse.ArgumentParser:
         type=int, default=None, dest="anova_neuron_chunk",
         help="Neurons processed per ANOVA batch (reduce to avoid GPU OOM on large grids; default: all at once).",
     )
+    group.add_argument(
+        "--scramble-teacher-graph", "--scramble_teacher_graph",
+        action="store_true", dest="scramble_teacher_graph",
+        help="Control arm: permute each row of the teacher's supernode adjacency by a "
+             "fixed derangement (one per row index, drawn once from the run seed and "
+             "reused for every prompt), so the target keeps the teacher's numbers and "
+             "per-row sparsity but carries no information about which supernode routes "
+             "to which. Supernode selection, the student's graph and the loss are "
+             "unchanged. The loss against the real target is still logged as "
+             "step_graph_loss_real_target, and the permutations as "
+             "scramble_permutations. A scrambled target starts further from the "
+             "student, so rescale --lambda-graph to match the real run's step-1 "
+             "step_grad_ratio before comparing arms.",
+    )
     return parser
 
 
@@ -636,6 +667,7 @@ def main() -> None:
             graph_verbose=args.graph_verbose,
             track_grad_metrics=args.track_grad_metrics,
             track_flops=args.track_flops,
+            scramble_teacher_graph=args.scramble_teacher_graph,
             graph_node_labels=graph_node_labels,
             anova_range_radius=args.anova_range_radius,
             mlp_cache_batch_size=args.cache_batch_size,

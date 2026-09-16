@@ -204,7 +204,8 @@ class FlopCounter(TorchDispatchMode):
     forwards differentiate to. Elementwise work (norms, activations, softmax, the
     optimizer update) is not counted, matching the usual model-FLOPs convention.
     A dispatch mode routes every aten op through Python, so keep it active only
-    around the compute being measured and expect a few microseconds per op.
+    around the compute being measured and expect tens of microseconds per op;
+    graph KD dispatches ~1M ops per step (2-3x slower), standard KD ~7k.
 
     One instance may be entered several times in sequence; ``flops`` accumulates
     across entries until ``reset``.
@@ -607,8 +608,11 @@ def add_kd_args(parser: argparse.ArgumentParser) -> None:
              "train step's forward and backward passes (teacher forward and, for graph "
              "KD, both attribution graphs included) and record the per-step total as "
              "step_flops in the history. Elementwise ops and the optimizer update are "
-             "not counted. Routes every op through a Python dispatch mode, so a step "
-             "gets slower by a few microseconds per kernel it launches.",
+             "not counted. Routes every aten op through a Python dispatch mode at tens "
+             "of microseconds each: negligible for standard KD (~7k ops per step), but "
+             "graph KD launches ~1M ops per step, so expect that step to take 2-3x "
+             "longer. FLOPs per step are nearly constant, so a few tracked steps "
+             "calibrate a run.",
     )
 
 
