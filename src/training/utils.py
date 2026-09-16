@@ -551,10 +551,45 @@ SHARED_TEACHER = "teacher"
 SHARED_BASELINES = "baselines"
 
 
+def completed_seeds(save_dir: str, steps: int) -> Dict[int, int]:
+    """Seeds whose run in ``save_dir``'s history JSON reached ``steps``, mapped to their last step.
+
+    A seed whose entry stops short (a crash after a periodic checkpoint wrote the
+    history) is not counted, so run_seeds trains it again.
+    """
+    path = history_path(save_dir)
+    if not os.path.exists(path):
+        return {}
+    try:
+        runs = load_history_runs(path)
+    except (OSError, ValueError) as e:
+        print(f"WARN: could not read {path} ({e}); treating no seed as done")
+        return {}
+    done: Dict[int, int] = {}
+    for key, run in runs.items():
+        train_steps = run.get("train_step") or []
+        last = max(train_steps) if train_steps else 0
+        if last >= steps:
+            done[int(key)] = last
+    return done
+
+
 def run_seeds(
-    seeds: Sequence[int], resume: bool, build_trainer: Callable[[int, Dict[str, Any]], Any],
+    seeds: Sequence[int],
+    resume: bool,
+    build_trainer: Callable[[int, Dict[str, Any]], Any],
+    *,
+    save_dir: str | None = None,
+    steps: int | None = None,
+    redo: bool = False,
 ) -> List[Dict[str, Any]]:
     """Train once per seed, in order, and return each run's history.
+
+    A seed that already has a finished run (one that reached ``steps``) in
+    ``save_dir``'s history JSON is skipped unless ``redo`` is set, so a seed list
+    can be re-issued after an interruption and only the missing seeds run. An
+    entry that stopped short of ``steps`` is treated as absent and re-run from
+    scratch; use ``--resume`` with that single seed to continue it instead.
 
     ``build_trainer(seed, shared)`` constructs a fresh trainer for that seed. The
     student and optimizer are rebuilt every time; ``shared`` is one dict that
@@ -571,6 +606,16 @@ def run_seeds(
         raise ValueError("--seeds needs at least one seed")
     if resume and len(seeds) > 1:
         raise ValueError("--resume continues a single run's checkpoint; pass exactly one seed with it")
+    if save_dir is not None and steps is not None and not redo and not resume:
+        done = completed_seeds(save_dir, steps)
+        skipped = [s for s in seeds if s in done]
+        if skipped:
+            print(f"Skipping seed(s) {skipped}: already finished ({steps} steps) in {history_path(save_dir)}; "
+                  f"pass --redo-seeds to train them again.")
+            seeds = [s for s in seeds if s not in done]
+        if not seeds:
+            print("Every requested seed is already done; nothing to train.")
+            return []
     shared: Dict[str, Any] = {}
     histories: List[Dict[str, Any]] = []
     for i, seed in enumerate(seeds, 1):
@@ -881,4 +926,8 @@ def add_standard_args(parser: argparse.ArgumentParser) -> None:
                          "--save-dir: the history JSON keeps each under \"runs\", the top level being "
                          "the last run, and training_curves.png overlays them. The saved model and "
                          "periodic checkpoint are per folder, so the last seed's overwrite the "
-                         "earlier ones. --resume needs exactly one seed. Default 42.")
+                         "earlier ones. A seed whose run in that folder already reached --steps is "
+                         "skipped (see --redo-seeds). --resume needs exactly one seed. Default 42.")
+    group.add_argument("--redo-seeds", action="store_true", dest="redo_seeds",
+                    help="Train every listed seed even if the folder's history already holds a "
+                         "finished run for it, replacing that entry.")

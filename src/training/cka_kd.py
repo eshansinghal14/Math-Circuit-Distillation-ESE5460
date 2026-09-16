@@ -95,7 +95,8 @@ def main() -> None:
             shared=shared,
         )
 
-    run_seeds(args.seeds, args.resume, build)
+    run_seeds(args.seeds, args.resume, build, save_dir=os.path.join(DIR_ROOT, args.save_dir),
+              steps=args.steps, redo=args.redo_seeds)
 
 
 if __name__ == "__main__":

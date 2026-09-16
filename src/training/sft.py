@@ -286,6 +286,7 @@ def main() -> None:
     args = build_parser().parse_args()
     train_data, test_data = load_data(args.dataset, test_limit=args.test_limit)
     print(f"Train: {len(train_data)} | Test: {len(test_data)}")
+    save_dir = os.path.join(DIR_ROOT, args.save_dir, args.model.split("/")[-1], args.dataset)
 
     def build(seed: int, shared: Dict[str, Any]):
         return SFTTrainer(
@@ -295,7 +296,7 @@ def main() -> None:
                 steps=args.steps,
                 batch_size=args.batch_size,
                 learning_rate=args.lr,
-                save_dir=os.path.join(DIR_ROOT, args.save_dir, args.model.split("/")[-1], args.dataset),
+                save_dir=save_dir,
                 eval_every_n_steps=args.eval_every_n_steps,
                 save_every_n_steps=args.save_every_n_steps,
                 grad_accum_steps=args.grad_accum_steps,
@@ -310,7 +311,7 @@ def main() -> None:
             shared=shared,
         )
 
-    run_seeds(args.seeds, args.resume, build)
+    run_seeds(args.seeds, args.resume, build, save_dir=save_dir, steps=args.steps, redo=args.redo_seeds)
 
 
 if __name__ == "__main__":
