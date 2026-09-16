@@ -84,7 +84,7 @@ class SFTConfig:
     steps: int = 15
     batch_size: int = 32
     learning_rate: float = 1e-6
-    max_eval_tokens: int = 256
+    max_eval_tokens: Optional[int] = None  # None -> utils.default_eval_tokens(dataset)
     save_dir: str = "results/sft"
     eval_every_n_steps: int = 1
     save_every_n_steps: int = 0

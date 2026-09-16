@@ -765,7 +765,10 @@ def add_standard_args(parser: argparse.ArgumentParser) -> None:
                     help="Continue from <save-dir>/checkpoint: loads and verifies the student weights, "
                          "optimizer state, step and history saved by --save-every-n-steps.")
     group.add_argument("--grad-accum-steps", type=int, default=1, dest="grad_accum_steps")
-    group.add_argument("--max-eval-tokens", type=int, default=256, dest="max_eval_tokens")
+    group.add_argument("--max-eval-tokens", type=int, default=None, dest="max_eval_tokens",
+                    help="Greedy-decoded tokens per eval prompt. Default: 8 for the local arithmetic "
+                         "datasets (4-digit answers, worst case one digit per token), 256 for gsm8k/svamp. "
+                         "1 truncates any digit-by-digit answer and caps 33_add, which needs two tokens.")
     group.add_argument("--test-limit", type=int, default=None, dest="test_limit")
     group.add_argument("--seed", type=int, default=DEFAULT_SEED,
                     help="Seed for python, numpy and torch: data order, any sampling, and "

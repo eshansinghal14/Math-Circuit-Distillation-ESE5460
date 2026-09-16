@@ -45,6 +45,21 @@ def extract_local_dataset_answer(text: str) -> Optional[int]:
     return None
 
 
+def extract_leading_int(text: str) -> Optional[int]:
+    """First integer in a generated continuation, anchored at its start.
+
+    Used to grade the local arithmetic datasets: the prompt ends at ``=`` so the
+    answer is the first thing the model emits. Anchoring at the start (after
+    optional whitespace) means trailing junk - a stray extra digit chunk after a
+    newline, an echoed second equation - cannot change the parsed answer, and
+    reading the whole continuation means an answer the model chunks digit by
+    digit is still captured in full. Returns None when the continuation does not
+    begin with an integer.
+    """
+    m = re.match(r"\s*(-?\d+)", text or "")
+    return int(m.group(1)) if m else None
+
+
 def extract_gsm8k_answer(text: str) -> Optional[str]:
     text = (text or "").strip()
     m = re.search(r"####\s*(" + _NUM + r")", text)
@@ -143,8 +158,30 @@ def load_model(model_name, *, dtype: torch.dtype = torch.bfloat16):
     return model, patch_tokenizer_no_special_tokens(tokenizer)
 
 
+# Local arithmetic answers are at most 4 digits. Llama 3 tokenises digits in
+# chunks of 1-3, so the worst case is one digit per token plus a leading-space
+# token; 8 leaves headroom. gsm8k / svamp generate a rationale and need far more.
+LOCAL_EVAL_TOKENS = 8
+HF_EVAL_TOKENS = 256
+
+
+def default_eval_tokens(dataset_name: str) -> int:
+    return HF_EVAL_TOKENS if dataset_name in _HF_DATASETS else LOCAL_EVAL_TOKENS
+
+
 @torch.no_grad()
-def eval_model(model, tokenizer, test_dataset, dataset_name: str, batch_size: int, max_eval_tokens: int) -> float:
+def eval_model(model, tokenizer, test_dataset, dataset_name: str, batch_size: int,
+               max_eval_tokens: Optional[int] = None) -> float:
+    """Greedy-decode every test prompt and score the parsed answer against gold.
+
+    ``max_eval_tokens=None`` resolves to :func:`default_eval_tokens`. For the local
+    arithmetic datasets the continuation alone is decoded and graded by
+    :func:`extract_leading_int`; the prompt echo is never parsed, so a truncated
+    digit-by-digit answer or a second echoed equation cannot flip the score.
+    """
+    if max_eval_tokens is None:
+        max_eval_tokens = default_eval_tokens(dataset_name)
+    is_hf = dataset_name in _HF_DATASETS
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.eval()
     original_side = tokenizer.padding_side
@@ -165,17 +202,22 @@ def eval_model(model, tokenizer, test_dataset, dataset_name: str, batch_size: in
                 do_sample=False,
                 pad_token_id=tokenizer.pad_token_id,
             )
-            # decode full output (prompt echo + gen) so "= 46" is present for arithmetic extraction
-            full_texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-            for full_text, gold in zip(full_texts, golds):
-                pred = parse_response(full_text, dataset_name)
-                if isinstance(gold, int):
-                    if pred is not None and pred == gold:
-                        correct += 1
+            prompt_len = inputs["input_ids"].shape[1]
+            if is_hf:
+                # gsm8k / svamp extraction keys on markers ("####", the last "=")
+                # that may sit in the prompt echo, so decode the full text.
+                texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+            else:
+                texts = tokenizer.batch_decode(outputs[:, prompt_len:], skip_special_tokens=True)
+            for text, gold in zip(texts, golds):
+                if is_hf:
+                    pred = parse_response(text, dataset_name)
+                    gold_parsed = gold if isinstance(gold, int) else parse_response(str(gold), dataset_name)
                 else:
-                    gold_parsed = parse_response(str(gold), dataset_name)
-                    if pred is not None and gold_parsed is not None and pred == gold_parsed:
-                        correct += 1
+                    pred = extract_leading_int(text)
+                    gold_parsed = gold if isinstance(gold, int) else extract_leading_int(str(gold))
+                if pred is not None and gold_parsed is not None and pred == gold_parsed:
+                    correct += 1
                 total += 1
     finally:
         tokenizer.padding_side = original_side

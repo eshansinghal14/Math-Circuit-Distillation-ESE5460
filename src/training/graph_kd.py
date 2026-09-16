@@ -71,7 +71,7 @@ class GraphKDConfig:
     learning_rate: float = 1e-6
     temperature: float = 2.0
     kl_token_chunk_size: int = 64
-    max_eval_tokens: int = 256
+    max_eval_tokens: Optional[int] = None  # None -> utils.default_eval_tokens(dataset)
     save_dir: str = "results/graph_kd"
     eval_every_n_steps: int = 1
     save_every_n_steps: int = 0

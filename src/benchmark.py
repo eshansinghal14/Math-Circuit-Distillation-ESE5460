@@ -10,7 +10,7 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--model-name", required=True, help="HuggingFace model id or local path")
     p.add_argument("--dataset", required=True, help="Dataset name under datasets/ (e.g. 22_add)")
     p.add_argument("--batch-size", type=int, default=50)
-    p.add_argument("--max-new-tokens", type=int, default=256)
+    p.add_argument("--max-new-tokens", type=int, default=None, help="None -> 8 for local arithmetic, 256 for gsm8k/svamp")
     p.add_argument("--test-limit", type=int, default=None, help="Limit number of test examples")
     return p.parse_args(argv)
 
