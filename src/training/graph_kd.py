@@ -42,6 +42,8 @@ from training.utils import (
     maybe_save_periodic_checkpoint,
     record_resumed_config,
     resume_checkpoint_dir,
+    run_baselines,
+    shared_teacher,
     run_seeds,
     resume_training_state,
     run_config_record,
@@ -73,6 +75,7 @@ class GraphKDConfig:
     temperature: float = 2.0
     kl_token_chunk_size: int = 64
     max_eval_tokens: Optional[int] = None  # None -> utils.default_eval_tokens(dataset)
+    eval_batch_size: int = 256
     save_dir: str = "results/graph_kd"
     eval_every_n_steps: int = 1
     save_every_n_steps: int = 0
@@ -114,8 +117,11 @@ class GraphKDTrainer:
         config: GraphKDConfig,
         train_data: Dict[str, Any],
         test_data: Dict[str, Any],
+        shared: Dict[str, Any] | None = None,
     ) -> None:
+        """``shared`` is run_seeds' cross-seed dict (teacher, baselines); None loads everything."""
         self.config = config
+        self.shared = shared
         seed_all(config.seed)
 
         # fp32 master weights with a bf16 autocast forward, shared with SFT and
@@ -128,12 +134,7 @@ class GraphKDTrainer:
         student_src = resume_checkpoint_dir(config.save_dir) if config.resume else config.model
         self.model, self.tokenizer = load_student(student_src)
 
-        self.teacher, _ = load_model(config.teacher)
-        self.teacher.eval()
-        for p in self.teacher.parameters():
-            p.requires_grad_(False)
-        if hasattr(self.teacher.config, "use_cache"):
-            self.teacher.config.use_cache = False
+        self.teacher = shared_teacher(shared, config.teacher, load_model)
 
         dataset = PromptAnswerDataset(config.dataset, train_data, self.tokenizer)
         self.test_dataset = PromptAnswerDataset(config.dataset, test_data, self.tokenizer)
@@ -157,15 +158,23 @@ class GraphKDTrainer:
         student_mlp_cache: dict | None = None
         teacher_mlp_cache: dict | None = None
         if config.graph_node_labels:
-            from graph_loss.precompute_mlp_inputs import build_mlp_input_cache as _build_mlp_cache
-            student_mlp_cache = _build_mlp_cache(
-                self.student_adapter, config.dataset, config.model,
-                data_dict=train_data, batch_size=config.mlp_cache_batch_size,
-            )
-            teacher_mlp_cache = _build_mlp_cache(
-                self.teacher_adapter, config.dataset, config.teacher,
-                data_dict=train_data, batch_size=config.mlp_cache_batch_size,
-            )
+            # Built from the untrained student and the teacher, so seed-independent:
+            # under run_seeds they are built for the first seed and reused.
+            if shared is not None and "mlp_caches" in shared:
+                print("MLP-input caches reused from the previous seed.")
+                student_mlp_cache, teacher_mlp_cache = shared["mlp_caches"]
+            else:
+                from graph_loss.precompute_mlp_inputs import build_mlp_input_cache as _build_mlp_cache
+                student_mlp_cache = _build_mlp_cache(
+                    self.student_adapter, config.dataset, config.model,
+                    data_dict=train_data, batch_size=config.mlp_cache_batch_size,
+                )
+                teacher_mlp_cache = _build_mlp_cache(
+                    self.teacher_adapter, config.dataset, config.teacher,
+                    data_dict=train_data, batch_size=config.mlp_cache_batch_size,
+                )
+                if shared is not None:
+                    shared["mlp_caches"] = (student_mlp_cache, teacher_mlp_cache)
 
         self.graph_config = GraphAuxConfig(
             lambda_graph=config.lambda_graph,
@@ -212,7 +221,7 @@ class GraphKDTrainer:
         with self._autocast():
             return eval_model(
                 model, self.tokenizer, test_dataset, dataset_name,
-                cfg.batch_size, cfg.max_eval_tokens,
+                cfg.eval_batch_size, cfg.max_eval_tokens,
             )
 
     def _eval(self) -> float:
@@ -472,18 +481,10 @@ class GraphKDTrainer:
             self.history["config"] = run_config_record(cfg, self.model, self.optimizer)
             print(describe_run_setup(self.history["config"]))
 
-            print("Evaluating baseline...")
-            baseline_acc = self._eval()
-            self.history["student_baseline"] = baseline_acc
-            self.history["accuracy"].append(baseline_acc)
-            self.history["accuracy_step"].append(0)
-            print(f"  Student baseline accuracy: {baseline_acc:.4f}")
-            teacher_baseline_acc = self._eval_teacher()
-            self.history["teacher_baseline"] = teacher_baseline_acc
-            print(f"  Teacher baseline accuracy: {teacher_baseline_acc:.4f}")
-            for ds, acc in self._eval_all_extra().items():
-                self.history[f"accuracy_{ds}"].append(acc)
-                print(f"  Student baseline [{ds}]: {acc:.4f}")
+            run_baselines(
+                self.shared, self.history,
+                student=self._eval, teacher=self._eval_teacher, extra=self._eval_all_extra,
+            )
 
         sample = self.loader.dataset[0]
         print("─" * 60)
@@ -639,7 +640,7 @@ def main() -> None:
     train_data, test_data = load_data(args.dataset, test_limit=args.test_limit)
     print(f"Train: {len(train_data)} | Test: {len(test_data)}")
 
-    def build(seed: int):
+    def build(seed: int, shared: Dict[str, Any]):
         return GraphKDTrainer(
             GraphKDConfig(
                 model=args.model,
@@ -655,6 +656,7 @@ def main() -> None:
                 save_every_n_steps=args.save_every_n_steps,
                 grad_accum_steps=args.grad_accum_steps,
                 max_eval_tokens=args.max_eval_tokens,
+                eval_batch_size=args.eval_batch_size,
                 eval_datasets=args.eval_datasets,
                 resume=args.resume,
                 seed=seed,
@@ -681,6 +683,7 @@ def main() -> None:
             ),
             train_data,
             test_data,
+            shared=shared,
         )
 
     run_seeds(args.seeds, args.resume, build)

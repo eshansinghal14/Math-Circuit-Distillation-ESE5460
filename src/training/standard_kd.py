@@ -38,6 +38,8 @@ from training.utils import (
     maybe_save_periodic_checkpoint,
     record_resumed_config,
     resume_checkpoint_dir,
+    run_baselines,
+    shared_teacher,
     run_seeds,
     resume_training_state,
     run_config_record,
@@ -69,6 +71,7 @@ class StandardKDConfig:
     temperature: float = 2.0
     kl_token_chunk_size: int = 64
     max_eval_tokens: Optional[int] = None  # None -> utils.default_eval_tokens(dataset)
+    eval_batch_size: int = 256
     save_dir: str = "results/standard_kd"
     eval_every_n_steps: int = 1
     save_every_n_steps: int = 0
@@ -90,8 +93,11 @@ class StandardKDTrainer:
         config: StandardKDConfig,
         train_data: Dict[str, Any],
         test_data: Dict[str, Any],
+        shared: Dict[str, Any] | None = None,
     ) -> None:
+        """``shared`` is run_seeds' cross-seed dict (teacher, baselines); None loads everything."""
         self.config = config
+        self.shared = shared
         seed_all(config.seed)
 
         # fp32 master weights with a bf16 autocast forward; see training/utils.py.
@@ -100,12 +106,7 @@ class StandardKDTrainer:
         student_src = resume_checkpoint_dir(config.save_dir) if config.resume else config.model
         self.model, self.tokenizer = load_student(student_src)
 
-        self.teacher, _ = load_model(config.teacher)
-        self.teacher.eval()
-        for p in self.teacher.parameters():
-            p.requires_grad_(False)
-        if hasattr(self.teacher.config, "use_cache"):
-            self.teacher.config.use_cache = False
+        self.teacher = shared_teacher(shared, config.teacher, load_model)
 
         dataset = PromptAnswerDataset(config.dataset, train_data, self.tokenizer)
         self.test_dataset = PromptAnswerDataset(config.dataset, test_data, self.tokenizer)
@@ -141,7 +142,7 @@ class StandardKDTrainer:
         with self._autocast():
             return eval_model(
                 model, self.tokenizer, test_dataset, dataset_name,
-                cfg.batch_size, cfg.max_eval_tokens,
+                cfg.eval_batch_size, cfg.max_eval_tokens,
             )
 
     def _eval(self) -> float:
@@ -246,18 +247,10 @@ class StandardKDTrainer:
             self.history["config"] = run_config_record(cfg, self.model, self.optimizer)
             print(describe_run_setup(self.history["config"]))
 
-            print("Evaluating baseline...")
-            baseline_acc = self._eval()
-            self.history["student_baseline"] = baseline_acc
-            self.history["accuracy"].append(baseline_acc)
-            self.history["accuracy_step"].append(0)
-            print(f"  Student baseline accuracy: {baseline_acc:.4f}")
-            teacher_baseline_acc = self._eval_teacher()
-            self.history["teacher_baseline"] = teacher_baseline_acc
-            print(f"  Teacher baseline accuracy: {teacher_baseline_acc:.4f}")
-            for ds, acc in self._eval_all_extra().items():
-                self.history[f"accuracy_{ds}"].append(acc)
-                print(f"  Student baseline [{ds}]: {acc:.4f}")
+            run_baselines(
+                self.shared, self.history,
+                student=self._eval, teacher=self._eval_teacher, extra=self._eval_all_extra,
+            )
 
         sample = self.loader.dataset[0]
         print("─" * 60)
@@ -315,7 +308,7 @@ def main() -> None:
     train_data, test_data = load_data(args.dataset, test_limit=args.test_limit)
     print(f"Train: {len(train_data)} | Test: {len(test_data)}")
 
-    def build(seed: int):
+    def build(seed: int, shared: Dict[str, Any]):
         return StandardKDTrainer(
             StandardKDConfig(
                 model=args.model,
@@ -331,6 +324,7 @@ def main() -> None:
                 save_every_n_steps=args.save_every_n_steps,
                 grad_accum_steps=args.grad_accum_steps,
                 max_eval_tokens=args.max_eval_tokens,
+                eval_batch_size=args.eval_batch_size,
                 eval_datasets=args.eval_datasets,
                 resume=args.resume,
                 track_flops=args.track_flops,
@@ -338,6 +332,7 @@ def main() -> None:
             ),
             train_data,
             test_data,
+            shared=shared,
         )
 
     run_seeds(args.seeds, args.resume, build)

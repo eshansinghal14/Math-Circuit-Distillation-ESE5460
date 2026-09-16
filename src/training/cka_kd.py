@@ -20,7 +20,7 @@ import argparse
 import os
 import sys
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Any, Dict, Tuple
 
 import torch
 
@@ -87,11 +87,12 @@ def main() -> None:
     train_data, test_data = load_data(args.dataset, test_limit=args.test_limit)
     print(f"Train: {len(train_data)} | Test: {len(test_data)}")
 
-    def build(seed: int):
+    def build(seed: int, shared: Dict[str, Any]):
         return CKAKDTrainer(
             CKAKDConfig(**base_config_kwargs(args, DIR_ROOT, seed=seed)),
             train_data,
             test_data,
+            shared=shared,
         )
 
     run_seeds(args.seeds, args.resume, build)

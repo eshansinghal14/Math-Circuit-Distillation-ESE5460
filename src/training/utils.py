@@ -543,25 +543,40 @@ HISTORY_RUNS_KEY = "runs"
 _SAME_FILE_CONFIG_IGNORED = _RESUME_CONFIG_IGNORED | {"seed", "save_dir"}
 
 
-def run_seeds(seeds: Sequence[int], resume: bool, build_trainer: Callable[[int], Any]) -> List[Dict[str, Any]]:
+# Keys a trainer may store in the ``shared`` dict run_seeds threads through its
+# builds. Everything here is independent of the seed: the frozen teacher, the
+# untrained student's and the teacher's baseline accuracies, and (graph KD, ANOVA
+# path) the MLP-input caches built from the untrained models.
+SHARED_TEACHER = "teacher"
+SHARED_BASELINES = "baselines"
+
+
+def run_seeds(
+    seeds: Sequence[int], resume: bool, build_trainer: Callable[[int, Dict[str, Any]], Any],
+) -> List[Dict[str, Any]]:
     """Train once per seed, in order, and return each run's history.
 
-    ``build_trainer(seed)`` constructs a fresh trainer (models included) for that
-    seed; it is torn down and CUDA memory released before the next one starts, so
-    a list of seeds costs no more peak memory than a single run. Seeds are
-    de-duplicated, keeping first occurrence. ``--resume`` continues one specific
-    checkpoint and so is refused with more than one seed.
+    ``build_trainer(seed, shared)`` constructs a fresh trainer for that seed. The
+    student and optimizer are rebuilt every time; ``shared`` is one dict that
+    lives across the loop, in which a trainer keeps what does not depend on the
+    seed (see :func:`shared_teacher`, :func:`run_baselines`), so the teacher is
+    loaded and the baselines are evaluated for the first seed only. Each trainer
+    is dropped and the CUDA cache emptied before the next seed starts, so a list
+    costs no more peak memory than a single run. Seeds are de-duplicated,
+    keeping first occurrence. ``--resume`` continues one specific checkpoint and
+    so is refused with more than one seed.
     """
     seeds = list(dict.fromkeys(int(s) for s in seeds))
     if not seeds:
         raise ValueError("--seeds needs at least one seed")
     if resume and len(seeds) > 1:
         raise ValueError("--resume continues a single run's checkpoint; pass exactly one seed with it")
+    shared: Dict[str, Any] = {}
     histories: List[Dict[str, Any]] = []
     for i, seed in enumerate(seeds, 1):
         if len(seeds) > 1:
             print(f"\n=== seed {seed} ({i}/{len(seeds)}) ===")
-        trainer = build_trainer(seed)
+        trainer = build_trainer(seed, shared)
         try:
             histories.append(trainer.train())
         finally:
@@ -570,6 +585,61 @@ def run_seeds(seeds: Sequence[int], resume: bool, build_trainer: Callable[[int],
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
     return histories
+
+
+def shared_teacher(shared: Dict[str, Any] | None, teacher_name: str, load: Callable[[str], Any]):
+    """The frozen, eval-mode, no-cache teacher; loaded once per ``shared`` dict.
+
+    ``load(name)`` returns ``(model, tokenizer)``. With ``shared`` None (a trainer
+    built outside run_seeds) the teacher is simply loaded.
+    """
+    if shared is not None and shared.get(SHARED_TEACHER) is not None:
+        print(f"Teacher {teacher_name} reused from the previous seed.")
+        return shared[SHARED_TEACHER]
+    teacher, _ = load(teacher_name)
+    teacher.eval()
+    for p in teacher.parameters():
+        p.requires_grad_(False)
+    if hasattr(teacher.config, "use_cache"):
+        teacher.config.use_cache = False
+    if shared is not None:
+        shared[SHARED_TEACHER] = teacher
+    return teacher
+
+
+def run_baselines(
+    shared: Dict[str, Any] | None,
+    history: Dict[str, Any],
+    *,
+    student: Callable[[], float],
+    teacher: Callable[[], float] | None,
+    extra: Callable[[], Dict[str, float]],
+) -> None:
+    """Record the step-0 accuracies in ``history``, evaluating them once per ``shared`` dict.
+
+    The untrained student and the teacher are the same weights for every seed,
+    and eval is greedy, so the baselines are computed for the first seed and
+    copied into every later seed's history. ``teacher`` is None for trainers
+    without one (SFT).
+    """
+    cached = shared.get(SHARED_BASELINES) if shared is not None else None
+    if cached is None:
+        print("Evaluating baseline...")
+        cached = {"student": student(), "teacher": teacher() if teacher is not None else None, "extra": extra()}
+        if shared is not None:
+            shared[SHARED_BASELINES] = cached
+    else:
+        print("Baselines reused from the first seed (untrained student and teacher do not depend on it).")
+    history["student_baseline"] = cached["student"]
+    history["accuracy"].append(cached["student"])
+    history["accuracy_step"].append(0)
+    print(f"  Student baseline accuracy: {cached['student']:.4f}")
+    if cached["teacher"] is not None:
+        history["teacher_baseline"] = cached["teacher"]
+        print(f"  Teacher baseline accuracy: {cached['teacher']:.4f}")
+    for ds, acc in cached["extra"].items():
+        history[f"accuracy_{ds}"].append(acc)
+        print(f"  Student baseline [{ds}]: {acc:.4f}")
 
 
 def history_seed(history: Dict[str, Any]) -> int:
@@ -799,6 +869,10 @@ def add_standard_args(parser: argparse.ArgumentParser) -> None:
                     help="Greedy-decoded tokens per eval prompt. Default: 8 for the local arithmetic "
                          "datasets (4-digit answers, worst case one digit per token), 256 for gsm8k/svamp. "
                          "1 truncates any digit-by-digit answer and caps 33_add, which needs two tokens.")
+    group.add_argument("--eval-batch-size", type=int, default=256, dest="eval_batch_size",
+                    help="Prompts per generate() call during eval. Eval is no-grad greedy decoding of "
+                         "short prompts, so it can run far larger batches than training; it used to "
+                         "share --batch-size. Default 256.")
     group.add_argument("--test-limit", type=int, default=None, dest="test_limit")
     group.add_argument("--seeds", "--seed", type=int, nargs="+", default=[DEFAULT_SEED], dest="seeds",
                     help="One or more seeds for python, numpy and torch: data order, any sampling, "
