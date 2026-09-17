@@ -149,16 +149,16 @@ class SFTTrainer:
     def _autocast(self):
         return student_autocast()
 
-    def _eval_on(self, dataset_name: str, test_dataset: PromptAnswerDataset, show: int = 0) -> float:
+    def _eval_on(self, dataset_name: str, test_dataset: PromptAnswerDataset) -> float:
         cfg = self.config
         with self._autocast():
             return eval_model(
                 self.model, self.tokenizer, test_dataset, dataset_name,
-                cfg.eval_batch_size, cfg.max_eval_tokens, show=show,
+                cfg.eval_batch_size, cfg.max_eval_tokens,
             )
 
     def _eval(self) -> float:
-        return self._eval_on(self.config.dataset, self.test_dataset, show=3)
+        return self._eval_on(self.config.dataset, self.test_dataset)
 
     def _eval_all_extra(self) -> Dict[str, float]:
         return {ds: self._eval_on(ds, td) for ds, td in self.extra_test_datasets.items()}
@@ -207,7 +207,7 @@ class SFTTrainer:
                 self.history["step_tf_acc"].append(self._last_tf_acc)
                 self.history["step_ce_loss"].append(accum_loss)
                 total_loss += accum_loss
-                print(f"  step {self._train_step} | CE={accum_loss:.4f} | tfAcc={self._last_tf_acc:.3f}")
+                print(f"  step {self._train_step} | CE={accum_loss:.4f}")
                 self._last_save_step = maybe_save_periodic_checkpoint(
                     self.model, self.tokenizer, self.config.save_dir,
                     self._train_step, self.config.save_every_n_steps,

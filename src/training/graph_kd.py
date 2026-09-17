@@ -251,17 +251,17 @@ class GraphKDTrainer:
         print(f"  sequence check passed: KD batch, graph term, adapter and eval agree on {n} tokens "
               f"(BOS id {self.tokenizer.bos_token_id} leads)")
 
-    def _eval_on(self, model, dataset_name: str, test_dataset: PromptAnswerDataset, show: int = 0) -> float:
+    def _eval_on(self, model, dataset_name: str, test_dataset: PromptAnswerDataset) -> float:
         cfg = self.config
         # A no-op for the bf16 teacher.
         with self._autocast():
             return eval_model(
                 model, self.tokenizer, test_dataset, dataset_name,
-                cfg.eval_batch_size, cfg.max_eval_tokens, show=show,
+                cfg.eval_batch_size, cfg.max_eval_tokens,
             )
 
     def _eval(self) -> float:
-        return self._eval_on(self.model, self.config.dataset, self.test_dataset, show=3)
+        return self._eval_on(self.model, self.config.dataset, self.test_dataset)
 
     def _eval_teacher(self) -> float:
         return self._eval_on(self.teacher, self.config.dataset, self.test_dataset)
@@ -485,7 +485,7 @@ class GraphKDTrainer:
                     flops_str = ""
                 print(
                     f"  step {self._train_step} | KL={accum_kl:.4f} | "
-                    f"Graph={accum_graph:.4f} | tfAcc={self._last_tf_acc:.3f}{scramble_str}{gnorm_str}{flops_str}"
+                    f"Graph={accum_graph:.4f}{scramble_str}{gnorm_str}{flops_str}"
                 )
                 self._last_save_step = maybe_save_periodic_checkpoint(
                     self.model, self.tokenizer, self.config.save_dir,
