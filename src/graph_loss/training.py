@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import glob
+import hashlib
+import json
 import logging
+import os
 import random
 import time
 
@@ -65,6 +69,9 @@ class GraphAuxConfig:
     scramble_teacher_graph: bool = False
     scramble_seed: int = 0
     scramble_permutations: dict = field(default_factory=dict)
+    # Per-prompt cache of the teacher's target (see TeacherTargetCache); None
+    # recomputes the teacher's graph for every prompt.
+    teacher_target_cache: Any = None
 
 
 def _aggregate_supergraph_adjacency(
@@ -156,6 +163,203 @@ def scramble_teacher_rows(W_T: torch.Tensor, config: GraphAuxConfig) -> torch.Te
         print(f"  [graph] scrambled teacher target: K={k}, row permutations {perms}")
     idx = torch.tensor(perms, device=W_T.device, dtype=torch.long)
     return torch.gather(W_T, 1, idx)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Teacher target cache
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The teacher is frozen, so for a fixed teacher-side configuration its target for
+# a prompt (the K x K supernode adjacency, the supernode labels, the logit-target
+# ids and the DLA reference logits) never changes. Every graph-KD run in a sweep
+# nevertheless rebuilt it per prompt: a full attribution pass plus, on the ANOVA
+# path, labelling ~45k pre-selected neurons against the activation cache. The
+# cache below stores each prompt's target once, in one file per configuration
+# under a key that also hashes the graph_loss source, so a code change can never
+# serve stale targets. Entries are a few kilobytes, so a whole dataset's worth
+# lives in memory and is written back atomically, merging with what another
+# process may have added meanwhile. The DLA logits are kept as their top-256
+# entries: the only consumer, _dla_kl_scores_for_output, restricts itself to the
+# top-100 tokens and renormalises, which the reconstruction reproduces to float
+# precision.
+
+TEACHER_TARGET_CACHE_VERSION = 1
+_TEACHER_DLA_TOPK = 256  # >= the dla_top_k_vocab (100) select_anova_supernodes uses
+
+
+def graph_code_digest() -> str:
+    """sha1 of every .py under graph_loss/ plus utils.py (tokenisation), so any
+    change to how targets are built invalidates cached targets."""
+    root = os.path.dirname(os.path.abspath(__file__))
+    files = sorted(glob.glob(os.path.join(root, "**", "*.py"), recursive=True))
+    files.append(os.path.join(os.path.dirname(root), "utils.py"))
+    h = hashlib.sha1()
+    for path in files:
+        if not os.path.isfile(path):
+            continue
+        h.update(os.path.relpath(path, os.path.dirname(root)).replace(os.sep, "/").encode())
+        with open(path, "rb") as f:
+            h.update(f.read())
+    return h.hexdigest()[:12]
+
+
+def teacher_target_cache_key(config: GraphAuxConfig, teacher_name: str) -> str:
+    """Hash of everything the teacher's target depends on."""
+    cache_meta = (config.teacher_mlp_input_cache or {}).get("meta", {})
+    fields = {
+        "version": TEACHER_TARGET_CACHE_VERSION,
+        "code": graph_code_digest(),
+        "teacher": teacher_name,
+        "dataset": config.dataset_name,
+        "labels": sorted(config.graph_node_labels or []),
+        "nodes_per_label": config.teacher_nodes_per_label,
+        "prop_neurons_per_layer": config.teacher_prop_neurons_per_layer,
+        "top_k_logits": config.top_k_logits,
+        "temperature": config.temperature,
+        "freeze_attention": config.freeze_attention,
+        "freeze_rms_norm": config.freeze_rms_norm,
+        "constant_node_weighting": config.constant_node_weighting,
+        "tokens_dla_nodes": config.tokens_dla_nodes,
+        "mlp_cache": {
+            "n_prompts": cache_meta.get("n_prompts"),
+            "dataset_key": cache_meta.get("dataset_key"),
+            "model_name": cache_meta.get("model_name"),
+        },
+    }
+    return hashlib.sha1(json.dumps(fields, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
+
+class TeacherTargetCache:
+    """Per-prompt teacher targets, persisted to one file per teacher-side configuration."""
+
+    def __init__(self, path: str | None) -> None:
+        self.path = path
+        self.entries: dict[str, dict] = {}
+        self.hits = 0
+        self.misses = 0
+        self._dirty = 0
+        if path and os.path.isfile(path):
+            self.entries = dict(torch.load(path, map_location="cpu", weights_only=False))
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+    def get(self, prompt: str) -> dict | None:
+        entry = self.entries.get(prompt)
+        if entry is None:
+            self.misses += 1
+        else:
+            self.hits += 1
+        return entry
+
+    def put(self, prompt: str, entry: dict) -> None:
+        self.entries[prompt] = entry
+        self._dirty += 1
+
+    def flush(self) -> bool:
+        """Write new entries to ``path``, merged with whatever is there now. Returns whether it wrote."""
+        if not self.path or self._dirty == 0:
+            return False
+        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        merged: dict[str, dict] = {}
+        if os.path.isfile(self.path):
+            try:
+                merged = dict(torch.load(self.path, map_location="cpu", weights_only=False))
+            except Exception as e:  # a half-written file from a crash elsewhere
+                logger.warning("could not read %s (%s); overwriting it", self.path, e)
+        merged.update(self.entries)
+        tmp = f"{self.path}.tmp{os.getpid()}"
+        torch.save(merged, tmp)
+        os.replace(tmp, self.path)
+        self.entries = merged
+        self._dirty = 0
+        return True
+
+
+def _teacher_target_entry(
+    supergraph: SuperGraph,
+    logit_token_ids: torch.Tensor,
+    dla_logits: torch.Tensor | None,
+) -> dict:
+    entry: dict[str, Any] = {
+        "adj": supergraph.supernode_adjacency_matrix.detach().cpu().clone(),
+        "supernodes": [[int(i) for i in sn] for sn in supergraph.supernodes],
+        "labels": [list(lbls) for lbls in (supergraph.supernode_labels or [])],
+        "logit_ids": logit_token_ids.detach().cpu().clone(),
+        "dla": None,
+    }
+    if dla_logits is not None:
+        k = min(_TEACHER_DLA_TOPK, int(dla_logits.numel()))
+        vals, ids = torch.topk(dla_logits.detach().float(), k)
+        entry["dla"] = {
+            "ids": ids.cpu(), "vals": vals.cpu(),
+            "vocab": int(dla_logits.numel()), "dtype": str(dla_logits.dtype).removeprefix("torch."),
+        }
+    return entry
+
+
+def _teacher_target_from_entry(
+    entry: dict, device: torch.device,
+) -> tuple[SuperGraph, torch.Tensor, torch.Tensor | None]:
+    supergraph = SuperGraph(
+        supernode_adjacency_matrix=entry["adj"].to(device),
+        supernodes=[list(sn) for sn in entry["supernodes"]],
+        supernode_labels=[list(lbls) for lbls in entry["labels"]],
+    )
+    logit_ids = entry["logit_ids"].to(device)
+    dla = entry["dla"]
+    dla_logits: torch.Tensor | None = None
+    if dla is not None:
+        full = torch.full((dla["vocab"],), float("-inf"), dtype=torch.float32)
+        full[dla["ids"]] = dla["vals"]
+        dla_logits = full.to(dtype=getattr(torch, dla["dtype"]), device=device)
+    return supergraph, logit_ids, dla_logits
+
+
+def _compute_teacher_target(
+    prompt: str,
+    answer: Any,
+    teacher_adapter: HFLlamaGraphAdapter,
+    config: GraphAuxConfig,
+    device: torch.device,
+) -> tuple[SuperGraph, torch.Tensor, torch.Tensor | None]:
+    """The teacher's supergraph, logit-target ids and DLA reference logits for one prompt."""
+    with torch.enable_grad():
+        teacher_result = create_graph(
+            teacher_adapter,
+            prompt,
+            prop_neurons_per_layer=config.teacher_prop_neurons_per_layer,
+            top_k_logits=config.top_k_logits,
+            temperature=config.temperature,
+            batch_size=config.teacher_graph_batch_size,
+            verbose=config.verbose,
+            node_labels=config.graph_node_labels,
+            mlp_input_cache=config.teacher_mlp_input_cache,
+            nodes_per_label=config.teacher_nodes_per_label,
+            no_grad_supergraph=True,
+            build_create_graph=False,
+            detach_result=True,
+            freeze_attention=config.freeze_attention,
+            freeze_rms_norm=config.freeze_rms_norm,
+            constant_node_weighting=config.constant_node_weighting,
+        )
+    # Same ids as the KD batch row (BOS + prompt, answer + EOS): the teacher's
+    # DLA reference logits at the last prompt position must come from the same
+    # BOS-prefixed forward that create_graph ran on the prompt above.
+    prompt_ids, answer_ids = tokenize_prompt_answer(
+        teacher_adapter.tokenizer, prompt, str(answer),
+    )
+    full_input_ids = torch.cat([prompt_ids, answer_ids]).to(device)
+    prompt_len = int(prompt_ids.numel())
+    with torch.no_grad():
+        full_logits = teacher_adapter.model(full_input_ids.unsqueeze(0)).logits.squeeze(0).detach().cpu()
+    teacher_dla_logits: torch.Tensor | None = None
+    if prompt_len > 0 and full_logits.shape[0] >= prompt_len:
+        teacher_dla_logits = full_logits[prompt_len - 1].to(device)
+    logit_token_ids = teacher_result.graph.logit_token_ids.to(device)
+    teacher_supergraph = teacher_result.supergraph
+    del teacher_result
+    return teacher_supergraph, logit_token_ids, teacher_dla_logits
 
 
 def compute_prompt_graph_loss(
@@ -518,6 +722,9 @@ def backward_batch_graph_loss(
     detached_losses = []
     denom = float(len(prompts))
     graph_backward_prompts = 0
+    time_teacher = 0.0
+    time_student = 0.0
+    cache_hits = 0
 
     for i, prompt in enumerate(prompts):
         if config.compare_n_tokens is not None:
@@ -535,41 +742,20 @@ def backward_batch_graph_loss(
             detached_losses.append(prompt_loss)  # already detached
             graph_backward_prompts += 1
         else:
-            with torch.enable_grad():
-                teacher_result = create_graph(
-                    teacher_adapter,
-                    prompt,
-                    prop_neurons_per_layer=config.teacher_prop_neurons_per_layer,
-                    top_k_logits=config.top_k_logits,
-                    temperature=config.temperature,
-                    batch_size=config.teacher_graph_batch_size,
-                    verbose=config.verbose,
-                    node_labels=config.graph_node_labels,
-                    mlp_input_cache=config.teacher_mlp_input_cache,
-                    nodes_per_label=config.teacher_nodes_per_label,
-                    no_grad_supergraph=True,
-                    build_create_graph=False,
-                    detach_result=True,
-                    freeze_attention=config.freeze_attention,
-                    freeze_rms_norm=config.freeze_rms_norm,
-                    constant_node_weighting=config.constant_node_weighting,
+            t_start = time.perf_counter()
+            cache = config.teacher_target_cache
+            entry = cache.get(prompt) if cache is not None else None
+            if entry is None:
+                teacher_supergraph, logit_token_ids, teacher_dla_logits = _compute_teacher_target(
+                    prompt, answers[i], teacher_adapter, config, device,
                 )
-            # Same ids as the KD batch row (BOS + prompt, answer + EOS): the teacher's
-            # DLA reference logits at the last prompt position must come from the same
-            # BOS-prefixed forward that create_graph ran on the prompt above.
-            prompt_ids, answer_ids = tokenize_prompt_answer(
-                teacher_adapter.tokenizer, prompt, str(answers[i]),
-            )
-            full_input_ids = torch.cat([prompt_ids, answer_ids]).to(device)
-            prompt_len = int(prompt_ids.numel())
-            with torch.no_grad():
-                full_logits = teacher_adapter.model(full_input_ids.unsqueeze(0)).logits.squeeze(0).detach().cpu()
-            teacher_dla_logits: torch.Tensor | None = None
-            if prompt_len > 0 and full_logits.shape[0] >= prompt_len:
-                teacher_dla_logits = full_logits[prompt_len - 1].to(device)
-            logit_token_ids = teacher_result.graph.logit_token_ids.to(device)
-            teacher_supergraph = teacher_result.supergraph
-            del teacher_result
+                if cache is not None:
+                    cache.put(prompt, _teacher_target_entry(teacher_supergraph, logit_token_ids, teacher_dla_logits))
+            else:
+                teacher_supergraph, logit_token_ids, teacher_dla_logits = _teacher_target_from_entry(entry, device)
+                cache_hits += 1
+            time_teacher += time.perf_counter() - t_start
+            t_start = time.perf_counter()
             prompt_loss, prompt_metrics = compute_prompt_graph_loss(
                 prompt=prompt,
                 student_adapter=student_adapter,
@@ -586,6 +772,7 @@ def backward_batch_graph_loss(
             elif config.verbose:
                 print("  [graph] WARN: graph loss has no grad; skipping backward")
             del scaled_loss
+            time_student += time.perf_counter() - t_start
         gc.collect()
         if device.type == "cuda":
             torch.cuda.empty_cache()
@@ -598,4 +785,8 @@ def backward_batch_graph_loss(
     metrics = {key: value / denom for key, value in metric_sums.items()}
     metrics["graph_prompts"] = float(len(prompts))
     metrics["graph_backward_prompts"] = float(graph_backward_prompts)
+    # Wall-clock totals (not per-prompt means) and cache hits for this batch.
+    metrics["graph_time_teacher"] = time_teacher
+    metrics["graph_time_student"] = time_student
+    metrics["teacher_cache_hits"] = float(cache_hits)
     return loss, metrics

@@ -541,6 +541,7 @@ def resume_training_state(model, optimizer, save_dir: str) -> Tuple[int, Dict[st
 
 # Fields that legitimately differ between the original launch and a resume.
 _RESUME_CONFIG_IGNORED = {
+    "anova_cache_device", "teacher_target_cache_dir",
     "resume", "device", "torch_version", "transformers_version", "bitsandbytes_version",
 }
 

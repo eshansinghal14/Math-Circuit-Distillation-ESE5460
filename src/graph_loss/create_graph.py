@@ -377,8 +377,11 @@ def build_shared_context(
 
     anova_token_selected_indices = sorted(all_selected)
 
-    # Precompute activation write result if needed (CLI heatmap path only; None in training).
-    need_awr = need_anova or (supernode_heatmap_output_dir is not None)
+    # The activation-write result feeds only the per-supernode heatmap PDFs
+    # (build_super_graph consults it under supernode_heatmap_output_dir alone), so
+    # it is built only when those are requested. Building it whenever ANOVA ran
+    # cost training a second full transfer of the MLP-input cache per prompt.
+    need_awr = supernode_heatmap_output_dir is not None
     activation_write_result = None
     if need_awr and anova_token_selected_indices:
         # Build a temporary filtered ctx to compute activation write results for ANOVA neurons.

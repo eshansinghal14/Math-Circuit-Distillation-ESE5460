@@ -94,8 +94,8 @@ def compute_activation_grid_from_mlp_cache(
         if not layer_members:
             continue
 
-        # One contiguous CPU→GPU transfer for the whole layer.
-        layer_tensor_gpu = layer_tensor.to(device=device)  # [n_prompts, n_positions, d_model]
+        # One contiguous transfer for the whole layer (a no-op if the cache is GPU-resident).
+        layer_tensor_gpu = layer_tensor.to(device=device, non_blocking=True)  # [n_prompts, n_positions, d_model]
         dtype = layer_tensor_gpu.dtype
 
         # Gather all neuron ids for this layer at once.
@@ -230,7 +230,8 @@ def label_neurons_layer_by_layer(
 
     # Process one layer at a time; run ANOVA immediately per-layer so grids never accumulate.
     for layer in valid_batch_layers:
-        layer_tensor_gpu = layer_inputs[layer].to(device=device)  # [P, n_positions, d]
+        # Free if the cache is GPU-resident; async at PCIe speed if it is pinned.
+        layer_tensor_gpu = layer_inputs[layer].to(device=device, non_blocking=True)  # [P, n_positions, d]
         n_positions = int(layer_tensor_gpu.shape[1])
         dtype = layer_tensor_gpu.dtype
         d = layer_tensor_gpu.shape[-1]

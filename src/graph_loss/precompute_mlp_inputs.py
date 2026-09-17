@@ -30,12 +30,49 @@ def _dataset_slug(dataset_key: str) -> str:
     return safe
 
 
-def load_mlp_cache_dir(cache_dir: str) -> dict:
-    """Load an MLP input cache from a directory containing meta.pt + layer_i.pt."""
+CACHE_DEVICES = ("cpu", "pinned", "cuda")
+
+
+def place_cache_tensor(t: torch.Tensor, device: str) -> torch.Tensor:
+    """Put one cached layer tensor where ``device`` says: pageable CPU memory
+    (``cpu``), page-locked CPU memory (``pinned``) or resident on the GPU (``cuda``).
+
+    The ANOVA labeler copies every layer of the cache to the GPU for every prompt
+    it labels, gigabytes per prompt and hundreds per training step. From pageable
+    memory that copy runs at a few GB/s, from pinned memory at PCIe speed, and
+    from the GPU it is free. Pinning falls back to pageable with a warning if the
+    allocation is refused, and is a no-op without CUDA.
+    """
+    if device == "cpu":
+        return t
+    if device == "pinned":
+        if not torch.cuda.is_available():
+            return t
+        try:
+            return t.pin_memory()
+        except RuntimeError as e:
+            logger.warning(
+                "could not pin %.2f GB of MLP-cache memory (%s); leaving it pageable",
+                t.numel() * t.element_size() / 1e9, e,
+            )
+            return t
+    if device == "cuda":
+        return t.to("cuda")
+    raise ValueError(f"unknown cache device {device!r}; expected one of {CACHE_DEVICES}")
+
+
+def load_mlp_cache_dir(cache_dir: str, device: str = "cpu") -> dict:
+    """Load an MLP input cache from a directory containing meta.pt + layer_i.pt.
+
+    ``device`` places each layer tensor; see place_cache_tensor.
+    """
     meta = torch.load(os.path.join(cache_dir, "meta.pt"), map_location="cpu", weights_only=True)
     n_layers = meta["n_layers"]
     layer_inputs = [
-        torch.load(os.path.join(cache_dir, f"layer_{i}.pt"), map_location="cpu", weights_only=True)
+        place_cache_tensor(
+            torch.load(os.path.join(cache_dir, f"layer_{i}.pt"), map_location="cpu", weights_only=True),
+            device,
+        )
         for i in range(n_layers)
     ]
     return {"meta": meta, "layer_inputs": layer_inputs}
@@ -75,8 +112,11 @@ def build_mlp_input_cache(
     data_dict: dict,
     batch_size: int = 64,
     refresh: bool = False,
+    cache_device: str = "cpu",
 ) -> dict:
     """Build or load an MLP-input cache stored under the system temp directory.
+
+    ``cache_device`` is where the returned layer tensors live (see place_cache_tensor).
 
     Checks for an existing cache keyed by model and dataset. If found, loads
     and returns it immediately. Otherwise captures residual-stream inputs
@@ -92,7 +132,7 @@ def build_mlp_input_cache(
         logger.info("Deleted existing MLP cache at %s", cache_dir)
     meta_path = os.path.join(cache_dir, "meta.pt")
     if os.path.isfile(meta_path):
-        return load_mlp_cache_dir(cache_dir)
+        return load_mlp_cache_dir(cache_dir, device=cache_device)
 
     os.makedirs(cache_dir, exist_ok=True)
     n_layers = adapter.n_layers
@@ -189,7 +229,7 @@ def build_mlp_input_cache(
     }
     torch.save(meta, meta_path)
     logger.info("MLP input cache written to %s", cache_dir)
-    return load_mlp_cache_dir(cache_dir)
+    return load_mlp_cache_dir(cache_dir, device=cache_device)
 
 
 def main() -> None:

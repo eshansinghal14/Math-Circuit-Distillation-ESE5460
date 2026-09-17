@@ -29,7 +29,12 @@ from utils import (
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
-from graph_loss.training import GraphAuxConfig, backward_batch_graph_loss
+from graph_loss.training import (
+    GraphAuxConfig,
+    TeacherTargetCache,
+    backward_batch_graph_loss,
+    teacher_target_cache_key,
+)
 from training.utils import (
     DEFAULT_SEED,
     ParamChangeCanary,
@@ -110,6 +115,9 @@ class GraphKDConfig:
     anova_range_radius: int = 0
     mlp_cache_batch_size: int = 32
     anova_neuron_chunk: int | None = None
+    # Performance only; neither changes any number a run produces.
+    anova_cache_device: str = "auto"
+    teacher_target_cache_dir: str | None = "cache/teacher_targets"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -171,13 +179,20 @@ class GraphKDTrainer:
                 student_mlp_cache, teacher_mlp_cache = shared["mlp_caches"]
             else:
                 from graph_loss.precompute_mlp_inputs import build_mlp_input_cache as _build_mlp_cache
+                student_dev, teacher_dev = _anova_cache_devices(config.anova_cache_device)
                 student_mlp_cache = _build_mlp_cache(
                     self.student_adapter, config.dataset, config.model,
                     data_dict=train_data, batch_size=config.mlp_cache_batch_size,
+                    cache_device=student_dev,
                 )
                 teacher_mlp_cache = _build_mlp_cache(
                     self.teacher_adapter, config.dataset, config.teacher,
                     data_dict=train_data, batch_size=config.mlp_cache_batch_size,
+                    cache_device=teacher_dev,
+                )
+                print(
+                    f"MLP-input caches: student {_cache_gb(student_mlp_cache):.2f} GB on {student_dev}, "
+                    f"teacher {_cache_gb(teacher_mlp_cache):.2f} GB on {teacher_dev}"
                 )
                 if shared is not None:
                     shared["mlp_caches"] = (student_mlp_cache, teacher_mlp_cache)
@@ -207,6 +222,27 @@ class GraphKDTrainer:
             scramble_teacher_graph=config.scramble_teacher_graph,
             scramble_seed=config.seed,
         )
+
+        # The teacher's per-prompt target is a pure function of the teacher-side
+        # configuration, so it is built once per prompt and shared by every run
+        # with that configuration (all seeds, every lambda, every control).
+        self.teacher_target_cache: TeacherTargetCache | None = None
+        cache_dir = config.teacher_target_cache_dir
+        if cache_dir and cache_dir.lower() != "none":
+            if shared is not None and "teacher_target_cache" in shared:
+                self.teacher_target_cache = shared["teacher_target_cache"]
+            else:
+                if not os.path.isabs(cache_dir):
+                    cache_dir = os.path.join(DIR_ROOT, cache_dir)
+                key = teacher_target_cache_key(self.graph_config, config.teacher)
+                self.teacher_target_cache = TeacherTargetCache(os.path.join(cache_dir, f"{key}.pt"))
+                if shared is not None:
+                    shared["teacher_target_cache"] = self.teacher_target_cache
+            self.graph_config.teacher_target_cache = self.teacher_target_cache
+            print(
+                f"Teacher target cache: {self.teacher_target_cache.path} "
+                f"({len(self.teacher_target_cache)} prompts cached)"
+            )
 
         self.history: Dict[str, List] = defaultdict(list)
         self._train_step = 0
@@ -294,6 +330,10 @@ class GraphKDTrainer:
         accum_teacher_sn = 0.0
         accum_graph_real = 0.0
         accum_flops = 0
+        accum_time_teacher = 0.0
+        accum_time_student = 0.0
+        accum_cache_hits = 0.0
+        accum_graph_prompts = 0.0
         micro_step = 0
         # Matmul / attention FLOPs of each micro-step's forward and backward
         # passes; a no-op unless --track-flops. Entered around the compute only,
@@ -372,6 +412,10 @@ class GraphKDTrainer:
             accum_aligned += float(graph_metrics.get("aligned_teacher_supernodes", 0.0))
             accum_teacher_sn += float(graph_metrics.get("teacher_supernodes", 0.0))
             accum_graph_real += float(graph_metrics.get("edge_loss_real_target", 0.0))
+            accum_time_teacher += float(graph_metrics.get("graph_time_teacher", 0.0))
+            accum_time_student += float(graph_metrics.get("graph_time_student", 0.0))
+            accum_cache_hits += float(graph_metrics.get("teacher_cache_hits", 0.0))
+            accum_graph_prompts += float(graph_metrics.get("graph_prompts", 0.0))
             if cfg.track_grad_metrics:
                 # grads_before is the gradient after the KL backward and before the
                 # graph backward, so the graph contribution is exactly the delta
@@ -490,9 +534,20 @@ class GraphKDTrainer:
                     flops_str = f" | FLOPs={accum_flops:.3e}"
                 else:
                     flops_str = ""
+                self.history["step_graph_time_teacher"].append(accum_time_teacher)
+                self.history["step_graph_time_student"].append(accum_time_student)
+                self.history["step_teacher_cache_hits"].append(accum_cache_hits)
+                hits_str = (
+                    f", cache hits {accum_cache_hits:.0f}/{accum_graph_prompts:.0f}"
+                    if self.teacher_target_cache is not None else ""
+                )
+                time_str = (
+                    f" | graph {accum_time_teacher + accum_time_student:.0f}s"
+                    f" (teacher {accum_time_teacher:.0f}s, student {accum_time_student:.0f}s{hits_str})"
+                )
                 print(
                     f"  step {self._train_step} | KL={accum_kl:.4f} | "
-                    f"Graph={accum_graph:.4f}{scramble_str}{gnorm_str}{flops_str}"
+                    f"Graph={accum_graph:.4f}{scramble_str}{gnorm_str}{flops_str}{time_str}"
                 )
                 self._last_save_step = maybe_save_periodic_checkpoint(
                     self.model, self.tokenizer, self.config.save_dir,
@@ -511,6 +566,10 @@ class GraphKDTrainer:
                 accum_teacher_sn = 0.0
                 accum_graph_real = 0.0
                 accum_flops = 0
+                accum_time_teacher = 0.0
+                accum_time_student = 0.0
+                accum_cache_hits = 0.0
+                accum_graph_prompts = 0.0
                 n_steps += 1
 
         denom = max(n_steps, 1)
@@ -561,6 +620,8 @@ class GraphKDTrainer:
                 break
             self.history["kl_loss"].append(metrics["kl_loss"])
             self.history["graph_loss"].append(metrics["graph_loss"])
+            if self.teacher_target_cache is not None:
+                self.teacher_target_cache.flush()
 
             acc = self._eval()
             self.history["accuracy"].append(acc)
@@ -571,6 +632,8 @@ class GraphKDTrainer:
             extra_str = "".join(f" | {ds}={a:.4f}" for ds, a in extra_accs.items())
             print(f"  [eval] step {self._train_step}/{cfg.steps} | Acc={acc:.4f}{extra_str}")
 
+        if self.teacher_target_cache is not None:
+            self.teacher_target_cache.flush()
         save_history(self.history, cfg.save_dir)
         save_curves(
             self.history, cfg.save_dir,
@@ -666,6 +729,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Neurons processed per ANOVA batch (reduce to avoid GPU OOM on large grids; default: all at once).",
     )
     group.add_argument(
+        "--anova-cache-device", "--anova_cache_device",
+        choices=["auto", "cpu", "pinned", "cuda"], default="auto", dest="anova_cache_device",
+        help="Where the MLP-input caches the ANOVA labeler reads live. The labeler copies "
+             "every layer of a cache to the GPU for every prompt it labels, so pageable "
+             "CPU memory (cpu) costs seconds per prompt, pinned memory copies at PCIe "
+             "speed and cuda makes the copy free. auto (default) puts the student's cache "
+             "on the GPU and pins the teacher's.",
+    )
+    group.add_argument(
+        "--teacher-target-cache", "--teacher_target_cache",
+        type=str, default="cache/teacher_targets", dest="teacher_target_cache_dir",
+        help="Directory (relative to the data root unless absolute) holding one file per "
+             "teacher-side configuration with every prompt's teacher target built so "
+             "far. A prompt's target is computed once and reused by every later run, "
+             "seed or lambda with the same teacher settings; the key hashes the "
+             "graph_loss source so code changes never serve stale targets. 'none' "
+             "disables it.",
+    )
+    group.add_argument(
         "--scramble-teacher-graph", "--scramble_teacher_graph",
         action="store_true", dest="scramble_teacher_graph",
         help="Control arm: permute each row of the teacher's supernode adjacency by a "
@@ -680,6 +762,19 @@ def build_parser() -> argparse.ArgumentParser:
              "step_grad_ratio before comparing arms.",
     )
     return parser
+
+
+def _anova_cache_devices(spec: str) -> tuple[str, str]:
+    """``(student, teacher)`` placement for the two MLP-input caches."""
+    if spec == "auto":
+        return ("cuda" if torch.cuda.is_available() else "cpu", "pinned")
+    return (spec, spec)
+
+
+def _cache_gb(cache: dict | None) -> float:
+    if not cache:
+        return 0.0
+    return sum(t.numel() * t.element_size() for t in cache.get("layer_inputs", [])) / 1e9
 
 
 def _normalize_label(label: str) -> str:
@@ -736,6 +831,8 @@ def main() -> None:
                 anova_range_radius=args.anova_range_radius,
                 mlp_cache_batch_size=args.cache_batch_size,
                 anova_neuron_chunk=args.anova_neuron_chunk,
+                anova_cache_device=args.anova_cache_device,
+                teacher_target_cache_dir=args.teacher_target_cache_dir,
             ),
             train_data,
             test_data,
