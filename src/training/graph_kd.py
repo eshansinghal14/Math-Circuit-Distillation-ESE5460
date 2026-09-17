@@ -76,7 +76,6 @@ class GraphKDConfig:
     learning_rate: float = 1e-6
     temperature: float = 2.0
     kl_token_chunk_size: int = 64
-    kd_positions: str = "response"  # see training.utils.kd_position_mask
     max_eval_tokens: Optional[int] = None  # None -> utils.default_eval_tokens(dataset)
     eval_batch_size: int = 256
     save_dir: str = "results/graph_kd"
@@ -304,7 +303,7 @@ class GraphKDTrainer:
             flop_counter.reset()
             input_ids = batch["input_ids"].to(_DEVICE)
             attention_mask = batch["attention_mask"].to(_DEVICE)
-            kd_mask = kd_position_mask(attention_mask, batch["response_mask"].to(_DEVICE), cfg.kd_positions)
+            kd_mask = kd_position_mask(attention_mask, batch["response_mask"].to(_DEVICE))
 
             # With grad_accum == 1 the optimizer has just zeroed .grad, so the
             # gradient after kl.backward() *is* this step's KL gradient and no
@@ -695,7 +694,6 @@ def main() -> None:
                 learning_rate=args.lr,
                 temperature=args.temperature,
                 kl_token_chunk_size=args.kl_token_chunk_size,
-                kd_positions=args.kd_positions,
                 save_dir=save_dir,
                 eval_every_n_steps=args.eval_every_n_steps,
                 save_every_n_steps=args.save_every_n_steps,

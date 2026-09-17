@@ -251,28 +251,20 @@ def step_flop_counter(enabled: bool):
     return FlopCounter() if enabled else _NullFlopCounter()
 
 
-KD_POSITIONS = ("response", "all")
+def kd_position_mask(attention_mask: torch.Tensor, response_mask: torch.Tensor) -> torch.Tensor:
+    """``[B, L]`` mask of the logit positions the KD term is computed on: the
+    positions that *predict* an answer token or the EOS after it, i.e.
+    ``response_mask`` shifted left by one (logits at position ``p`` predict token
+    ``p + 1``), exactly the positions the SFT loss scores.
 
-
-def kd_position_mask(attention_mask: torch.Tensor, response_mask: torch.Tensor, kd_positions: str) -> torch.Tensor:
-    """``[B, L]`` mask of the logit positions the KD term is computed on.
-
-    ``response``: the positions that *predict* an answer token or the EOS after
-    it, i.e. ``response_mask`` shifted left by one (logits at position ``p``
-    predict token ``p + 1``), exactly the positions the SFT loss scores. ``all``:
-    every non-padding position, the pre-2026-09-17 behaviour.
-
-    With BOS in the training sequence, ``all`` spends most of the loss on
-    positions that have nothing to do with the task: the KL after BOS is the two
-    models' disagreement over how a document starts (the largest single term,
-    ~2.4 of ~14 nats per sequence) and the prompt positions predict random
-    operands. Scoring only the answer positions removed a dip in which the
-    student fell to ~0.01 in-distribution accuracy within ten steps of KD.
+    The KD term is scored on these positions only. Scoring every non-padding
+    position (the behaviour before 2026-09-17) spent most of the loss off the
+    task: with BOS in the sequence the largest single term was the two models'
+    disagreement over how a document starts, scored at the attention-sink
+    position (~2.4 of ~14 nats per sequence), and the prompt positions scored
+    the teacher's prior over random operands; the student fell to ~0.01
+    in-distribution accuracy within ten steps of KD.
     """
-    if kd_positions not in KD_POSITIONS:
-        raise ValueError(f"kd_positions must be one of {KD_POSITIONS}, got {kd_positions!r}")
-    if kd_positions == "all":
-        return attention_mask.bool()
     mask = torch.zeros_like(attention_mask, dtype=torch.bool)
     mask[:, :-1] = response_mask[:, 1:].bool()
     return mask & attention_mask.bool()
@@ -932,11 +924,6 @@ def add_kd_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--teacher", type=str, required=True)
     group.add_argument("--temperature", type=float, default=2.0)
     group.add_argument("--kl-token-chunk-size", type=int, default=64, dest="kl_token_chunk_size")
-    group.add_argument("--kd-positions", choices=list(KD_POSITIONS), default="response", dest="kd_positions",
-                       help="Logit positions the KD KL is averaged over: 'response' (default) scores only "
-                            "the positions that predict the answer tokens and the EOS after them, as the "
-                            "SFT loss does; 'all' scores every non-padding position including the one "
-                            "after BOS and the prompt tokens (the behaviour before 2026-09-17).")
     group.add_argument(
         "--track-flops", "--track_flops", action="store_true", dest="track_flops",
         help="Count the FLOPs of every matmul, attention and convolution kernel in each "
