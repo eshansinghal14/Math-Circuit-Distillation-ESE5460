@@ -36,6 +36,7 @@ from training.utils import (
     maybe_save_periodic_checkpoint,
     record_resumed_config,
     first_answer_token_accuracy,
+    apply_lr_schedule,
     resume_checkpoint_dir,
     run_baselines,
     run_seeds,
@@ -87,6 +88,8 @@ class SFTConfig:
     steps: int = 15
     batch_size: int = 32
     learning_rate: float = 1e-6
+    warmup_steps: int = 10
+    lr_floor: float = 0.1  # see training.utils.scheduled_lr
     max_eval_tokens: Optional[int] = None  # None -> utils.default_eval_tokens(dataset)
     eval_batch_size: int = 256
     save_dir: str = "results/sft"
@@ -197,6 +200,9 @@ class SFTTrainer:
             if micro_step % grad_accum == 0:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), _GRAD_CLIP)
                 canary = ParamChangeCanary(self.model) if self._train_step == 0 else None
+                self._last_lr = apply_lr_schedule(
+                    self.optimizer, self._train_step + 1, cfg.steps, cfg.learning_rate,
+                    cfg.warmup_steps, cfg.lr_floor)
                 self.optimizer.step()
                 self.optimizer.zero_grad()
                 if canary is not None:
@@ -205,6 +211,7 @@ class SFTTrainer:
                 self._train_step += 1
                 self.history["train_step"].append(self._train_step)
                 self.history["step_tf_acc"].append(self._last_tf_acc)
+                self.history["step_lr"].append(self._last_lr)
                 self.history["step_ce_loss"].append(accum_loss)
                 total_loss += accum_loss
                 print(f"  step {self._train_step} | CE={accum_loss:.4f}")
@@ -299,6 +306,8 @@ def main() -> None:
                 steps=args.steps,
                 batch_size=args.batch_size,
                 learning_rate=args.lr,
+                warmup_steps=args.warmup_steps,
+                lr_floor=args.lr_floor,
                 save_dir=save_dir,
                 eval_every_n_steps=args.eval_every_n_steps,
                 save_every_n_steps=args.save_every_n_steps,

@@ -366,7 +366,8 @@ Appendices~\ref{app:llama} and~\ref{app:perf}.
 The teacher is Meta-Llama-3-8B-Instruct and the student Llama-3.2-1B-Instruct, both public
 checkpoints; the teacher is frozen and runs in bf16, the student holds fp32 master weights under a
 bf16 autocast forward (Appendix~\ref{app:llama}). Training prompts are two-digit additions
-``\texttt{$a$+$b$=}'' (22\_add), batch 32, AdamW at $10^{-6}$ with no schedule, 100 steps.
+``\texttt{$a$+$b$=}'' (22\_add), batch 32, AdamW with a peak rate of $10^{-6}$, ten warmup steps
+and cosine decay to a tenth of the peak, 100 steps.
 Generalisation is measured on four families never seen in training: three- and four-operand sums
 of two-digit numbers (222\_add, 2222\_add), three-digit addition (33\_add) and two-digit by
 one-digit multiplication (21\_mult), $5000$ held-out prompts each ($1000$ for 21\_mult), scored by
@@ -893,7 +894,8 @@ rather than the batch's.
     \toprule
     teacher / student & Meta-Llama-3-8B-Instruct / Llama-3.2-1B-Instruct, $1.24$B parameters \\
     training data & 22\_add prompts ``\texttt{$a$+$b$=}'', batch 32, 100 steps (control: 300) \\
-    optimiser & AdamW, learning rate $10^{-6}$, no schedule, gradient clipping at $1.0$ \\
+    optimiser & AdamW, peak learning rate $10^{-6}$, linear warmup over 10 steps, \\
+              & cosine decay to $10^{-7}$ at the last step, gradient clipping at $1.0$ \\
     precision & fp32 master weights and optimiser moments, bf16 autocast forward; teacher bf16 \\
     KD term & $\tau = 1$, forward KL over the positions predicting the answer tokens and EOS \\
     graph term & $\lambda = 0.1$, JSD, arg-token + DLA supernodes, 3 neurons per label \\

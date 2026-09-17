@@ -8,6 +8,7 @@ import dataclasses
 import gc
 import hashlib
 import json
+import math
 import os
 import random
 import shutil
@@ -87,6 +88,35 @@ def make_optimizer(model, lr: float):
     """torch AdamW with fp32 moments. See the precision note at the top of this file."""
     from torch.optim import AdamW
     return AdamW(params=model.parameters(), lr=lr, foreach=False)
+
+
+def scheduled_lr(step: int, total_steps: int, peak: float, warmup_steps: int, floor: float) -> float:
+    """Learning rate for optimizer step ``step`` (1-based): linear warmup from 0 over
+    ``warmup_steps``, then cosine decay from ``peak`` to ``floor * peak`` at ``total_steps``.
+
+    Stateless, so --resume needs nothing beyond the restored step count. Added
+    2026-09-17: with a constant 1e-6 and no warmup, standard KD on the answer
+    positions overshot to 0.51 in-distribution at step 10 and then cycled
+    +-0.03 with a ~10-step period for the rest of the run -- an Adam limit
+    cycle, visible in every family in phase -- so every at-step number depended
+    on the phase the eval landed in. Warmup removes the overshoot; the decay
+    damps the cycle. ``warmup_steps=0`` and ``floor=1`` give the old constant
+    rate.
+    """
+    if warmup_steps > 0 and step <= warmup_steps:
+        return peak * step / warmup_steps
+    if total_steps <= warmup_steps:
+        return peak
+    progress = min(1.0, (step - warmup_steps) / max(1, total_steps - warmup_steps))
+    return peak * (floor + (1.0 - floor) * 0.5 * (1.0 + math.cos(math.pi * progress)))
+
+
+def apply_lr_schedule(optimizer, step: int, total_steps: int, peak: float, warmup_steps: int, floor: float) -> float:
+    """Set every param group's lr for this step and return it."""
+    lr = scheduled_lr(step, total_steps, peak, warmup_steps, floor)
+    for group in optimizer.param_groups:
+        group["lr"] = lr
+    return lr
 
 
 def run_config_record(config, model, optimizer) -> Dict[str, Any]:
@@ -965,7 +995,13 @@ def add_standard_args(parser: argparse.ArgumentParser) -> None:
                     metavar="DATASET", help="Additional datasets to evaluate on at every eval step.")
     group.add_argument("--steps", type=int, default=15)
     group.add_argument("--batch-size", type=int, default=32, dest="batch_size")
-    group.add_argument("--lr", type=float, default=1e-6)
+    group.add_argument("--lr", type=float, default=1e-6, help="Peak learning rate; see --warmup-steps.")
+    group.add_argument("--warmup-steps", type=int, default=10, dest="warmup_steps",
+                       help="Linear warmup from 0 to --lr over this many steps, then cosine decay to "
+                            "--lr-floor x --lr at --steps. 0 disables the warmup.")
+    group.add_argument("--lr-floor", type=float, default=0.1, dest="lr_floor",
+                       help="Fraction of --lr the cosine decay reaches at the last step; 1 keeps the "
+                            "rate constant after warmup.")
     group.add_argument("--save-dir", type=str, default="results/sft")
     group.add_argument("--eval-every-n-steps", type=int, default=1, dest="eval_every_n_steps")
     group.add_argument("--save-every-n-steps", type=int, default=0, dest="save_every_n_steps",

@@ -73,6 +73,7 @@ from training.utils import (
     make_optimizer,
     maybe_save_periodic_checkpoint,
     record_resumed_config,
+    apply_lr_schedule,
     resume_checkpoint_dir,
     run_baselines,
     shared_teacher,
@@ -411,6 +412,8 @@ class RepKDConfig:
     steps: int = 15
     batch_size: int = 32
     learning_rate: float = 1e-6
+    warmup_steps: int = 10
+    lr_floor: float = 0.1  # see training.utils.scheduled_lr
     temperature: float = 1.0
     kl_token_chunk_size: int = 64
     max_eval_tokens: Optional[int] = None  # None -> utils.default_eval_tokens(dataset)
@@ -732,6 +735,9 @@ class RepKDTrainer:
                 accum_clip = float(total_norm)
                 if torch.isfinite(total_norm):
                     canary = ParamChangeCanary(self.model) if self._train_step == 0 else None
+                    self._last_lr = apply_lr_schedule(
+                        self.optimizer, self._train_step + 1, cfg.steps, cfg.learning_rate,
+                        cfg.warmup_steps, cfg.lr_floor)
                     self.optimizer.step()
                     if canary is not None:
                         log_first_step_canary(canary.report(self.model), self.history)
@@ -744,6 +750,7 @@ class RepKDTrainer:
                 self.history["train_step"].append(self._train_step)
                 self.history["step_kl_loss"].append(acc["kl"])
                 self.history["step_tf_acc"].append(self._last_tf_acc)
+                self.history["step_lr"].append(self._last_lr)
                 self.history["step_rep_loss"].append(acc["rep"])
                 comp_str = ""
                 for k in comps:
@@ -872,6 +879,8 @@ def base_config_kwargs(args: argparse.Namespace, dir_root: str, seed: int | None
         steps=args.steps,
         batch_size=args.batch_size,
         learning_rate=args.lr,
+        warmup_steps=args.warmup_steps,
+        lr_floor=args.lr_floor,
         temperature=args.temperature,
         kl_token_chunk_size=args.kl_token_chunk_size,
         save_dir=os.path.join(dir_root, args.save_dir),
