@@ -995,11 +995,11 @@ def add_standard_args(parser: argparse.ArgumentParser) -> None:
                     metavar="DATASET", help="Additional datasets to evaluate on at every eval step.")
     group.add_argument("--steps", type=int, default=15)
     group.add_argument("--batch-size", type=int, default=32, dest="batch_size")
-    group.add_argument("--lr", type=float, default=1e-6, help="Peak learning rate; see --warmup-steps.")
+    group.add_argument("--lr", type=float, default=5e-7, help="Peak learning rate; see --warmup-steps.")
     group.add_argument("--warmup-steps", type=int, default=10, dest="warmup_steps",
                        help="Linear warmup from 0 to --lr over this many steps, then cosine decay to "
                             "--lr-floor x --lr at --steps. 0 disables the warmup.")
-    group.add_argument("--lr-floor", type=float, default=0.1, dest="lr_floor",
+    group.add_argument("--lr-floor", type=float, default=0.3, dest="lr_floor",
                        help="Fraction of --lr the cosine decay reaches at the last step; 1 keeps the "
                             "rate constant after warmup.")
     group.add_argument("--save-dir", type=str, default="results/sft")

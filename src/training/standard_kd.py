@@ -70,9 +70,9 @@ class StandardKDConfig:
     dataset: str
     steps: int = 15
     batch_size: int = 32
-    learning_rate: float = 1e-6
+    learning_rate: float = 5e-7
     warmup_steps: int = 10
-    lr_floor: float = 0.1  # see training.utils.scheduled_lr
+    lr_floor: float = 0.3  # see training.utils.scheduled_lr
     temperature: float = 1.0
     kl_token_chunk_size: int = 64
     max_eval_tokens: Optional[int] = None  # None -> utils.default_eval_tokens(dataset)
