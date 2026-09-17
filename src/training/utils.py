@@ -270,6 +270,28 @@ def kd_position_mask(attention_mask: torch.Tensor, response_mask: torch.Tensor) 
     return mask & attention_mask.bool()
 
 
+def describe_answer_position(tokenizer, student_logits, teacher_logits, input_ids, response_mask,
+                             temperature: float, row: int = 0, k: int = 5) -> None:
+    """Print both models' top-k next-token distributions at the answer position of one row.
+
+    The KD target at that position is the teacher's distribution at the training
+    temperature; printing it beside tau = 1 shows how much of the teacher's mass
+    the softening moves onto non-answer tokens (a "?" after "=", a newline), which
+    is what a mode-covering forward KL will make the student reproduce first.
+    """
+    first = int(response_mask[row].int().argmax().item())
+    gold = tokenizer.decode([int(input_ids[row, first])])
+    prompt = tokenizer.decode(input_ids[row, :first].tolist(), skip_special_tokens=True)
+    print(f"  answer position of {prompt!r} (gold {gold!r}):")
+    for name, logits in (("teacher", teacher_logits), ("student", student_logits)):
+        z = logits[row, first - 1].detach().float()
+        for tau in sorted({1.0, float(temperature)}):
+            p = torch.softmax(z / tau, dim=-1)
+            top = torch.topk(p, k)
+            cells = ", ".join(f"{tokenizer.decode([int(i)])!r}:{float(v):.3f}" for v, i in zip(top.values, top.indices))
+            print(f"    {name} tau={tau:g}: {cells}  (top-{k} mass {float(top.values.sum()):.3f})")
+
+
 def first_answer_token_accuracy(logits: torch.Tensor, input_ids: torch.Tensor, response_mask: torch.Tensor) -> float:
     """Teacher-forced accuracy of the first answer token on a training batch.
 

@@ -66,6 +66,7 @@ from training.utils import (
     ParamChangeCanary,
     describe_run_setup,
     kd_position_mask,
+    describe_answer_position,
     first_answer_token_accuracy,
     kl_loss,
     load_student,
@@ -657,6 +658,8 @@ class RepKDTrainer:
                 s_logits, t_logits, s_cap, t_cap = self._forward_pair(input_ids, attention_mask)
             self._check_student_grads(s_cap)
             self._last_tf_acc = first_answer_token_accuracy(s_logits.detach(), input_ids, response_mask)
+            if self._train_step == 0 and micro_step == 0:
+                describe_answer_position(self.tokenizer, s_logits, t_logits, input_ids, response_mask, cfg.temperature)
 
             token_mask = matched_token_mask(
                 attention_mask, response_mask, cfg.match_positions, cfg.keep_first_position,
