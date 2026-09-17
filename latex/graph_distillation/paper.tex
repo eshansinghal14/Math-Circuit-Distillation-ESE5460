@@ -162,7 +162,7 @@ The full objective adds \eqref{eq:graphloss} to the ordinary temperature-scaled 
   \label{eq:total}
 \end{equation}
 where $\mathcal{P}$ is the set of positions that predict an answer token or the end-of-sequence
-token after it, $z_p$ the logits at position $p$, $\tau = 2$, and $\lambda = 0.1$
+token after it, $z_p$ the logits at position $p$, $\tau = 1$, and $\lambda = 0.1$
 (Appendix~\ref{app:lambda}). The two gradients are close to orthogonal in parameter space
 throughout training (cosine within $\pm 0.09$ and mean $+0.004$ over 500 logged steps), which in a
 space of $10^9$ dimensions is simply what unrelated objectives look like; its one practical
@@ -195,7 +195,7 @@ where $m^{(\ell_j)}$ is the output of MLP block $\ell_j$. Token-embedding nodes 
 way with $v^{\mathrm{out}}$ replaced by the embedding vector, and logit nodes use
 $f_c = \langle h^{(L)}_{-1},\, W_U[:,c] - \overline{W_U}\rangle$ with the mean-subtracted
 unembedding column, following \citet{ameisen2025circuit}. The logit targets $c$ are the smallest set
-of top tokens whose probabilities under $\softmax(z/\tau)$, $\tau = 2$, sum to $0.95$, capped at
+of top tokens whose probabilities under $\softmax(z/\tau)$, $\tau = 1$, sum to $0.95$, capped at
 ten. Since $n_{\mathrm{pos}} \times d_{\mathrm{mlp}}$ candidate neurons per layer is far too many,
 we keep the top $10\%$ per layer by write-vector norm; activations at the BOS position are zeroed so
 the attention sink is never selected.
@@ -372,7 +372,7 @@ of two-digit numbers (222\_add, 2222\_add), three-digit addition (33\_add) and t
 one-digit multiplication (21\_mult), $5000$ held-out prompts each ($1000$ for 21\_mult), scored by
 greedy decoding and exact match on the leading integer of the continuation. We compare three
 objectives through one trainer stack: supervised fine-tuning on the gold answers (SFT); standard
-KD from the teacher's logits at $\tau = 2$; KD plus the graph loss \eqref{eq:total} with
+KD from the teacher's logits at $\tau = 1$; KD plus the graph loss \eqref{eq:total} with
 $\lambda = 0.1$ and the prompt-derived supernodes of Section~\ref{sec:supernodes-general}; and,
 as representation-level references that constrain the student's internals without a graph, KD
 plus the TinyBERT recipe \citep{jiao2020tinybert} --- mean-squared error between a learned linear
@@ -765,7 +765,7 @@ The weight $\lambda$ in \eqref{eq:total} is the one hyperparameter the method ad
 $\lambda \in \{0.03, 0.1, 0.3\}$ against two references trained through the same stack and
 evaluated identically: the $\lambda = 0$ control, which is standard knowledge distillation, and
 supervised fine-tuning on the same prompts. Everything else is held fixed: learning rate
-$10^{-6}$, batch size 32, $\tau = 2$, the same data order, and the unfrozen arg-token and DLA
+$10^{-6}$, batch size 32, $\tau = 1$, the same data order, and the unfrozen arg-token and DLA
 supernodes of Section~\ref{sec:supernodes-general} with three neurons each
 (Appendix~\ref{app:details} has the full table). The graph runs train for 100 steps; the control
 trains for 300 so that its peak is not cut off. Table~\ref{tab:lambda} and Figure~\ref{fig:lambda}
@@ -895,7 +895,7 @@ rather than the batch's.
     training data & 22\_add prompts ``\texttt{$a$+$b$=}'', batch 32, 100 steps (control: 300) \\
     optimiser & AdamW, learning rate $10^{-6}$, no schedule, gradient clipping at $1.0$ \\
     precision & fp32 master weights and optimiser moments, bf16 autocast forward; teacher bf16 \\
-    KD term & $\tau = 2$, forward KL over the positions predicting the answer tokens and EOS \\
+    KD term & $\tau = 1$, forward KL over the positions predicting the answer tokens and EOS \\
     graph term & $\lambda = 0.1$, JSD, arg-token + DLA supernodes, 3 neurons per label \\
     attribution & top $10\%$ of neurons per layer by write norm in the teacher, $1\%$ in the student; \\
                 & logit targets: top tokens covering $0.95$ of $\softmax(z/\tau)$, at most ten \\

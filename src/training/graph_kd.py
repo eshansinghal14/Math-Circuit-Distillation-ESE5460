@@ -37,7 +37,6 @@ from training.utils import (
     add_standard_args,
     describe_run_setup,
     kd_position_mask,
-    describe_answer_position,
     first_answer_token_accuracy,
     kl_loss,
     load_student,
@@ -76,7 +75,7 @@ class GraphKDConfig:
     steps: int = 15
     batch_size: int = 32
     learning_rate: float = 1e-6
-    temperature: float = 2.0
+    temperature: float = 1.0
     kl_token_chunk_size: int = 64
     max_eval_tokens: Optional[int] = None  # None -> utils.default_eval_tokens(dataset)
     eval_batch_size: int = 256
@@ -327,9 +326,6 @@ class GraphKDTrainer:
 
                 with torch.no_grad():
                     teacher_logits = self.teacher(input_ids, attention_mask=attention_mask).logits
-                if self._train_step == 0 and micro_step == 0:
-                    describe_answer_position(self.tokenizer, student_logits, teacher_logits, input_ids,
-                                             batch["response_mask"].to(_DEVICE), cfg.temperature)
 
                 kl = kl_loss(
                     student_logits, teacher_logits, kd_mask,

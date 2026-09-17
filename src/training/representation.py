@@ -66,7 +66,6 @@ from training.utils import (
     ParamChangeCanary,
     describe_run_setup,
     kd_position_mask,
-    describe_answer_position,
     first_answer_token_accuracy,
     kl_loss,
     load_student,
@@ -412,7 +411,7 @@ class RepKDConfig:
     steps: int = 15
     batch_size: int = 32
     learning_rate: float = 1e-6
-    temperature: float = 2.0
+    temperature: float = 1.0
     kl_token_chunk_size: int = 64
     max_eval_tokens: Optional[int] = None  # None -> utils.default_eval_tokens(dataset)
     eval_batch_size: int = 256
@@ -658,8 +657,6 @@ class RepKDTrainer:
                 s_logits, t_logits, s_cap, t_cap = self._forward_pair(input_ids, attention_mask)
             self._check_student_grads(s_cap)
             self._last_tf_acc = first_answer_token_accuracy(s_logits.detach(), input_ids, response_mask)
-            if self._train_step == 0 and micro_step == 0:
-                describe_answer_position(self.tokenizer, s_logits, t_logits, input_ids, response_mask, cfg.temperature)
 
             token_mask = matched_token_mask(
                 attention_mask, response_mask, cfg.match_positions, cfg.keep_first_position,

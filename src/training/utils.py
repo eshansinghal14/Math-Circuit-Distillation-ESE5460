@@ -270,28 +270,6 @@ def kd_position_mask(attention_mask: torch.Tensor, response_mask: torch.Tensor) 
     return mask & attention_mask.bool()
 
 
-def describe_answer_position(tokenizer, student_logits, teacher_logits, input_ids, response_mask,
-                             temperature: float, row: int = 0, k: int = 5) -> None:
-    """Print both models' top-k next-token distributions at the answer position of one row.
-
-    The KD target at that position is the teacher's distribution at the training
-    temperature; printing it beside tau = 1 shows how much of the teacher's mass
-    the softening moves onto non-answer tokens (a "?" after "=", a newline), which
-    is what a mode-covering forward KL will make the student reproduce first.
-    """
-    first = int(response_mask[row].int().argmax().item())
-    gold = tokenizer.decode([int(input_ids[row, first])])
-    prompt = tokenizer.decode(input_ids[row, :first].tolist(), skip_special_tokens=True)
-    print(f"  answer position of {prompt!r} (gold {gold!r}):")
-    for name, logits in (("teacher", teacher_logits), ("student", student_logits)):
-        z = logits[row, first - 1].detach().float()
-        for tau in sorted({1.0, float(temperature)}):
-            p = torch.softmax(z / tau, dim=-1)
-            top = torch.topk(p, k)
-            cells = ", ".join(f"{tokenizer.decode([int(i)])!r}:{float(v):.3f}" for v, i in zip(top.values, top.indices))
-            print(f"    {name} tau={tau:g}: {cells}  (top-{k} mass {float(top.values.sum()):.3f})")
-
-
 def first_answer_token_accuracy(logits: torch.Tensor, input_ids: torch.Tensor, response_mask: torch.Tensor) -> float:
     """Teacher-forced accuracy of the first answer token on a training batch.
 
@@ -959,7 +937,11 @@ def save_curves(
 def add_kd_args(parser: argparse.ArgumentParser) -> None:
     group = parser.add_argument_group("kd_args")
     group.add_argument("--teacher", type=str, required=True)
-    group.add_argument("--temperature", type=float, default=2.0)
+    group.add_argument("--temperature", type=float, default=1.0,
+                       help="KD softening temperature, also used for the graph term's logit targets. "
+                            "1.0: at 2.0 the teacher's tail mass on non-answer tokens after '=' (a '?') "
+                            "rivals the answer's, and the mode-covering forward KL made the student "
+                            "emit '?' within five steps (2026-09-17).")
     group.add_argument("--kl-token-chunk-size", type=int, default=64, dest="kl_token_chunk_size")
     group.add_argument(
         "--track-flops", "--track_flops", action="store_true", dest="track_flops",
