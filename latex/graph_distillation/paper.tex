@@ -161,7 +161,8 @@ The full objective adds \eqref{eq:graphloss} to the ordinary temperature-scaled 
   \lambda\, \mathcal{L}_{\mathrm{graph}}(\theta_\Stud),
   \label{eq:total}
 \end{equation}
-where $z_p$ are logits at non-padding position $p$, $\tau = 2$, and $\lambda = 0.1$
+where $\mathcal{P}$ is the set of positions that predict an answer token or the end-of-sequence
+token after it, $z_p$ the logits at position $p$, $\tau = 2$, and $\lambda = 0.1$
 (Appendix~\ref{app:lambda}). The two gradients are close to orthogonal in parameter space
 throughout training (cosine within $\pm 0.09$ and mean $+0.004$ over 500 logged steps), which in a
 space of $10^9$ dimensions is simply what unrelated objectives look like; its one practical
@@ -894,7 +895,7 @@ rather than the batch's.
     training data & 22\_add prompts ``\texttt{$a$+$b$=}'', batch 32, 100 steps (control: 300) \\
     optimiser & AdamW, learning rate $10^{-6}$, no schedule, gradient clipping at $1.0$ \\
     precision & fp32 master weights and optimiser moments, bf16 autocast forward; teacher bf16 \\
-    KD term & $\tau = 2$, forward KL over all non-padding positions \\
+    KD term & $\tau = 2$, forward KL over the positions predicting the answer tokens and EOS \\
     graph term & $\lambda = 0.1$, JSD, arg-token + DLA supernodes, 3 neurons per label \\
     attribution & top $10\%$ of neurons per layer by write norm in the teacher, $1\%$ in the student; \\
                 & logit targets: top tokens covering $0.95$ of $\softmax(z/\tau)$, at most ten \\
