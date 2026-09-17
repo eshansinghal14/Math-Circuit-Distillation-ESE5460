@@ -168,7 +168,8 @@ class SFTTrainer:
 
     def train_epoch(self, *, max_steps: Optional[int] = None) -> Dict[str, float]:
         self.model.train()
-        grad_accum = self.config.grad_accum_steps
+        cfg = self.config
+        grad_accum = cfg.grad_accum_steps
         total_loss = 0.0
         n_steps = 0
         accum_loss = 0.0
