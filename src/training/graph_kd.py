@@ -23,6 +23,7 @@ from utils import (
     load_data,
     load_model,
     seed_all,
+    tokenize_prompt_answer,
 )
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -215,6 +216,39 @@ class GraphKDTrainer:
         """bf16 autocast for the student forward; it holds fp32 master weights."""
         return student_autocast()
 
+    def _check_sequence_consistency(self, batch, input_ids, attention_mask) -> None:
+        """Once per run: the ids the graph term will build on must equal the KD batch row.
+
+        The KD term sees ``batch["input_ids"]``; the graph term re-tokenises
+        ``batch["prompts"]`` / ``batch["answers"]`` through tokenize_prompt_answer and
+        the attribution adapter prepends BOS when missing; eval_model tokenises with
+        add_special_tokens=True. All three must agree token for token, and the
+        sequence must start with BOS. A mismatch here once let the KD loss train a
+        distribution the student was never evaluated on.
+        """
+        p_ids, a_ids = tokenize_prompt_answer(self.tokenizer, batch["prompts"][0], str(batch["answers"][0]))
+        seq = torch.cat([p_ids, a_ids]).to(input_ids.device)
+        n = int(attention_mask[0].sum())
+        row = input_ids[0][:n]
+        if n != seq.numel() or not torch.equal(row, seq):
+            raise RuntimeError(
+                "KD batch row and graph-term tokenisation disagree for the first prompt: "
+                f"batch {row.tolist()} vs graph {seq.tolist()}"
+            )
+        adapter_ids = self.student_adapter.ensure_tokenized(batch["prompts"][0])
+        if not torch.equal(adapter_ids.cpu(), p_ids.cpu()):
+            raise RuntimeError(
+                "attribution adapter tokenises the prompt differently from the KD batch: "
+                f"adapter {adapter_ids.tolist()} vs batch {p_ids.tolist()}"
+            )
+        eval_ids = self.tokenizer([batch["prompts"][0]], add_special_tokens=True)["input_ids"][0]
+        if list(eval_ids) != p_ids.tolist():
+            raise RuntimeError(
+                f"eval_model tokenisation differs from the KD batch prompt: eval {eval_ids} vs batch {p_ids.tolist()}"
+            )
+        print(f"  sequence check passed: KD batch, graph term, adapter and eval agree on {n} tokens "
+              f"(BOS id {self.tokenizer.bos_token_id} leads)")
+
     def _eval_on(self, model, dataset_name: str, test_dataset: PromptAnswerDataset) -> float:
         cfg = self.config
         # A no-op for the bf16 teacher.
@@ -300,6 +334,8 @@ class GraphKDTrainer:
             # ── Graph loss ────────────────────────────────────────────────────
             prompts: List[str] = batch["prompts"]
             answers = batch["answers"]
+            if self._train_step == 0 and micro_step == 0:
+                self._check_sequence_consistency(batch, input_ids, attention_mask)
             if cfg.n_graph_prompts is not None and cfg.n_graph_prompts < len(prompts):
                 sel = random.sample(range(len(prompts)), cfg.n_graph_prompts)
                 prompts = [prompts[i] for i in sel]

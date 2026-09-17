@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
-from utils import parse_response
+from utils import parse_response, tokenize_prompt_answer
 
 import torch
 
@@ -380,12 +380,9 @@ def _compare_tokens_loss_for_prompt(
     import gc
 
     tokenizer = student_adapter.tokenizer
-    prompt_ids = tokenizer(
-        prompt, return_tensors="pt", add_special_tokens=False
-    )["input_ids"].squeeze(0)
-    answer_ids = tokenizer(
-        str(answer) + tokenizer.eos_token, return_tensors="pt", add_special_tokens=False
-    )["input_ids"].squeeze(0)
+    # Same ids as the KD batch row for this prompt (BOS + prompt, answer + EOS), so
+    # the DLA reference logits below come from the same forward the graph is built on.
+    prompt_ids, answer_ids = tokenize_prompt_answer(tokenizer, prompt, str(answer))
     input_ids = torch.cat([prompt_ids, answer_ids]).to(device)
     response_start = int(prompt_ids.numel())
     response_end = int(input_ids.numel())
@@ -557,13 +554,12 @@ def backward_batch_graph_loss(
                     freeze_rms_norm=config.freeze_rms_norm,
                     constant_node_weighting=config.constant_node_weighting,
                 )
-            prompt_ids = teacher_adapter.tokenizer(
-                prompt, return_tensors="pt", add_special_tokens=False
-            )["input_ids"].squeeze(0)
-            answer_ids = teacher_adapter.tokenizer(
-                str(answers[i]) + teacher_adapter.tokenizer.eos_token,
-                return_tensors="pt", add_special_tokens=False,
-            )["input_ids"].squeeze(0)
+            # Same ids as the KD batch row (BOS + prompt, answer + EOS): the teacher's
+            # DLA reference logits at the last prompt position must come from the same
+            # BOS-prefixed forward that create_graph ran on the prompt above.
+            prompt_ids, answer_ids = tokenize_prompt_answer(
+                teacher_adapter.tokenizer, prompt, str(answers[i]),
+            )
             full_input_ids = torch.cat([prompt_ids, answer_ids]).to(device)
             prompt_len = int(prompt_ids.numel())
             with torch.no_grad():

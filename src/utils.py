@@ -193,8 +193,12 @@ def eval_model(model, tokenizer, test_dataset, dataset_name: str, batch_size: in
             batch = samples[i : i + batch_size]
             prompts = [s["formatted_prompt"] for s in batch]
             golds = [s["answer"] for s in batch]
+            # Same rule as tokenize_prompt_answer: BOS leads the prompt unless the
+            # text (a chat template) already carries it.
+            bos = tokenizer.bos_token or ""
             inputs = tokenizer(
-                prompts, return_tensors="pt", padding=True, truncation=True, add_special_tokens=True,
+                prompts, return_tensors="pt", padding=True, truncation=True,
+                add_special_tokens=not (bos and prompts[0].startswith(bos)),
             ).to(device)
             outputs = model.generate(
                 **inputs,
@@ -236,6 +240,41 @@ def seed_all(seed: int) -> None:
 _HF_DATASETS = ("gsm8k", "svamp")
 
 
+def tokenize_prompt_answer(tokenizer, formatted_prompt: str, answer_text: str):
+    """The one tokenisation of a training sequence: ``(prompt_ids, answer_ids)``.
+
+    ``prompt_ids`` is what :func:`eval_model` feeds the model at test time
+    (``add_special_tokens=True``, so Llama's ``<|begin_of_text|>`` leads it) and
+    what the attribution adapter builds graphs on (it prepends BOS when missing);
+    ``answer_ids`` is the answer text followed by EOS, no specials. Every place
+    that builds a training sequence -- :class:`PromptAnswerDataset` for the KD,
+    SFT and representation terms, and ``graph_loss.training`` for the graph term
+    -- goes through here, so the three cannot drift apart again. A chat template
+    already carries the BOS string in its text and must not get a second one.
+
+    Until 2026-09-17 the dataset passed ``add_special_tokens=False``, so the KD
+    and SFT terms trained a no-BOS distribution the student was never evaluated
+    on while the graph term alone saw the evaluated format.
+    """
+    bos = tokenizer.bos_token or ""
+    add_bos = not (bos and formatted_prompt.startswith(bos))
+    prompt_ids = tokenizer(
+        formatted_prompt, return_tensors="pt", padding=False, add_special_tokens=add_bos,
+    )["input_ids"].squeeze(0)
+    answer_ids = tokenizer(
+        answer_text + tokenizer.eos_token, return_tensors="pt", padding=False, add_special_tokens=False,
+    )["input_ids"].squeeze(0)
+    bos_id = getattr(tokenizer, "bos_token_id", None)
+    if bos_id is not None and int(prompt_ids[0]) != int(bos_id):
+        raise RuntimeError(
+            f"training sequence for {formatted_prompt!r:.60} does not start with BOS (id {bos_id}); "
+            "eval_model and the attribution adapter both prepend it, so training must too"
+        )
+    if bos_id is not None and prompt_ids.numel() > 1 and int(prompt_ids[1]) == int(bos_id):
+        raise RuntimeError(f"training sequence for {formatted_prompt!r:.60} has two BOS tokens")
+    return prompt_ids, answer_ids
+
+
 class PromptAnswerDataset(Dataset):
     """Tokenized prompt-answer dataset for SFT."""
 
@@ -255,13 +294,7 @@ class PromptAnswerDataset(Dataset):
                     formatted_prompt = prompt + "\n\nA:"
             else:
                 formatted_prompt = prompt
-            prompt_ids = tokenizer(
-                formatted_prompt, return_tensors="pt", padding=False, add_special_tokens=False,
-            )["input_ids"].squeeze(0)
-            answer_ids = tokenizer(
-                answer_text + tokenizer.eos_token,
-                return_tensors="pt", padding=False, add_special_tokens=False,
-            )["input_ids"].squeeze(0)
+            prompt_ids, answer_ids = tokenize_prompt_answer(tokenizer, formatted_prompt, answer_text)
             self.samples.append({
                 "input_ids": torch.cat([prompt_ids, answer_ids]),
                 "prompt_len": int(prompt_ids.size(0)),
