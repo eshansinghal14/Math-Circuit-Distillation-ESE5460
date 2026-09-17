@@ -66,6 +66,7 @@ from training.utils import (
     ParamChangeCanary,
     describe_run_setup,
     kd_position_mask,
+    first_answer_token_accuracy,
     kl_loss,
     load_student,
     log_first_step_canary,
@@ -598,16 +599,16 @@ class RepKDTrainer:
 
     # ── eval ──────────────────────────────────────────────────────────────────
 
-    def _eval_on(self, model, dataset_name: str, test_dataset: PromptAnswerDataset) -> float:
+    def _eval_on(self, model, dataset_name: str, test_dataset: PromptAnswerDataset, show: int = 0) -> float:
         cfg = self.config
         with self._autocast():
             return eval_model(
                 model, self.tokenizer, test_dataset, dataset_name,
-                cfg.eval_batch_size, cfg.max_eval_tokens,
+                cfg.eval_batch_size, cfg.max_eval_tokens, show=show,
             )
 
     def _eval(self) -> float:
-        return self._eval_on(self.model, self.config.dataset, self.test_dataset)
+        return self._eval_on(self.model, self.config.dataset, self.test_dataset, show=3)
 
     def _eval_teacher(self) -> float:
         return self._eval_on(self.teacher, self.config.dataset, self.test_dataset)
@@ -655,6 +656,7 @@ class RepKDTrainer:
             with flop_counter:
                 s_logits, t_logits, s_cap, t_cap = self._forward_pair(input_ids, attention_mask)
             self._check_student_grads(s_cap)
+            self._last_tf_acc = first_answer_token_accuracy(s_logits.detach(), input_ids, response_mask)
 
             token_mask = matched_token_mask(
                 attention_mask, response_mask, cfg.match_positions, cfg.keep_first_position,
@@ -741,6 +743,7 @@ class RepKDTrainer:
                 self._train_step += 1
                 self.history["train_step"].append(self._train_step)
                 self.history["step_kl_loss"].append(acc["kl"])
+                self.history["step_tf_acc"].append(self._last_tf_acc)
                 self.history["step_rep_loss"].append(acc["rep"])
                 comp_str = ""
                 for k in comps:
@@ -772,7 +775,7 @@ class RepKDTrainer:
                     self.history["step_flops"].append(accum_flops)
                     flops_str = f" | FLOPs={accum_flops:.3e}"
                 print(
-                    f"  step {self._train_step} | KL={acc['kl']:.4f} | "
+                    f"  step {self._train_step} | KL={acc['kl']:.4f} | tfAcc={self._last_tf_acc:.3f} | "
                     f"{self.REP_NAME}={acc['rep']:.4f}{comp_str}{gnorm_str}{flops_str}"
                 )
                 self._last_save_step = maybe_save_periodic_checkpoint(

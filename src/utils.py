@@ -171,8 +171,12 @@ def default_eval_tokens(dataset_name: str) -> int:
 
 @torch.no_grad()
 def eval_model(model, tokenizer, test_dataset, dataset_name: str, batch_size: int,
-               max_eval_tokens: Optional[int] = None) -> float:
+               max_eval_tokens: Optional[int] = None, show: int = 0) -> float:
     """Greedy-decode every test prompt and score the parsed answer against gold.
+
+    ``show`` prints that many of the first batch's examples -- prompt, raw
+    generated continuation, parsed prediction, gold -- so a run's log shows what
+    the model is actually emitting when its accuracy moves.
 
     ``max_eval_tokens=None`` resolves to :func:`default_eval_tokens`. For the local
     arithmetic datasets the continuation alone is decoded and graded by
@@ -213,7 +217,7 @@ def eval_model(model, tokenizer, test_dataset, dataset_name: str, batch_size: in
                 texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
             else:
                 texts = tokenizer.batch_decode(outputs[:, prompt_len:], skip_special_tokens=True)
-            for text, gold in zip(texts, golds):
+            for j, (text, gold) in enumerate(zip(texts, golds)):
                 if is_hf:
                     pred = parse_response(text, dataset_name)
                     gold_parsed = gold if isinstance(gold, int) else parse_response(str(gold), dataset_name)
@@ -223,6 +227,8 @@ def eval_model(model, tokenizer, test_dataset, dataset_name: str, batch_size: in
                 if pred is not None and gold_parsed is not None and pred == gold_parsed:
                     correct += 1
                 total += 1
+                if i == 0 and j < show:
+                    print(f"    [{dataset_name}] {prompts[j]!r} -> {text!r}  parsed={pred!r}  gold={gold!r}")
     finally:
         tokenizer.padding_side = original_side
     model.train()

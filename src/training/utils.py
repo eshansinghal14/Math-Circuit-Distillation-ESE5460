@@ -270,6 +270,21 @@ def kd_position_mask(attention_mask: torch.Tensor, response_mask: torch.Tensor) 
     return mask & attention_mask.bool()
 
 
+def first_answer_token_accuracy(logits: torch.Tensor, input_ids: torch.Tensor, response_mask: torch.Tensor) -> float:
+    """Teacher-forced accuracy of the first answer token on a training batch.
+
+    The argmax of the logits at the last prompt position against the gold token
+    that follows it: the same prediction greedy decoding makes for its first
+    token, taken from the training forward. If this is high while the eval
+    accuracy is low, the gap is in generation or parsing; if both are low, the
+    model has genuinely lost the answer.
+    """
+    first = response_mask.int().argmax(dim=1)
+    rows = torch.arange(input_ids.size(0), device=input_ids.device)
+    pred = logits[rows, first - 1].argmax(dim=-1)
+    return float((pred == input_ids[rows, first]).float().mean().item())
+
+
 def kl_loss(
     student_logits: torch.Tensor,
     teacher_logits: torch.Tensor,

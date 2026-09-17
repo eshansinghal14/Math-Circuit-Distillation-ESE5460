@@ -32,6 +32,7 @@ from training.utils import (
     add_standard_args,
     describe_run_setup,
     kd_position_mask,
+    first_answer_token_accuracy,
     kl_loss,
     load_student,
     log_first_step_canary,
@@ -137,17 +138,17 @@ class StandardKDTrainer:
     def _autocast(self):
         return student_autocast()
 
-    def _eval_on(self, model, dataset_name: str, test_dataset: PromptAnswerDataset) -> float:
+    def _eval_on(self, model, dataset_name: str, test_dataset: PromptAnswerDataset, show: int = 0) -> float:
         cfg = self.config
         # A no-op for the bf16 teacher.
         with self._autocast():
             return eval_model(
                 model, self.tokenizer, test_dataset, dataset_name,
-                cfg.eval_batch_size, cfg.max_eval_tokens,
+                cfg.eval_batch_size, cfg.max_eval_tokens, show=show,
             )
 
     def _eval(self) -> float:
-        return self._eval_on(self.model, self.config.dataset, self.test_dataset)
+        return self._eval_on(self.model, self.config.dataset, self.test_dataset, show=3)
 
     def _eval_teacher(self) -> float:
         return self._eval_on(self.teacher, self.config.dataset, self.test_dataset)
@@ -184,6 +185,8 @@ class StandardKDTrainer:
             with flop_counter:
                 with self._autocast():
                     student_logits = self.model(input_ids, attention_mask=attention_mask).logits
+                self._last_tf_acc = first_answer_token_accuracy(
+                    student_logits.detach(), input_ids, batch["response_mask"].to(_DEVICE))
 
                 with torch.no_grad():
                     teacher_logits = self.teacher(input_ids, attention_mask=attention_mask).logits
@@ -216,13 +219,14 @@ class StandardKDTrainer:
                 self._train_step += 1
                 self.history["train_step"].append(self._train_step)
                 self.history["step_kl_loss"].append(accum_loss)
+                self.history["step_tf_acc"].append(self._last_tf_acc)
                 total_loss += accum_loss
                 if cfg.track_flops:
                     self.history["step_flops"].append(accum_flops)
                     flops_str = f" | FLOPs={accum_flops:.3e}"
                 else:
                     flops_str = ""
-                print(f"  step {self._train_step} | KL={accum_loss:.4f}{flops_str}")
+                print(f"  step {self._train_step} | KL={accum_loss:.4f} | tfAcc={self._last_tf_acc:.3f}{flops_str}")
                 self._last_save_step = maybe_save_periodic_checkpoint(
                     self.model, self.tokenizer, self.config.save_dir,
                     self._train_step, self.config.save_every_n_steps,
