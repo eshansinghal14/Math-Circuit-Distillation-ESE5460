@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 import torch
 
-from graph_loss.anova_node_labels import parse_numeric_args
+from graph_loss.anova_node_labels import LabelTable, parse_numeric_args
 from graph_loss.attribution.attribute import _attribute_from_context, setup_attribution
 from graph_loss.attribution.context import HFAttributionContext
 from graph_loss.graph import (
@@ -521,11 +521,18 @@ def create_graph_at_position(
         cat: {old_to_new[old]: scores for old, scores in cat_scores.items() if old in old_to_new}
         for cat, cat_scores in shared.raw_sum_member_scores.items()
     }
-    filtered_label_results = {
-        old_to_new[old]: shared.label_results[old]
-        for old in selected_row_indices
-        if old in shared.label_results
-    }
+    if isinstance(shared.label_results, LabelTable):
+        # Only the selected neurons ever become NodeLabel objects (heatmap use).
+        rows = [old for old in selected_row_indices if old < len(shared.label_results)]
+        filtered_label_results = dict(zip(
+            (old_to_new[old] for old in rows), shared.label_results.node_labels(rows),
+        ))
+    else:
+        filtered_label_results = {
+            old_to_new[old]: shared.label_results[old]
+            for old in selected_row_indices
+            if old in shared.label_results
+        }
 
     # --- Filter context and run attribution ---
     keep_mask = torch.zeros(ctx.n_neurons, dtype=torch.bool, device=adapter.device)

@@ -318,29 +318,23 @@ def build_gpu_anova_state(rules: list[BasisRule], device: torch.device) -> dict:
     }
 
 
-def gpu_label_activation_heatmaps(
+def gpu_score_activation_heatmaps(
     acts_flat_gpu: torch.Tensor,
     gpu_state: dict,
-    rules: list[BasisRule],
-) -> list[NodeLabel]:
-    """Score and label N neuron activation heatmaps entirely on GPU.
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """Score N activation heatmaps against the ANOVA rules, entirely on GPU.
 
-    acts_flat_gpu: [N, M] on GPU — flattened activation grids, may contain NaN.
-    gpu_state:     dict from build_gpu_anova_state.
-
-    All scoring (explained variance, scatter-max, specificity) runs on GPU.
-    One .tolist() call moves the results to CPU; the final loop is pure dict
-    construction with no tensor operations inside it.
+    Returns ``(cat_scores [N, C], base_specificity [N, B], combo_specificity [N] or
+    None)``: the per-category explained variance (scatter-max over that category's
+    rules), the specificity of each base category (its score minus the best other
+    base category) and the specificity of the composite "arg1 units and arg2
+    units" category when it exists. This is the whole numerical content of a
+    NodeLabel; node_labels_from_scores turns rows into NodeLabel objects.
     """
     N = int(acts_flat_gpu.shape[0])
-    if not rules:
-        empty = NodeLabel(labels=[], scores={}, categories={}, category_scores={}, category_specificity={})
-        return [empty] * N
-
     masks_flat_gpu   = gpu_state["masks_flat_gpu"]
     rule_cat_ids     = gpu_state["rule_cat_ids"]
     base_to_all      = gpu_state["base_to_all"]
-    cat_label_strs   = gpu_state["cat_label_strs"]
     C                = gpu_state["C"]
     B                = gpu_state["B"]
     arg1u_idx        = gpu_state["arg1u_idx"]
@@ -348,8 +342,6 @@ def gpu_label_activation_heatmaps(
     combo_idx        = gpu_state["combo_idx"]
     has_combo        = gpu_state["has_combo"]
     combo_cols       = gpu_state["combo_competitor_cols"]
-    all_categories   = gpu_state["all_categories"]
-    base_categories  = gpu_state["base_categories"]
     dev              = acts_flat_gpu.device
 
     # --- GPU: explained variance [N, R] ---
@@ -379,6 +371,7 @@ def gpu_label_activation_heatmaps(
     base_specificity     = base_scores - competitor_max                         # [N, B]
 
     # --- GPU: combo specificity ---
+    combo_specificity: torch.Tensor | None = None
     if has_combo:
         combo_competitor_max = (
             base_scores[:, combo_cols].max(dim=1).values.clamp(min=0.0)
@@ -386,14 +379,41 @@ def gpu_label_activation_heatmaps(
         )
         combo_specificity = cat_scores[:, combo_idx] - combo_competitor_max     # [N]
 
-    # --- Single D2H transfer ---
-    cs = cat_scores.tolist()       # [N][C]
-    bs = base_specificity.tolist() # [N][B]
-    combo_s = combo_specificity.tolist() if has_combo else None  # [N]
+    return cat_scores, base_specificity, combo_specificity
 
-    # --- Dict construction: no tensor ops below this line ---
+
+def node_labels_from_scores(
+    cat_scores: torch.Tensor,
+    base_specificity: torch.Tensor,
+    combo_specificity: torch.Tensor | None,
+    *,
+    all_categories: list[str],
+    base_categories: list[str],
+    cat_label_strs: list[str],
+    has_combo: bool,
+    rows: list[int] | torch.Tensor | None = None,
+) -> list[NodeLabel]:
+    """NodeLabel objects for ``rows`` (every row if None) of the score tensors.
+
+    One D2H transfer, then pure dict construction. Building these for every
+    labelled neuron was the cost of the old label path (hundreds of thousands
+    of objects per prompt on the teacher); the training path now builds them
+    only for the few neurons that end up in a supernode.
+    """
+    if rows is None:
+        cs = cat_scores.tolist()
+        bs = base_specificity.tolist()
+        combo_s = combo_specificity.tolist() if has_combo and combo_specificity is not None else None
+    else:
+        rows_t = torch.as_tensor(rows, dtype=torch.long, device=cat_scores.device)
+        cs = cat_scores[rows_t].tolist()
+        bs = base_specificity[rows_t].tolist()
+        combo_s = combo_specificity[rows_t].tolist() if has_combo and combo_specificity is not None else None
+    C = len(all_categories)
+    B = len(base_categories)
+
     out: list[NodeLabel] = []
-    for n in range(N):
+    for n in range(len(cs)):
         row_cs = cs[n]
         row_bs = bs[n]
 
@@ -407,7 +427,7 @@ def gpu_label_activation_heatmaps(
             for b in range(B)
             if base_categories[b] in category_scores_n
         }
-        if has_combo and "arg1 units and arg2 units" in category_scores_n:
+        if has_combo and combo_s is not None and "arg1 units and arg2 units" in category_scores_n:
             category_specificity_n["arg1 units and arg2 units"] = combo_s[n]
 
         labels = [
@@ -435,3 +455,109 @@ def gpu_label_activation_heatmaps(
         ))
 
     return out
+
+
+def gpu_label_activation_heatmaps(
+    acts_flat_gpu: torch.Tensor,
+    gpu_state: dict,
+    rules: list[BasisRule],
+) -> list[NodeLabel]:
+    """Score and label N neuron activation heatmaps; one NodeLabel per row.
+
+    The CLI / heatmap path. Training uses LabelTable instead, which keeps the
+    same scores as tensors and materialises NodeLabels only for selected rows.
+    """
+    N = int(acts_flat_gpu.shape[0])
+    if not rules:
+        empty = NodeLabel(labels=[], scores={}, categories={}, category_scores={}, category_specificity={})
+        return [empty] * N
+    cat_scores, base_specificity, combo_specificity = gpu_score_activation_heatmaps(acts_flat_gpu, gpu_state)
+    return node_labels_from_scores(
+        cat_scores, base_specificity, combo_specificity,
+        all_categories=gpu_state["all_categories"],
+        base_categories=gpu_state["base_categories"],
+        cat_label_strs=gpu_state["cat_label_strs"],
+        has_combo=gpu_state["has_combo"],
+    )
+
+
+@dataclass
+class LabelTable:
+    """ANOVA scores of N neurons as tensors: what a ``list[NodeLabel]`` holds, without the objects.
+
+    Row ``i`` corresponds to neuron ``i`` of the ``neuron_locations`` it was built
+    for. A row of zeros is an unlabelled neuron (the old ``empty`` NodeLabel):
+    it has no positive category score, so it is never a candidate.
+    """
+
+    cat_scores: torch.Tensor                 # [N, C]
+    base_specificity: torch.Tensor           # [N, B]
+    combo_specificity: torch.Tensor | None   # [N]
+    all_categories: list[str]
+    base_categories: list[str]
+    cat_label_strs: list[str]
+    has_combo: bool
+
+    @classmethod
+    def zeros(cls, n: int, gpu_state: dict | None, device) -> "LabelTable":
+        if gpu_state is None:
+            return cls(torch.zeros(n, 0, device=device), torch.zeros(n, 0, device=device), None, [], [], [], False)
+        return cls(
+            torch.zeros(n, gpu_state["C"], device=device),
+            torch.zeros(n, gpu_state["B"], device=device),
+            torch.zeros(n, device=device) if gpu_state["has_combo"] else None,
+            list(gpu_state["all_categories"]),
+            list(gpu_state["base_categories"]),
+            list(gpu_state["cat_label_strs"]),
+            bool(gpu_state["has_combo"]),
+        )
+
+    @classmethod
+    def from_scores(cls, cat_scores, base_specificity, combo_specificity, gpu_state: dict) -> "LabelTable":
+        return cls(
+            cat_scores, base_specificity, combo_specificity,
+            list(gpu_state["all_categories"]), list(gpu_state["base_categories"]),
+            list(gpu_state["cat_label_strs"]), bool(gpu_state["has_combo"]),
+        )
+
+    def __len__(self) -> int:
+        return int(self.cat_scores.shape[0])
+
+    def category_scores_column(self, category: str) -> torch.Tensor | None:
+        """``[N]`` scores of ``category``, or None if the table has no such category."""
+        if category not in self.all_categories:
+            return None
+        c = self.all_categories.index(category)
+        if not self.cat_label_strs[c]:
+            return None
+        return self.cat_scores[:, c]
+
+    def specificity_column(self, category: str) -> torch.Tensor:
+        """``[N]`` specificity of ``category``; zeros for categories that have none
+        (the NodeLabel path's ``category_specificity.get(category, 0.0)``)."""
+        if category in self.base_categories:
+            return self.base_specificity[:, self.base_categories.index(category)]
+        if self.has_combo and self.combo_specificity is not None and category == "arg1 units and arg2 units":
+            return self.combo_specificity
+        return torch.zeros(len(self), device=self.cat_scores.device)
+
+    def label_for(self, category: str) -> str:
+        """The rule label a selected neuron of ``category`` is tagged with (NodeLabel.categories)."""
+        if category in self.all_categories:
+            label = self.cat_label_strs[self.all_categories.index(category)]
+            if label:
+                return label
+        return category
+
+    def node_label(self, row: int) -> NodeLabel:
+        return self.node_labels([row])[0]
+
+    def node_labels(self, rows) -> list[NodeLabel]:
+        if len(self.all_categories) == 0:
+            empty = NodeLabel(labels=[], scores={}, categories={}, category_scores={}, category_specificity={})
+            return [empty] * len(rows)
+        return node_labels_from_scores(
+            self.cat_scores, self.base_specificity, self.combo_specificity,
+            all_categories=self.all_categories, base_categories=self.base_categories,
+            cat_label_strs=self.cat_label_strs, has_combo=self.has_combo, rows=rows,
+        )

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import torch
 import torch.nn.functional as F
 
-from graph_loss.anova_node_labels import ANOVA_LABEL_CATEGORIES
+from graph_loss.anova_node_labels import ANOVA_LABEL_CATEGORIES, LabelTable
 from graph_loss.attribution.targets import LogitTarget
 from graph_loss.neuron_activation_heatmap import (
     save_dla_heatmap_pdf,
@@ -325,6 +325,13 @@ def select_anova_supernodes(
         sum_member_scores: dict from category -> {row_idx -> (var, spec, dla_cossim)}
             for sum-category supernodes only.
     """
+    if isinstance(label_results, LabelTable):
+        return _select_anova_supernodes_table(
+            label_results, nodes_per_label=nodes_per_label, strict=strict,
+            source_vectors=source_vectors, W_U=W_U, tokenizer=tokenizer, target_args=target_args,
+            allowed_labels=allowed_labels, include_dla_node=include_dla_node,
+            model_logits=model_logits, dla_temperature=dla_temperature, dla_top_k_vocab=dla_top_k_vocab,
+        )
     logger = logging.getLogger(__name__)
     use_dla = (
         source_vectors is not None
@@ -475,6 +482,185 @@ def select_anova_supernodes(
         "  ANOVA selection: unique_neurons=%d / total_candidates=%d",
         len(selected_row_indices),
         len(label_results),
+    )
+    return selected_row_indices, supernodes, supernode_labels_out, node_labels, sum_member_scores
+
+
+def _select_anova_supernodes_table(
+    table: LabelTable,
+    *,
+    nodes_per_label: int,
+    strict: bool,
+    source_vectors: torch.Tensor | None,
+    W_U: torch.Tensor | None,
+    tokenizer,
+    target_args: list[int] | None,
+    allowed_labels: set[str] | None,
+    include_dla_node: bool,
+    model_logits: torch.Tensor | None,
+    dla_temperature: float,
+    dla_top_k_vocab: int,
+) -> tuple[list[int], list[list[int]], list[list[str]], dict[int, list[str]], dict[str, dict[int, tuple[float, float, float]]]]:
+    """select_anova_supernodes on a LabelTable: the same selection, done with tensor ops.
+
+    Per category the candidates are the rows with a positive category score,
+    ranked by specificity (DLA-KL for the sum categories) with a stable
+    descending sort, so ties resolve by row order exactly as the list path's
+    ``sorted(..., reverse=True)`` does. Only the selected rows ever become
+    Python objects. Ranking scores that the list path handled as Python floats
+    are compared in float64 so no ordering can differ.
+    """
+    logger = logging.getLogger(__name__)
+    use_dla = (
+        source_vectors is not None
+        and W_U is not None
+        and tokenizer is not None
+        and target_args is not None
+        and len(target_args) >= 2
+    )
+    target_sum = int(sum(target_args)) if use_dla else 0
+    dev = table.cat_scores.device
+
+    selected_member_ids: set[int] = set()
+    supernodes: list[list[int]] = []
+    supernode_labels_out: list[list[str]] = []
+    node_labels: dict[int, list[str]] = {}
+    sum_member_scores: dict[str, dict[int, tuple[float, float, float]]] = {}
+
+    _base_categories = set(ANOVA_LABEL_CATEGORIES)
+    _extra_categories = (
+        [lbl for lbl in sorted(allowed_labels) if lbl not in _base_categories]
+        if allowed_labels
+        else []
+    )
+    for category in list(ANOVA_LABEL_CATEGORIES) + _extra_categories:
+        if allowed_labels is not None and category not in allowed_labels:
+            continue
+        is_sum_category = category in {"sum range", "sum units"}
+
+        col = table.category_scores_column(category)
+        if col is None:
+            cand = torch.zeros(0, dtype=torch.long, device=dev)
+        else:
+            cand = torch.nonzero(col > 0.0, as_tuple=False).squeeze(1)
+        kl_all: torch.Tensor | None = None
+        if is_sum_category:
+            if use_dla and cand.numel() > 0:
+                kl_all = torch.tensor(
+                    _dla_kl_scores_for_sum(
+                        source_vectors,  # type: ignore[arg-type]
+                        W_U,             # type: ignore[arg-type]
+                        tokenizer,
+                        target_value=target_sum,
+                        units=(category == "sum units"),
+                    ),
+                    dtype=torch.float64, device=dev,
+                )
+                scores = kl_all[cand]
+            else:
+                cand = cand[:0]
+                scores = cand.to(torch.float64)
+        else:
+            scores = table.specificity_column(category)[cand]
+
+        if cand.numel() == 0:
+            if strict and not is_sum_category and category in _base_categories:
+                raise ValueError(
+                    f"ANOVA category {category!r} has no positive-variance nodes."
+                )
+            explicitly_requested = allowed_labels is not None and category in allowed_labels
+            if is_sum_category:
+                logger.info("  ANOVA label %s: no DLA-scored candidates", category)
+            elif explicitly_requested and category not in _base_categories:
+                logger.warning(
+                    "  ANOVA label %r: no positive-variance nodes — this may not be a valid "
+                    "category name. Valid dynamic categories include 'arg1 range', "
+                    "'arg1 arg2 sum range', 'sum range', etc.",
+                    category,
+                )
+            else:
+                logger.info("  ANOVA label %s: no positive-variance nodes", category)
+            continue
+
+        order = torch.sort(scores, descending=True, stable=True).indices
+        keep_count = min(nodes_per_label, int(cand.numel()))
+        top_rows = cand[order[:keep_count]].tolist()
+        top_scores = scores[order[:keep_count]].tolist()
+
+        label = table.label_for(category)
+        for row_idx in top_rows:
+            node_labels.setdefault(row_idx, [])
+            if label not in node_labels[row_idx]:
+                node_labels[row_idx].append(label)
+            selected_member_ids.add(row_idx)
+
+        if is_sum_category:
+            spec_col = table.specificity_column(category)
+            sum_member_scores[category] = {
+                row_idx: (
+                    float(col[row_idx].item()),
+                    float(spec_col[row_idx].item()),
+                    float(-kl_all[row_idx].item()) if kl_all is not None else 0.0,
+                )
+                for row_idx in top_rows
+            }
+
+        supernodes.append(list(top_rows))
+        supernode_labels_out.append([category])
+        logger.info(
+            "  ANOVA label %s: selected=%d/%d cap=%d best_score=%.6g",
+            category,
+            len(top_rows),
+            int(cand.numel()),
+            nodes_per_label,
+            float(top_scores[0]),
+        )
+
+    # DLA supernode: neurons whose write-vector DLA distribution best matches the
+    # model's actual output distribution (lowest KL divergence).
+    if include_dla_node:
+        if source_vectors is None or W_U is None or model_logits is None:
+            logger.warning(
+                "  include_dla_node=True but source_vectors/W_U/model_logits not all "
+                "provided — skipping DLA supernode."
+            )
+        else:
+            kl_scores = torch.tensor(
+                _dla_kl_scores_for_output(
+                    source_vectors,
+                    W_U,
+                    model_logits,
+                    temperature=dla_temperature,
+                    top_k=dla_top_k_vocab,
+                ),
+                dtype=torch.float64, device=dev,
+            )
+            n_candidates = int(kl_scores.numel())
+            order = torch.sort(kl_scores, descending=True, stable=True).indices
+            keep_count = min(nodes_per_label, n_candidates)
+            top_dla = order[:keep_count].tolist()
+            dla_members = []
+            for row_idx in top_dla:
+                node_labels.setdefault(row_idx, [])
+                if "dla" not in node_labels[row_idx]:
+                    node_labels[row_idx].append("dla")
+                selected_member_ids.add(row_idx)
+                dla_members.append(row_idx)
+            supernodes.append(dla_members)
+            supernode_labels_out.append(["dla"])
+            logger.info(
+                "  DLA supernode: selected=%d/%d cap=%d best_score=%.6g",
+                len(dla_members),
+                n_candidates,
+                nodes_per_label,
+                float(kl_scores[top_dla[0]].item()) if top_dla else 0.0,
+            )
+
+    selected_row_indices = sorted(selected_member_ids)
+    logger.info(
+        "  ANOVA selection: unique_neurons=%d / total_candidates=%d",
+        len(selected_row_indices),
+        len(table),
     )
     return selected_row_indices, supernodes, supernode_labels_out, node_labels, sum_member_scores
 

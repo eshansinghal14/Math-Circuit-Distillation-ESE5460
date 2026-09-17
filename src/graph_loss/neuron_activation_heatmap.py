@@ -161,19 +161,21 @@ def label_neurons_layer_by_layer(
     target_args: tuple[int, ...] | None = None,
     anova_range_radius: int = 0,
     anova_neuron_chunk: int | None = None,
-) -> list:
-    """ANOVA-label N neurons across all model layers with pipelined H2D transfers and one D2H flush.
+) -> "LabelTable":
+    """ANOVA-score N neurons across all model layers; returns a LabelTable.
 
-    All CPU→GPU transfers are queued simultaneously via non_blocking=True so the
-    DMA engine can pipeline them.  Per-neuron activations stay on GPU until a single D2H transfer
-    at the end, eliminating per-layer host synchronisation points.
-    Returns a list[NodeLabel] in the same order as neuron_locations.
+    One layer at a time: that layer's cached MLP inputs go to the GPU (free if
+    the cache is GPU-resident), the requested neurons' activation grids come
+    from one batched matmul, and gpu_score_activation_heatmaps scores them. The
+    scores are written straight into the table's tensors; nothing per neuron
+    happens in Python, which is what made labelling the teacher's ~230k
+    pre-selected neuron-positions cost seconds per prompt.
     """
     from graph_loss.anova_node_labels import (
-        NodeLabel,
+        LabelTable,
         build_anova_basis_rules,
         build_gpu_anova_state,
-        gpu_label_activation_heatmaps,
+        gpu_score_activation_heatmaps,
     )
 
     meta = mlp_input_cache.get("meta", {})
@@ -201,18 +203,12 @@ def label_neurons_layer_by_layer(
         stride *= grid_shape[dim]
 
     n_kept = int(neuron_locations.shape[0])
-    label_results: list = [None] * n_kept
+    device = model.cfg.device
 
     layer_to_neurons: dict[int, list[tuple[int, int, int]]] = defaultdict(list)
     for loc_idx, (layer, token_pos, neuron_id) in enumerate(neuron_locations.tolist()):
         layer_to_neurons[int(layer)].append((loc_idx, int(token_pos), int(neuron_id)))
-
-    device = model.cfg.device
-    empty = NodeLabel(labels=[], scores={}, categories={}, category_scores={}, category_specificity={})
     sorted_layers = sorted(layer_to_neurons.keys())
-
-    # Move flat_indices to GPU once; reused for every layer's scatter operation.
-    flat_indices_gpu = flat_indices.to(device=device)
 
     # Build ANOVA rules + GPU state once; masks and indicator matrices are reused every batch.
     anova_rules = build_anova_basis_rules(
@@ -220,15 +216,20 @@ def label_neurons_layer_by_layer(
         target_args=target_args,
         anova_range_radius=anova_range_radius,
     )
+    if not anova_rules:
+        return LabelTable.zeros(n_kept, None, device)
     gpu_anova_state = build_gpu_anova_state(anova_rules, device)
+    table = LabelTable.zeros(n_kept, gpu_anova_state, device)
 
     valid_batch_layers = [l for l in sorted_layers if l < len(layer_inputs)]
     if not valid_batch_layers:
-        return [empty] * n_kept
+        return table
 
+    # Move flat_indices to GPU once; reused for every layer's scatter operation.
+    flat_indices_gpu = flat_indices.to(device=device)
     total_neurons_labeled = 0
 
-    # Process one layer at a time; run ANOVA immediately per-layer so grids never accumulate.
+    # Process one layer at a time; score immediately per layer so grids never accumulate.
     for layer in valid_batch_layers:
         # Free if the cache is GPU-resident; async at PCIe speed if it is pinned.
         layer_tensor_gpu = layer_inputs[layer].to(device=device, non_blocking=True)  # [P, n_positions, d]
@@ -294,10 +295,13 @@ def label_neurons_layer_by_layer(
                 n_c = acts_c.shape[1]
                 grid = torch.full((n_c, grid_cells), float("nan"), dtype=torch.float32, device=device)
                 grid[:, flat_indices_gpu] = acts_c.T
-                chunk_labels = gpu_label_activation_heatmaps(grid, gpu_anova_state, anova_rules)
+                cs, bs, combo = gpu_score_activation_heatmaps(grid, gpu_anova_state)
                 del grid
-                for label_j, (li, _) in enumerate(chunk_neurons):
-                    label_results[li] = chunk_labels[label_j]
+                rows = torch.tensor([li for li, _ in chunk_neurons], dtype=torch.long, device=device)
+                table.cat_scores[rows] = cs
+                table.base_specificity[rows] = bs
+                if combo is not None and table.combo_specificity is not None:
+                    table.combo_specificity[rows] = combo
                 n_labeled_layer += n_c
         del neuron_acts_batch
         total_neurons_labeled += n_labeled_layer
@@ -307,11 +311,9 @@ def label_neurons_layer_by_layer(
         len(valid_batch_layers),
         total_neurons_labeled,
     )
+    return table
 
-    return [lbl if lbl is not None else empty for lbl in label_results]
 
-
-@torch.no_grad()
 def build_neuron_activation_write_result(
     model,
     neuron_locations: list[tuple[int, int, int]] | torch.Tensor,
