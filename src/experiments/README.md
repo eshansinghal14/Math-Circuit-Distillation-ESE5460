@@ -21,4 +21,21 @@ omitted means arg-token + DLA supernodes (what `graph_kd` uses when its own
 Nothing warns you if they disagree — the numbers just describe a different
 objective than the one you trained on.
 
+Paper figures and tables (`PYTHONPATH=src python -m experiments.<name>` from the
+repo root; each writes `latex/graph_distillation/figures/<name>.pdf` and, where it
+has a table, `latex/graph_distillation/tables/<name>.tex` as a complete tabular
+that the paper pulls in with `\tablerows{}`; never edit those by hand):
+
+| script | figure / table |
+| --- | --- |
+| `plot_main_results.py` | graph distillation vs SFT vs standard KD, all families; `tables/main_results.tex` |
+| `plot_lambda_sweep.py` | Appendix D: the λ sweep with both references; `tables/lambda.tex` |
+| `plot_freeze_ablation.py` | Appendix C: the linearisation arms; `tables/freeze_train.tex`. A missing arm becomes a `\pending{}` column. |
+| `plot_grad_metrics.py` | Appendix C: per-step gradient metrics; `tables/freeze_dynamics.tex` |
+| `plot_scramble.py` | Appendix D: real against scrambled routing target, accuracy and losses |
+
+`_paper_plots.py` holds the shared loader (every seed in a history, mean ± sd),
+the summary statistics (values at a step, per-seed peaks, dip / recovery) and the
+palette.
+
 Each script's module docstring explains how to read its output.

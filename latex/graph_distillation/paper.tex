@@ -34,6 +34,16 @@
 \newcommand{\pv}[1]{{\color{purple} pv: #1}}
 % Placeholder marker for sections still to be written.
 \newcommand{\todosec}[1]{{\color{Gray}\emph{[#1]}}}
+% A result slot that a scheduled run will fill. The argument is an optional
+% description, e.g. \pending{: seeds 2--3}; table cells use \pending{}. Rendered
+% visibly so that no slot ships unfilled; Appendix F lists every open one.
+\newcommand{\pending}[1]{{\color{BurntOrange}\emph{[pending#1]}}}
+% Rows of a generated table: tables/<name>.tex, written by src/experiments/plot_*.py.
+% Uses TeX's primitive \input because LaTeX's \input{} leaves a token behind that
+% makes the following \bottomrule a "Misplaced \noalign".
+\makeatletter
+\newcommand{\tablerows}[1]{\@@input tables/#1.tex }
+\makeatother
 
 \DeclareMathOperator{\KL}{KL}
 \DeclareMathOperator{\JSD}{JSD}
@@ -71,9 +81,21 @@
 \maketitle
 
 \begin{abstract}
-\todosec{Abstract. One paragraph: the gap between output-level distillation and
-mechanism transfer; graph distillation as a supernode-level structural loss on
-attribution graphs; the Llama-3.1-8B $\to$ Llama-3.2-1B arithmetic setting; headline result.}
+Recent distillation objectives, whether reverse-KL, on-policy or decoupled, sharpen how a
+student imitates its teacher's outputs, yet all are computed from those outputs alone: the
+student is graded on what it says, never on how it arrived there. Attribution graphs expose the
+how, tracing the direct linear effect of each internal component on the next in one forward pass. We introduce \emph{graph distillation}, which builds attribution graphs over
+MLP neurons in teacher and student, coarsens each into a supergraph whose nodes carry functional
+labels shared by both models, and trains the student to route causal influence between those
+supernodes as the teacher does, via a Jensen--Shannon divergence on the supergraph's edges. The
+graph loss simply adds to the standard KD loss. Supernodes are first
+built for two-digit addition by ANOVA over neuron activation grids, then generalised to a
+prompt-derived construction with no task-specific design. Distilling Llama-3-8B-Instruct into
+Llama-3.2-1B-Instruct, graph distillation lifts in-distribution accuracy from 65\% to 98\% and
+held-out accuracy on harder arithmetic from 22\% to 53\%, against 42\% for supervised fine-tuning
+and 31--37\% for output- and representation-level distillation at the same step count, and reaches
+its peak in half the steps standard distillation needs. Richer reasoning tasks are the natural next
+target.
 \end{abstract}
 
 \section{Introduction}
@@ -95,14 +117,14 @@ attribution graphs); prior attempts at mechanism-level transfer.}
 \label{sec:overview}
 
 Standard knowledge distillation constrains only the \emph{output} of the student and says nothing
-about how that output was produced \citep{hinton2015distilling}. We add a second, orthogonal
-constraint on the \emph{internal computation} (Appendix~\ref{app:orthogonality} discusses in what
-sense it is orthogonal to the output-level loss): for a given arithmetic prompt we build an attribution graph over MLP
+about how that output was produced \citep{hinton2015distilling}. We add a second constraint on the
+\emph{internal computation}: for a given arithmetic prompt we build an attribution graph over MLP
 neurons in each model, coarsen it into a small set of functionally-labelled \emph{supernodes} that
 exist in both models, and require the teacher and the student to route causal influence between
 those supernodes in the same proportions.
 
-Let $\Teach$ be the frozen teacher (Llama-3.1-8B) and $\Stud$ the student (Llama-3.2-1B) with
+Let $\Teach$ be the frozen teacher (Llama-3-8B-Instruct) and $\Stud$ the student
+(Llama-3.2-1B-Instruct) with
 trainable parameters $\theta_\Stud$. For a prompt $x$, the pipeline of
 Sections~\ref{sec:attrib}--\ref{sec:superedges} produces one $K \times K$ supernode adjacency
 matrix per model, $W^{\Teach}(x)$ and $W^{\Stud}(x;\theta_\Stud)$, whose row $t$ says
@@ -139,7 +161,13 @@ The full objective adds \eqref{eq:graphloss} to the ordinary temperature-scaled 
   \lambda\, \mathcal{L}_{\mathrm{graph}}(\theta_\Stud),
   \label{eq:total}
 \end{equation}
-where $z_p$ are logits at non-padding position $p$, $\tau = 2$, and $\lambda = 1$.
+where $z_p$ are logits at non-padding position $p$, $\tau = 2$, and $\lambda = 0.1$
+(Appendix~\ref{app:lambda}). The two gradients are close to orthogonal in parameter space
+throughout training (cosine within $\pm 0.09$ and mean $+0.004$ over 500 logged steps), which in a
+space of $10^9$ dimensions is simply what unrelated objectives look like; its one practical
+consequence is that under AdamW's per-parameter normalisation the graph term takes full-size steps
+in the many directions where the KD gradient is near zero, so a term that is under $1\%$ of the KD
+gradient's norm can still change what the student learns.
 
 \subsection{Attribution graphs over MLP neurons}
 \label{sec:attrib}
@@ -334,25 +362,96 @@ Appendices~\ref{app:llama} and~\ref{app:perf}.
 \section{Experimental Setup}
 \label{sec:setup}
 
-\todosec{Experimental setup. Teacher/student pair and checkpoints; training data and splits;
-optimiser, schedule, batch size, $n_{\mathrm{graph}}$; which supernode categories are enabled;
-baselines (SFT, standard KD, KD + graph loss); evaluation metric and prompt format; hardware
-and wall-clock cost per step.}
+The teacher is Meta-Llama-3-8B-Instruct and the student Llama-3.2-1B-Instruct, both public
+checkpoints; the teacher is frozen and runs in bf16, the student holds fp32 master weights under a
+bf16 autocast forward (Appendix~\ref{app:llama}). Training prompts are two-digit additions
+``\texttt{$a$+$b$=}'' (22\_add), batch 32, AdamW at $10^{-6}$ with no schedule, 100 steps.
+Generalisation is measured on four families never seen in training: three- and four-operand sums
+of two-digit numbers (222\_add, 2222\_add), three-digit addition (33\_add) and two-digit by
+one-digit multiplication (21\_mult), $5000$ held-out prompts each ($1000$ for 21\_mult), scored by
+greedy decoding and exact match on the leading integer of the continuation. We compare three
+objectives through one trainer stack: supervised fine-tuning on the gold answers (SFT); standard
+KD from the teacher's logits at $\tau = 2$; KD plus the graph loss \eqref{eq:total} with
+$\lambda = 0.1$ and the prompt-derived supernodes of Section~\ref{sec:supernodes-general}; and,
+as representation-level references that constrain the student's internals without a graph, KD
+plus the TinyBERT recipe \citep{jiao2020tinybert} --- mean-squared error between a learned linear
+projection of the student's residual stream and the teacher's at uniformly mapped layers, plus
+attention-pattern MSE at the same layers --- and KD plus linear centred kernel alignment
+\citep{kornblith2019similarity} on the residual streams, both at weight $0.1$ in place of $\lambda$. Every
+baseline carries three seeds and the distillation baselines train for 300 steps so that their
+later peaks are not cut off. The full configuration is Table~\ref{tab:config}.
+
+\todosec{Still to add: hardware and wall-clock cost per step for each objective.}
 
 \section{Results}
 \label{sec:results}
 
-\todosec{Results. Accuracy against the baselines; graph loss and KD loss curves; whether
-supernode routing actually converges toward the teacher's; per-category breakdown of which
-supernodes align and which do not.}
+Table~\ref{tab:main} and Figure~\ref{fig:main} compare the objectives. Graph distillation
+reaches $0.983$ in-distribution and $0.525$ mean held-out accuracy at step 100, against
+$0.976 \pm 0.028$ and $0.415 \pm 0.025$ for SFT and $0.900 \pm 0.011$ and $0.369 \pm 0.022$ for
+standard KD. The held-out margin over SFT is $0.11$, about four SFT seed standard deviations, and
+holds on three of the four families; on 33\_add SFT is ahead at step 100, with the largest seed
+spread of any cell in the table. The margin over standard KD is $0.16$ at matched steps and $0.14$
+against the control's later peak at step 160, and graph distillation reaches its own peak at step
+85. On 21\_mult, the one held-out family that is not addition, graph distillation nearly matches
+the teacher's in-distribution accuracy while every baseline stops near $0.55$.
+
+Constraining the student's internals is not by itself what helps. The two representation-level
+baselines, which add a hidden-state loss to the same KD term at the same weight, land at or below
+standard KD: $0.309 \pm 0.003$ mean held-out accuracy at step 100 for the TinyBERT recipe and
+$0.341 \pm 0.004$ for CKA, with peaks of $0.375$ and $0.373$ against the control's $0.383$, and
+in-distribution accuracy within $0.02$ of the control throughout. Both dip exactly as standard KD
+does. What the graph term adds is therefore not a generic regulariser on the residual stream but
+something specific to the routing target, and Appendix~\ref{app:lambda} tests that directly by
+scrambling the target.
+
+\begin{table}[t]
+  \centering
+  \small
+  \caption{Accuracy at step 100 on the training family (22\_add) and the four held-out families,
+  the mean over the held-out families, and the peaks over the run with their step. Seed mean
+  $\pm$ sd over three seeds for the baselines; the graph run is a single seed. The three
+  distillation baselines trained to step 300; the teacher scores $0.957$ on 22\_add. Bold is the
+  best mean in a row; italics are below the untrained student.
+  \emph{Dip / recovery} is the minimum in-distribution accuracy over steps 1--40 and the first
+  later step back at or above the untrained student.}
+  \label{tab:main}
+  \scriptsize\setlength{\tabcolsep}{1.5pt}
+  \tablerows{main_results}
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\textwidth]{figures/main_results.pdf}
+  \caption{Accuracy against training step: in-distribution, the mean over the four held-out
+  families, and each family. The three distillation baselines share the grey of the reference
+  method and differ in line style; seed means with a $\pm 1$ sd band for the three-seed
+  baselines. The dashed rule is the untrained student and the dotted rule the teacher.
+  Every run dips below the untrained student before recovering; the dip is deepest and longest for
+  standard KD and the graph term removes most of it (Appendix~\ref{app:lambda}).}
+  \label{fig:main}
+\end{figure}
+
+Standard KD is the weaker baseline on every measure. It falls to $0.25$ in-distribution in its first
+twenty steps and needs sixty to recover the untrained student, where SFT and graph distillation
+dip to about $0.50$ and recover by step 25; it never reaches SFT's held-out peak in three times the
+steps. The graph term is what closes that gap: Appendix~\ref{app:lambda} shows the dip shrinking
+monotonically with $\lambda$ and the held-out gain appearing only once a run has recovered.
+Appendix~\ref{app:freeze} shows that the choice of linearisation inside the attribution does not
+change the outcome at the working weight.
+
+\pending{: seeds 2--3 for graph distillation, on which the error bars of its row depend.}
+
+\todosec{Still to add: graph-loss and KD-loss curves; whether supernode routing converges toward
+the teacher's; per-supernode breakdown of which routes align and which do not.}
 
 \section{Analysis}
 \label{sec:analysis}
 
 \todosec{Analysis. Qualitative before/after supergraphs for the student; do the student's
-activation grids sharpen over training? Ablations: $\lambda$, JSD vs.\ other divergences,
-number of supernodes, $n_{\mathrm{per}}$, and the linearisation ablation of
-Appendix~\ref{app:freeze}.}
+activation grids sharpen over training? Ablations beyond $\lambda$ (Appendix~\ref{app:lambda})
+and the linearisation (Appendix~\ref{app:freeze}): JSD vs.\ other divergences, number of
+supernodes, $n_{\mathrm{per}}$.}
 
 \section{Limitations}
 \label{sec:limitations}
@@ -394,48 +493,15 @@ material.}
 
 \appendix
 
-\section{Orthogonality of the Graph and KD Losses}
-\label{app:orthogonality}
-
-The KD loss constrains only the output distribution and is invariant to which internal circuit
-produces it; the graph loss constrains routing between supernodes and is close to invariant to the
-output. If that separation is real, the two gradients should be close to orthogonal in parameter
-space rather than one being a reparameterisation of the other.
-
-We measure this directly (Figure~\ref{fig:orthogonality}). At the student's initial checkpoint we compute
-$\nabla_{\theta_\Stud}\mathcal{L}_{\mathrm{KD}}$ over one batch of 32 prompts and
-$\nabla_{\theta_\Stud}\mathcal{L}_{\mathrm{graph}}$ over 8 prompts, and take the cosine between
-them. Across all four linearisation variants of Appendix~\ref{app:freeze} the cosine lies in
-$[-0.024, -0.008]$: every variant lies between $90.5^\circ$ and $91.4^\circ$,
-and the near-orthogonality is a property of the objective rather than of one particular
-linearisation.
-
-\begin{figure}[h]
-  \centering
-  \includegraphics[width=\textwidth]{figures/orthogonality.pdf}
-  \caption{The graph gradient is both small and sideways. \emph{Above}: the two gradients drawn to
-  scale on equal axes, so the angle is not distorted; the arc is the unfrozen variant, and the other
-  three linearisations lie between $90.5^\circ$ and $91.4^\circ$. \emph{Below}: the same cosines on a
-  $[-1, 1]$ line. The four points are offset vertically only to separate values that coincide to
-  within $0.015$; the offset carries no meaning. The grey bar is the same measure taken between two
-  graph-loss linearisations ($0.63$ to $0.77$, Appendix~\ref{app:freeze}), included because without
-  a yardstick a reader cannot tell whether $-0.02$ is near zero or merely small.}
-  \label{fig:orthogonality}
-\end{figure}
-
-
-This also resolves an apparent puzzle about magnitudes. At $\lambda_{\mathrm{graph}}=1$ the graph
-gradient has norm $3.65$ against the KD gradient's $50.41$, so at the $\lambda_{\mathrm{graph}}$
-actually used in training the graph term is smaller by more than two orders of magnitude, yet it
-changes downstream accuracy substantially (Appendix~\ref{app:freeze}). Orthogonality explains why:
-AdamW normalises per parameter, so in the large subspace where the KD gradient is near zero the
-graph term is the only signal present and receives a full-size step regardless of its global norm.
-The graph loss does not accelerate KD along KD's own direction --- there is no such component to
-accelerate --- it moves the student in directions output-level distillation never explores.
-
-\es{Measured at initialisation only. Tracking the cosine over training, and on a second
-teacher/student pair, is still to do.}
-
+% Every table in the appendices is \input from latex/graph_distillation/tables/,
+% which the scripts in src/experiments/plot_*.py regenerate from the training
+% histories together with the figures. Re-run them after any new run lands:
+%   PYTHONPATH=src python -m experiments.plot_main_results
+%   PYTHONPATH=src python -m experiments.plot_lambda_sweep
+%   PYTHONPATH=src python -m experiments.plot_freeze_ablation
+%   PYTHONPATH=src python -m experiments.plot_grad_metrics
+%   PYTHONPATH=src python -m experiments.plot_scramble
+% Slots waiting on a run are marked \pending{} and listed in Appendix F.
 
 \section{Adapting the Pipeline to Llama}
 \label{app:llama}
@@ -473,22 +539,25 @@ non-stationary early in training when the student's own output distribution is s
 denominators when linearising, so that edges reflect only the direct residual-stream path. We
 implement both freezes as backward-only stop-gradients and make each independently selectable, so
 \eqref{eq:edge} can be evaluated either with the direct-path linearisation or through the full
-Hugging Face Jacobian. Appendix~\ref{app:freeze} measures what the choice costs: it changes the
-gradient's direction rather than its magnitude, and the direct-path linearisation is the better
-training signal on every metric we tracked.
+Hugging Face Jacobian. Appendix~\ref{app:freeze} measures what the choice costs at the working
+$\lambda$: at initialisation it rotates the graph gradient by $40^\circ$ to $50^\circ$, and over a
+full run it changes downstream accuracy by less than the seed-to-seed spread of the baselines.
 
-\emph{Precision.} The graph gradient is small next to the KD gradient --- $0.5$--$6\%$ of its
-norm for $\lambda \in [0.01, 0.3]$ (Appendix~\ref{app:lambda}) --- and it arrives one prompt at
-a time, since each prompt's graph is backpropagated and freed before the next is built
-(Appendix~\ref{app:perf}). With bf16 parameters those $\sim$32 partial sums each land below half
-a unit in the last place of a \texttt{.grad} buffer that already holds the KD gradient, and are
-rounded away: we measured only $66$--$100\%$ of the graph gradient surviving accumulation,
-decreasing with $\lambda$, which silently compressed a $\lambda$ sweep toward its top. bf16
-weights lose the update itself as well, since an AdamW step at $10^{-6}$--$10^{-5}$ is under half
-a ULP for most weights. The student therefore holds fp32 master weights and fp32 optimiser
-moments and runs its forward under bf16 autocast; the inference-only teacher stays bf16. The test
-that this is enough is the step-one check of Appendix~\ref{app:lambda}: summaries of the graph
-gradient that are invariant to its scale must agree across $\lambda$, and now do.
+\emph{Precision.} The graph gradient is small next to the KD gradient --- under $1\%$ of its norm
+at step one and a few per cent by the end of a run for $\lambda \in [0.03, 0.3]$
+(Table~\ref{tab:freeze-dynamics}) --- and it arrives one prompt at a time, since each prompt's
+graph is backpropagated and freed before the next is built (Appendix~\ref{app:perf}). With bf16
+parameters those $\sim$32 partial sums each land below half a unit in the last place of a
+\texttt{.grad} buffer that already holds the KD gradient, and are rounded away: we measured only
+$66$--$100\%$ of the graph gradient surviving accumulation, decreasing with $\lambda$, which
+silently compressed a $\lambda$ sweep toward its top. bf16 weights lose the update itself as well,
+since an AdamW step at $10^{-6}$ is under half a ULP for most weights; only about $2\%$ of the
+parameters changed on a step. The student therefore holds fp32 master weights and fp32 optimiser
+moments and runs its forward under bf16 autocast; the inference-only teacher stays bf16. Every run
+records the fraction of parameters that moved on step one as a canary (it is $1.000$ for every run
+reported here), and the step-one check of Appendix~\ref{app:lambda} confirms that scale-invariant
+summaries of the graph gradient agree across $\lambda$.
+
 
 \section{The Direct-Path Linearisation as a Training Signal}
 \label{app:freeze}
@@ -499,7 +568,8 @@ interpretability: it renders the graph locally linear in the node activations an
 readable. It is not obvious that it is also the right choice when the graph is a regression target
 rather than a figure, since the frozen edge omits real causal influence --- paths on which a source
 node shifts \emph{where} a target attends, and the rank-one RMSNorm term that projects out the
-component of each edge along the activation direction. This appendix measures the difference.
+component of each edge along the activation direction. This appendix measures the difference,
+first in the gradient the choice produces and then in the student it trains.
 
 \subsection{Implementation}
 
@@ -517,7 +587,16 @@ correction from every RMSNorm on the path back to the weights. We hit this: with
 passes, in-distribution accuracy collapsed from $0.634$ to $0.090$ within twenty steps while the KD
 loss continued to fall.
 
-\subsection{Gradient geometry}
+The RMSNorm freeze has a second, measurable effect on the \emph{target}. Frozen minus true
+Jacobian is $+r\,\hat{x}\hat{x}^{\top}$, a rank-one radial term, and in Llama $\hat{x}$ is dominated
+by the massive activations at the attention sink. Frozen edges therefore load onto the BOS node
+(its share of attribution mass rises from $0.11$ to $0.47$ in the teacher and from $0.07$ to
+$0.53$ in the student), which saturates every member's $\fracext$ near $1$ and collapses the
+member weighting of \eqref{eq:superedge} to a plain mean. The ablation below therefore includes an
+arm that keeps the unfrozen Jacobian but sets the weighting to a constant, to separate the freeze's
+effect on the target from its effect on the gradient.
+
+\subsection{Gradient geometry at initialisation}
 
 Table~\ref{tab:freeze-grad} reports the graph gradient under each variant at the student's initial
 checkpoint, against the unfrozen gradient and against the KD gradient.
@@ -526,7 +605,9 @@ checkpoint, against the unfrozen gradient and against the KD gradient.
   \centering
   \caption{Graph-loss gradient under each linearisation, at the student's initial checkpoint;
   22\_add, 8 graph prompts, $\lambda_{\mathrm{graph}}=1$. Cosines are against the unfrozen graph
-  gradient and against the KD gradient.}
+  gradient and against the KD gradient. Measured with the earlier bf16 gradient accumulation
+  (Appendix~\ref{app:llama}), which attenuates the graph gradient's magnitude but not its
+  direction. \pending{: re-measure in the fp32 regime.}}
   \label{tab:freeze-grad}
   \begin{tabular}{lccccc}
     \toprule
@@ -542,248 +623,239 @@ checkpoint, against the unfrozen gradient and against the KD gradient.
   \end{tabular}
 \end{table}
 
-Two things stand out. First, the freeze changes direction, not strength: every frozen variant is
-$40^\circ$ to $51^\circ$ away from the unfrozen gradient while being \emph{larger} in norm. The
-unfrozen total-effect gradient is the smallest of the four, which is what destructive interference
-between paths produces --- freezing removes the cancellation rather than removing signal. Second,
-the two freezes partially cancel each other: freezing both gives a smaller gradient than either
-alone and an angle between the two, so their deviations from the unfrozen gradient are
-anti-correlated. A plausible mechanism is that the RMSNorm freeze injects radial (pure-scale)
-sensitivity that the true Jacobian projects out, while the attention freeze deletes the QK path,
-which is the channel most responsive to scale because a radial perturbation rescales the query and
-so sharpens or flattens the softmax.
+The freeze changes direction, not strength: every frozen variant is $40^\circ$ to $51^\circ$ away
+from the unfrozen gradient while being slightly \emph{larger} in norm. The unfrozen total-effect
+gradient is the smallest of the four, which is what destructive interference between paths
+produces --- freezing removes the cancellation rather than removing signal. The two freezes also
+partially cancel each other: freezing both gives a smaller gradient than either alone and an angle
+between the two. A plausible mechanism is that the RMSNorm freeze injects the radial sensitivity
+described above, while the attention freeze deletes the QK path, the channel most responsive to a
+radial perturbation because rescaling the query sharpens or flattens the softmax. Whether a
+$45^\circ$ rotation of a gradient this small matters to training is the question the next section
+answers.
 
 \subsection{Training ablation}
+\label{sec:freeze-train}
 
-Table~\ref{tab:freeze-train} trains all four variants for 15 steps under otherwise identical
-settings, evaluating in-distribution on two-digit addition and out-of-distribution on four
-arithmetic families never seen in training.
+Table~\ref{tab:freeze-train} and Figure~\ref{fig:freeze-ablation} train the variants for 100
+steps at the working weight $\lambda = 0.1$ under otherwise identical settings (those of
+Appendix~\ref{app:lambda}), evaluating in-distribution on two-digit addition and out-of-distribution
+on four arithmetic families never seen in training.
 
 \begin{table}[h]
   \centering
-  \caption{Distillation accuracy under each linearisation. Peak column is the maximum
-  in-distribution accuracy over the run; remaining columns are at step 15. OOD is the mean of the
-  four right-hand columns. Single seed.}
+  \small
+  \caption{Distillation accuracy under each linearisation at $\lambda = 0.1$, step 100, laid out
+  as Table~\ref{tab:main}. Single seed per arm; the two arms not yet run are marked.}
   \label{tab:freeze-train}
-  \begin{tabular}{lcccccc}
-    \toprule
-    & 22\_add (peak) & OOD & 222\_add & 2222\_add & 33\_add & 21\_mult \\
-    \midrule
-    student, untrained & 0.6340 & 0.1395 & 0.1034 & 0.0236 & 0.3189 & 0.1120 \\
-    teacher            & 0.9562 & ---    & ---    & ---    & ---    & ---    \\
-    \midrule
-    unfrozen           & 0.9588 & 0.2560 & 0.1698 & 0.0206 & 0.2686 & 0.5650 \\
-    attention frozen   & 0.9678 & 0.2582 & 0.1748 & 0.0210 & 0.2621 & 0.5750 \\
-    RMSNorm frozen     & 0.9792 & 0.3474 & 0.2681 & 0.0298 & 0.3598 & 0.7320 \\
-    both frozen        & \textbf{0.9824} & \textbf{0.3582} & \textbf{0.2840} & \textbf{0.0352} & \textbf{0.3714} & \textbf{0.7420} \\
-    \bottomrule
-  \end{tabular}
+  \footnotesize\setlength{\tabcolsep}{4pt}
+  \tablerows{freeze_train}
 \end{table}
 
 \begin{figure}[h]
   \centering
   \includegraphics[width=\textwidth]{figures/freeze_ablation.pdf}
-  \caption{Accuracy against training step for the four linearisations. Hue carries the RMSNorm
-  freeze and line style the attention freeze, so the 2$\times$2 design is visible as two pairs: the
-  RMSNorm-frozen runs separate from the other two within a few steps and stay separated. The dashed
-  rule marks the untrained student on every panel and the dotted rule in the left panel marks the
-  teacher. In-distribution accuracy peaks around step 6--7 and then declines in all four runs, while
-  out-of-distribution accuracy is still climbing at step 15 for the two runs without the RMSNorm
-  freeze; the right panel shows those same two runs ending \emph{below} the untrained student on
-  three-digit addition, which the two RMSNorm-frozen runs do not.}
+  \caption{Accuracy against training step for the linearisation arms at $\lambda = 0.1$. Hue
+  carries the RMSNorm freeze and line style the attention freeze, so the 2$\times$2 design reads as
+  two pairs; the constant-weighting arm is the third hue. \emph{Left, centre}: the full run;
+  \emph{right}: the first forty steps of the in-distribution curve, where the arms differ most.
+  The dashed rule is the untrained student and the dotted rule the teacher. The arms lie on top
+  of one another: that overlap is the result.}
   \label{fig:freeze-ablation}
 \end{figure}
 
+At the working weight the linearisation does not change what the student learns. The three arms
+run so far end within $0.022$ mean OOD of one another at step 100 and within $0.008$ at their
+peaks, which all fall at step 85; their in-distribution accuracies are within $0.003$. That spread is
+smaller than the seed-to-seed standard deviation of the baselines in Section~\ref{sec:results}
+($0.025$ mean OOD for SFT over three seeds), so no ordering among them can be claimed from one
+seed. Two things do separate the arms. Both the freeze and the constant weighting shallow the dip
+that every run takes before recovering (Appendix~\ref{app:lambda}): the minimum rises from
+$0.493$ to $0.509$ and $0.511$, and the both-frozen arm reaches it five steps sooner. And the
+both-frozen arm is the only one to lose ground after its peak, giving back about $0.03$ on each of
+222\_add and 2222\_add between steps 70 and 100 where the other two are flat or still rising.
 
-Figure~\ref{fig:freeze-ablation} plots the trajectories. Both metrics rank the four variants identically and monotonically: freezing more is better, and the
-direct-path linearisation is best. The RMSNorm freeze is the large effect ($+0.091$ OOD on its own,
-$+0.100$ on top of the attention freeze) and the attention freeze a small consistent bonus
-($+0.002$ alone, $+0.011$ on top of RMSNorm); the two are mildly super-additive on OOD, since
-additivity would predict $0.3496$ against the $0.3582$ observed.
+The constant-weighting arm is the informative null. It reproduces the unfrozen arm to within
+$0.008$ on every family, so the $\fracext$ weighting of \eqref{eq:superedge} is inert here, and by
+the same token the RMSNorm freeze's saturation of that weighting cannot be what any RMSNorm-frozen
+arm is doing. Whatever the freeze contributes must come through the gradient, and at this
+$\lambda$ that contribution is inside noise.
 
-The sharpest evidence is a sign change rather than a difference of means. On 33\_add and 2222\_add,
-the two variants without the RMSNorm freeze end \emph{below} the untrained student ($0.2686$ and
-$0.2621$ against a $0.3189$ baseline; $0.0206$ and $0.0210$ against $0.0236$), while both variants
-with it end above. Without the RMSNorm freeze, graph distillation degrades those two families;
-with it, they improve.
+This reverses an earlier reading. An ablation at $\lambda = 1$, 15 steps, under the bf16
+accumulation of Appendix~\ref{app:llama}, had ranked the arms monotonically with the amount frozen.
+That measurement ordered the arms by the depth of the dip --- at 15 steps there is no OOD signal
+yet, since no run has recovered the untrained student --- and, as Table~\ref{tab:freeze-train}
+shows, the freeze does shallow the dip. It is the extrapolation from the dip to generalisation
+that did not hold.
 
-\subsection{What predicts quality, and what does not}
-\label{sec:freeze-predictors}
-
-Cosine to the unfrozen gradient does \emph{not} predict downstream quality, and is close to
-anti-predictive: it ranks the unfrozen gradient highest by construction, and the unfrozen variant is
-the worst of the four. Proximity to the total-effect gradient is not the property that matters.
-
-The initial value of $\mathcal{L}_{\mathrm{graph}}$ does order all four variants correctly on both
-metrics --- the harder the teacher's supergraph is to match at initialisation, the better the
-student ends up --- which is consistent with the interference account above, since the freezes
-expose structure that path cancellation averages away in the total effect. With four points this is
-an observation rather than a result, but it is free: the quantity is already in the training log at
-step one.
+\pending{: the attention-only and RMSNorm-only arms at $\lambda = 0.1$; seeds 2--3 for the
+unfrozen and both-frozen arms; one both-frozen run at $\lambda = 0.3$, where the graph gradient is
+three times larger and a rotation of it would have more room to matter.}
 
 \subsection{Gradient dynamics over training}
 \label{sec:freeze-dynamics}
 
-All four runs were repeated with per-step gradient instrumentation. Training is seeded and the
-data order is deterministic, so accuracy reproduced bit-for-bit and the instrumentation is free.
-Figure~\ref{fig:grad-metrics} plots the result and Table~\ref{tab:freeze-dynamics} summarises it.
-
-\emph{Orthogonality is maintained, not merely initial.} The step-one cosine is $-0.0237$, against
-the $-0.0236$ that Appendix~\ref{app:orthogonality} measures by a separate route at the same
-checkpoint. Over fifteen steps it oscillates within roughly $[-0.033, +0.049]$ in every variant and
-never drifts, so the mean absolute cosine stays below $0.006$. The near-orthogonality of
-$\mathcal{L}_{\mathrm{graph}}$ and $\mathcal{L}_{\mathrm{KD}}$ is therefore a property of the
-objective throughout training rather than an artefact of initialisation.
-
-\emph{The graph term progressively takes over.} $\|\nabla\mathcal{L}_{\mathrm{KD}}\|$ falls by a
-factor of $14.6$ over fifteen steps, from $50.4$ to $3.5$, while
-$\|\nabla\mathcal{L}_{\mathrm{graph}}\|$ stays flat near $1.5$. Their ratio therefore climbs from
-about $0.05$ to between $0.38$ and $0.53$, and the fraction of parameter entries whose update sign
-the graph term decides rises from $0.02$ to $0.12$. Nobody chose this schedule: it is a consequence
-of KD converging faster than the graph objective.
-
-It also lines up with the accuracy curves. In-distribution accuracy peaks at step 6--7, where the
-ratio is around $0.10$--$0.15$, and declines from there, while out-of-distribution accuracy goes on
-rising to step 11--15 (Figure~\ref{fig:freeze-ablation}). As the graph term gains relative weight,
-the student trades in-distribution fit for out-of-distribution generalisation --- which is what two
-near-orthogonal objectives should do, since a single trajectory cannot maximise both.
+Every run records per-step gradient instrumentation. Figure~\ref{fig:grad-metrics} plots it and
+Table~\ref{tab:freeze-dynamics} summarises it.
 
 \begin{table}[h]
   \centering
-  \caption{Per-step gradient metrics, averaged over the fifteen steps. The graph norm is already
-  scaled by $\lambda_{\mathrm{graph}}$, so these are the quantities that reach the optimiser.}
+  \caption{Per-step gradient metrics averaged over the 100 steps, $\lambda = 0.1$. The graph norm
+  is already scaled by $\lambda$, so these are the quantities that reach the optimiser; the
+  cosine column gives the signed mean and, in parentheses, the mean absolute value.}
   \label{tab:freeze-dynamics}
+  \small
   \begin{tabular}{lccccc}
     \toprule
-    & $\|g_{\mathrm{KD}}\|$ & $\|g_{\mathrm{graph}}\|$ & ratio & $\cos$ & sign flips \\
+    & $\|g_{\mathrm{KD}}\|$ & $\lambda\|g_{\mathrm{graph}}\|$ & ratio & $\cos$ (mean $|\cos|$) & sign flips \\
     \midrule
-    unfrozen         & 15.62 & 1.726 & 0.184 & $+0.0053$ & 0.0750 \\
-    attention frozen & 15.62 & 1.579 & 0.175 & $+0.0042$ & 0.0712 \\
-    RMSNorm frozen   & 15.66 & 1.762 & 0.189 & $+0.0025$ & 0.0747 \\
-    both frozen      & 15.63 & 1.887 & 0.213 & $+0.0007$ & 0.0774 \\
-    \midrule
-    spread across variants & 0.3\% & 17.7\% & 20.1\% & --- & 8.3\% \\
+    \tablerows{freeze_dynamics}
     \bottomrule
   \end{tabular}
 \end{table}
 
-\emph{No aggregate gradient statistic separates the four variants.} This is the substantive
-negative result of the instrumentation. The linearisations differ by $33.5\%$ in relative
-out-of-distribution accuracy, but by $0.3\%$ in KD gradient norm --- as they must, being the same
-objective --- and by only $8.3\%$ in sign flips and $20.1\%$ in ratio. Two of the metrics carry
-orderings that are simply wrong: sign flips place the unfrozen run, the worst performer, second.
-The cosine with the KD gradient -- a different quantity from the cosine with the unfrozen
-gradient in Section~\ref{sec:freeze-predictors} -- is the one whose ordering matches accuracy for all four
-variants, more
-orthogonal being better, but the spread between runs ($0.0047$) is smaller than the standard error
-implied by the step-to-step scatter within a single run ($0.0055$), so it cannot be claimed.
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{figures/grad_metrics.pdf}
+  \caption{Per-step gradient metrics for the linearisation arms, encoded as in
+  Figure~\ref{fig:freeze-ablation}. The arms are drawn on every panel and lie on top of one
+  another. The KD gradient falls twentyfold while the graph gradient stays within a factor of two,
+  so their ratio climbs an order of magnitude and the share of update signs the graph term
+  decides rises from $0.3\%$ to $2\%$, none of it by design. The cosine oscillates about zero
+  throughout; its excursions coincide across arms because the arms see the same batches.}
+  \label{fig:grad-metrics}
+\end{figure}
 
-Whatever distinguishes the linearisations is therefore not the size of the graph gradient, nor its
-alignment with the KD gradient, but which parameters it moves --- and scalar summaries are blind to
-that by construction. The per-group figures in Table~\ref{tab:freeze-grad} point the same way: the
-RMSNorm freeze almost doubles the gradient reaching the normalisation weights (ratio $1.93$) while
-the global norm barely moves at all.
+\emph{The graph term progressively takes over.} $\|\nabla\mathcal{L}_{\mathrm{KD}}\|$ falls from
+$49.2$ at step one to $2.5$ at step 100, while $\lambda\|\nabla\mathcal{L}_{\mathrm{graph}}\|$
+goes from $0.30$ to $0.17$. Their ratio therefore climbs from $0.006$ to $0.07$, with transient
+spikes to $0.27$ on individual batches, and the fraction of parameter entries whose update sign
+the graph term decides rises from $0.3\%$ to $2.3\%$. Nobody chose this schedule: it is a
+consequence of KD converging faster than the graph objective. It also lines up with the accuracy
+curves of Appendix~\ref{app:lambda}: in-distribution accuracy is saturated by step 70 in every
+graph run while mean OOD accuracy goes on rising to step 85.
 
-One incidental observation: the pre-clip gradient norm falls from $50.5$ to $3.8$ and so exceeds the
+\emph{No aggregate gradient statistic separates the arms}, which is consistent with their
+identical accuracy: the run means differ by $0.3\%$ in KD norm, $2\%$ in graph norm and about
+$5\%$ in ratio and sign flips, and the cosine traces coincide step for step. If the arms differ
+at all it is in \emph{which} parameters the graph term moves, and scalar summaries are blind to
+that by construction.
+
+One incidental observation: the pre-clip gradient norm never falls below $1.9$ and so exceeds the
 clip threshold of $1.0$ at every step of every run. Gradient clipping is not a rarely-triggered
 safety valve here but a permanent rescaling --- one that AdamW largely undoes, since per-parameter
 normalisation cancels a uniform scale factor.
 
-
-\begin{figure}[h]
-  \centering
-  \includegraphics[width=\textwidth]{figures/grad_metrics.pdf}
-  \caption{Per-step gradient metrics for the four linearisations, encoded as in
-  Figure~\ref{fig:freeze-ablation}. \emph{All four variants are drawn on every panel and lie almost
-  exactly on top of one another} --- that overlap is the point, not a plotting artefact. The KD
-  gradient collapses by a factor of $14.6$ while the graph gradient stays flat, so their ratio
-  climbs tenfold and the share of update signs the graph term decides rises from $2\%$ to $12\%$,
-  none of it by design. The cosine oscillates about zero throughout and never drifts. Yet these
-  four runs differ by a third in out-of-distribution accuracy, so what separates them is not
-  visible in any of these aggregates.}
-  \label{fig:grad-metrics}
-\end{figure}
-
-
 \subsection{Caveats}
 
-Single seed, 15 steps, and a single supernode construction -- the arg-token and DLA supernodes of Section~\ref{sec:supernodes-general}, not the ANOVA supernodes. The freeze acts on the edge coefficients, before supernodes are formed, so the RMSNorm result should transfer; the attention result is less safe to extrapolate, since arg-token supernodes are positional and attention is the only mechanism that moves information between positions. In-distribution accuracy peaks at step 6--7 in all four runs and declines
-afterwards, while OOD accuracy is still rising at step 15 for the two variants without the RMSNorm
-freeze, so their OOD numbers are lower bounds. The gap between the two best variants ($0.011$ OOD)
-is within what a single seed can plausibly produce; the gap between the RMSNorm-frozen and
-unfrozen variants ($0.091$ OOD, plus the two sign changes) is not. 2222\_add is close to unlearned
-in every configuration. \es{Seeds and longer runs before this table goes in the camera-ready.}
+Single seed per arm; one supernode construction, the arg-token and DLA supernodes of
+Section~\ref{sec:supernodes-general}, not the ANOVA supernodes. The freeze acts on the edge
+coefficients, before supernodes are formed, so the RMSNorm result should transfer; the attention
+result is less safe to extrapolate, since arg-token supernodes are positional and attention is
+the only mechanism that moves information between positions. The gradient geometry of
+Table~\ref{tab:freeze-grad} was measured in the earlier bf16 regime. 2222\_add is close to
+unlearned in every configuration.
 
 
 \section{Sensitivity to the Graph-Loss Weight}
 \label{app:lambda}
 
 The weight $\lambda$ in \eqref{eq:total} is the one hyperparameter the method adds. We sweep
-$\lambda \in \{0.01, 0.1, 0.3\}$ against a $\lambda = 0$ control, which is standard knowledge
-distillation through the same pipeline, with everything else held fixed: learning rate
-$10^{-6}$, batch size 32, $\tau = 2$, a shared seed so every run sees the same batches, and the
-unfrozen arg-token and DLA supernodes of Section~\ref{sec:supernodes-general} with three neurons
-each. The graph runs train for 100 steps; the control trains for 300 so that its peak is not cut
-off. Table~\ref{tab:lambda} and Figure~\ref{fig:lambda} report the result.
+$\lambda \in \{0.03, 0.1, 0.3\}$ against two references trained through the same stack and
+evaluated identically: the $\lambda = 0$ control, which is standard knowledge distillation, and
+supervised fine-tuning on the same prompts. Everything else is held fixed: learning rate
+$10^{-6}$, batch size 32, $\tau = 2$, the same data order, and the unfrozen arg-token and DLA
+supernodes of Section~\ref{sec:supernodes-general} with three neurons each
+(Appendix~\ref{app:details} has the full table). The graph runs train for 100 steps; the control
+trains for 300 so that its peak is not cut off. Table~\ref{tab:lambda} and Figure~\ref{fig:lambda}
+report the result; the references carry three seeds each, the sweep one.
 
 \begin{table}[h]
   \centering
   \small
-  \caption{Accuracy under each graph-loss weight, single seed. Peak columns are the maximum over
-  the run, with the step in parentheses; family columns are at step 100; \emph{dip} is the
-  minimum in-distribution accuracy over steps 1--30 and \emph{recovery} the first step back at or
-  above the untrained student. The control ran to step 300. Entries below the untrained student
-  are in italics.}
+  \caption{Accuracy under each graph-loss weight against the two references, laid out as
+  Table~\ref{tab:main}: families at step 100, peaks over the run with their step, and the
+  in-distribution dip and recovery. Seed mean $\pm$ sd for the three-seed references; the sweep
+  is one seed each. The control ran to step 300.}
   \label{tab:lambda}
-  \begin{tabular}{lcccccccc}
-    \toprule
-    & 22\_add (peak) & OOD (peak) & OOD (100) & 222\_add & 2222\_add & 33\_add & 21\_mult & dip / recovery \\
-    \midrule
-    student, untrained & 0.6404 & 0.1421 & --- & 0.1050 & 0.0244 & 0.3199 & 0.1190 & --- \\
-    \midrule
-    KD only ($\lambda = 0$) & 0.9376 (195) & 0.1928 (195) & 0.1587 & \emph{0.0973} & \emph{0.0072} & \emph{0.1923} & 0.3380 & 0.180 / 70 \\
-    $\lambda = 0.01$ & 0.9732 (100) & 0.2569 (98) & 0.2564 & 0.2083 & \emph{0.0174} & \emph{0.2930} & 0.5070 & 0.207 / 55 \\
-    $\lambda = 0.1$ & \textbf{0.9862} (98) & \textbf{0.3774} (100) & \textbf{0.3774} & \textbf{0.3845} & 0.0614 & \textbf{0.3807} & \textbf{0.6830} & 0.384 / 28 \\
-    $\lambda = 0.3$ & 0.9570 (76) & 0.3684 (84) & 0.3362 & 0.3032 & \textbf{0.0696} & 0.3391 & 0.6330 & \textbf{0.547 / 18} \\
-    \bottomrule
-  \end{tabular}
+  \scriptsize\setlength{\tabcolsep}{3pt}
+  \tablerows{lambda}
 \end{table}
 
 \begin{figure}[h]
   \centering
   \includegraphics[width=\textwidth]{figures/lambda_sweep.pdf}
   \caption{Sensitivity to $\lambda$. One hue stepped light to dark with increasing $\lambda$;
-  standard KD in dashed grey, shown to step 100 to share the axis. \emph{Left, centre:}
-  in-distribution and mean out-of-distribution accuracy against training step; the dashed rule is
-  the untrained student and the dotted rule the teacher. \emph{Right:} peak mean
-  out-of-distribution accuracy against $\lambda$ on a log axis, with the control's 300-step peak
-  as the dashed reference.}
+  standard KD in dashed grey and SFT in orange, seed means with a $\pm 1$ sd band, shown to step
+  100 to share the axis. \emph{Left, centre:} in-distribution and mean out-of-distribution accuracy
+  against training step; the dashed rule is the untrained student and the dotted rule the teacher.
+  \emph{Right:} peak mean out-of-distribution accuracy against $\lambda$ on a log axis, with the
+  control's 300-step peak and SFT's peak as reference rules.}
   \label{fig:lambda}
 \end{figure}
 
-Three things hold across every metric and every family. First, output-level distillation alone
-does not generalise in this setting: the control peaks at $0.938$ in-distribution and $0.193$
-mean OOD, and at no point in 300 steps recovers the untrained student on three-digit or
-four-operand addition, whereas every graph run beats it on every family at step 100 and
-$\lambda = 0.1$ nearly doubles its OOD peak. Second, every run first falls below the untrained
-student and then recovers, and the dip is monotone in $\lambda$ --- a minimum of $0.180$,
-$0.207$, $0.384$ and $0.547$ at $\lambda = 0$, $0.01$, $0.1$ and $0.3$, recovered after 70, 55,
-28 and 18 steps --- so the dip belongs to the KD objective and the graph term shortens it.
-Third, larger $\lambda$ rises faster but peaks earlier and then declines: $\lambda = 0.3$ peaks
-between steps 76 and 84 and gives back $0.03$ OOD by step 100, while $\lambda = 0.1$ was still
-improving when it ended. The response is therefore an inverted U whose top is broad relative to
-a single seed --- $\lambda = 0.1$ and $0.3$ differ by $0.009$ OOD at their peaks across a
-threefold change in $\lambda$ --- and we use $\lambda = 0.1$ throughout.
+Three things hold across every metric and every family. First, every graph run beats both
+references on every held-out family at step 100, and the margin is not a matter of training
+length: the control peaks at $0.383$ mean OOD at step 160 and declines from there, and SFT at
+$0.440$ at step 60, against $0.532$ for $\lambda = 0.1$. Standard distillation is in fact the
+weaker of the two references here, no better than the untrained student on 33\_add at step 100 and
+never reaching SFT's peak in 300 steps. Second, every run first falls below the untrained student
+and then recovers, and the dip is monotone in $\lambda$ --- a minimum of $0.248$, $0.335$,
+$0.493$ and $0.609$ at $\lambda = 0$, $0.03$, $0.1$ and $0.3$, recovered after 60, 35, 25 and 20
+steps --- so the dip belongs to the KD objective and the graph term shortens it. SFT, which has
+no KD term, dips only to $0.505$ and recovers by step 20; $\lambda = 0.1$ comes within $0.012$ of
+it. Third,
+larger $\lambda$ rises faster but peaks earlier and then declines: $\lambda = 0.3$ peaks at step
+70--80 and gives back $0.06$ in-distribution and $0.04$ OOD by step 100, while $\lambda = 0.03$
+and $0.1$ are flat from step 85. The response is therefore an inverted U whose top is broad ---
+the three peaks lie within $0.016$ of one another across a tenfold change in $\lambda$ --- and
+what separates the values is stability after the peak rather than the height of it. We use
+$\lambda = 0.1$ throughout as the largest weight that has not begun to collapse by step 100.
 
-The sweep doubles as a precision check on the training stack. At step one the runs share weights,
-so any scale-invariant summary of the graph gradient must agree across $\lambda$; both
-$\|g_{\mathrm{graph}}\| / \lambda$ and $\cos(g_{\mathrm{graph}}, g_{\mathrm{KD}})$ do, to four
-decimals ($2.82$ and $-0.041$). Under the bf16 gradient accumulation of an earlier version of the
-stack (Appendix~\ref{app:llama}) they did not: the graph gradient, which arrives one prompt at a time into a buffer already
-holding the far larger KD gradient, was rounded away more severely the smaller $\lambda$ was,
-which biased that regime against small $\lambda$. The $\lambda = 1$ results of
-Appendix~\ref{app:freeze} were measured there and are being re-run. Single seed; $\lambda = 1$ is
-not included here.
+The sweep doubles as a precision check on the training stack. At step one the runs share weights
+and batch, so any scale-invariant summary of the graph gradient must agree across $\lambda$; both
+$\|g_{\mathrm{graph}}\| / \lambda$ and $\cos(g_{\mathrm{graph}}, g_{\mathrm{KD}})$ do, to three
+decimals ($2.96$ and $-0.015$). Under the bf16 gradient accumulation of an earlier version of the
+stack (Appendix~\ref{app:llama}) they did not: the graph gradient, which arrives one prompt at a
+time into a buffer already holding the far larger KD gradient, was rounded away more severely the
+smaller $\lambda$ was, which biased that regime against small $\lambda$.
+
+\subsection{Structure control: a scrambled target}
+\label{sec:scramble}
+
+Does the gain come from the \emph{content} of the teacher's routing, or would any structured
+target of the same shape act as a regulariser? We train the $\lambda = 0.1$ configuration against
+a scrambled target: each row of the teacher's $K \times K$ supernode adjacency is permuted by a
+fixed derangement, drawn once from the run seed and reused for every prompt, so the target keeps
+the teacher's numbers and per-row sparsity but pairs every supernode with the wrong sources. The
+run also scores the student against the real target at every step, without gradient.
+Figure~\ref{fig:scramble} shows the result.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{figures/scramble.pdf}
+  \caption{Real against scrambled routing target at $\lambda = 0.1$, single seed, with the KD-only
+  control for reference. \emph{Left pair:} accuracy. \emph{Third:} the graph loss the scrambled
+  arm trains on, the same arm scored against the real target, and the real arm's loss.
+  \emph{Right:} the KD loss of the three runs.}
+  \label{fig:scramble}
+\end{figure}
+
+The scrambled target is not merely useless but destructive: in-distribution accuracy falls to
+$0.036$ by step 100 and mean held-out accuracy to $0.084$, below the untrained student on every
+family, while the real target reaches $0.983$ and $0.525$ from the same initialisation, data order
+and $\lambda$. This is not a matter of gradient scale --- the scrambled arm's graph gradient is
+\emph{smaller} than the real arm's at every stage (step-one ratio to the KD gradient $0.0044$
+against $0.0060$, run mean $0.046$ against $0.042$) --- and the student never fits the scrambled
+target: its loss on it drifts from $0.358$ to $0.368$ while its loss on the real target stays flat
+at $0.31$--$0.33$, where the real arm's falls to $0.276$. A routing target the student cannot
+reach still moves the student, and moves it somewhere the teacher's target does not. Together with
+the representation-level baselines of Section~\ref{sec:results}, which constrain the same
+residual stream to no effect, this locates the gain in the target's content.
+
+\pending{: seeds 2--3 for $\lambda = 0.1$ and for the scrambled arm; $\lambda = 1$ in the fp32
+regime.}
+
 
 \section{Performance Optimisations}
 \label{app:perf}
@@ -803,11 +875,60 @@ $n_{\mathrm{graph}}$ prompts per batch get a graph, and each prompt's graph loss
 and freed before the next graph is built, so peak memory is set by one prompt's attribution graph
 rather than the batch's.
 
-\section{Additional Details}
+\pending{: wall-clock and FLOPs per step for each objective, from \texttt{-{}-track-flops}.}
+
+
+\section{Training and Evaluation Details}
 \label{app:details}
 
-\todosec{Appendix. Full hyperparameters; the complete ANOVA category list including the
-composite and combination-sum categories omitted from Section~\ref{sec:supernodes}; additional
-supergraph figures; per-supernode activation-heatmap montages.}
+\begin{table}[h]
+  \centering
+  \small
+  \caption{Configuration shared by every run in the paper unless a section says otherwise. The
+  three trainers (SFT, standard KD, graph distillation) share one implementation of the
+  optimiser, precision regime, data order and evaluation.}
+  \label{tab:config}
+  \begin{tabular}{ll}
+    \toprule
+    teacher / student & Meta-Llama-3-8B-Instruct / Llama-3.2-1B-Instruct, $1.24$B parameters \\
+    training data & 22\_add prompts ``\texttt{$a$+$b$=}'', batch 32, 100 steps (control: 300) \\
+    optimiser & AdamW, learning rate $10^{-6}$, no schedule, gradient clipping at $1.0$ \\
+    precision & fp32 master weights and optimiser moments, bf16 autocast forward; teacher bf16 \\
+    KD term & $\tau = 2$, forward KL over all non-padding positions \\
+    graph term & $\lambda = 0.1$, JSD, arg-token + DLA supernodes, 3 neurons per label \\
+    attribution & top $10\%$ of neurons per layer by write norm in the teacher, $1\%$ in the student; \\
+                & logit targets: top tokens covering $0.95$ of $\softmax(z/\tau)$, at most ten \\
+    linearisation & unfrozen (full Jacobian) unless stated; Appendix~\ref{app:freeze} \\
+    evaluation & greedy decoding, up to 5 new tokens, first integer of the continuation; \\
+               & every 5 steps (control: 10) on 22\_add and the four held-out families \\
+    test sets & $5000$ prompts per family ($1000$ for 21\_mult), disjoint from training \\
+    baselines & TinyBERT recipe (MSE on projected hidden states and on attention patterns, \\
+              & uniform layer map) and linear CKA on residual streams; weight $0.1$ on the KD term \\
+    seeds & 1 for graph runs; 1, 2, 3 for SFT, the KD control and the two representation baselines \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\emph{Evaluation.} An answer is scored by decoding only the generated continuation and parsing its
+leading integer. This matters more than it sounds: Llama~3 tokenises digits in groups of one to
+three, and the untrained student often emits an answer digit by digit, so a one-token budget
+truncates it, while parsing the prompt echo lets a second, echoed equation override a correct
+answer. Both effects moved every family's accuracy, the untrained student's included, so all
+numbers in the paper come from one evaluation convention and are not comparable to earlier drafts.
+
+\emph{Held-out families.} 222\_add and 2222\_add are three- and four-operand sums of two-digit
+numbers, 33\_add is three-digit addition (the only family whose answers need two tokens), and
+21\_mult is a two-digit by one-digit product.
+
+\emph{Pending results.} The following slots are marked \pending{} in the text and will be filled
+from the same scripts without editing the tables by hand: seeds 2--3 for the $\lambda = 0.1$ run
+and for the scrambled arm (Section~\ref{sec:results}, Appendix~\ref{app:lambda}); the
+attention-only and RMSNorm-only linearisation arms and seeds for the both-frozen arm
+(Appendix~\ref{app:freeze}); the fp32 re-measurement of Table~\ref{tab:freeze-grad}; FLOPs per
+step (Appendix~\ref{app:perf}).
+
+\todosec{Still to write: the complete ANOVA category list including the composite and
+combination-sum categories omitted from Section~\ref{sec:supernodes}; additional supergraph
+figures; per-supernode activation-heatmap montages.}
 
 \end{document}
