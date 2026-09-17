@@ -417,7 +417,7 @@ def create_graph_at_position(
     dla_model_logits: torch.Tensor | None = None,
     attribution_targets=None,
     top_k_logits: float | None = 0.95,
-    temperature: float = 2.0,
+    temperature: float = 1.0,
     batch_size: int = 512,
     build_create_graph: bool = False,
     detach_result: bool | None = None,
@@ -592,7 +592,7 @@ def create_graph(
     # attribution params
     attribution_targets=None,
     top_k_logits: float | None = 0.95,
-    temperature: float = 2.0,
+    temperature: float = 1.0,
     prop_neurons_per_layer: float = 0.1,
     batch_size: int = 512,
     dtype: torch.dtype | None = None,

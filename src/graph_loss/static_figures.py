@@ -94,7 +94,7 @@ class BuildConfig:
     """Attribution-graph build parameters shared across all models."""
 
     top_k_logits: float = 0.95
-    temperature: float = 2.0
+    temperature: float = 1.0
     prop_neurons_per_layer: float = 0.1
     attribution_batch_size: int = 512
     nodes_per_label: int = 10

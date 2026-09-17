@@ -69,7 +69,7 @@ class AttributionTargets:
         tokenizer,
         *,
         top_k_logits: float | None = None,
-        temperature: float = 2.0,
+        temperature: float = 1.0,
     ):
         """Build attribution targets from user specification.
 
@@ -188,7 +188,7 @@ class AttributionTargets:
         unembed_proj: torch.Tensor,
         top_k_logits: float | None,
         tokenizer,
-        temperature: float = 2.0,
+        temperature: float = 1.0,
     ) -> tuple[list[LogitTarget], torch.Tensor, torch.Tensor]:
         """Auto-select salient logits by cumulative probability threshold.
 
@@ -230,7 +230,7 @@ class AttributionTargets:
         logits: torch.Tensor,
         unembed_proj: torch.Tensor,
         tokenizer,
-        temperature: float = 2.0,
+        temperature: float = 1.0,
     ) -> tuple[list[LogitTarget], torch.Tensor, torch.Tensor]:
         """Construct from specific vocabulary indices.
 
@@ -275,7 +275,7 @@ class AttributionTargets:
         logits: torch.Tensor,
         unembed_proj: torch.Tensor,
         tokenizer,
-        temperature: float = 2.0,
+        temperature: float = 1.0,
     ) -> tuple[list[LogitTarget], torch.Tensor, torch.Tensor]:
         """Construct from a sequence of token strings.
 
@@ -390,7 +390,7 @@ class AttributionTargets:
         indices: torch.Tensor,
         logits: torch.Tensor,
         unembed_proj: torch.Tensor,
-        temperature: float = 2.0,
+        temperature: float = 1.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Compute probabilities and demeaned vectors for indices.
 

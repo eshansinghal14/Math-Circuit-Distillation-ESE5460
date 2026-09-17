@@ -73,7 +73,7 @@ def add_graph_build_args(parser: argparse.ArgumentParser) -> None:
         "--temperature",
         type=float,
         default=2.0,
-        help="Softmax temperature for computing logit probabilities (default: 2.0).",
+        help="Softmax temperature for computing logit probabilities (default: 1.0).",
     )
     parser.add_argument(
         "--prop_neurons_per_layer",

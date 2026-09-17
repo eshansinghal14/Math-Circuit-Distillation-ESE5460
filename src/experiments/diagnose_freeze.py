@@ -170,7 +170,7 @@ def main() -> None:
                     help="Prompt batch size when building the MLP input cache.")
     ap.add_argument("--attribution-batch-size", type=int, default=512)
     ap.add_argument("--top-k-logits", type=float, default=0.95)
-    ap.add_argument("--temperature", type=float, default=2.0)
+    ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument(
         "--modes",

@@ -158,7 +158,7 @@ def main() -> None:
                     help="Prompt batch size when building the MLP input cache.")
     ap.add_argument("--prop-neurons-per-layer", type=float, default=0.1)
     ap.add_argument("--top-k-logits", type=float, default=0.95)
-    ap.add_argument("--temperature", type=float, default=2.0)
+    ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--graph-loss-type", default="jsd")
     ap.add_argument(
         "--modes",

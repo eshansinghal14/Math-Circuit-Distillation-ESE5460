@@ -236,7 +236,7 @@ def _dla_kl_scores_for_output(
     source_vectors: torch.Tensor,
     W_U: torch.Tensor,
     model_logits: torch.Tensor,
-    temperature: float = 2.0,
+    temperature: float = 1.0,
     top_k: int = 100,
 ) -> list[float]:
     """Compute DLA-KL scores vs the model's actual output distribution.
@@ -284,7 +284,7 @@ def select_anova_supernodes(
     allowed_labels: set[str] | None = None,
     include_dla_node: bool = False,
     model_logits: torch.Tensor | None = None,
-    dla_temperature: float = 2.0,
+    dla_temperature: float = 1.0,
     dla_top_k_vocab: int = 100,
 ) -> tuple[list[int], list[list[int]], list[list[str]], dict[int, list[str]], dict[str, dict[int, tuple[float, float, float]]]]:
     """Select ANOVA supernodes from pre-computed label results.

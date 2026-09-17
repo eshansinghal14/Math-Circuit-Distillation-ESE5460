@@ -28,7 +28,7 @@ class GraphAuxConfig:
     student_prop_neurons_per_layer: float = 0.1
 
     top_k_logits: float | None = 0.95
-    temperature: float = 2.0
+    temperature: float = 1.0
     teacher_graph_batch_size: int = 512
     student_graph_batch_size: int = 1
     verbose: bool = False
