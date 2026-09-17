@@ -154,6 +154,9 @@ class StandardKDTrainer:
     def _eval_all_extra(self) -> Dict[str, float]:
         return {ds: self._eval_on(self.model, ds, td) for ds, td in self.extra_test_datasets.items()}
 
+    def _eval_teacher_all_extra(self) -> Dict[str, float]:
+        return {ds: self._eval_on(self.teacher, ds, td) for ds, td in self.extra_test_datasets.items()}
+
     def train_epoch(self, *, max_steps: Optional[int] = None) -> Dict[str, float]:
         self.model.train()
         cfg = self.config
@@ -250,6 +253,7 @@ class StandardKDTrainer:
             run_baselines(
                 self.shared, self.history,
                 student=self._eval, teacher=self._eval_teacher, extra=self._eval_all_extra,
+                teacher_extra=self._eval_teacher_all_extra,
             )
 
         sample = self.loader.dataset[0]

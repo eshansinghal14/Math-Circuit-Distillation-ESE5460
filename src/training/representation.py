@@ -614,6 +614,9 @@ class RepKDTrainer:
     def _eval_all_extra(self) -> Dict[str, float]:
         return {ds: self._eval_on(self.model, ds, td) for ds, td in self.extra_test_datasets.items()}
 
+    def _eval_teacher_all_extra(self) -> Dict[str, float]:
+        return {ds: self._eval_on(self.teacher, ds, td) for ds, td in self.extra_test_datasets.items()}
+
     # ── training ──────────────────────────────────────────────────────────────
 
     def _snapshot_grads(self) -> Dict[str, torch.Tensor]:
@@ -806,6 +809,7 @@ class RepKDTrainer:
             run_baselines(
                 self.shared, self.history,
                 student=self._eval, teacher=self._eval_teacher, extra=self._eval_all_extra,
+                teacher_extra=self._eval_teacher_all_extra,
             )
 
         sample = self.loader.dataset[0]

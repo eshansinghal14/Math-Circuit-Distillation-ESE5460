@@ -664,18 +664,26 @@ def run_baselines(
     student: Callable[[], float],
     teacher: Callable[[], float] | None,
     extra: Callable[[], Dict[str, float]],
+    teacher_extra: Callable[[], Dict[str, float]] | None = None,
 ) -> None:
     """Record the step-0 accuracies in ``history``, evaluating them once per ``shared`` dict.
 
     The untrained student and the teacher are the same weights for every seed,
     and eval is greedy, so the baselines are computed for the first seed and
     copied into every later seed's history. ``teacher`` is None for trainers
-    without one (SFT).
+    without one (SFT). ``teacher_extra`` scores the teacher on every
+    ``--eval-datasets`` entry, recorded as ``teacher_baseline_<dataset>``: the
+    ceiling each OOD curve should be read against.
     """
     cached = shared.get(SHARED_BASELINES) if shared is not None else None
     if cached is None:
         print("Evaluating baseline...")
-        cached = {"student": student(), "teacher": teacher() if teacher is not None else None, "extra": extra()}
+        cached = {
+            "student": student(),
+            "teacher": teacher() if teacher is not None else None,
+            "extra": extra(),
+            "teacher_extra": teacher_extra() if teacher_extra is not None else {},
+        }
         if shared is not None:
             shared[SHARED_BASELINES] = cached
     else:
@@ -690,6 +698,9 @@ def run_baselines(
     for ds, acc in cached["extra"].items():
         history[f"accuracy_{ds}"].append(acc)
         print(f"  Student baseline [{ds}]: {acc:.4f}")
+    for ds, acc in cached.get("teacher_extra", {}).items():
+        history[f"teacher_baseline_{ds}"] = acc
+        print(f"  Teacher baseline [{ds}]: {acc:.4f}")
 
 
 def history_seed(history: Dict[str, Any]) -> int:
@@ -789,7 +800,8 @@ def save_curves(
     Every seed recorded in the folder's history JSON (see save_history) is drawn:
     losses as a faint raw trace under an EMA with smoothing ``ema_alpha``, one
     colour per seed; accuracies one colour per dataset, with the per-seed traces
-    faint and their mean over seeds bold once there is more than one seed.
+    faint and their mean over seeds bold once there is more than one seed, and
+    the teacher's accuracy on each dataset as a dashed line in that colour.
     ``history`` is the run that just finished and is used alone if the JSON is
     unreadable.
     """
@@ -840,9 +852,20 @@ def save_curves(
         if k.startswith("accuracy_") and k != "accuracy_step"
     })
     use_legend = len(acc_keys) > 1
+    teacher_drawn = False
     for j, key in enumerate(acc_keys):
         name = "main" if key == "accuracy" else key[len("accuracy_"):]
         c = colors[j % len(colors)]
+        # The teacher's accuracy on the same dataset, dashed in the dataset's
+        # colour: the ceiling each curve should be read against.
+        t_key = "teacher_baseline" if key == "accuracy" else f"teacher_baseline_{name}"
+        t_val = next((runs[s][t_key] for s in seeds if isinstance(runs[s].get(t_key), (int, float))), None)
+        if t_val is not None:
+            acc_ax.axhline(
+                t_val, color=c, linestyle="--", linewidth=1.0, alpha=0.7,
+                label=None if teacher_drawn else "teacher (dashed)",
+            )
+            teacher_drawn = True
         per_seed: List[Tuple[List, List]] = []
         for seed in seeds:
             h = runs[seed]
@@ -869,7 +892,7 @@ def save_curves(
     acc_ax.set_xlabel("train step")
     acc_ax.set_ylim(0, 1)
     acc_ax.grid(True, alpha=0.3)
-    if use_legend or multi:
+    if use_legend or multi or teacher_drawn:
         acc_ax.legend(fontsize=7, loc="lower right")
     fig.tight_layout()
     fig.savefig(os.path.join(save_dir, "training_curves.png"), dpi=150)
