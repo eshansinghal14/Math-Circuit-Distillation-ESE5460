@@ -118,6 +118,10 @@ CONSTRUCTIONS: dict[str, tuple[bool, bool]] = {
 PLOT_CONSTRUCTIONS = ("normalised", "composition")
 COMPOSITION_GROUPS = ["arg blocks", "sum blocks", "tokens"]
 DISTANCES = ["rel_mse", "cos", "jsd", "jsd_mass"]
+# Headline distance in figures and the per-prompt printout: rel_mse keeps the row
+# level (block-captured share of inbound mass), which is what moves with competence
+# and under KD; the JSD variants row-normalise it away (2026-09-18 analysis).
+HEADLINE = "rel_mse"
 EPS = 1e-8
 
 
@@ -487,7 +491,7 @@ def render(out_path: str, prompt: str, rec: dict[str, Any], teacher_p: float, la
             ax.set_yticklabels(labels if c == 0 else [], fontsize=7)
             ax.set_title(title, fontsize=9)
             fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
-        key = "rel_mse" if signed else "jsd_mass"
+        key = HEADLINE
         d = dist_by[cons]
         label = f"{cons}\nstudent: {key} = {d[key]:.3f}, cos = {d['cos']:.2f}"
         if dist_kd is not None and cons in dist_kd:
@@ -579,7 +583,7 @@ def render_graphs(out_path: str, prompt: str, rec: dict[str, Any], teacher_p: fl
     for r, cons in enumerate(names):
         signed, _ = CONSTRUCTIONS[cons]
         scale = float(max([mats[cons][m].abs().max() for m in models] + [torch.tensor(1e-8)]))
-        key = "rel_mse" if signed else "jsd_mass"
+        key = HEADLINE
         for c, m in enumerate(models):
             if m == "teacher":
                 title = f"teacher  [{cons}]"
@@ -836,8 +840,7 @@ def main() -> None:
                 if dd is None:
                     continue
                 print(f"   {name:8s}" + " | ".join(
-                    f"{cons} {('rel_mse' if CONSTRUCTIONS[cons][0] else 'jsd_mass')}="
-                    f"{dd[cons]['rel_mse' if CONSTRUCTIONS[cons][0] else 'jsd_mass']:.3f} cos={dd[cons]['cos']:.2f}"
+                    f"{cons} {HEADLINE}={dd[cons][HEADLINE]:.3f} cos={dd[cons]['cos']:.2f}"
                     for cons in CONSTRUCTIONS))
             del t_res, s_res, k_res, t_pool
             torch.cuda.empty_cache()
