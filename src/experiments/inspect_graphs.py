@@ -63,7 +63,9 @@ controls add ``kd_same_prompt``, ``kd_shuffled_prompt``, ``kd_minus_student``
 on moves under KD by more than the membership noise floor and towards the
 teacher. Buckets stay defined by the untrained student's scores.
 
-One heatmap figure and one node-and-edge figure per prompt. Pass
+One heatmap figure and one node-and-edge figure per prompt, under
+``<out>/<dataset>/<bucket>/``; only ``normalised`` and ``composition`` are drawn
+(the signed variants are scored but were ruled out). Pass
 ``--student-checkpoint`` to run the identical analysis on a trained student.
 
 Usage (from the repository root, GPU):
@@ -106,6 +108,11 @@ CONSTRUCTIONS: dict[str, tuple[bool, bool]] = {
     "gold-path": (True, True),
     "composition": (False, False),
 }
+# Constructions that get figure rows. The signed edge-level variants (raw-signed,
+# gold-signed, gold-path) were ruled out on 2026-09-18 -- the teacher's signed
+# supergraph is not reproducible across prompts -- and are kept in summary.json /
+# the controls for comparison only.
+PLOT_CONSTRUCTIONS = ("normalised", "composition")
 COMPOSITION_GROUPS = ["arg blocks", "sum blocks", "tokens"]
 DISTANCES = ["rel_mse", "cos", "jsd", "jsd_mass"]
 EPS = 1e-8
@@ -437,7 +444,7 @@ def render(out_path: str, prompt: str, rec: dict[str, Any], teacher_p: float, la
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    names = list(CONSTRUCTIONS)
+    names = list(PLOT_CONSTRUCTIONS)
     models = _models_in(mats)
     others = [m for m in models if m != "teacher"]
     n_cols = len(models) + len(others)
@@ -549,7 +556,7 @@ def render_graphs(out_path: str, prompt: str, rec: dict[str, Any], teacher_p: fl
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    names = [c for c in CONSTRUCTIONS if c != "composition"]
+    names = [c for c in PLOT_CONSTRUCTIONS if c != "composition"]
     models = _models_in(mats)
     fig, axes = plt.subplots(len(names), len(models), figsize=(5.5 * len(models), 5 * len(names)), squeeze=False)
     for r, cons in enumerate(names):
