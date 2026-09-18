@@ -141,6 +141,12 @@ class GraphKDTrainer:
         self.config = config
         self.shared = shared
         seed_all(config.seed)
+        # 'tokens' asks for the token-embedding source columns and is not an ANOVA
+        # category; with no real category left there is no ANOVA and no MLP-input
+        # cache to build. Done here as well as in main() so a config built directly
+        # (a notebook) behaves the same.
+        config.graph_node_labels, tokens_label = normalize_node_labels(config.graph_node_labels)
+        config.token_source_columns = config.token_source_columns or tokens_label
 
         # fp32 master weights with a bf16 autocast forward, shared with SFT and
         # standard KD so the three are comparable. The graph term is the reason this

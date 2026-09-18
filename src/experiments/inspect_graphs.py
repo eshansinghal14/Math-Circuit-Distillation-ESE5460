@@ -613,8 +613,10 @@ def main() -> None:
     ap.add_argument("--mlp-cache-batch-size", type=int, default=32)
     ap.add_argument("--score-batch-size", type=int, default=2048,
                     help="Prompts per teacher-forced forward when scoring the whole split.")
-    ap.add_argument("--out", default=os.path.join(DIR_ROOT, "results", "inspect_graphs"))
+    ap.add_argument("--out", default=os.path.join(DIR_ROOT, "results", "inspect_graphs"),
+                    help="Output root; figures and summary.json go under <out>/<dataset>/.")
     args = ap.parse_args()
+    args.out = os.path.join(args.out, args.dataset)
 
     # Same normalisation as the trainer ('arg 1 units' -> 'arg1 units'; 'tokens' is
     # accepted and dropped, since every construction here already carries the token

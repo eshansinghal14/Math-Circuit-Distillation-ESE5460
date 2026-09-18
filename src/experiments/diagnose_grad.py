@@ -68,6 +68,7 @@ import torch
 
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
 from graph_loss.training import GraphAuxConfig, backward_batch_graph_loss
+from graph_loss.utils import normalize_node_labels
 from training.utils import kl_loss
 from utils import (
     DataLoader,
@@ -215,6 +216,8 @@ def main() -> None:
     # split via load_data, matching GraphKDTrainer rather than create_graph's own
     # load_split(dataset, "all") convention -- the point of this script is to
     # reproduce the training gradient, so it has to mirror the trainer.
+    # 'tokens' is not an ANOVA category (token source columns); it needs no cache.
+    args.graph_node_labels, tokens_label = normalize_node_labels(args.graph_node_labels)
     student_mlp_cache = teacher_mlp_cache = None
     if args.graph_node_labels:
         from graph_loss.precompute_mlp_inputs import build_mlp_input_cache
@@ -241,6 +244,7 @@ def main() -> None:
             freeze_attention=freeze_attention,
             freeze_rms_norm=freeze_rms_norm,
             graph_node_labels=args.graph_node_labels or None,
+            token_source_columns=tokens_label,
             student_anova_range_radius=args.anova_range_radius,
             anova_neuron_chunk=args.anova_neuron_chunk,
             mlp_input_cache=student_mlp_cache,

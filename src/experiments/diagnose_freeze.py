@@ -62,6 +62,7 @@ import torch
 from graph_loss.create_graph import create_graph
 from graph_loss.graph import normalize_matrix
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
+from graph_loss.utils import normalize_node_labels
 from utils import load_data, load_model
 
 _EPS = 1e-8
@@ -198,6 +199,8 @@ def main() -> None:
     model, tokenizer = load_model(args.model)
     model.eval()
     adapter = HFLlamaGraphAdapter(model, tokenizer, device)
+    # 'tokens' is not an ANOVA category (token source columns); it needs no cache.
+    args.graph_node_labels, tokens_label = normalize_node_labels(args.graph_node_labels)
 
     train_data, _ = load_data(args.dataset)
     prompts = sorted(train_data.keys())
@@ -227,6 +230,7 @@ def main() -> None:
                     # With labels set, create_graph builds (and disk-caches) the
                     # MLP-input cache itself from load_split(dataset, "all").
                     node_labels=args.graph_node_labels or None,
+                    token_source_columns=tokens_label,
                     dataset=args.dataset if args.graph_node_labels else None,
                     model_name=args.model if args.graph_node_labels else None,
                     anova_range_radius=args.anova_range_radius,

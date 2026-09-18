@@ -19,6 +19,7 @@ from graph_loss.graph import (
     select_arg_supernodes,
 )
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
+from graph_loss.utils import normalize_node_labels
 from graph_loss.neuron_activation_heatmap import (
     ActivationWriteResult,
     build_neuron_activation_write_result,
@@ -260,6 +261,7 @@ def build_shared_context(
         ANOVA + token supernodes in unfiltered ctx-space indices.
     """
     _logger = logger or logging.getLogger(__name__)
+    node_labels, _ = normalize_node_labels(node_labels)  # 'tokens' is not an ANOVA category
 
     _logger.info("Running setup_attribution (neuron pre-selection by gradient norm)")
     ctx = setup_attribution(
@@ -696,6 +698,11 @@ def create_graph(
     """
     _logger = logger or logging.getLogger(__name__)
     input_ids = adapter.ensure_tokenized(prompt)
+    # 'tokens' is a pseudo-label: it asks for the token-embedding source columns and
+    # is never an ANOVA category. Handled here so every caller (trainer, diagnostics,
+    # figures) agrees, and a 'tokens'-only request needs no ANOVA / MLP-input cache.
+    node_labels, tokens_label = normalize_node_labels(node_labels)
+    token_source_columns = token_source_columns or tokens_label
 
     shared = build_shared_context(
         adapter,

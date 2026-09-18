@@ -22,6 +22,7 @@ from graph_loss.create_graph import create_graph
 from graph_loss.graph import aggregate_supernode_adjacency, SuperGraph, normalize_matrix
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
 from graph_loss.loss import compute_graph_loss
+from graph_loss.utils import normalize_node_labels
 
 
 @dataclass
@@ -79,6 +80,16 @@ class GraphAuxConfig:
     # Per-prompt cache of the teacher's target (see TeacherTargetCache); None
     # recomputes the teacher's graph for every prompt.
     teacher_target_cache: Any = None
+
+    def __post_init__(self) -> None:
+        # 'tokens' in graph_node_labels means token_source_columns, never an ANOVA
+        # category: strip it here so the cache key, the label filter and the ANOVA
+        # selection all see only real categories, and a 'tokens'-only list means
+        # no ANOVA (None), i.e. the arg-token + DLA construction with token columns.
+        if self.graph_node_labels is not None:
+            labels, tokens_label = normalize_node_labels(self.graph_node_labels)
+            self.graph_node_labels = labels or None
+            self.token_source_columns = self.token_source_columns or tokens_label
 
 
 def _aggregate_supergraph_adjacency(
