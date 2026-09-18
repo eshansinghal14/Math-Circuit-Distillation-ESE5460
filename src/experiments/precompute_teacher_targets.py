@@ -29,7 +29,6 @@ from __future__ import annotations
 import argparse
 import gc
 import os
-import re
 import sys
 import time
 from typing import Callable
@@ -39,6 +38,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils import DIR_ROOT, load_data, load_model  # noqa: E402
+from graph_loss.utils import normalize_node_labels  # noqa: E402
 
 from graph_loss.training import (  # noqa: E402
     GraphAuxConfig,
@@ -47,10 +47,6 @@ from graph_loss.training import (  # noqa: E402
     _teacher_target_entry,
     teacher_target_cache_key,
 )
-
-
-def _normalize_label(label: str) -> str:
-    return re.sub(r"\barg\s+(\d+)", lambda m: f"arg{m.group(1)}", label)
 
 
 def precompute(
@@ -88,7 +84,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dataset", type=str, required=True)
     p.add_argument("--graph-node-labels", "--graph_node_labels", nargs="+", default=[],
                    dest="graph_node_labels", metavar="LABEL",
-                   help="ANOVA supernode labels, exactly as passed to graph_kd (omit for arg-token + DLA).")
+                   help="ANOVA supernode labels, exactly as passed to graph_kd (omit for arg-token + DLA; "
+                        "'tokens' appends the token-embedding source columns).")
+    p.add_argument("--supergraph-aggregation", type=str, default="normalised", dest="supergraph_aggregation",
+                   choices=["normalised", "raw-signed"], help="Must match graph_kd's flag.")
+    p.add_argument("--token-source-columns", action="store_true", dest="token_source_columns",
+                   help="Must match graph_kd's flag (or pass 'tokens' as a label).")
     p.add_argument("--nodes-per-label", type=int, default=10, dest="nodes_per_label")
     p.add_argument("--teacher-prop-neurons-per-layer", type=float, default=0.1,
                    dest="teacher_prop_neurons_per_layer")
@@ -118,7 +119,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    labels = [_normalize_label(lbl) for lbl in args.graph_node_labels]
+    labels, tokens_label = normalize_node_labels(args.graph_node_labels)
+    token_source_columns = args.token_source_columns or tokens_label
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     train_data, _ = load_data(args.dataset)
@@ -157,6 +159,8 @@ def main() -> None:
         freeze_attention=args.freeze_attention,
         freeze_rms_norm=args.freeze_rms_norm,
         constant_node_weighting=args.constant_node_weighting,
+        supergraph_aggregation=args.supergraph_aggregation,
+        token_source_columns=token_source_columns,
         dataset_name=args.dataset,
     )
     cache_dir = args.teacher_target_cache_dir

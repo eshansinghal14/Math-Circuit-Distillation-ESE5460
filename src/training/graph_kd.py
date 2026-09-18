@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import random
 import sys
 from collections import defaultdict
@@ -29,6 +28,7 @@ from utils import (
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
+from graph_loss.utils import normalize_node_labels
 from graph_loss.training import (
     GraphAuxConfig,
     TeacherTargetCache,
@@ -694,7 +694,8 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument(
         "--token-source-columns", action="store_true", dest="token_source_columns",
         help="Append the token-embedding nodes as extra source columns of the supergraph "
-             "(present in both models regardless of pre-selection).",
+             "(present in both models regardless of pre-selection). Same as passing "
+             "'tokens' in --graph-node-labels.",
     )
     group.add_argument(
         "--freeze-attention", action="store_true", dest="freeze_attention",
@@ -748,7 +749,9 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument(
         "--graph-node-labels", "--graph_node_labels",
         nargs="+", default=[], dest="graph_node_labels", metavar="LABEL",
-        help="ANOVA supernode labels, e.g. 'sum units' 'arg1 range'. Pass 'all' for every category.",
+        help="ANOVA supernode labels, e.g. 'sum units' 'arg1 range'. Pass 'all' for every category. "
+             "'tokens' adds the token-embedding nodes as source columns of the supergraph "
+             "(dataset-independent; equivalent to --token-source-columns).",
     )
     group.add_argument("--anova-range-radius", "--anova_range_radius", type=int, default=0,
                        dest="anova_range_radius")
@@ -811,14 +814,11 @@ def _cache_gb(cache: dict | None) -> float:
     return sum(t.numel() * t.element_size() for t in cache.get("layer_inputs", [])) / 1e9
 
 
-def _normalize_label(label: str) -> str:
-    """Normalize 'arg N ...' -> 'argN ...' for CLI convenience."""
-    return re.sub(r'\barg\s+(\d+)', lambda m: f'arg{m.group(1)}', label)
-
-
 def main() -> None:
     args = build_parser().parse_args()
-    graph_node_labels = [_normalize_label(lbl) for lbl in args.graph_node_labels]
+    graph_node_labels, tokens_label = normalize_node_labels(args.graph_node_labels)
+    if tokens_label:
+        args.token_source_columns = True
     train_data, test_data = load_data(args.dataset, test_limit=args.test_limit)
     print(f"Train: {len(train_data)} | Test: {len(test_data)}")
     save_dir = os.path.join(DIR_ROOT, args.save_dir)

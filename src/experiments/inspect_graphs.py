@@ -9,8 +9,10 @@ without one -- and for a few prompts per bucket builds the teacher and student
 graphs once and derives every candidate supergraph construction from the same
 two attributions:
 
-  * ``normalised`` (the original): per-target |inbound| shares over the whole
-    pre-selected pool, then the K x K block; the trainer's row-JSD target.
+  * ``normalised`` (the trainer's default aggregation, here always with the
+    token-embedding source columns, i.e. what ``--graph-node-labels ... tokens``
+    trains on): per-target |inbound| shares over the whole pre-selected pool,
+    then the K x (K+T) block.
   * ``raw-signed``: signed edges summed over source members, mean over target
     members, token-embedding source columns appended, whole matrix divided by
     its |mass|.
@@ -87,6 +89,7 @@ from utils import DIR_ROOT, load_data, load_model, tokenize_prompt_answer  # noq
 from training.utils import load_student, student_autocast  # noqa: E402
 from graph_loss.hf_adapter import HFLlamaGraphAdapter  # noqa: E402
 from graph_loss.graph import aggregate_supernode_adjacency  # noqa: E402
+from graph_loss.utils import normalize_node_labels  # noqa: E402
 from graph_loss.training import GraphAuxConfig  # noqa: E402
 from graph_loss.create_graph import create_graph  # noqa: E402
 
@@ -97,7 +100,7 @@ RIGHT_BUCKETS = {"right_confident", "right_unsure"}
 
 # construction -> (signed?, has token columns?)
 CONSTRUCTIONS: dict[str, tuple[bool, bool]] = {
-    "normalised": (False, False),
+    "normalised": (False, True),
     "raw-signed": (True, True),
     "gold-signed": (True, True),
     "gold-path": (True, True),
@@ -112,20 +115,20 @@ EPS = 1e-8
 # Scoring
 # ---------------------------------------------------------------------------
 
-def parse_prompt(prompt: str) -> tuple[int, int] | None:
-    m = re.fullmatch(r"\s*(\d+)\s*\+\s*(\d+)\s*=\s*", prompt)
-    return (int(m.group(1)), int(m.group(2))) if m else None
+def parse_prompt(prompt: str) -> list[int] | None:
+    """Operands of an N-ary addition prompt ('12+34=' or '12+34+56='), else None."""
+    m = re.fullmatch(r"\s*(\d+(?:\s*\+\s*\d+)+)\s*=\s*", prompt)
+    return [int(x) for x in re.findall(r"\d+", m.group(1))] if m else None
 
 
 def attributes(prompt: str) -> dict[str, bool]:
-    ab = parse_prompt(prompt)
-    if ab is None:
+    args = parse_prompt(prompt)
+    if args is None:
         return {}
-    a, b = ab
     return {
-        "carry_units": (a % 10 + b % 10) >= 10,
-        "sum_ge_100": a + b >= 100,
-        "single_digit": a < 10 or b < 10,
+        "carry_units": sum(a % 10 for a in args) >= 10,
+        "sum_ge_100": sum(args) >= 100,
+        "single_digit": any(a < 10 for a in args),
     }
 
 
@@ -277,8 +280,8 @@ def build_constructions(graph, supernodes: list[list[int]], ids: list[int], labe
     """Every construction, aligned to ``labels`` (rows and block columns in ``ids`` order)."""
     n_super = len(supernodes)
     out: dict[str, torch.Tensor] = {}
-    out["normalised"] = submatrix(aggregate_supernode_adjacency(graph, supernodes, aggregation="normalised"),
-                                  ids, n_super)
+    out["normalised"] = submatrix(aggregate_supernode_adjacency(graph, supernodes, aggregation="normalised",
+                                                                token_source_columns=True), ids, n_super)
     out["raw-signed"] = submatrix(aggregate_supernode_adjacency(graph, supernodes, aggregation="raw-signed",
                                                                 token_source_columns=True), ids, n_super)
     for mode in ("gold-signed", "gold-path"):
@@ -584,7 +587,10 @@ def main() -> None:
                     help="Path to a standard-KD-trained student (final_checkpoint). Graphed as a third model on "
                          "the same prompts, with its distances to the teacher and to the untrained student.")
     ap.add_argument("--teacher", default="meta-llama/Meta-Llama-3-8B-Instruct")
-    ap.add_argument("--dataset", default="22_add")
+    ap.add_argument("--dataset", default="22_add",
+                    help="Local dataset under datasets/ (e.g. 22_add, 222_add). Prompts are N-ary additions; "
+                         "the ANOVA grid is built from its train split, so the labels must exist for its "
+                         "operand count ('sum range', 'sum units', 'tokens' and 'argN ...' do).")
     ap.add_argument("--split", choices=["test", "train"], default="test")
     ap.add_argument("--n-per-bucket", type=int, default=3)
     ap.add_argument("--confident", type=float, default=0.8)
@@ -610,12 +616,14 @@ def main() -> None:
     ap.add_argument("--out", default=os.path.join(DIR_ROOT, "results", "inspect_graphs"))
     args = ap.parse_args()
 
-    # Same normalisation as the trainer ('arg 1 units' -> 'arg1 units'); 'none' or an
-    # empty list selects the arg-token + DLA construction (node_labels=None).
-    raw_labels = [re.sub(r"\barg\s+(\d+)", lambda m: f"arg{m.group(1)}", l) for l in args.graph_node_labels]
+    # Same normalisation as the trainer ('arg 1 units' -> 'arg1 units'; 'tokens' is
+    # accepted and dropped, since every construction here already carries the token
+    # columns); 'none' or an empty list selects the arg-token + DLA construction.
+    raw_labels, _ = normalize_node_labels(args.graph_node_labels)
     node_labels = None if not raw_labels or raw_labels == ["none"] else raw_labels
     args.graph_node_labels = node_labels
-    print("supernode construction:", "arg-token + DLA" if node_labels is None else node_labels)
+    print("supernode construction:", "arg-token + DLA" if node_labels is None else node_labels,
+          f"| dataset {args.dataset} ({args.split} split scored, {args.dataset} train split for the ANOVA grid)")
 
     train_data, test_data = load_data(args.dataset)
     data = test_data if args.split == "test" else train_data

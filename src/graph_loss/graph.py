@@ -766,11 +766,17 @@ def aggregate_supernode_adjacency(
     ``raw-signed``: entry (t, s) is the mean over t's members of the sum over s's
     members of the raw signed direct-effect edges. Raw edges depend only on the
     two nodes, not on the pool, so the entries are pool-independent; sign and the
-    relative strength of rows and edges are kept. With ``token_source_columns``
-    the token-embedding nodes are appended as extra source columns (they exist in
-    both models regardless of pre-selection). The whole matrix is then divided
+    relative strength of rows and edges are kept. The whole matrix is then divided
     once by its total |mass|, which removes the two models' overall activation /
     gradient scales and nothing else. frac_external is not used on this path.
+
+    With ``token_source_columns`` the token-embedding nodes are appended as extra
+    source columns on either path (they exist in both models regardless of
+    pre-selection): entry (t, token p) is the same aggregate over t's members of
+    that member's edge from token p -- the frac_external-weighted mean of the
+    normalised |edge| on ``normalised`` (normalize_matrix already counts the token
+    columns in each target's unit of inbound mass), the plain mean of the raw
+    signed edge on ``raw-signed``. Without it the matrix is K x K as before.
 
     Built out-of-place (torch.stack) so gradient flows through the student's
     adjacency into the model.
@@ -781,6 +787,8 @@ def aggregate_supernode_adjacency(
     num_supernodes = len(supernodes)
     if num_supernodes == 0:
         return torch.zeros((0, 0), device=adjacency.device, dtype=adjacency.dtype)
+    n_neurons = graph.n_neurons
+    n_tokens = graph.n_tokens if token_source_columns else 0
 
     if aggregation == "normalised":
         adj_matrix_norm = normalize_matrix(adjacency)
@@ -795,17 +803,18 @@ def aggregate_supernode_adjacency(
                 frac_external = torch.ones_like(total_input)
             else:
                 frac_external = (total_input - internal_input) / total_input.clamp(min=epsilon)
+            weight_sum = frac_external.sum(dim=0).clamp(min=epsilon)
             entries = []
             for s in range(num_supernodes):
                 sum_A = adj_matrix_norm[target_members][:, supernodes[s]].sum(dim=1)
-                entries.append((frac_external * sum_A).sum(dim=0) / frac_external.sum(dim=0).clamp(min=epsilon))
+                entries.append((frac_external * sum_A).sum(dim=0) / weight_sum)
+            for p in range(n_tokens):
+                entries.append((frac_external * adj_matrix_norm[target_members, n_neurons + p]).sum(dim=0) / weight_sum)
             rows.append(torch.stack(entries))
         return torch.stack(rows)
 
     math_dtype = torch.float32 if adjacency.dtype in (torch.float16, torch.bfloat16) else adjacency.dtype
     A = adjacency.to(dtype=math_dtype)
-    n_neurons = graph.n_neurons
-    n_tokens = graph.n_tokens if token_source_columns else 0
     rows = []
     for t in range(num_supernodes):
         A_t = A[supernodes[t]]  # [n_members_t, n_sources]

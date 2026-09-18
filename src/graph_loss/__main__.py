@@ -8,7 +8,7 @@ from graph_loss.create_graph import (
 )
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
 from graph_loss.supergraph_viz import render_supergraph, show_figure
-from graph_loss.utils import add_graph_build_args
+from graph_loss.utils import add_graph_build_args, normalize_node_labels
 from utils import DIR_ROOT, load_model
 
 
@@ -92,6 +92,7 @@ def main():
         ),
     )
     args = parser.parse_args()
+    args.graph_node_labels, token_source_columns = normalize_node_labels(args.graph_node_labels)
     if args.graph_node_labels and args.dataset is None:
         parser.error("--dataset is required when --graph-node-labels is specified")
     if args.supernode_heatmap_output_dir:
@@ -123,6 +124,7 @@ def main():
         anova_range_radius=args.anova_range_radius,
         anova_neuron_chunk=args.anova_neuron_chunk,
         node_labels=args.graph_node_labels,
+        token_source_columns=token_source_columns,
         freeze_attention=args.freeze_attention,
         freeze_rms_norm=args.freeze_rms_norm,
         logger=logger,

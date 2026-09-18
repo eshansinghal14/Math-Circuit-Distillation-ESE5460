@@ -10,6 +10,31 @@ import torch
 
 DTYPE_CHOICES = ["float32", "bfloat16", "float16"]
 
+# Pseudo-label accepted by --graph-node-labels on every entry point: it is not an
+# ANOVA category but a request to append the token-embedding nodes as source
+# columns of the supergraph (token_source_columns=True). Token nodes exist in
+# both models for every prompt, so the label is dataset-independent.
+TOKENS_LABEL = "tokens"
+
+
+def normalize_node_labels(labels: list[str] | None) -> tuple[list[str], bool]:
+    """Canonicalise CLI supernode labels and split out the ``tokens`` pseudo-label.
+
+    'arg N ...' -> 'argN ...' (CLI convenience, the same rule everywhere). Returns
+    (ANOVA labels with 'tokens' removed, whether 'tokens' was requested). An empty
+    label list after removal means no ANOVA supernodes (the arg-token + DLA
+    construction), exactly as before.
+    """
+    out: list[str] = []
+    tokens = False
+    for label in labels or []:
+        label = re.sub(r"\barg\s+(\d+)", lambda m: f"arg{m.group(1)}", label)
+        if label.strip().lower() == TOKENS_LABEL:
+            tokens = True
+        else:
+            out.append(label)
+    return out, tokens
+
 
 @dataclass
 class ActivationWriteResult:
@@ -129,7 +154,8 @@ def add_graph_build_args(parser: argparse.ArgumentParser) -> None:
         help=(
             "Whitelist of ANOVA supernode label names to include when building the "
             "supergraph. E.g. --graph-node-labels 'arg1 range' 'sum units'. "
-            "Pass 'all' to include every ANOVA label category. "
+            "Pass 'all' to include every ANOVA label category. 'tokens' is not an "
+            "ANOVA category: it appends the token-embedding nodes as source columns. "
             "If omitted, no ANOVA supernodes are created."
         ),
     )
