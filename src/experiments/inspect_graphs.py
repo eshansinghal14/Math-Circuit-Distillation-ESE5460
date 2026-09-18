@@ -204,6 +204,99 @@ def render(out_path: str, prompt: str, rec: dict[str, Any], teacher_p: float, la
     plt.close(fig)
 
 
+def _node_positions(labels: list[str], token_strs: list[str]) -> tuple[dict, dict]:
+    """Layered layout: token nodes at the bottom, arg-type supernodes in the middle,
+    sum / dla supernodes at the top. Returns (supernode positions, token positions)."""
+    low = [i for i, l in enumerate(labels) if l.lower().startswith("arg")]
+    high = [i for i in range(len(labels)) if i not in low]
+    pos: dict[int, tuple[float, float]] = {}
+    layers = ((0.5, low), (0.9, high)) if token_strs else ((0.2, low), (0.8, high))
+    for y, members in layers:
+        for k, i in enumerate(members):
+            pos[i] = ((k + 1) / (len(members) + 1), y)
+    tok_pos = {p: ((p + 1) / (len(token_strs) + 1), 0.1) for p in range(len(token_strs))}
+    return pos, tok_pos
+
+
+def draw_graph(ax, labels: list[str], token_strs: list[str], W: torch.Tensor, *, title: str,
+               scale: float, signed: bool, threshold: float = 0.06, annotate_top: int = 6) -> None:
+    """Node-and-edge view of one supergraph. Rows of ``W`` are targets, the first
+    ``len(labels)`` columns are supernode sources and any further columns are
+    token-embedding sources. Edge width is |w| / ``scale`` (pass the same scale for
+    teacher and student so widths are comparable); blue is positive, red negative
+    (grey when ``signed`` is False); edges under ``threshold`` x scale are omitted
+    and the ``annotate_top`` largest are labelled with their value. Self-loops are
+    not drawn (they are on the heatmap's diagonal)."""
+    from matplotlib.patches import FancyArrowPatch
+
+    K = len(labels)
+    has_tokens = W.shape[1] > K
+    pos, tok_pos = _node_positions(labels, token_strs if has_tokens else [])
+    edges = []
+    for t in range(K):
+        for s in range(W.shape[1]):
+            if s == t:
+                continue
+            w = float(W[t, s])
+            if abs(w) < threshold * scale:
+                continue
+            src = pos[s] if s < K else tok_pos[s - K]
+            edges.append((abs(w), w, src, pos[t]))
+    edges.sort(key=lambda e: e[0])
+    cut = edges[-annotate_top][0] if len(edges) >= annotate_top else (edges[0][0] if edges else 0.0)
+    for mag, w, src, dst in edges:
+        rel = min(1.0, mag / max(scale, 1e-12))
+        colour = ("#2a78d6" if w >= 0 else "#e34948") if signed else "#52514e"
+        ax.add_patch(FancyArrowPatch(src, dst, arrowstyle="-|>", mutation_scale=10,
+                                     lw=0.4 + 5.0 * rel, alpha=min(1.0, 0.3 + 0.7 * rel), color=colour,
+                                     connectionstyle="arc3,rad=0.12", shrinkA=13, shrinkB=13, zorder=1))
+        if mag >= cut:
+            # 35% of the way from source to target, off the midpoint where edges cross
+            mx, my = 0.65 * src[0] + 0.35 * dst[0], 0.65 * src[1] + 0.35 * dst[1]
+            ax.text(mx, my + 0.02, f"{w:+.3f}" if signed else f"{w:.3f}", fontsize=5.5, ha="center",
+                    color=colour, zorder=4, bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="none", alpha=0.8))
+    for i, (x, y) in pos.items():
+        ax.scatter([x], [y], s=800, color="#e9e8e5", edgecolors="#52514e", zorder=2)
+        ax.text(x, y, labels[i], ha="center", va="center", fontsize=6.5, zorder=3)
+    for p, (x, y) in tok_pos.items():
+        ax.scatter([x], [y], s=420, color="#fff4e0", edgecolors="#eda100", zorder=2)
+        ax.text(x, y, token_strs[p], ha="center", va="center", fontsize=6.5, zorder=3)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.set_axis_off()
+    ax.set_title(title, fontsize=9)
+
+
+def render_graphs(out_path: str, prompt: str, rec: dict[str, Any], teacher_p: float, labels: list[str],
+                  token_strs: list[str], mats: dict[str, dict[str, torch.Tensor]],
+                  loss_by: dict[str, dict[str, float]]) -> None:
+    """Node-and-edge diagrams: rows = constructions, columns = teacher / student.
+    Within a row both panels share the edge-width scale (the larger of the two
+    matrices' maxima), so a thinner edge in one panel means a weaker edge."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(2, 2, figsize=(11, 10))
+    rows = [("normalised", False, "jsd", "row JSD"), ("raw-signed", True, "rel_mse", "rel. sq. error")]
+    for r, (cons, signed, key, name) in enumerate(rows):
+        T, S = mats[cons]["teacher"], mats[cons]["student"]
+        scale = float(max(T.abs().max(), S.abs().max(), 1e-8))
+        draw_graph(axes[r][0], labels, token_strs, T, title=f"teacher  [{cons}]", scale=scale, signed=signed)
+        draw_graph(axes[r][1], labels, token_strs, S, title=f"student  [{cons}]  ({name} = {loss_by[cons][key]:.4f})",
+                   scale=scale, signed=signed)
+    fig.suptitle(
+        f"{prompt!r}  gold {rec['gold']}  |  student argmax {rec['argmax_str']!r} p(gold)={rec['p_gold']:.2f}"
+        f"  |  teacher p(gold)={teacher_p:.2f}\nedge width = |weight| on a shared scale per row; "
+        "blue positive, red negative; token nodes in orange",
+        fontsize=10,
+    )
+    fig.tight_layout()
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    fig.savefig(out_path, dpi=140)
+    plt.close(fig)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -219,7 +312,10 @@ def main() -> None:
     ap.add_argument("--n-per-bucket", type=int, default=3)
     ap.add_argument("--confident", type=float, default=0.8)
     ap.add_argument("--unsure", type=float, default=0.5)
-    ap.add_argument("--graph-node-labels", nargs="+", default=ANOVA_LABELS)
+    ap.add_argument("--graph-node-labels", nargs="*", default=ANOVA_LABELS,
+                    help="ANOVA supernode labels (e.g. 'sum units' 'arg1 range'), 'all' for every "
+                         "category, or 'none' / nothing for the arg-token + DLA construction the "
+                         "trainer uses when no labels are given. Default: the six ANOVA labels.")
     ap.add_argument("--nodes-per-label", type=int, default=10)
     ap.add_argument("--teacher-prop-neurons", type=float, default=0.003)
     ap.add_argument("--student-prop-neurons", type=float, default=0.01)
@@ -229,6 +325,13 @@ def main() -> None:
     ap.add_argument("--score-batch-size", type=int, default=64)
     ap.add_argument("--out", default=os.path.join(DIR_ROOT, "results", "inspect_graphs"))
     args = ap.parse_args()
+
+    # Same normalisation as the trainer ('arg 1 units' -> 'arg1 units'); 'none' or an
+    # empty list selects the arg-token + DLA construction (node_labels=None).
+    raw_labels = [re.sub(r"\barg\s+(\d+)", lambda m: f"arg{m.group(1)}", l) for l in args.graph_node_labels]
+    node_labels = None if not raw_labels or raw_labels == ["none"] else raw_labels
+    args.graph_node_labels = node_labels
+    print("supernode construction:", "arg-token + DLA" if node_labels is None else node_labels)
 
     train_data, test_data = load_data(args.dataset)
     data = test_data if args.split == "test" else train_data
@@ -265,10 +368,12 @@ def main() -> None:
 
     student_adapter = HFLlamaGraphAdapter(student, tokenizer, DEVICE)
     teacher_adapter = HFLlamaGraphAdapter(teacher, tokenizer, DEVICE)
-    student_cache = build_mlp_input_cache(student_adapter, args.dataset, args.student, data_dict=train_data,
-                                          batch_size=args.mlp_cache_batch_size)
-    teacher_cache = build_mlp_input_cache(teacher_adapter, args.dataset, args.teacher, data_dict=train_data,
-                                          batch_size=args.mlp_cache_batch_size)
+    student_cache = teacher_cache = None
+    if node_labels is not None:  # the ANOVA path needs the probe-grid MLP inputs
+        student_cache = build_mlp_input_cache(student_adapter, args.dataset, args.student, data_dict=train_data,
+                                              batch_size=args.mlp_cache_batch_size)
+        teacher_cache = build_mlp_input_cache(teacher_adapter, args.dataset, args.teacher, data_dict=train_data,
+                                              batch_size=args.mlp_cache_batch_size)
     config = GraphAuxConfig(
         graph_dtype=torch.bfloat16,
         teacher_prop_neurons_per_layer=args.teacher_prop_neurons,
@@ -277,7 +382,7 @@ def main() -> None:
         teacher_graph_batch_size=args.teacher_graph_batch_size,
         student_graph_batch_size=args.student_graph_batch_size,
         student_nodes_per_label=args.nodes_per_label, teacher_nodes_per_label=args.nodes_per_label,
-        graph_node_labels=list(args.graph_node_labels),
+        graph_node_labels=node_labels,
         mlp_input_cache=student_cache, teacher_mlp_input_cache=teacher_cache,
         supergraph_aggregation="raw-signed", token_source_columns=True,
         dataset_name=args.dataset,
@@ -334,8 +439,10 @@ def main() -> None:
                        matrices={cons: {k: v.tolist() for k, v in m.items()} for cons, m in mats.items()})
             records.append(rec)
             safe = re.sub(r"[^0-9a-zA-Z]+", "_", prompt).strip("_")
-            render(os.path.join(args.out, b, f"{safe}.png"), prompt, rec, t_scores[i]["p_gold"], labels,
+            render(os.path.join(args.out, b, f"{safe}_adj.png"), prompt, rec, t_scores[i]["p_gold"], labels,
                    token_strs, mats, loss_by)
+            render_graphs(os.path.join(args.out, b, f"{safe}_graph.png"), prompt, rec, t_scores[i]["p_gold"],
+                          labels, token_strs, mats, loss_by)
             print(f"   normalised JSD {loss_by['normalised']['jsd']:.4f} | raw-signed rel-mse {loss_by['raw-signed']['rel_mse']:.4f}")
             del t_res, s_res
             torch.cuda.empty_cache()
