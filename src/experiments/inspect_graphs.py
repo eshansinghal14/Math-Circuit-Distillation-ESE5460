@@ -6,17 +6,62 @@ position, plus the teacher's own probability), tags each prompt with structural
 attributes (units carry, sum >= 100, single-digit operand), sorts prompts into
 buckets -- right and confident, right but unsure, wrong with a carry, wrong
 without one -- and for a few prompts per bucket builds the teacher and student
-supergraphs once and renders both constructions from the same graphs:
+graphs once and derives every candidate supergraph construction from the same
+two attributions:
 
-  * ``normalised`` (the original): per-target |inbound| shares, row-normalised,
-    compared with the row-wise JSD the training loss uses;
-  * ``raw-signed`` with token-embedding source columns: signed edges, whole
-    matrix normalised once, compared with the relative squared error.
+  * ``normalised`` (the original): per-target |inbound| shares over the whole
+    pre-selected pool, then the K x K block; the trainer's row-JSD target.
+  * ``raw-signed``: signed edges summed over source members, mean over target
+    members, token-embedding source columns appended, whole matrix divided by
+    its |mass|.
+  * ``gold-signed``: ``raw-signed`` after orienting every target neuron so that
+    a positive edge means "the source pushes the target in the direction that
+    raises the gold-answer logit": edge(t<-s) * sign(e(gold<-t)) * sign(a_t).
+    A neuron's sign convention is arbitrary; this makes it canonical so member
+    sums add coherently instead of cancelling.
+  * ``gold-path``: the two-hop path attribution to the gold logit,
+    edge(t<-s) * e(gold<-t) / a_t, aggregated like ``raw-signed``.
+  * ``composition``: per target block, the distribution of inbound |mass| over
+    three source groups -- arg-type blocks, sum/DLA-type blocks, token
+    embeddings. How deep the block's inputs are, with no sign and no per-edge
+    detail.
 
-One figure per prompt (two rows, one per construction; teacher / student /
-difference) and a ``summary.json`` with every prompt's scores, tags, bucket and
-both losses, plus per-bucket means -- so the same run says whether either loss
-separates prompts the student gets right from ones it gets wrong. Pass
+Every construction is scored with the same four distances: relative squared
+error, cosine, row JSD with equal row weights (the trainer's) and row JSD with
+rows weighted by the teacher's row |mass| (so near-empty rows stop out-voting
+the rows that hold the circuit).
+
+Controls, computed from the collected matrices and written to ``summary.json``
+under ``controls`` (and printed):
+
+  * same-prompt distance (student_i vs teacher_i) against the *shuffled-prompt*
+    distance (student_i vs teacher_j, j != i). A construction that carries
+    prompt-level information has the first well below the second; one whose
+    target is a constant has them equal.
+  * teacher-vs-teacher and student-vs-student across prompts: how much of the
+    target is prompt-specific at all.
+  * right vs wrong bucket means: whether the distance sees competence.
+  * membership noise floor: the teacher against itself with the last
+    ``--noise-drop-members`` members of every supernode dropped (same graph,
+    same pool), per construction. A right/wrong gap must clear this.
+  * optional pool noise floor (``--noise-pool-prop``): a second teacher graph
+    at a different pre-selection fraction, aligned by label.
+
+The gold token is forced into the attribution targets when the teacher's 95%
+salient set does not already contain it (recorded per prompt as
+``gold_in_salient``); nothing else about the graphs changes.
+
+``--kd-checkpoint`` adds a third model -- a standard-KD-trained student -- graphed
+on the same prompts with the same targets. Per prompt the summary then carries
+its score (``kd_correct``, ``kd_p_gold``), its distance to the teacher
+(``losses_kd``) and to the untrained student (``losses_kd_vs_student``); the
+controls add ``kd_same_prompt``, ``kd_shuffled_prompt``, ``kd_minus_student``
+(how much closer to the teacher KD moved the graph; negative = closer) and
+``kd_vs_student``. That is the sensitivity test: a construction worth training
+on moves under KD by more than the membership noise floor and towards the
+teacher. Buckets stay defined by the untrained student's scores.
+
+One heatmap figure and one node-and-edge figure per prompt. Pass
 ``--student-checkpoint`` to run the identical analysis on a trained student.
 
 Usage (from the repository root, GPU):
@@ -27,9 +72,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
+from types import SimpleNamespace
 from typing import Any
 
 import torch
@@ -40,13 +87,25 @@ from utils import DIR_ROOT, load_data, load_model, tokenize_prompt_answer  # noq
 from training.utils import load_student, student_autocast  # noqa: E402
 from graph_loss.hf_adapter import HFLlamaGraphAdapter  # noqa: E402
 from graph_loss.graph import aggregate_supernode_adjacency  # noqa: E402
-from graph_loss.loss import _compute_edge_loss  # noqa: E402
 from graph_loss.training import GraphAuxConfig  # noqa: E402
 from graph_loss.create_graph import create_graph  # noqa: E402
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 ANOVA_LABELS = ["arg1 range", "arg1 units", "arg2 range", "arg2 units", "sum range", "sum units"]
 BUCKETS = ["right_confident", "right_unsure", "wrong_carry", "wrong_nocarry"]
+RIGHT_BUCKETS = {"right_confident", "right_unsure"}
+
+# construction -> (signed?, has token columns?)
+CONSTRUCTIONS: dict[str, tuple[bool, bool]] = {
+    "normalised": (False, False),
+    "raw-signed": (True, True),
+    "gold-signed": (True, True),
+    "gold-path": (True, True),
+    "composition": (False, False),
+}
+COMPOSITION_GROUPS = ["arg blocks", "sum blocks", "tokens"]
+DISTANCES = ["rel_mse", "cos", "jsd", "jsd_mass"]
+EPS = 1e-8
 
 
 # ---------------------------------------------------------------------------
@@ -113,8 +172,24 @@ def bucket_of(rec: dict[str, Any], tags: dict[str, bool], confident: float, unsu
     return "wrong_carry" if tags.get("carry_units") else "wrong_nocarry"
 
 
+def salient_targets_with_gold(logits: torch.Tensor, gold_token: int, top_k_logits: float,
+                              temperature: float) -> tuple[torch.Tensor, bool]:
+    """The teacher's salient logit set (AttributionTargets._from_salient: fewest top
+    logits reaching ``top_k_logits`` cumulative mass, capped at 10) with the gold
+    token appended when it is missing. Returns (token ids, gold_was_in_salient)."""
+    probs = torch.softmax(logits.float() / temperature, dim=-1)
+    sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+    k = int((torch.cumsum(sorted_probs, dim=-1) < top_k_logits).sum().item()) + 1
+    k = min(k, 10, probs.numel())
+    top = sorted_indices[:k].cpu()
+    in_salient = bool((top == gold_token).any())
+    if not in_salient:
+        top = torch.cat([top, torch.tensor([gold_token], dtype=top.dtype)])
+    return top, in_salient
+
+
 # ---------------------------------------------------------------------------
-# Graphs
+# Graphs -> constructions
 # ---------------------------------------------------------------------------
 
 def label_of(supergraph, i: int) -> str:
@@ -123,7 +198,7 @@ def label_of(supergraph, i: int) -> str:
 
 
 def align(teacher_sg, student_sg):
-    """Teacher-ordered shared labels -> (labels, teacher_ids, student_ids, mapping)."""
+    """Teacher-ordered shared labels -> (labels, teacher_ids, student_ids)."""
     s_index = {label_of(student_sg, j): j for j in range(len(student_sg.supernodes))}
     labels, t_ids, s_ids = [], [], []
     for i in range(len(teacher_sg.supernodes)):
@@ -144,61 +219,255 @@ def submatrix(W: torch.Tensor, ids: list[int], n_super: int) -> torch.Tensor:
     return torch.cat([block, extra], dim=1) if extra.shape[1] else block
 
 
-def both_constructions(graph, supergraph) -> dict[str, torch.Tensor]:
-    return {
-        "normalised": aggregate_supernode_adjacency(graph, supergraph.supernodes, aggregation="normalised"),
-        "raw-signed": aggregate_supernode_adjacency(graph, supergraph.supernodes, aggregation="raw-signed",
-                                                   token_source_columns=True),
-    }
+def gold_logit_index(graph, gold_token: int) -> int | None:
+    for i, t in enumerate(graph.logit_targets):
+        if int(t.vocab_idx) == int(gold_token):
+            return i
+    return None
 
 
-def losses(WT: torch.Tensor, WS: torch.Tensor, n: int) -> dict[str, float]:
-    ids = list(range(n))
-    mapping = {i: {i} for i in ids}
-    return {
-        "jsd": float(_compute_edge_loss(WT, WS, mapping, ids, ids, similarity="jsd")),
-        "rel_mse": float(_compute_edge_loss(WT, WS, mapping, ids, ids, similarity="rel-mse")),
-    }
+def gold_oriented_graph(graph, gold_token: int, mode: str):
+    """A view of ``graph`` whose neuron rows are re-signed / re-scaled by the
+    target neuron's effect on the gold logit, for aggregate_supernode_adjacency.
+
+    e(gold<-t) is the logit row of the adjacency (direct effect of t's write on the
+    gold logit), a_t the neuron's activation, so g_t = e(gold<-t) / a_t is the
+    gold-logit change per unit of t's activation.
+
+    ``gold-signed``: row t *= sign(g_t)   (magnitudes untouched, sign canonical)
+    ``gold-path``:   row t *= g_t         (two-hop path attribution s -> t -> gold)
+    Rows of neurons with no gold effect become zero on both.
+    """
+    gi = gold_logit_index(graph, gold_token)
+    if gi is None:
+        raise ValueError(f"gold token {gold_token} is not among the graph's logit targets")
+    A = graph.adjacency_matrix.detach().float()
+    n = graph.n_neurons
+    logit_row = n + graph.n_tokens + gi
+    e_gold = A[logit_row, :n]                                  # [n_neurons]
+    a = graph.neuron_activations.detach().float().reshape(-1)[:n]
+    g = e_gold / a.abs().clamp(min=1e-6) * torch.sign(a)
+    factor = torch.sign(g) if mode == "gold-signed" else g
+    oriented = A.clone()
+    oriented[:n] = oriented[:n] * factor.unsqueeze(1)
+    return SimpleNamespace(adjacency_matrix=oriented, n_neurons=n, n_tokens=graph.n_tokens)
+
+
+def is_arg_label(label: str) -> bool:
+    return label.lower().startswith("arg")
+
+
+def composition_matrix(W_raw: torch.Tensor, labels: list[str]) -> torch.Tensor:
+    """K x 3 row distributions of inbound |mass| over {arg blocks, sum blocks, tokens}
+    from an aligned raw-signed K x (K+T) matrix."""
+    K = len(labels)
+    a = W_raw.abs()
+    arg_cols = [j for j, l in enumerate(labels) if is_arg_label(l)]
+    sum_cols = [j for j in range(K) if j not in arg_cols]
+    groups = torch.stack([
+        a[:, arg_cols].sum(dim=1) if arg_cols else torch.zeros(K),
+        a[:, sum_cols].sum(dim=1) if sum_cols else torch.zeros(K),
+        a[:, K:].sum(dim=1) if a.shape[1] > K else torch.zeros(K),
+    ], dim=1)
+    return groups / groups.sum(dim=1, keepdim=True).clamp(min=EPS)
+
+
+def build_constructions(graph, supernodes: list[list[int]], ids: list[int], labels: list[str],
+                        gold_token: int) -> dict[str, torch.Tensor]:
+    """Every construction, aligned to ``labels`` (rows and block columns in ``ids`` order)."""
+    n_super = len(supernodes)
+    out: dict[str, torch.Tensor] = {}
+    out["normalised"] = submatrix(aggregate_supernode_adjacency(graph, supernodes, aggregation="normalised"),
+                                  ids, n_super)
+    out["raw-signed"] = submatrix(aggregate_supernode_adjacency(graph, supernodes, aggregation="raw-signed",
+                                                                token_source_columns=True), ids, n_super)
+    for mode in ("gold-signed", "gold-path"):
+        view = gold_oriented_graph(graph, gold_token, mode)
+        out[mode] = submatrix(aggregate_supernode_adjacency(view, supernodes, aggregation="raw-signed",
+                                                            token_source_columns=True), ids, n_super)
+    out["composition"] = composition_matrix(out["raw-signed"], labels)
+    return out
 
 
 # ---------------------------------------------------------------------------
-# Figure
+# Distances
 # ---------------------------------------------------------------------------
+
+def _row_dists(M: torch.Tensor) -> torch.Tensor:
+    a = M.abs()
+    return a / a.sum(dim=1, keepdim=True).clamp(min=EPS)
+
+
+def _row_jsd(T: torch.Tensor, S: torch.Tensor) -> torch.Tensor:
+    t, s = _row_dists(T), _row_dists(S)
+    m = 0.5 * (t + s)
+    kl = lambda p, q: (p * ((p + EPS).log() - (q + EPS).log())).sum(dim=1)  # noqa: E731
+    return 0.5 * (kl(t, m) + kl(s, m))
+
+
+def distances(T: torch.Tensor, S: torch.Tensor) -> dict[str, float]:
+    """``rel_mse``: ||S-T||^2 / ||T||^2 (signed; 0 identical, 1 empty student, 4 sign flip).
+    ``cos``: cosine of the flattened matrices. ``jsd``: mean row JSD on |.| row
+    distributions (the trainer's loss). ``jsd_mass``: the same rows weighted by the
+    teacher's share of total |mass|."""
+    T, S = T.float(), S.float()
+    diff2 = (S - T).pow(2).sum()
+    rows = _row_jsd(T, S)
+    w = T.abs().sum(dim=1)
+    w = w / w.sum().clamp(min=EPS)
+    return {
+        "rel_mse": float(diff2 / T.pow(2).sum().clamp(min=EPS)),
+        "cos": float((S * T).sum() / (S.norm() * T.norm()).clamp(min=EPS)),
+        "jsd": float(rows.mean()),
+        "jsd_mass": float((w * rows).sum()),
+    }
+
+
+def _mean(xs: list[float]) -> float | None:
+    xs = [x for x in xs if x is not None and not math.isnan(x)]
+    return sum(xs) / len(xs) if xs else None
+
+
+def controls(records: list[dict[str, Any]], mats: list[dict[str, dict[str, torch.Tensor]]]) -> dict[str, Any]:
+    """Cross-prompt controls per construction and distance. Cross-prompt pairs are
+    formed only between prompts whose matrices have the same shape and labels.
+    The ``kd_*`` fields exist only when a KD-trained student was graphed."""
+    n = len(records)
+    out: dict[str, Any] = {}
+
+    def compatible(i: int, j: int, cons: str) -> bool:
+        return (i != j and records[i]["labels"] == records[j]["labels"]
+                and mats[i][cons]["teacher"].shape == mats[j][cons]["teacher"].shape)
+
+    for cons in CONSTRUCTIONS:
+        same = [distances(mats[i][cons]["teacher"], mats[i][cons]["student"]) for i in range(n)]
+        shuffled, tt, ss, kd_shuffled = [], [], [], []
+        for i in range(n):
+            for j in range(n):
+                if not compatible(i, j, cons):
+                    continue
+                shuffled.append(distances(mats[j][cons]["teacher"], mats[i][cons]["student"]))
+                tt.append(distances(mats[i][cons]["teacher"], mats[j][cons]["teacher"]))
+                ss.append(distances(mats[i][cons]["student"], mats[j][cons]["student"]))
+                if "kd" in mats[i][cons]:
+                    kd_shuffled.append(distances(mats[j][cons]["teacher"], mats[i][cons]["kd"]))
+        noise_m = [distances(m[cons]["teacher"], m[cons]["teacher_fewer_members"]) for m in mats
+                   if "teacher_fewer_members" in m[cons]]
+        noise_p = [distances(m[cons]["teacher"], m[cons]["teacher_other_pool"]) for m in mats
+                   if "teacher_other_pool" in m[cons]]
+        kd_idx = [i for i in range(n) if "kd" in mats[i][cons]]
+        kd_same = [distances(mats[i][cons]["teacher"], mats[i][cons]["kd"]) for i in kd_idx]
+        kd_vs_s = [distances(mats[i][cons]["student"], mats[i][cons]["kd"]) for i in kd_idx]
+        same_on_kd = [same[i] for i in kd_idx]
+        right = [same[i] for i in range(n) if records[i]["bucket"] in RIGHT_BUCKETS]
+        wrong = [same[i] for i in range(n) if records[i]["bucket"] not in RIGHT_BUCKETS]
+        out[cons] = {}
+        for d in DISTANCES:
+            pick = lambda lst: _mean([x[d] for x in lst])  # noqa: E731
+            r, w = pick(right), pick(wrong)
+            entry = {
+                "same_prompt": pick(same), "shuffled_prompt": pick(shuffled),
+                "teacher_vs_teacher": pick(tt), "student_vs_student": pick(ss),
+                "right": r, "wrong": w,
+                "wrong_minus_right": (w - r) if (r is not None and w is not None) else None,
+                "noise_members": pick(noise_m), "noise_pool": pick(noise_p),
+                "n_pairs": len(shuffled),
+            }
+            if kd_idx:
+                k, s_on_k = pick(kd_same), pick(same_on_kd)
+                entry.update({
+                    "kd_same_prompt": k, "kd_shuffled_prompt": pick(kd_shuffled),
+                    "kd_minus_student": (k - s_on_k) if (k is not None and s_on_k is not None) else None,
+                    "kd_vs_student": pick(kd_vs_s), "n_kd": len(kd_idx),
+                })
+            out[cons][d] = entry
+    return out
+
+
+def print_controls(ctrl: dict[str, Any]) -> None:
+    cols = ["same_prompt", "shuffled_prompt", "teacher_vs_teacher", "student_vs_student", "right", "wrong",
+            "wrong_minus_right", "noise_members", "noise_pool"]
+    has_kd = any("kd_same_prompt" in v for per_d in ctrl.values() for v in per_d.values())
+    if has_kd:
+        cols += ["kd_same_prompt", "kd_shuffled_prompt", "kd_minus_student", "kd_vs_student"]
+    fmt = lambda v: "   --  " if v is None else f"{v:7.3f}"  # noqa: E731
+    print("\ncontrols (means over prompts / prompt pairs):")
+    print(f"  {'construction':13s} {'dist':9s} " + " ".join(f"{c[:10]:>10s}" for c in cols))
+    for cons, per_d in ctrl.items():
+        for d, v in per_d.items():
+            print(f"  {cons:13s} {d:9s} " + " ".join(f"{fmt(v.get(c)):>10s}" for c in cols))
+    print("  read: a construction carries prompt-level information only if same_prompt << shuffled_prompt;\n"
+          "        it sees competence only if wrong_minus_right clears noise_members (and noise_pool)"
+          + (";\n        KD moved the graph towards the teacher only if kd_minus_student is negative and\n"
+             "        |kd_minus_student| and kd_vs_student clear noise_members." if has_kd else "."))
+
+
+# ---------------------------------------------------------------------------
+# Figures
+# ---------------------------------------------------------------------------
+
+def _col_labels(cons: str, labels: list[str], token_strs: list[str], M: torch.Tensor) -> list[str]:
+    if cons == "composition":
+        return COMPOSITION_GROUPS
+    return labels + ([f"tok:{t}" for t in token_strs] if M.shape[1] > len(labels) else [])
+
+
+def _models_in(mats: dict[str, dict[str, torch.Tensor]]) -> list[str]:
+    """Model columns present: teacher, student and, when graphed, the KD student."""
+    return [m for m in ("teacher", "student", "kd") if m in next(iter(mats.values()))]
+
+
+def _title(prompt: str, rec: dict[str, Any], teacher_p: float) -> str:
+    t = (f"{prompt!r}  gold {rec['gold']}  |  student argmax {rec['argmax_str']!r} "
+         f"p(gold)={rec['p_gold']:.2f}  |  teacher p(gold)={teacher_p:.2f}")
+    if "kd_p_gold" in rec:
+        t += f"  |  KD student argmax {rec['kd_argmax_str']!r} p(gold)={rec['kd_p_gold']:.2f}"
+    return t
+
 
 def render(out_path: str, prompt: str, rec: dict[str, Any], teacher_p: float, labels: list[str],
-           token_strs: list[str], mats: dict[str, dict[str, torch.Tensor]], loss_by: dict[str, dict[str, float]]) -> None:
+           token_strs: list[str], mats: dict[str, dict[str, torch.Tensor]], dist_by: dict[str, dict[str, float]],
+           dist_kd: dict[str, dict[str, float]] | None = None) -> None:
+    """Heatmaps: one row per construction; columns = each model, then each
+    non-teacher model minus the teacher."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(2, 3, figsize=(12.5, 8.2))
-    rows = [("normalised", "magma", "jsd", "row JSD"), ("raw-signed", "RdBu_r", "rel_mse", "rel. sq. error")]
-    for r, (cons, cmap, key, name) in enumerate(rows):
-        T, S = mats[cons]["teacher"], mats[cons]["student"]
-        D = S - T
-        vmax = float(max(T.abs().max(), S.abs().max(), 1e-8))
-        panels = [("teacher", T), ("student", S), ("student - teacher", D)]
-        for c, (title, M) in enumerate(panels):
+    names = list(CONSTRUCTIONS)
+    models = _models_in(mats)
+    others = [m for m in models if m != "teacher"]
+    n_cols = len(models) + len(others)
+    fig, axes = plt.subplots(len(names), n_cols, figsize=(4.2 * n_cols, 3.9 * len(names)), squeeze=False)
+    for r, cons in enumerate(names):
+        signed, _ = CONSTRUCTIONS[cons]
+        T = mats[cons]["teacher"]
+        vmax = float(max([mats[cons][m].abs().max() for m in models] + [torch.tensor(1e-8)]))
+        panels = [(m if m != "kd" else "KD student", mats[cons][m], False) for m in models]
+        panels += [(f"{m if m != 'kd' else 'KD student'} - teacher", mats[cons][m] - T, True) for m in others]
+        dmax = float(max([(mats[cons][m] - T).abs().max() for m in others] + [torch.tensor(1e-8)]))
+        for c, (title, M, is_diff) in enumerate(panels):
             ax = axes[r][c]
-            if cons == "normalised" and c < 2:
-                im = ax.imshow(M.numpy(), cmap=cmap, vmin=0, vmax=vmax, aspect="auto")
+            if not signed and not is_diff:
+                im = ax.imshow(M.numpy(), cmap="magma", vmin=0, vmax=vmax, aspect="auto")
             else:
-                lim = vmax if c < 2 else float(D.abs().max().clamp(min=1e-8))
+                lim = dmax if is_diff else vmax
                 im = ax.imshow(M.numpy(), cmap="RdBu_r", vmin=-lim, vmax=lim, aspect="auto")
-            cols = labels + ([f"tok:{t}" for t in token_strs] if M.shape[1] > len(labels) else [])
+            cols = _col_labels(cons, labels, token_strs, M)
             ax.set_xticks(range(len(cols)))
             ax.set_xticklabels(cols, rotation=90, fontsize=7)
             ax.set_yticks(range(len(labels)))
             ax.set_yticklabels(labels if c == 0 else [], fontsize=7)
             ax.set_title(title, fontsize=9)
             fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
-        axes[r][0].set_ylabel(f"{cons}\n({name} = {loss_by[cons][key]:.4f})", fontsize=9)
-    fig.suptitle(
-        f"{prompt!r}  gold {rec['gold']}  |  student argmax {rec['argmax_str']!r} "
-        f"p(gold)={rec['p_gold']:.2f}  |  teacher p(gold)={teacher_p:.2f}",
-        fontsize=10,
-    )
-    fig.tight_layout()
+        key = "rel_mse" if signed else "jsd_mass"
+        d = dist_by[cons]
+        label = f"{cons}\nstudent: {key} = {d[key]:.3f}, cos = {d['cos']:.2f}"
+        if dist_kd is not None and cons in dist_kd:
+            label += f"\nKD: {key} = {dist_kd[cons][key]:.3f}, cos = {dist_kd[cons]['cos']:.2f}"
+        axes[r][0].set_ylabel(label, fontsize=8)
+    fig.suptitle(_title(prompt, rec, teacher_p), fontsize=10)
+    fig.tight_layout(rect=(0, 0, 1, 0.975))
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     fig.savefig(out_path, dpi=140)
     plt.close(fig)
@@ -207,7 +476,7 @@ def render(out_path: str, prompt: str, rec: dict[str, Any], teacher_p: float, la
 def _node_positions(labels: list[str], token_strs: list[str]) -> tuple[dict, dict]:
     """Layered layout: token nodes at the bottom, arg-type supernodes in the middle,
     sum / dla supernodes at the top. Returns (supernode positions, token positions)."""
-    low = [i for i, l in enumerate(labels) if l.lower().startswith("arg")]
+    low = [i for i, l in enumerate(labels) if is_arg_label(l)]
     high = [i for i in range(len(labels)) if i not in low]
     pos: dict[int, tuple[float, float]] = {}
     layers = ((0.5, low), (0.9, high)) if token_strs else ((0.2, low), (0.8, high))
@@ -269,29 +538,35 @@ def draw_graph(ax, labels: list[str], token_strs: list[str], W: torch.Tensor, *,
 
 def render_graphs(out_path: str, prompt: str, rec: dict[str, Any], teacher_p: float, labels: list[str],
                   token_strs: list[str], mats: dict[str, dict[str, torch.Tensor]],
-                  loss_by: dict[str, dict[str, float]]) -> None:
-    """Node-and-edge diagrams: rows = constructions, columns = teacher / student.
-    Within a row both panels share the edge-width scale (the larger of the two
-    matrices' maxima), so a thinner edge in one panel means a weaker edge."""
+                  dist_by: dict[str, dict[str, float]], dist_kd: dict[str, dict[str, float]] | None = None) -> None:
+    """Node-and-edge diagrams: rows = edge-level constructions, columns = models.
+    Within a row all panels share the edge-width scale (the largest matrix
+    maximum), so a thinner edge in one panel means a weaker edge."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(2, 2, figsize=(11, 10))
-    rows = [("normalised", False, "jsd", "row JSD"), ("raw-signed", True, "rel_mse", "rel. sq. error")]
-    for r, (cons, signed, key, name) in enumerate(rows):
-        T, S = mats[cons]["teacher"], mats[cons]["student"]
-        scale = float(max(T.abs().max(), S.abs().max(), 1e-8))
-        draw_graph(axes[r][0], labels, token_strs, T, title=f"teacher  [{cons}]", scale=scale, signed=signed)
-        draw_graph(axes[r][1], labels, token_strs, S, title=f"student  [{cons}]  ({name} = {loss_by[cons][key]:.4f})",
-                   scale=scale, signed=signed)
+    names = [c for c in CONSTRUCTIONS if c != "composition"]
+    models = _models_in(mats)
+    fig, axes = plt.subplots(len(names), len(models), figsize=(5.5 * len(models), 5 * len(names)), squeeze=False)
+    for r, cons in enumerate(names):
+        signed, _ = CONSTRUCTIONS[cons]
+        scale = float(max([mats[cons][m].abs().max() for m in models] + [torch.tensor(1e-8)]))
+        key = "rel_mse" if signed else "jsd_mass"
+        for c, m in enumerate(models):
+            if m == "teacher":
+                title = f"teacher  [{cons}]"
+            elif m == "student":
+                title = f"student  [{cons}]  ({key} = {dist_by[cons][key]:.3f})"
+            else:
+                title = f"KD student  [{cons}]" + (f"  ({key} = {dist_kd[cons][key]:.3f})" if dist_kd else "")
+            draw_graph(axes[r][c], labels, token_strs, mats[cons][m], title=title, scale=scale, signed=signed)
     fig.suptitle(
-        f"{prompt!r}  gold {rec['gold']}  |  student argmax {rec['argmax_str']!r} p(gold)={rec['p_gold']:.2f}"
-        f"  |  teacher p(gold)={teacher_p:.2f}\nedge width = |weight| on a shared scale per row; "
+        _title(prompt, rec, teacher_p) + "\nedge width = |weight| on a shared scale per row; "
         "blue positive, red negative; token nodes in orange",
         fontsize=10,
     )
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0, 1, 0.975))
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     fig.savefig(out_path, dpi=140)
     plt.close(fig)
@@ -305,6 +580,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--student", default="meta-llama/Llama-3.2-1B-Instruct")
     ap.add_argument("--student-checkpoint", default=None, help="Path to a trained student (final_checkpoint) instead of --student.")
+    ap.add_argument("--kd-checkpoint", default=None,
+                    help="Path to a standard-KD-trained student (final_checkpoint). Graphed as a third model on "
+                         "the same prompts, with its distances to the teacher and to the untrained student.")
     ap.add_argument("--teacher", default="meta-llama/Meta-Llama-3-8B-Instruct")
     ap.add_argument("--dataset", default="22_add")
     ap.add_argument("--split", choices=["test", "train"], default="test")
@@ -318,6 +596,12 @@ def main() -> None:
     ap.add_argument("--nodes-per-label", type=int, default=10)
     ap.add_argument("--teacher-prop-neurons", type=float, default=0.003)
     ap.add_argument("--student-prop-neurons", type=float, default=0.01)
+    ap.add_argument("--noise-drop-members", type=int, default=2,
+                    help="Membership noise floor: re-aggregate the teacher with this many lowest-ranked "
+                         "members dropped from every supernode (same graph). 0 disables.")
+    ap.add_argument("--noise-pool-prop", type=float, default=None,
+                    help="Pool noise floor: also build the teacher graph at this pre-selection fraction "
+                         "and report its distance to the default-pool teacher. Off by default.")
     ap.add_argument("--teacher-graph-batch-size", type=int, default=512)
     ap.add_argument("--student-graph-batch-size", type=int, default=128)
     ap.add_argument("--mlp-cache-batch-size", type=int, default=32)
@@ -339,7 +623,11 @@ def main() -> None:
     prompts = [p for p, _ in items]
     answers = [a for _, a in items]
 
-    student, tokenizer = load_student(args.student_checkpoint or args.student)
+    student_name = args.student_checkpoint or args.student
+    student, tokenizer = load_student(student_name)
+    kd = None
+    if args.kd_checkpoint:
+        kd, _ = load_student(args.kd_checkpoint)
     teacher, _ = load_model(args.teacher)
     teacher.eval()
     for p in teacher.parameters():
@@ -353,6 +641,10 @@ def main() -> None:
     n_right = sum(r["correct"] for r in s_scores)
     print(f"scored {len(prompts)} {args.split} prompts: student argmax right on {n_right} "
           f"({n_right / len(prompts):.3f}); teacher right on {sum(r['correct'] for r in t_scores)}")
+    k_scores = None
+    if kd is not None:
+        k_scores = score_prompts(kd, tokenizer, prompts, answers, args.score_batch_size, student_autocast)
+        print(f"  KD student right on {sum(r['correct'] for r in k_scores)}")
 
     picked: dict[str, list[int]] = {b: [] for b in BUCKETS}
     for i, rec in enumerate(s_scores):
@@ -368,12 +660,16 @@ def main() -> None:
 
     student_adapter = HFLlamaGraphAdapter(student, tokenizer, DEVICE)
     teacher_adapter = HFLlamaGraphAdapter(teacher, tokenizer, DEVICE)
-    student_cache = teacher_cache = None
-    if node_labels is not None:  # the ANOVA path needs the probe-grid MLP inputs
-        student_cache = build_mlp_input_cache(student_adapter, args.dataset, args.student, data_dict=train_data,
+    kd_adapter = HFLlamaGraphAdapter(kd, tokenizer, DEVICE) if kd is not None else None
+    student_cache = teacher_cache = kd_cache = None
+    if node_labels is not None:  # the ANOVA path needs the probe-grid MLP inputs, keyed per set of weights
+        student_cache = build_mlp_input_cache(student_adapter, args.dataset, student_name, data_dict=train_data,
                                               batch_size=args.mlp_cache_batch_size)
         teacher_cache = build_mlp_input_cache(teacher_adapter, args.dataset, args.teacher, data_dict=train_data,
                                               batch_size=args.mlp_cache_batch_size)
+        if kd_adapter is not None:
+            kd_cache = build_mlp_input_cache(kd_adapter, args.dataset, args.kd_checkpoint, data_dict=train_data,
+                                             batch_size=args.mlp_cache_batch_size)
     config = GraphAuxConfig(
         graph_dtype=torch.bfloat16,
         teacher_prop_neurons_per_layer=args.teacher_prop_neurons,
@@ -388,83 +684,165 @@ def main() -> None:
         dataset_name=args.dataset,
     )
 
+    def teacher_graph(prompt: str, targets: torch.Tensor, prop: float):
+        return create_graph(
+            teacher_adapter, prompt, attribution_targets=targets,
+            prop_neurons_per_layer=prop,
+            top_k_logits=config.top_k_logits, temperature=config.temperature,
+            batch_size=config.teacher_graph_batch_size, node_labels=config.graph_node_labels,
+            mlp_input_cache=config.teacher_mlp_input_cache, nodes_per_label=config.teacher_nodes_per_label,
+            no_grad_supergraph=True, build_create_graph=False, detach_result=True,
+            supergraph_aggregation="raw-signed", token_source_columns=True,
+        )
+
+    def student_graph(adapter, cache, prompt: str, logit_token_ids: torch.Tensor, teacher_dla_logits: torch.Tensor):
+        """The student-side graph the trainer builds: teacher's logit targets, teacher's
+        logits for the DLA reference, the model's own MLP-input cache for ANOVA labels."""
+        return create_graph(
+            adapter, prompt,
+            attribution_targets=logit_token_ids.cpu(),
+            prop_neurons_per_layer=config.student_prop_neurons_per_layer,
+            top_k_logits=config.top_k_logits, temperature=config.temperature,
+            batch_size=config.student_graph_batch_size, dtype=config.graph_dtype,
+            build_create_graph=False, detach_result=True, skip_logit_attribution=False,
+            mlp_input_cache=cache, node_labels=config.graph_node_labels or [],
+            nodes_per_label=config.student_nodes_per_label, dla_model_logits=teacher_dla_logits,
+            no_grad_supergraph=True, supergraph_aggregation="raw-signed", token_source_columns=True,
+        )
+
+    def ids_for(supergraph, labels: list[str]) -> list[int] | None:
+        """Supernode indices of ``supergraph`` in ``labels`` order, or None if one is missing."""
+        index = {label_of(supergraph, j): j for j in range(len(supergraph.supernodes))}
+        return [index[l] for l in labels] if all(l in index for l in labels) else None
+
     records: list[dict[str, Any]] = []
+    all_mats: list[dict[str, dict[str, torch.Tensor]]] = []
     for b in BUCKETS:
         for i in picked[b]:
             prompt, answer = prompts[i], answers[i]
+            gold_token = int(s_scores[i]["gold_token"])
             print(f"[{b}] building graphs for {prompt!r} ...")
-            # Mirrors _compute_teacher_target, but keeps the teacher's Graph so both
-            # constructions can be aggregated from the same attribution.
+            # Mirrors _compute_teacher_target, but keeps the teacher's Graph so every
+            # construction can be aggregated from the same attribution, and forces the
+            # gold token into the logit targets so the gold-oriented constructions exist.
             p_ids, a_ids = tokenize_prompt_answer(tokenizer, prompt, str(answer))
             full_ids = torch.cat([p_ids, a_ids]).to(DEVICE)
             with torch.no_grad():
                 teacher_dla_logits = teacher(full_ids.unsqueeze(0)).logits[0, p_ids.numel() - 1].detach()
+            targets, gold_in_salient = salient_targets_with_gold(teacher_dla_logits, gold_token,
+                                                                 config.top_k_logits, config.temperature)
             with torch.enable_grad():
-                t_res = create_graph(
-                    teacher_adapter, prompt,
-                    prop_neurons_per_layer=config.teacher_prop_neurons_per_layer,
-                    top_k_logits=config.top_k_logits, temperature=config.temperature,
-                    batch_size=config.teacher_graph_batch_size, node_labels=config.graph_node_labels,
-                    mlp_input_cache=config.teacher_mlp_input_cache, nodes_per_label=config.teacher_nodes_per_label,
-                    no_grad_supergraph=True, build_create_graph=False, detach_result=True,
-                    supergraph_aggregation="raw-signed", token_source_columns=True,
-                )
+                t_res = teacher_graph(prompt, targets, config.teacher_prop_neurons_per_layer)
                 logit_token_ids = t_res.graph.logit_token_ids.to(DEVICE)
-                s_res = create_graph(
-                    student_adapter, prompt,
-                    attribution_targets=logit_token_ids.cpu() if logit_token_ids is not None else None,
-                    prop_neurons_per_layer=config.student_prop_neurons_per_layer,
-                    top_k_logits=config.top_k_logits, temperature=config.temperature,
-                    batch_size=config.student_graph_batch_size, dtype=config.graph_dtype,
-                    build_create_graph=False, detach_result=True, skip_logit_attribution=False,
-                    mlp_input_cache=config.mlp_input_cache, node_labels=config.graph_node_labels or [],
-                    nodes_per_label=config.student_nodes_per_label, dla_model_logits=teacher_dla_logits,
-                    no_grad_supergraph=True, supergraph_aggregation="raw-signed", token_source_columns=True,
-                )
+                s_res = student_graph(student_adapter, student_cache, prompt, logit_token_ids, teacher_dla_logits)
+                k_res = (student_graph(kd_adapter, kd_cache, prompt, logit_token_ids, teacher_dla_logits)
+                         if kd_adapter is not None else None)
+                t_pool = teacher_graph(prompt, targets, args.noise_pool_prop) if args.noise_pool_prop else None
             labels, t_ids, s_ids = align(t_res.supergraph, s_res.supergraph)
             if not labels:
                 print("   no shared supernode labels; skipping")
                 continue
-            nT, nS = len(t_res.supergraph.supernodes), len(s_res.supergraph.supernodes)
             with torch.no_grad():
-                T_by = both_constructions(t_res.graph, t_res.supergraph)
-                S_by = both_constructions(s_res.graph, s_res.supergraph)
-            mats = {cons: {"teacher": submatrix(T_by[cons], t_ids, nT), "student": submatrix(S_by[cons], s_ids, nS)}
-                    for cons in T_by}
-            loss_by = {cons: losses(mats[cons]["teacher"], mats[cons]["student"], len(labels)) for cons in mats}
+                T_by = build_constructions(t_res.graph, t_res.supergraph.supernodes, t_ids, labels, gold_token)
+                S_by = build_constructions(s_res.graph, s_res.supergraph.supernodes, s_ids, labels, gold_token)
+                mats = {cons: {"teacher": T_by[cons], "student": S_by[cons]} for cons in CONSTRUCTIONS}
+                if k_res is not None:
+                    k_ids = ids_for(k_res.supergraph, labels)
+                    if k_ids is None:
+                        print("   KD student lacks one of the shared supernode labels; no KD graph for this prompt")
+                    else:
+                        K_by = build_constructions(k_res.graph, k_res.supergraph.supernodes, k_ids, labels, gold_token)
+                        for cons in CONSTRUCTIONS:
+                            mats[cons]["kd"] = K_by[cons]
+                drop = args.noise_drop_members
+                if drop > 0 and all(len(m) > drop for m in t_res.supergraph.supernodes):
+                    fewer = [m[:-drop] for m in t_res.supergraph.supernodes]
+                    F_by = build_constructions(t_res.graph, fewer, t_ids, labels, gold_token)
+                    for cons in CONSTRUCTIONS:
+                        mats[cons]["teacher_fewer_members"] = F_by[cons]
+                if t_pool is not None:
+                    p_labels, p_t_ids, p_s_ids = align(t_res.supergraph, t_pool.supergraph)
+                    if p_labels == labels:
+                        P_by = build_constructions(t_pool.graph, t_pool.supergraph.supernodes, p_s_ids, labels, gold_token)
+                        for cons in CONSTRUCTIONS:
+                            mats[cons]["teacher_other_pool"] = P_by[cons]
+                    else:
+                        print(f"   pool-noise teacher shares only {p_labels}; skipping pool noise for this prompt")
+            dist_by = {cons: distances(mats[cons]["teacher"], mats[cons]["student"]) for cons in CONSTRUCTIONS}
+            has_kd = all("kd" in mats[cons] for cons in CONSTRUCTIONS)
+            dist_kd = {cons: distances(mats[cons]["teacher"], mats[cons]["kd"]) for cons in CONSTRUCTIONS} if has_kd else None
             token_strs = [tokenizer.decode([int(t)]) for t in t_res.graph.input_tokens.tolist()]
             rec = dict(s_scores[i])
             rec.update(bucket=b, tags=attributes(prompt), teacher_p_gold=t_scores[i]["p_gold"],
-                       labels=labels, losses=loss_by,
+                       gold_in_salient=gold_in_salient, labels=labels, token_strs=token_strs,
+                       losses=dist_by,
                        matrices={cons: {k: v.tolist() for k, v in m.items()} for cons, m in mats.items()})
+            if k_scores is not None:
+                rec.update(kd_correct=k_scores[i]["correct"], kd_p_gold=k_scores[i]["p_gold"],
+                           kd_argmax_str=k_scores[i]["argmax_str"])
+            if has_kd:
+                rec.update(losses_kd=dist_kd,
+                           losses_kd_vs_student={cons: distances(mats[cons]["student"], mats[cons]["kd"])
+                                                 for cons in CONSTRUCTIONS})
             records.append(rec)
+            all_mats.append(mats)
             safe = re.sub(r"[^0-9a-zA-Z]+", "_", prompt).strip("_")
             render(os.path.join(args.out, b, f"{safe}_adj.png"), prompt, rec, t_scores[i]["p_gold"], labels,
-                   token_strs, mats, loss_by)
+                   token_strs, mats, dist_by, dist_kd)
             render_graphs(os.path.join(args.out, b, f"{safe}_graph.png"), prompt, rec, t_scores[i]["p_gold"],
-                          labels, token_strs, mats, loss_by)
-            print(f"   normalised JSD {loss_by['normalised']['jsd']:.4f} | raw-signed rel-mse {loss_by['raw-signed']['rel_mse']:.4f}")
-            del t_res, s_res
+                          labels, token_strs, mats, dist_by, dist_kd)
+            for name, dd in (("student", dist_by), ("KD", dist_kd)):
+                if dd is None:
+                    continue
+                print(f"   {name:8s}" + " | ".join(
+                    f"{cons} {('rel_mse' if CONSTRUCTIONS[cons][0] else 'jsd_mass')}="
+                    f"{dd[cons]['rel_mse' if CONSTRUCTIONS[cons][0] else 'jsd_mass']:.3f} cos={dd[cons]['cos']:.2f}"
+                    for cons in CONSTRUCTIONS))
+            del t_res, s_res, k_res, t_pool
             torch.cuda.empty_cache()
 
     # ---- summary ------------------------------------------------------------
     summary: dict[str, Any] = {"args": vars(args), "n_scanned": len(prompts), "student_right": n_right,
-                               "buckets": {}, "prompts": records}
+                               "constructions": list(CONSTRUCTIONS), "distances": DISTANCES,
+                               "buckets": {}, "controls": {}, "prompts": records}
+    def bucket_means(rs: list[dict[str, Any]], key: str) -> dict[str, dict[str, float]] | None:
+        rs = [r for r in rs if key in r]
+        if not rs:
+            return None
+        return {cons: {d: sum(r[key][cons][d] for r in rs) / len(rs) for d in DISTANCES} for cons in CONSTRUCTIONS}
+
     for b in BUCKETS:
         rs = [r for r in records if r["bucket"] == b]
         if rs:
-            summary["buckets"][b] = {
+            entry = {
                 "n": len(rs),
-                "jsd_normalised": sum(r["losses"]["normalised"]["jsd"] for r in rs) / len(rs),
-                "rel_mse_raw_signed": sum(r["losses"]["raw-signed"]["rel_mse"] for r in rs) / len(rs),
                 "student_p_gold": sum(r["p_gold"] for r in rs) / len(rs),
+                "losses": bucket_means(rs, "losses"),
             }
+            if k_scores is not None:
+                entry["kd_p_gold"] = sum(r["kd_p_gold"] for r in rs) / len(rs)
+                entry["kd_right"] = sum(bool(r["kd_correct"]) for r in rs)
+                entry["losses_kd"] = bucket_means(rs, "losses_kd")
+                entry["losses_kd_vs_student"] = bucket_means(rs, "losses_kd_vs_student")
+            summary["buckets"][b] = entry
+    if records:
+        summary["controls"] = controls(records, all_mats)
     os.makedirs(args.out, exist_ok=True)
     with open(os.path.join(args.out, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
+
     print("\nper-bucket means:")
     for b, v in summary["buckets"].items():
-        print(f"  {b:16s} n={v['n']}  JSD(normalised)={v['jsd_normalised']:.4f}  rel-mse(raw-signed)={v['rel_mse_raw_signed']:.4f}  p(gold)={v['student_p_gold']:.2f}")
+        line = f"  {b:16s} n={v['n']}  student p(gold)={v['student_p_gold']:.2f}"
+        if "kd_p_gold" in v:
+            line += f"  KD p(gold)={v['kd_p_gold']:.2f} right {v['kd_right']}/{v['n']}"
+        print(line)
+        for cons in CONSTRUCTIONS:
+            print(f"      {cons:13s} student  " + "  ".join(f"{d}={v['losses'][cons][d]:.3f}" for d in DISTANCES))
+            if v.get("losses_kd"):
+                print(f"      {'':13s} KD       " + "  ".join(f"{d}={v['losses_kd'][cons][d]:.3f}" for d in DISTANCES))
+    if summary["controls"]:
+        print_controls(summary["controls"])
     print("wrote", os.path.join(args.out, "summary.json"))
 
 
