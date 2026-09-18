@@ -5,7 +5,9 @@ Scores the student on a whole local arithmetic split under teacher forcing
 position, plus the teacher's own probability), tags each prompt with structural
 attributes (units carry, sum >= 100, single-digit operand), sorts prompts into
 buckets -- right and confident, right but unsure, wrong with a carry, wrong
-without one -- and for a few prompts per bucket builds the teacher and student
+without one; the teacher must be right in every bucket, "right" means the
+student and the KD student (when given) are both right, "wrong" means both are
+wrong -- and for a few prompts per bucket builds the teacher and student
 graphs once and derives every candidate supergraph construction from the same
 two attributions:
 
@@ -61,7 +63,8 @@ controls add ``kd_same_prompt``, ``kd_shuffled_prompt``, ``kd_minus_student``
 (how much closer to the teacher KD moved the graph; negative = closer) and
 ``kd_vs_student``. That is the sensitivity test: a construction worth training
 on moves under KD by more than the membership noise floor and towards the
-teacher. Buckets stay defined by the untrained student's scores.
+teacher. With a KD student the buckets require it to agree with the untrained
+student (both right or both wrong), so prompts KD fixed are left out.
 
 One heatmap figure and one node-and-edge figure per prompt, under
 ``<out>/<dataset>/<bucket>/``; only ``normalised`` and ``composition`` are drawn
@@ -172,12 +175,26 @@ def score_prompts(model, tokenizer, prompts: list[str], answers: list, batch_siz
     return out
 
 
-def bucket_of(rec: dict[str, Any], tags: dict[str, bool], confident: float, unsure: float) -> str | None:
+def bucket_of(rec: dict[str, Any], tags: dict[str, bool], confident: float, unsure: float,
+              teacher_correct: bool, kd_correct: bool | None) -> str | None:
+    """Bucket of one prompt, or None if it belongs to no bucket.
+
+    The teacher must be right for every bucket (its graph is the target). Right
+    buckets need the student and, when graphed, the KD student right too; wrong
+    buckets need both of them wrong, so a prompt that KD fixed is in neither.
+    Confidence splits the right buckets by the untrained student's p(gold).
+    """
+    if not teacher_correct:
+        return None
     if rec["correct"]:
+        if kd_correct is False:
+            return None
         if rec["p_gold"] >= confident:
             return "right_confident"
         if rec["p_gold"] < unsure:
             return "right_unsure"
+        return None
+    if kd_correct:
         return None
     return "wrong_carry" if tags.get("carry_units") else "wrong_nocarry"
 
@@ -664,13 +681,20 @@ def main() -> None:
         print(f"  KD student right on {sum(r['correct'] for r in k_scores)}")
 
     picked: dict[str, list[int]] = {b: [] for b in BUCKETS}
+    n_eligible = {b: 0 for b in BUCKETS}
     for i, rec in enumerate(s_scores):
         tags = attributes(rec["prompt"])
-        b = bucket_of(rec, tags, args.confident, args.unsure)
-        if b is not None and len(picked[b]) < args.n_per_bucket:
-            picked[b].append(i)
+        b = bucket_of(rec, tags, args.confident, args.unsure,
+                      teacher_correct=bool(t_scores[i]["correct"]),
+                      kd_correct=bool(k_scores[i]["correct"]) if k_scores is not None else None)
+        if b is not None:
+            n_eligible[b] += 1
+            if len(picked[b]) < args.n_per_bucket:
+                picked[b].append(i)
+    print("buckets (teacher right everywhere; right = student" + (" and KD student" if k_scores else "")
+          + " right; wrong = " + ("both" if k_scores else "student") + " wrong):")
     for b in BUCKETS:
-        print(f"  {b}: {[prompts[i] for i in picked[b]]}")
+        print(f"  {b}: {n_eligible[b]} eligible, using {[prompts[i] for i in picked[b]]}")
 
     # ---- graphs -------------------------------------------------------------
     from graph_loss.precompute_mlp_inputs import build_mlp_input_cache
