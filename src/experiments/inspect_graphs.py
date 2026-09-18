@@ -1,6 +1,6 @@
 """Look at teacher and student supergraphs where the student is right and where it is wrong.
 
-Scores the student on a slice of a local arithmetic split under teacher forcing
+Scores the student on a whole local arithmetic split under teacher forcing
 (argmax and probability of the correct first answer token at the last prompt
 position, plus the teacher's own probability), tags each prompt with structural
 attributes (units carry, sum >= 100, single-digit operand), sorts prompts into
@@ -20,7 +20,7 @@ separates prompts the student gets right from ones it gets wrong. Pass
 ``--student-checkpoint`` to run the identical analysis on a trained student.
 
 Usage (from the repository root, GPU):
-    PYTHONPATH=src python -m experiments.inspect_graphs --n-scan 400 --n-per-bucket 3
+    PYTHONPATH=src python -m experiments.inspect_graphs --n-per-bucket 3
 """
 
 from __future__ import annotations
@@ -308,7 +308,6 @@ def main() -> None:
     ap.add_argument("--teacher", default="meta-llama/Meta-Llama-3-8B-Instruct")
     ap.add_argument("--dataset", default="22_add")
     ap.add_argument("--split", choices=["test", "train"], default="test")
-    ap.add_argument("--n-scan", type=int, default=400, help="Prompts scored before bucketing.")
     ap.add_argument("--n-per-bucket", type=int, default=3)
     ap.add_argument("--confident", type=float, default=0.8)
     ap.add_argument("--unsure", type=float, default=0.5)
@@ -322,7 +321,8 @@ def main() -> None:
     ap.add_argument("--teacher-graph-batch-size", type=int, default=512)
     ap.add_argument("--student-graph-batch-size", type=int, default=128)
     ap.add_argument("--mlp-cache-batch-size", type=int, default=32)
-    ap.add_argument("--score-batch-size", type=int, default=64)
+    ap.add_argument("--score-batch-size", type=int, default=2048,
+                    help="Prompts per teacher-forced forward when scoring the whole split.")
     ap.add_argument("--out", default=os.path.join(DIR_ROOT, "results", "inspect_graphs"))
     args = ap.parse_args()
 
@@ -335,7 +335,7 @@ def main() -> None:
 
     train_data, test_data = load_data(args.dataset)
     data = test_data if args.split == "test" else train_data
-    items = list(data.items())[: args.n_scan]
+    items = list(data.items())  # the whole split is scored; buckets draw from all of it
     prompts = [p for p, _ in items]
     answers = [a for _, a in items]
 
