@@ -10,8 +10,10 @@ whole training set in one pass, with only the teacher in memory, so every
 subsequent run hits it for every prompt and pays the student's cost alone.
 
 Pass exactly the teacher-side arguments the training runs will use; the cache
-file is keyed on them (and on the graph_loss source), and both this script and
-graph_kd print the file they use, so a mismatch is visible. Shards let several
+file is keyed on them, and both this script and graph_kd print the file they
+use, so a mismatch is visible. Code changes do not invalidate the file: when the
+graph_loss source has changed since it was written, a few cached prompts are
+rebuilt and compared, and the file is kept if they still match. Shards let several
 sessions share the work: ``--shard 0 3``, ``--shard 1 3``, ``--shard 2 3`` each
 take every third prompt, and their flushes merge into the same file.
 
@@ -166,8 +168,9 @@ def main() -> None:
 
     def compute(prompt: str, answer: object) -> dict:
         supergraph, logit_ids, dla_logits = _compute_teacher_target(prompt, answer, adapter, config, device)
-        return _teacher_target_entry(supergraph, logit_ids, dla_logits)
+        return _teacher_target_entry(supergraph, logit_ids, dla_logits, answer=answer)
 
+    cache.validate(compute)
     built = precompute(items, cache, compute, flush_every=args.flush_every)
     print(f"Done: built {built} targets; {len(cache)} prompts in {cache.path}")
 

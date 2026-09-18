@@ -32,6 +32,8 @@ from graph_loss.hf_adapter import HFLlamaGraphAdapter
 from graph_loss.training import (
     GraphAuxConfig,
     TeacherTargetCache,
+    _compute_teacher_target,
+    _teacher_target_entry,
     backward_batch_graph_loss,
     teacher_target_cache_key,
 )
@@ -236,6 +238,7 @@ class GraphKDTrainer:
                     cache_dir = os.path.join(DIR_ROOT, cache_dir)
                 key = teacher_target_cache_key(self.graph_config, config.teacher)
                 self.teacher_target_cache = TeacherTargetCache(os.path.join(cache_dir, f"{key}.pt"))
+                self.teacher_target_cache.validate(self._rebuild_teacher_target)
                 if shared is not None:
                     shared["teacher_target_cache"] = self.teacher_target_cache
             self.graph_config.teacher_target_cache = self.teacher_target_cache
@@ -256,6 +259,13 @@ class GraphKDTrainer:
     def _autocast(self):
         """bf16 autocast for the student forward; it holds fp32 master weights."""
         return student_autocast()
+
+    def _rebuild_teacher_target(self, prompt: str, answer: Any) -> dict:
+        """One prompt's teacher target with the current code (TeacherTargetCache.validate)."""
+        supergraph, logit_ids, dla_logits = _compute_teacher_target(
+            prompt, answer, self.teacher_adapter, self.graph_config, _DEVICE,
+        )
+        return _teacher_target_entry(supergraph, logit_ids, dla_logits, answer=answer)
 
     def _check_sequence_consistency(self, batch, input_ids, attention_mask) -> None:
         """Once per run: the ids the graph term will build on must equal the KD batch row.

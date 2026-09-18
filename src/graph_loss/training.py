@@ -174,14 +174,21 @@ def scramble_teacher_rows(W_T: torch.Tensor, config: GraphAuxConfig) -> torch.Te
 # ids and the DLA reference logits) never changes. Every graph-KD run in a sweep
 # nevertheless rebuilt it per prompt: a full attribution pass plus, on the ANOVA
 # path, labelling ~45k pre-selected neurons against the activation cache. The
-# cache below stores each prompt's target once, in one file per configuration
-# under a key that also hashes the graph_loss source, so a code change can never
-# serve stale targets. Entries are a few kilobytes, so a whole dataset's worth
-# lives in memory and is written back atomically, merging with what another
-# process may have added meanwhile. The DLA logits are kept as their top-256
-# entries: the only consumer, _dla_kl_scores_for_output, restricts itself to the
-# top-100 tokens and renormalises, which the reconstruction reproduces to float
-# precision.
+# cache below stores each prompt's target once, in one file per configuration.
+# Entries are a few kilobytes, so a whole dataset's worth lives in memory and is
+# written back atomically, merging with what another process may have added
+# meanwhile. The DLA logits are kept as their top-256 entries: the only consumer,
+# _dla_kl_scores_for_output, restricts itself to the top-100 tokens and
+# renormalises, which the reconstruction reproduces to float precision.
+#
+# Staleness is handled by content, not by code version. The file records the
+# digest of the graph_loss source it was written under; when a run opens it
+# under different code, TeacherTargetCache.validate recomputes a few of its
+# prompts with the current code and compares them with the stored entries. A
+# refactor that changes no number keeps the file (and its hours of teacher
+# work); a change that alters targets sets the file aside as stale and starts
+# afresh. Hashing the code into the key instead threw the cache away on every
+# commit that touched graph_loss, which during development is every day.
 
 TEACHER_TARGET_CACHE_VERSION = 1
 _TEACHER_DLA_TOPK = 256  # >= the dla_top_k_vocab (100) select_anova_supernodes uses
@@ -208,7 +215,6 @@ def teacher_target_cache_key(config: GraphAuxConfig, teacher_name: str) -> str:
     cache_meta = (config.teacher_mlp_input_cache or {}).get("meta", {})
     fields = {
         "version": TEACHER_TARGET_CACHE_VERSION,
-        "code": graph_code_digest(),
         "teacher": teacher_name,
         "dataset": config.dataset_name,
         "labels": sorted(config.graph_node_labels or []),
@@ -229,20 +235,105 @@ def teacher_target_cache_key(config: GraphAuxConfig, teacher_name: str) -> str:
     return hashlib.sha1(json.dumps(fields, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
 
+def _load_cache_file(path: str) -> tuple[dict[str, dict], dict[str, Any]]:
+    """``(entries, meta)`` from a cache file; a file from before ``__meta__`` existed is all entries."""
+    data = torch.load(path, map_location="cpu", weights_only=False)
+    if isinstance(data, dict) and "entries" in data and "__meta__" in data:
+        return dict(data["entries"]), dict(data["__meta__"])
+    return dict(data), {}
+
+
+def _dla_top_ids(dla: dict | None, k: int = 100) -> list[int] | None:
+    if dla is None:
+        return None
+    k = min(k, int(dla["vals"].numel()))
+    order = torch.topk(dla["vals"].float(), k).indices
+    return sorted(int(i) for i in dla["ids"][order].tolist())
+
+
+def _entries_match(a: dict, b: dict, *, rtol: float = 1e-2, atol: float = 1e-4) -> str | None:
+    """None if two entries describe the same target, else a one-line reason.
+
+    Labels and logit-target ids must agree exactly; the adjacency to a
+    tolerance that absorbs GPU non-determinism in the attribution; the DLA
+    reference must pick the same top-100 tokens.
+    """
+    if a["labels"] != b["labels"]:
+        return f"supernode labels differ: {a['labels']} vs {b['labels']}"
+    if not torch.equal(a["logit_ids"], b["logit_ids"]):
+        return f"logit-target ids differ: {a['logit_ids'].tolist()} vs {b['logit_ids'].tolist()}"
+    if tuple(a["adj"].shape) != tuple(b["adj"].shape):
+        return f"adjacency shapes differ: {tuple(a['adj'].shape)} vs {tuple(b['adj'].shape)}"
+    if not torch.allclose(a["adj"].float(), b["adj"].float(), rtol=rtol, atol=atol):
+        return f"adjacency differs (max |diff| {(a['adj'].float() - b['adj'].float()).abs().max().item():.3g})"
+    if _dla_top_ids(a["dla"]) != _dla_top_ids(b["dla"]):
+        return "DLA reference logits pick different top tokens"
+    return None
+
+
 class TeacherTargetCache:
     """Per-prompt teacher targets, persisted to one file per teacher-side configuration."""
 
     def __init__(self, path: str | None) -> None:
         self.path = path
         self.entries: dict[str, dict] = {}
+        self.meta: dict[str, Any] = {}
         self.hits = 0
         self.misses = 0
         self._dirty = 0
         if path and os.path.isfile(path):
-            self.entries = dict(torch.load(path, map_location="cpu", weights_only=False))
+            self.entries, self.meta = _load_cache_file(path)
 
     def __len__(self) -> int:
         return len(self.entries)
+
+    def validate(
+        self,
+        compute: Callable[[str, Any], dict],
+        *,
+        n_probe: int = 2,
+        log: Callable[[str], None] = print,
+    ) -> bool:
+        """Confirm the stored targets are what the current code produces.
+
+        Skipped when the file was written under the current graph_loss source.
+        Otherwise ``n_probe`` cached prompts are rebuilt with ``compute(prompt,
+        answer)`` and compared entry by entry. On agreement the file is kept and
+        stamped with the current digest; on disagreement it is renamed
+        ``<path>.stale-<digest>`` and this cache starts empty. Returns whether
+        the existing entries were kept.
+        """
+        current = graph_code_digest()
+        stored = self.meta.get("code_digest")
+        if not self.entries:
+            self.meta["code_digest"] = current
+            return True
+        if stored == current:
+            return True
+        prompts = sorted(self.entries)[:n_probe]
+        log(f"Teacher target cache was written under different code ({stored or 'unknown'} -> {current}); "
+            f"rebuilding {len(prompts)} probe prompt(s) to check it still matches...")
+        problems = []
+        for prompt in prompts:
+            old = self.entries[prompt]
+            new = compute(prompt, old.get("answer", "0"))
+            reason = _entries_match(old, new)
+            if reason is not None:
+                problems.append(f"{prompt!r}: {reason}")
+        if not problems:
+            self.meta["code_digest"] = current
+            self._dirty += 1  # persist the new stamp on the next flush
+            log(f"  probes match; keeping {len(self.entries)} cached targets")
+            return True
+        stale = f"{self.path}.stale-{stored or 'unknown'}"
+        log("  WARNING: cached teacher targets no longer match the current code; setting the file aside "
+            f"as {stale} and starting an empty cache.\n    " + "\n    ".join(problems))
+        if self.path and os.path.isfile(self.path):
+            os.replace(self.path, stale)
+        self.entries = {}
+        self.meta = {"code_digest": current}
+        self._dirty = 0
+        return False
 
     def get(self, prompt: str) -> dict | None:
         entry = self.entries.get(prompt)
@@ -264,14 +355,18 @@ class TeacherTargetCache:
         merged: dict[str, dict] = {}
         if os.path.isfile(self.path):
             try:
-                merged = dict(torch.load(self.path, map_location="cpu", weights_only=False))
+                merged, _ = _load_cache_file(self.path)
             except Exception as e:  # a half-written file from a crash elsewhere
                 logger.warning("could not read %s (%s); overwriting it", self.path, e)
         merged.update(self.entries)
+        meta = dict(self.meta)
+        meta.setdefault("code_digest", graph_code_digest())
+        meta["version"] = TEACHER_TARGET_CACHE_VERSION
         tmp = f"{self.path}.tmp{os.getpid()}"
-        torch.save(merged, tmp)
+        torch.save({"__meta__": meta, "entries": merged}, tmp)
         os.replace(tmp, self.path)
         self.entries = merged
+        self.meta = meta
         self._dirty = 0
         return True
 
@@ -280,8 +375,10 @@ def _teacher_target_entry(
     supergraph: SuperGraph,
     logit_token_ids: torch.Tensor,
     dla_logits: torch.Tensor | None,
+    answer: Any = None,
 ) -> dict:
     entry: dict[str, Any] = {
+        "answer": None if answer is None else str(answer),
         "adj": supergraph.supernode_adjacency_matrix.detach().cpu().clone(),
         "supernodes": [[int(i) for i in sn] for sn in supergraph.supernodes],
         "labels": [list(lbls) for lbls in (supergraph.supernode_labels or [])],
@@ -750,7 +847,9 @@ def backward_batch_graph_loss(
                     prompt, answers[i], teacher_adapter, config, device,
                 )
                 if cache is not None:
-                    cache.put(prompt, _teacher_target_entry(teacher_supergraph, logit_token_ids, teacher_dla_logits))
+                    cache.put(prompt, _teacher_target_entry(
+                        teacher_supergraph, logit_token_ids, teacher_dla_logits, answer=answers[i],
+                    ))
             else:
                 teacher_supergraph, logit_token_ids, teacher_dla_logits = _teacher_target_from_entry(entry, device)
                 cache_hits += 1
