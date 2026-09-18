@@ -13,9 +13,13 @@ def _compute_edge_loss(
     teacher_ids: list[int],
     student_ids: list[int],
     epsilon: float = 1e-8,
-    similarity: Literal["jsd", "kld", "mse", "mse-norm", "mse-scale"] = "jsd",
+    similarity: Literal["jsd", "kld", "mse", "mse-norm", "mse-scale", "rel-mse"] = "jsd",
 ) -> torch.Tensor:
     """Edge-level structural loss: row-wise similarity between aligned supernode adjacency.
+
+    Matrices may carry extra source columns beyond the supernodes (token-embedding
+    nodes, see aggregate_supernode_adjacency); those are aligned by position and
+    must be equally many on both sides.
 
     Assumes a 1-to-1 mapping between teacher and student supernodes.  Each row of
     the adjacency matrix represents "where does this supernode route its causal
@@ -50,10 +54,25 @@ def _compute_edge_loss(
     s_idx = torch.tensor([t_to_s[ti] for ti in valid_t], device=device, dtype=torch.long)
 
     # Aligned student submatrix: rows = valid targets, cols = all n_T teacher slots
-    W_S_aligned = torch.zeros(len(valid_t), n_T, device=device, dtype=dtype)
+    # followed by any extra (token) source columns, which align by position.
+    n_S = len(student_ids)
+    extra_t, extra_s = W_T.shape[1] - n_T, W_S.shape[1] - n_S
+    if extra_t != extra_s:
+        raise ValueError(f"teacher has {extra_t} extra source columns but student has {extra_s}")
+    W_S_aligned = torch.zeros(len(valid_t), n_T + extra_t, device=device, dtype=dtype)
     W_S_aligned[:, t_idx] = W_S[s_idx][:, s_idx]
+    if extra_t:
+        W_S_aligned[:, n_T:] = W_S[s_idx][:, n_S:]
 
     teacher_rows = W_T[t_idx].to(device=device, dtype=dtype)
+
+    if similarity == "rel-mse":
+        # Relative squared error on the signed, globally normalised matrices: the
+        # fraction of the teacher's edge energy the student fails to reproduce.
+        # Sign-aware, weights every edge by its size, no saturation, gradient
+        # 2(W_S - W_T) / ||W_T||^2 everywhere. Meant for the raw-signed aggregation.
+        diff = W_S_aligned.float() - teacher_rows.float().detach()
+        return (diff.pow(2).sum() / teacher_rows.float().pow(2).sum().clamp(min=epsilon)).to(dtype)
 
     t_abs = teacher_rows.float().abs()
     s_abs = W_S_aligned.float().abs()
@@ -109,7 +128,7 @@ def compute_graph_loss(
     teacher_ids: list[int],
     student_ids: list[int],
     epsilon: float = 1e-8,
-    similarity: Literal["jsd", "kld", "mse", "mse-norm", "mse-scale"] = "jsd",
+    similarity: Literal["jsd", "kld", "mse", "mse-norm", "mse-scale", "rel-mse"] = "jsd",
 ) -> tuple[torch.Tensor, dict]:
     """Graph loss: edge-structure similarity between aligned supernode adjacency rows."""
     loss = _compute_edge_loss(W_T, W_S, mapping, teacher_ids, student_ids, epsilon, similarity)

@@ -38,4 +38,6 @@ that the paper pulls in with `\tablerows{}`; never edit those by hand):
 the summary statistics (values at a step, per-seed peaks, dip / recovery) and the
 palette.
 
+| `inspect_graphs.py` | Where does the student's supergraph differ from the teacher's when it is right vs wrong? Scores a split under teacher forcing, buckets prompts (right-confident, right-unsure, wrong-with-carry, wrong-without), builds both models' graphs for a few per bucket and renders both constructions (`normalised` row-JSD and `raw-signed` + token columns rel-mse) side by side; `summary.json` has per-bucket mean losses, i.e. whether either loss separates right from wrong. `--student-checkpoint` runs it on a trained student. GPU. |
+
 Each script's module docstring explains how to read its output.

@@ -19,7 +19,7 @@ from utils import parse_response, tokenize_prompt_answer
 import torch
 
 from graph_loss.create_graph import create_graph
-from graph_loss.graph import SuperGraph, normalize_matrix
+from graph_loss.graph import aggregate_supernode_adjacency, SuperGraph, normalize_matrix
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
 from graph_loss.loss import compute_graph_loss
 
@@ -44,7 +44,14 @@ class GraphAuxConfig:
     student_mlp_input_cache_path: str | None = None
     mlp_input_cache: dict | None = None
     activation_write_result_cache: dict = field(default_factory=dict)
-    graph_loss_type: Literal["jsd", "kld", "mse", "mse-norm", "mse-scale"] = "jsd"
+    graph_loss_type: Literal["jsd", "kld", "mse", "mse-norm", "mse-scale", "rel-mse"] = "jsd"
+    # How the K x K supernode adjacency is aggregated from the attribution graph,
+    # applied identically to teacher and student. See
+    # graph_loss.graph.aggregate_supernode_adjacency for what each keeps.
+    supergraph_aggregation: Literal["normalised", "raw-signed"] = "normalised"
+    # Append the token-embedding nodes as extra source columns (raw-signed only
+    # makes sense with it; harmless otherwise).
+    token_source_columns: bool = False
     # Stop-gradient the attention pattern / RMSNorm denominator when computing
     # attribution-graph edges, matching the published direct-path linearisation.
     # Applied identically to teacher and student. See graph_loss.freeze.
@@ -75,44 +82,22 @@ class GraphAuxConfig:
 
 
 def _aggregate_supergraph_adjacency(
-    graph, supernodes: list[list[int]], constant_node_weighting: bool = False
+    graph, supernodes: list[list[int]], constant_node_weighting: bool = False,
+    aggregation: str = "normalised", token_source_columns: bool = False,
 ) -> SuperGraph:
     """Aggregate a differentiable graph adjacency using fixed supernode membership.
 
-    Uses torch.stack (out-of-place) instead of in-place setitem so that the
-    gradient from the edge loss flows back through supernode_adjacency_matrix
-    → adjacency_matrix → source_vectors_t → model parameters (down_proj.weight).
+    Delegates to graph_loss.graph.aggregate_supernode_adjacency, the same
+    function the teacher's build_super_graph uses, so the two sides cannot drift;
+    it is built out-of-place so the gradient from the edge loss flows back through
+    supernode_adjacency_matrix -> adjacency_matrix -> source vectors -> weights.
     """
-    adj_matrix_norm = normalize_matrix(graph.adjacency_matrix)
-    num_supernodes = len(supernodes)
-    if num_supernodes == 0:
-        device = graph.adjacency_matrix.device
-        dtype = graph.adjacency_matrix.dtype
-        return SuperGraph(
-            supernode_adjacency_matrix=torch.zeros((0, 0), device=device, dtype=dtype),
-            supernodes=[],
-        )
-    rows = []
-    for t in range(num_supernodes):
-        # frac_external(n_t): fraction of the absolute-valued *input* weights to n_t
-        # that originate outside the supernode (row sum over incoming edges). Must stay
-        # in sync with build_super_graph in graph.py.
-        total_input = torch.abs(adj_matrix_norm[supernodes[t]]).sum(dim=1)
-        internal_input = torch.abs(adj_matrix_norm[supernodes[t]][:, supernodes[t]]).sum(dim=1)
-        if constant_node_weighting:
-            frac_external = torch.ones_like(total_input)
-        else:
-            frac_external = (total_input - internal_input) / total_input.clamp(min=1e-10)
-        row_entries = []
-        for s in range(num_supernodes):
-            sum_A = adj_matrix_norm[supernodes[t]][:, supernodes[s]].sum(dim=1)
-            entry = (
-                (frac_external * sum_A).sum(dim=0)
-                / frac_external.sum(dim=0).clamp(min=1e-10)
-            )
-            row_entries.append(entry)
-        rows.append(torch.stack(row_entries))
-    supernode_adj_matrix = torch.stack(rows)
+    supernode_adj_matrix = aggregate_supernode_adjacency(
+        graph, supernodes,
+        aggregation=aggregation,
+        constant_node_weighting=constant_node_weighting,
+        token_source_columns=token_source_columns,
+    )
     return SuperGraph(
         supernode_adjacency_matrix=supernode_adj_matrix,
         supernodes=supernodes,
@@ -153,15 +138,17 @@ def scramble_teacher_rows(W_T: torch.Tensor, config: GraphAuxConfig) -> torch.Te
     by read direction), so there is no a-priori causal support to respect and
     the whole row is permuted.
     """
-    if W_T.ndim != 2 or W_T.shape[0] != W_T.shape[1]:
-        raise ValueError(f"Expected a square supernode adjacency, got {tuple(W_T.shape)}")
-    k = int(W_T.shape[0])
+    if W_T.ndim != 2:
+        raise ValueError(f"Expected a 2-D supernode adjacency, got {tuple(W_T.shape)}")
+    # Each row is permuted over all its columns (supernode and any token columns),
+    # so a rectangular raw-signed target is scrambled the same way as a square one.
+    k = int(W_T.shape[1])
     perms = config.scramble_permutations.get(k)
     if perms is None:
         perms = _derangements(k, random.Random(config.scramble_seed * 1_000_003 + k))
         config.scramble_permutations[k] = perms
-        print(f"  [graph] scrambled teacher target: K={k}, row permutations {perms}")
-    idx = torch.tensor(perms, device=W_T.device, dtype=torch.long)
+        print(f"  [graph] scrambled teacher target: width={k}, row permutations {perms}")
+    idx = torch.tensor(perms[: W_T.shape[0]], device=W_T.device, dtype=torch.long)
     return torch.gather(W_T, 1, idx)
 
 
@@ -225,6 +212,8 @@ def teacher_target_cache_key(config: GraphAuxConfig, teacher_name: str) -> str:
         "freeze_attention": config.freeze_attention,
         "freeze_rms_norm": config.freeze_rms_norm,
         "constant_node_weighting": config.constant_node_weighting,
+        "supergraph_aggregation": config.supergraph_aggregation,
+        "token_source_columns": config.token_source_columns,
         "tokens_dla_nodes": config.tokens_dla_nodes,
         "mlp_cache": {
             "n_prompts": cache_meta.get("n_prompts"),
@@ -439,6 +428,8 @@ def _compute_teacher_target(
             freeze_attention=config.freeze_attention,
             freeze_rms_norm=config.freeze_rms_norm,
             constant_node_weighting=config.constant_node_weighting,
+            supergraph_aggregation=config.supergraph_aggregation,
+            token_source_columns=config.token_source_columns,
         )
     # Same ids as the KD batch row (BOS + prompt, answer + EOS): the teacher's
     # DLA reference logits at the last prompt position must come from the same
@@ -503,6 +494,8 @@ def compute_prompt_graph_loss(
             freeze_attention=config.freeze_attention,
             freeze_rms_norm=config.freeze_rms_norm,
             constant_node_weighting=config.constant_node_weighting,
+            supergraph_aggregation=config.supergraph_aggregation,
+            token_source_columns=config.token_source_columns,
         )
     except ValueError as e:
         raise RuntimeError(
@@ -548,6 +541,8 @@ def compute_prompt_graph_loss(
         student_graph,
         student_supergraph_structure.supernodes,
         constant_node_weighting=config.constant_node_weighting,
+        aggregation=config.supergraph_aggregation,
+        token_source_columns=config.token_source_columns,
     )
     student_supergraph = student_supergraph._replace(
         supernode_labels=student_supergraph_structure.supernode_labels,
@@ -759,6 +754,8 @@ def _compare_tokens_loss_for_prompt(
                 freeze_attention=config.freeze_attention,
                 freeze_rms_norm=config.freeze_rms_norm,
                 constant_node_weighting=config.constant_node_weighting,
+            supergraph_aggregation=config.supergraph_aggregation,
+            token_source_columns=config.token_source_columns,
             )
 
         # Pass prefix_ids directly so the student tokenizes from the same IDs

@@ -739,12 +739,92 @@ def select_arg_supernodes(
     return raw_supernodes, supernode_labels_out
 
 
+SUPERGRAPH_AGGREGATIONS = ("normalised", "raw-signed")
+
+
+def aggregate_supernode_adjacency(
+    graph: Graph,
+    supernodes: list[list[int]],
+    *,
+    aggregation: str = "normalised",
+    constant_node_weighting: bool = False,
+    token_source_columns: bool = False,
+    epsilon: float = 1e-10,
+) -> torch.Tensor:
+    """The supernode adjacency for fixed membership -- the one arithmetic both the
+    teacher (build_super_graph) and the differentiable student path use.
+
+    ``normalised`` (the original construction): each target's |inbound| edges are
+    first divided by their sum over *all* sources (normalize_matrix), then entry
+    (t, s) is the frac_external-weighted mean over t's members of the sum over
+    s's members. Every entry is a share of a unit of inbound mass, so its level
+    depends on how many sources compete for that unit -- i.e. on the pre-selected
+    pool size, which differs 35x between an 8B at 10% and a 1B at 1% -- and only
+    the *shape* of a row survives a cross-model comparison. Relative row strength
+    and edge sign are discarded.
+
+    ``raw-signed``: entry (t, s) is the mean over t's members of the sum over s's
+    members of the raw signed direct-effect edges. Raw edges depend only on the
+    two nodes, not on the pool, so the entries are pool-independent; sign and the
+    relative strength of rows and edges are kept. With ``token_source_columns``
+    the token-embedding nodes are appended as extra source columns (they exist in
+    both models regardless of pre-selection). The whole matrix is then divided
+    once by its total |mass|, which removes the two models' overall activation /
+    gradient scales and nothing else. frac_external is not used on this path.
+
+    Built out-of-place (torch.stack) so gradient flows through the student's
+    adjacency into the model.
+    """
+    if aggregation not in SUPERGRAPH_AGGREGATIONS:
+        raise ValueError(f"aggregation must be one of {SUPERGRAPH_AGGREGATIONS}, got {aggregation!r}")
+    adjacency = graph.adjacency_matrix
+    num_supernodes = len(supernodes)
+    if num_supernodes == 0:
+        return torch.zeros((0, 0), device=adjacency.device, dtype=adjacency.dtype)
+
+    if aggregation == "normalised":
+        adj_matrix_norm = normalize_matrix(adjacency)
+        rows = []
+        for t in range(num_supernodes):
+            target_members = supernodes[t]
+            # frac_external(n_t): fraction of the absolute-valued *input* weights to n_t
+            # that originate outside the supernode -- a row sum over n_t's incoming edges.
+            total_input = torch.abs(adj_matrix_norm[target_members]).sum(dim=1)
+            internal_input = torch.abs(adj_matrix_norm[target_members][:, target_members]).sum(dim=1)
+            if constant_node_weighting:
+                frac_external = torch.ones_like(total_input)
+            else:
+                frac_external = (total_input - internal_input) / total_input.clamp(min=epsilon)
+            entries = []
+            for s in range(num_supernodes):
+                sum_A = adj_matrix_norm[target_members][:, supernodes[s]].sum(dim=1)
+                entries.append((frac_external * sum_A).sum(dim=0) / frac_external.sum(dim=0).clamp(min=epsilon))
+            rows.append(torch.stack(entries))
+        return torch.stack(rows)
+
+    math_dtype = torch.float32 if adjacency.dtype in (torch.float16, torch.bfloat16) else adjacency.dtype
+    A = adjacency.to(dtype=math_dtype)
+    n_neurons = graph.n_neurons
+    n_tokens = graph.n_tokens if token_source_columns else 0
+    rows = []
+    for t in range(num_supernodes):
+        A_t = A[supernodes[t]]  # [n_members_t, n_sources]
+        entries = [A_t[:, supernodes[s]].sum(dim=1).mean() for s in range(num_supernodes)]
+        for p in range(n_tokens):
+            entries.append(A_t[:, n_neurons + p].mean())
+        rows.append(torch.stack(entries))
+    W = torch.stack(rows)
+    return W / W.abs().sum().clamp(min=epsilon)
+
+
 def build_super_graph(
     graph: Graph,
     supernodes: list[list[int]],
     supernode_labels: list[list[str]],
     node_labels: dict[int, list[str]] | None = None,
     constant_node_weighting: bool = False,
+    supergraph_aggregation: str = "normalised",
+    token_source_columns: bool = False,
     supernode_heatmap_output_dir: str | None = None,
     activation_write_result: ActivationWriteResult | None = None,
     awr_index_map: dict[int, int] | None = None,
@@ -760,33 +840,13 @@ def build_super_graph(
     """
     logger = logging.getLogger(__name__)
     adjacency_matrix = graph.adjacency_matrix
-    adj_matrix_norm = normalize_matrix(adjacency_matrix)
     num_supernodes = len(supernodes)
-
-    supernode_adj_matrix = torch.zeros(
-        num_supernodes,
-        num_supernodes,
-        dtype=adj_matrix_norm.dtype,
-        device=adjacency_matrix.device,
+    supernode_adj_matrix = aggregate_supernode_adjacency(
+        graph, supernodes,
+        aggregation=supergraph_aggregation,
+        constant_node_weighting=constant_node_weighting,
+        token_source_columns=token_source_columns,
     )
-    for t in range(num_supernodes):
-        target_members = supernodes[t]
-        # frac_external(n_t): fraction of the absolute-valued *input* weights to n_t
-        # that originate outside the supernode -- a row sum over n_t's incoming edges,
-        # not a column sum over its outgoing ones.
-        total_input = torch.abs(adj_matrix_norm[target_members]).sum(dim=1)
-        internal_input = torch.abs(adj_matrix_norm[target_members][:, target_members]).sum(dim=1)
-        if constant_node_weighting:
-            frac_external = torch.ones_like(total_input)
-        else:
-            frac_external = (total_input - internal_input) / total_input.clamp(min=1e-10)
-        for s in range(num_supernodes):
-            source_members = supernodes[s]
-            sum_A = adj_matrix_norm[target_members][:, source_members].sum(dim=1)
-            supernode_adj_matrix[t, s] = (
-                (frac_external * sum_A).sum(dim=0)
-                / frac_external.sum(dim=0).clamp(min=1e-10)
-            )
 
     supernode_heatmap_pdf_paths: list[str] | None = None
     if supernode_heatmap_output_dir is not None:

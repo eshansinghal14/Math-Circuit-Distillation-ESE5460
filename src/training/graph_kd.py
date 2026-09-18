@@ -98,13 +98,15 @@ class GraphKDConfig:
     seed: int = _SEED
     # graph loss
     lambda_graph: float = 1.0
-    teacher_prop_neurons_per_layer: float = 0.1
-    student_prop_neurons_per_layer: float = 0.1
+    teacher_prop_neurons_per_layer: float = 0.003
+    student_prop_neurons_per_layer: float = 0.01
     nodes_per_label: int = 10
     graph_loss_type: str = "jsd"
     freeze_attention: bool = False
     freeze_rms_norm: bool = False
     constant_node_weighting: bool = False
+    supergraph_aggregation: str = "normalised"
+    token_source_columns: bool = False
     top_k_logits: float = 0.95
     teacher_graph_batch_size: int = 512
     student_graph_batch_size: int = 1
@@ -214,6 +216,8 @@ class GraphKDTrainer:
             freeze_attention=config.freeze_attention,
             freeze_rms_norm=config.freeze_rms_norm,
             constant_node_weighting=config.constant_node_weighting,
+            supergraph_aggregation=config.supergraph_aggregation,
+            token_source_columns=config.token_source_columns,
             verbose=config.graph_verbose,
             mlp_input_cache=student_mlp_cache,
             teacher_mlp_input_cache=teacher_mlp_cache,
@@ -674,7 +678,23 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Neurons per arg-token supernode and DLA supernode.")
     group.add_argument(
         "--graph-loss-type", type=str, default="jsd", dest="graph_loss_type",
-        choices=["jsd", "kld", "mse", "mse-norm", "mse-scale"],
+        choices=["jsd", "kld", "mse", "mse-norm", "mse-scale", "rel-mse"],
+        help="rel-mse: relative squared error on the signed, globally normalised matrices "
+             "(pair it with --supergraph-aggregation raw-signed); the others act on "
+             "|entries| row-normalised.",
+    )
+    group.add_argument(
+        "--supergraph-aggregation", type=str, default="normalised", dest="supergraph_aggregation",
+        choices=["normalised", "raw-signed"],
+        help="normalised: per-target |inbound| shares with frac_external weighting (pool-size "
+             "dependent; only row shape is comparable across models). raw-signed: mean over "
+             "target members of the summed raw signed edges, whole matrix divided once by its "
+             "|mass| (pool-independent; keeps sign and relative edge strength).",
+    )
+    group.add_argument(
+        "--token-source-columns", action="store_true", dest="token_source_columns",
+        help="Append the token-embedding nodes as extra source columns of the supergraph "
+             "(present in both models regardless of pre-selection).",
     )
     group.add_argument(
         "--freeze-attention", action="store_true", dest="freeze_attention",
@@ -689,9 +709,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     group.add_argument("--top-k-logits", "--top_k_logits", type=float, default=0.95,
                        dest="top_k_logits")
-    group.add_argument("--teacher-prop-neurons", type=float, default=0.1,
+    # Matched pools: 0.003 x (32 x 14336) and 0.01 x (16 x 8192) are both ~1.3-1.4k
+    # nodes per position, so the ten most specific members per label are drawn from
+    # pools of the same size in both models (and the teacher graph is ~30x cheaper
+    # than at the old 0.1).
+    group.add_argument("--teacher-prop-neurons", type=float, default=0.003,
                        dest="teacher_prop_neurons_per_layer")
-    group.add_argument("--student-prop-neurons", type=float, default=0.1,
+    group.add_argument("--student-prop-neurons", type=float, default=0.01,
                        dest="student_prop_neurons_per_layer")
     group.add_argument("--teacher-graph-batch-size", type=int, default=512,
                        dest="teacher_graph_batch_size")
@@ -827,6 +851,8 @@ def main() -> None:
                 freeze_attention=args.freeze_attention,
                 freeze_rms_norm=args.freeze_rms_norm,
                 constant_node_weighting=args.constant_node_weighting,
+                supergraph_aggregation=args.supergraph_aggregation,
+                token_source_columns=args.token_source_columns,
                 top_k_logits=args.top_k_logits,
                 teacher_prop_neurons_per_layer=args.teacher_prop_neurons_per_layer,
                 student_prop_neurons_per_layer=args.student_prop_neurons_per_layer,
