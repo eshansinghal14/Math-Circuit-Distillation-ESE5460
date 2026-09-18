@@ -839,7 +839,6 @@ def build_super_graph(
     graph (i.e. members index graph.neuron_locations directly).
     """
     logger = logging.getLogger(__name__)
-    adjacency_matrix = graph.adjacency_matrix
     num_supernodes = len(supernodes)
     supernode_adj_matrix = aggregate_supernode_adjacency(
         graph, supernodes,
