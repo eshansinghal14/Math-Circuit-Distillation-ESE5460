@@ -98,6 +98,7 @@ class GraphKDConfig:
     seed: int = _SEED
     # graph loss
     lambda_graph: float = 1.0
+    lambda_kl: float = 1.0
     teacher_prop_neurons_per_layer: float = 0.003
     student_prop_neurons_per_layer: float = 0.01
     nodes_per_label: int = 10
@@ -396,8 +397,11 @@ class GraphKDTrainer:
                 ) / grad_accum
 
                 kl_finite = torch.isfinite(kl)
-                if kl_finite:
-                    kl.backward()
+                # ``kl`` stays unscaled so step_kl_loss is comparable across
+                # --lambda-kl settings; only the backward carries the weight, and
+                # lambda_kl == 1.0 takes the original path unchanged.
+                if kl_finite and cfg.lambda_kl != 0.0:
+                    (kl if cfg.lambda_kl == 1.0 else kl * cfg.lambda_kl).backward()
 
             # ── Graph loss ────────────────────────────────────────────────────
             prompts: List[str] = batch["prompts"]
@@ -629,7 +633,8 @@ class GraphKDTrainer:
         print(
             f"Graph-KD | student={cfg.model} | teacher={cfg.teacher} | dataset={cfg.dataset}"
             f" | steps={cfg.steps} | lr={cfg.learning_rate} | temp={cfg.temperature}"
-            f" | lambda_graph={cfg.lambda_graph} | nodes_per_label={cfg.nodes_per_label}"
+            f" | lambda_graph={cfg.lambda_graph} | lambda_kl={cfg.lambda_kl}"
+            f" | nodes_per_label={cfg.nodes_per_label}"
             + (" | CONTROL: scrambled teacher graph" if cfg.scramble_teacher_graph else "")
         )
 
@@ -680,6 +685,9 @@ def build_parser() -> argparse.ArgumentParser:
     add_kd_args(parser)
     group = parser.add_argument_group("kd_graph_args")
     group.add_argument("--lambda-graph", type=float, default=1.0, dest="lambda_graph")
+    group.add_argument("--lambda-kl", type=float, default=1.0, dest="lambda_kl",
+                       help="Weight on the KD term. 0 trains on the graph loss alone; the KL is "
+                            "still computed and logged as step_kl_loss, it just gets no backward.")
     group.add_argument("--nodes-per-label", type=int, default=10, dest="nodes_per_label",
                        help="Neurons per arg-token supernode and DLA supernode.")
     group.add_argument(
@@ -852,6 +860,7 @@ def main() -> None:
                 resume=args.resume,
                 seed=seed,
                 lambda_graph=args.lambda_graph,
+                lambda_kl=args.lambda_kl,
                 nodes_per_label=args.nodes_per_label,
                 graph_loss_type=args.graph_loss_type,
                 freeze_attention=args.freeze_attention,
