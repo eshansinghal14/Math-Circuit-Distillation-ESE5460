@@ -475,7 +475,12 @@ class GraphKDTrainer:
                 accum_kl_gnorm += kl_sq ** 0.5
                 accum_graph_gnorm += graph_sq ** 0.5
                 accum_cos += dot / denom if denom > 0 else 0.0
-                accum_flip += flipped / total_elems if total_elems else 0.0
+                # A "flip" is only defined against a nonzero KD gradient. With
+                # --lambda-kl 0 every sign(g_kl) is 0, so sign(g_kl + g_graph)
+                # differs wherever the graph gradient is nonzero and the metric
+                # would read as the fraction of parameters the graph term touches
+                # (~0.70), not as a flip rate. Report NaN instead, as ratio does.
+                accum_flip += (flipped / total_elems) if (total_elems and kl_sq > 0) else float("nan")
 
             micro_step += 1
 
