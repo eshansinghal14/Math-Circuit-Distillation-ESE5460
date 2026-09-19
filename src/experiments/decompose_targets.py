@@ -503,6 +503,11 @@ def membership_analysis(prompts: list[str], Y: np.ndarray, entries: dict[str, di
     I, J = I[keep][:n_pairs], J[keep][:n_pairs]
 
     d = rel_mse(Y[I], Y[J])
+    # rel_mse divides by ||t_j||^2, so a trend in d against overlap could come
+    # entirely from the denominator. Carry the raw numerator and the denominator
+    # per pair so the report can show whether the numerator moves too.
+    num = ((Y[I] - Y[J]) ** 2).sum(axis=1)
+    den = (Y[J] ** 2).sum(axis=1)
     sums_arr = np.asarray(sums)
     dsum = np.abs(sums_arr[I] - sums_arr[J])
     ov = np.empty(len(I))
@@ -529,9 +534,13 @@ def membership_analysis(prompts: list[str], Y: np.ndarray, entries: dict[str, di
             last = b == len(edges) - 2
             sel = (o >= lo) & (o <= hi) if last else (o >= lo) & (o < hi)
             if sel.sum() >= 10:
+                idx = np.flatnonzero(mask)[sel] if mask.dtype == bool else sel
                 out.append({"overlap_lo": float(lo), "overlap_hi": float(hi),
                             "mean_overlap": float(o[sel].mean()),
-                            "rel_mse": float(dd[sel].mean()), "n": int(sel.sum())})
+                            "rel_mse": float(dd[sel].mean()),
+                            "sq_diff": float(num[idx].mean()),
+                            "sq_norm": float(den[idx].mean()),
+                            "n": int(sel.sum())})
         return out
 
     all_q = by_quintile(np.ones(len(d), dtype=bool))
@@ -573,7 +582,20 @@ def report_membership(m: dict[str, Any] | None, reference_loss: float | None) ->
             continue
         print("  target distance by member overlap, %s:" % name)
         for r in rows:
-            print("    overlap %.3f  rel_mse %.4f  (n=%d)" % (r["mean_overlap"], r["rel_mse"], r["n"]))
+            print("    overlap %.3f  rel_mse %.4f  |diff|^2 %.5f  |t|^2 %.5f  (n=%d)"
+                  % (r["mean_overlap"], r["rel_mse"], r["sq_diff"], r["sq_norm"], r["n"]))
+        if len(rows) >= 2:
+            dr = rows[-1]["sq_diff"] / max(rows[0]["sq_diff"], EPS)
+            nr = rows[-1]["sq_norm"] / max(rows[0]["sq_norm"], EPS)
+            rr = rows[-1]["rel_mse"] / max(rows[0]["rel_mse"], EPS)
+            if rr > 0.9:
+                note = "rel_mse barely moves with overlap: no trend to explain"
+            elif dr < 0.9:
+                note = "the numerator falls with overlap too, so the trend is real"
+            else:
+                note = "the numerator is flat: this trend is the denominator, an artefact"
+            print("    top/bottom bin: rel_mse x%.2f, |diff|^2 x%.2f, |t|^2 x%.2f -- %s"
+                  % (rr, dr, nr, note))
     if m["churn_share_matched"] is not None:
         print("  within matched sums, the most-overlapping fifth of pairs are %+.1f%% closer "
               "than the least-overlapping fifth" % (100 * m["churn_share_matched"]))
