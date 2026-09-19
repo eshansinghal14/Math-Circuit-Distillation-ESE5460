@@ -160,6 +160,68 @@ def describe_run_setup(record: Dict[str, Any]) -> str:
     )
 
 
+class ParamStepTracker:
+    """How far the weights actually move on each optimizer step.
+
+    Two runs can share a learning rate and still take very different sized steps:
+    Adam's update is ``lr * m / (sqrt(v) + eps)``, so a gradient whose sign pattern
+    is persistent across batches produces near-full-size steps while a noisy one
+    produces much smaller ones, and gradient clipping rescales by a factor that
+    changes over training. ``|dtheta|`` separates "this objective carries more
+    signal" from "this objective just moves the weights further per step".
+
+    Samples a stride of each tensor the way ParamChangeCanary does, so it costs a
+    few MB and no host transfer, and is cheap enough to run every step. The sample
+    is a fixed stride, so the ratio it reports is an unbiased estimate of the
+    whole model's relative movement.
+
+    Usage: ``snapshot()`` before ``optimizer.step()``, ``delta()`` after.
+    """
+
+    _SAMPLE = 8192
+
+    def __init__(self, model) -> None:
+        self._names = []
+        for name, p in model.named_parameters():
+            if p.requires_grad:
+                self._names.append(name)
+        self._before: Dict[str, torch.Tensor] = {}
+
+    def _sample(self, p: torch.Tensor) -> torch.Tensor:
+        flat = p.detach().flatten()
+        stride = max(1, flat.numel() // self._SAMPLE)
+        return flat[::stride]
+
+    def snapshot(self, model) -> None:
+        params = dict(model.named_parameters())
+        self._before = {
+            n: self._sample(params[n]).clone()
+            for n in self._names if n in params
+        }
+
+    def delta(self, model) -> tuple[float, float]:
+        """``(|dtheta|, |dtheta| / |theta|)`` over the sampled entries."""
+        if not self._before:
+            return float("nan"), float("nan")
+        params = dict(model.named_parameters())
+        d_sq = 0.0
+        p_sq = 0.0
+        for n, before in self._before.items():
+            p = params.get(n)
+            if p is None:
+                continue
+            after = self._sample(p)
+            if after.shape != before.shape:
+                continue
+            diff = (after.float() - before.float())
+            d_sq += float(diff.pow(2).sum().item())
+            p_sq += float(after.float().pow(2).sum().item())
+        self._before = {}
+        if p_sq <= 0:
+            return d_sq ** 0.5, float("nan")
+        return d_sq ** 0.5, (d_sq ** 0.5) / (p_sq ** 0.5)
+
+
 class ParamChangeCanary:
     """Fraction of parameter entries that the first optimizer step actually changes.
 

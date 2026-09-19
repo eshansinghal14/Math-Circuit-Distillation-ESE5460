@@ -26,6 +26,7 @@ from utils import (
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from training.utils import (
+    ParamStepTracker,
     DEFAULT_SEED,
     ParamChangeCanary,
     add_kd_args,
@@ -128,6 +129,7 @@ class StandardKDTrainer:
             self.extra_test_datasets[ds] = PromptAnswerDataset(ds, ds_test_data, self.tokenizer)
 
         self.optimizer = make_optimizer(self.model, config.learning_rate)
+        self._step_tracker = ParamStepTracker(self.model)
 
         self.history: Dict[str, List] = defaultdict(list)
         self._train_step = 0
@@ -217,7 +219,11 @@ class StandardKDTrainer:
                 self._last_lr = apply_lr_schedule(
                     self.optimizer, self._train_step + 1, cfg.steps, cfg.learning_rate,
                     cfg.warmup_steps, cfg.lr_floor)
+                self._step_tracker.snapshot(self.model)
                 self.optimizer.step()
+                d_abs, d_rel = self._step_tracker.delta(self.model)
+                self.history.setdefault("step_update_norm", []).append(d_abs)
+                self.history.setdefault("step_update_rel", []).append(d_rel)
                 self.optimizer.zero_grad()
                 if canary is not None:
                     log_first_step_canary(canary.report(self.model), self.history)

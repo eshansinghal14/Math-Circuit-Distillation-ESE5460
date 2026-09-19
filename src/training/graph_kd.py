@@ -40,6 +40,7 @@ from graph_loss.training import (
 from training.utils import (
     DEFAULT_SEED,
     ParamChangeCanary,
+    ParamStepTracker,
     add_kd_args,
     add_standard_args,
     describe_run_setup,
@@ -239,6 +240,7 @@ class GraphKDTrainer:
         # The teacher's per-prompt target is a pure function of the teacher-side
         # configuration, so it is built once per prompt and shared by every run
         # with that configuration (all seeds, every lambda, every control).
+        self._step_tracker = ParamStepTracker(self.model)
         self.teacher_target_cache: TeacherTargetCache | None = None
         cache_dir = config.teacher_target_cache_dir
         if cache_dir and cache_dir.lower() != "none":
@@ -347,6 +349,7 @@ class GraphKDTrainer:
         accum_cos = 0.0
         accum_flip = 0.0
         accum_clip = 0.0
+        accum_dtheta = accum_dtheta_rel = float("nan")
         accum_aligned = 0.0
         accum_teacher_sn = 0.0
         accum_graph_real = 0.0
@@ -507,7 +510,9 @@ class GraphKDTrainer:
                     self._last_lr = apply_lr_schedule(
                         self.optimizer, self._train_step + 1, cfg.steps, cfg.learning_rate,
                         cfg.warmup_steps, cfg.lr_floor)
+                    self._step_tracker.snapshot(self.model)
                     self.optimizer.step()
+                    accum_dtheta, accum_dtheta_rel = self._step_tracker.delta(self.model)
                     if canary is not None:
                         log_first_step_canary(canary.report(self.model), self.history)
                 else:
@@ -537,12 +542,15 @@ class GraphKDTrainer:
                         ("step_grad_cosine", mean_cos),
                         ("step_grad_signflip", mean_flip),
                         ("step_clip_norm", mean_clip),
+                        ("step_update_norm", accum_dtheta),
+                        ("step_update_rel", accum_dtheta_rel),
                     ):
                         self.history[key].append(val)
                     gnorm_str = (
                         f" | |g_KL|={accum_kl_gnorm:.4f} | |g_graph|={accum_graph_gnorm:.4f}"
                         f" | ratio={ratio:.4f} | cos={mean_cos:+.4f}"
                         f" | signflip={mean_flip:.3f} | clip={mean_clip:.3f}"
+                        f" | dtheta={accum_dtheta:.3e}"
                     )
                 else:
                     gnorm_str = ""
