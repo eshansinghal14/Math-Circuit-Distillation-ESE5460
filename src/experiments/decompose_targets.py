@@ -458,6 +458,146 @@ def kfold(Y: np.ndarray, X: np.ndarray, factor_cells: dict[str, list[Any]],
 
 
 # ---------------------------------------------------------------------------
+# Membership churn
+# ---------------------------------------------------------------------------
+
+def membership_analysis(prompts: list[str], Y: np.ndarray, entries: dict[str, dict],
+                        n_pairs: int, seed: int) -> dict[str, Any] | None:
+    """How much of the across-prompt target variation is supernode membership churn?
+
+    The true noise floor -- rebuild one prompt's graph with two members dropped --
+    needs the per-neuron edges, and the cache stores only the aggregate, so it
+    cannot be computed here. This is the offline substitute, and it answers the
+    same question from the member indices the cache does store.
+
+    For sampled prompt pairs it measures the Jaccard overlap of their supernode
+    members against the rel_mse between their targets. Pairs that selected nearly
+    the same neurons bound how far apart two targets get when membership is *not*
+    the thing differing: that is the floor the student would have to beat if
+    membership were held fixed.
+
+    Overlap is confounded with prompt similarity -- similar sums select similar
+    neurons and have similar targets -- so the comparison is also reported inside
+    a narrow band of |sum_i - sum_j|, where prompt similarity is roughly fixed and
+    membership is most of what still varies.
+    """
+    members: list[tuple[frozenset, ...]] = []
+    sums: list[float] = []
+    for p in prompts:
+        sn = entries[p].get("supernodes") or []
+        members.append(tuple(frozenset(int(i) for i in m) for m in sn))
+        args = parse_prompt(p)
+        sums.append(float(sum(args)) if args else float("nan"))
+    if not members or not members[0]:
+        return None
+    k = len(members[0])
+    if any(len(m) != k for m in members):
+        return None
+
+    rng = np.random.default_rng(seed)
+    n = len(prompts)
+    n_pairs = int(min(n_pairs, n * (n - 1) // 2))
+    I = rng.integers(0, n, size=n_pairs * 2)
+    J = rng.integers(0, n, size=n_pairs * 2)
+    keep = I != J
+    I, J = I[keep][:n_pairs], J[keep][:n_pairs]
+
+    d = rel_mse(Y[I], Y[J])
+    sums_arr = np.asarray(sums)
+    dsum = np.abs(sums_arr[I] - sums_arr[J])
+    ov = np.empty(len(I))
+    for r, (i, j) in enumerate(zip(I, J)):
+        tot = 0.0
+        for x, y in zip(members[i], members[j]):
+            u = len(x | y)
+            tot += (len(x & y) / u) if u else 1.0
+        ov[r] = tot / k
+
+    def by_quintile(mask: np.ndarray) -> list[dict[str, float]]:
+        o, dd = ov[mask], d[mask]
+        if len(o) < 50:
+            return []
+        # Overlap is heavily tied at 0 when supernodes rarely share members, so
+        # plain quintile edges collapse onto each other and the same pairs come
+        # back as several identical bins. Dedupe the edges and make every bin
+        # half-open but the last, so each pair lands in exactly one.
+        edges = np.unique(np.quantile(o, [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]))
+        if len(edges) < 2:
+            return []
+        out = []
+        for b, (lo, hi) in enumerate(zip(edges[:-1], edges[1:])):
+            last = b == len(edges) - 2
+            sel = (o >= lo) & (o <= hi) if last else (o >= lo) & (o < hi)
+            if sel.sum() >= 10:
+                out.append({"overlap_lo": float(lo), "overlap_hi": float(hi),
+                            "mean_overlap": float(o[sel].mean()),
+                            "rel_mse": float(dd[sel].mean()), "n": int(sel.sum())})
+        return out
+
+    all_q = by_quintile(np.ones(len(d), dtype=bool))
+    near = dsum <= np.quantile(dsum, 0.10)
+    matched_q = by_quintile(near)
+
+    def spread(q: list[dict[str, float]]) -> float | None:
+        if len(q) < 2 or q[0]["rel_mse"] <= 0:
+            return None
+        return (q[0]["rel_mse"] - q[-1]["rel_mse"]) / q[0]["rel_mse"]
+
+    return {
+        "n_pairs": int(len(d)),
+        "n_supernodes": k,
+        "overlap_mean": float(ov.mean()), "overlap_median": float(np.median(ov)),
+        "overlap_p10": float(np.percentile(ov, 10)), "overlap_p90": float(np.percentile(ov, 90)),
+        "by_overlap": all_q,
+        "by_overlap_matched_sums": matched_q,
+        "matched_sum_cutoff": float(np.quantile(dsum, 0.10)),
+        "churn_share_all": spread(all_q),
+        "churn_share_matched": spread(matched_q),
+        "floor_high_overlap_matched": matched_q[-1]["rel_mse"] if matched_q else None,
+    }
+
+
+def report_membership(m: dict[str, Any] | None, reference_loss: float | None) -> None:
+    """Print the churn analysis and say which way it points."""
+    if m is None:
+        print("\nMembership churn: supernode members not recorded consistently; skipped.")
+        return
+    print("\nMembership churn (%d prompt pairs, %d supernodes):" % (m["n_pairs"], m["n_supernodes"]))
+    print("  Jaccard overlap of members across prompts: median %.3f (p10 %.3f, p90 %.3f)"
+          % (m["overlap_median"], m["overlap_p10"], m["overlap_p90"]))
+    for name, key in (("all pairs", "by_overlap"),
+                      ("pairs with |sum_i-sum_j| <= %.0f" % m["matched_sum_cutoff"],
+                       "by_overlap_matched_sums")):
+        rows = m[key]
+        if not rows:
+            continue
+        print("  target distance by member overlap, %s:" % name)
+        for r in rows:
+            print("    overlap %.3f  rel_mse %.4f  (n=%d)" % (r["mean_overlap"], r["rel_mse"], r["n"]))
+    if m["churn_share_matched"] is not None:
+        print("  within matched sums, the most-overlapping fifth of pairs are %+.1f%% closer "
+              "than the least-overlapping fifth" % (100 * m["churn_share_matched"]))
+    floor = m["floor_high_overlap_matched"]
+    if floor is None:
+        return
+    top_overlap = m["by_overlap_matched_sums"][-1]["mean_overlap"]
+    if top_overlap < 0.5:
+        print("  no floor estimate: even the most-overlapping pairs share only %.0f%% of their "
+              "members, so no pair holds membership fixed. Every target in this cache is built on a "
+              "different neuron set, which is itself the finding." % (100 * top_overlap))
+        return
+    print("  membership-held-roughly-fixed floor: %.4f (top bin shares %.0f%% of members)"
+          % (floor, 100 * top_overlap))
+    if reference_loss is None:
+        return
+    if reference_loss <= floor * 1.3:
+        print("    the student sits at %.4f, within 30%% of this floor: the objective is mostly "
+              "selection noise and there is little left for the graph term to learn." % reference_loss)
+    else:
+        print("    the student sits at %.4f, well above it: the target is reachable in principle, "
+              "so the failure is in the gradient, not the objective." % reference_loss)
+
+# ---------------------------------------------------------------------------
 # Entry-level variance map
 # ---------------------------------------------------------------------------
 
@@ -501,6 +641,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--folds", type=int, default=5)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--top-entries", type=int, default=12, dest="top_entries")
+    p.add_argument("--pairs", type=int, default=200000,
+                   help="Prompt pairs sampled for the membership-churn analysis.")
     p.add_argument("--ignore-audit", action="store_true", dest="ignore_audit",
                    help="Run the decomposition even though the cache audit found problems.")
     p.add_argument("--reference-loss", type=float, default=None, dest="reference_loss",
@@ -561,6 +703,9 @@ def main() -> None:
         print(f"    {e['target']:<12} <- {e['source']:<12} mean {e['mean']:+.4f} sd {e['sd']:.4f}"
               f" | {e['share_of_variance']:5.1%} of variance")
 
+    membership = membership_analysis(prompts, Y, entries, args.pairs, args.seed)
+    report_membership(membership, args.reference_loss)
+
     print(f"\nOut-of-fold prediction of a held-out prompt's target ({args.folds} folds), "
           "in the trainer's rel-mse units:")
     res = kfold(Y, X, factor_cells, args.folds, args.seed)
@@ -608,6 +753,7 @@ def main() -> None:
         "n_prompts": len(prompts), "n_operands": n_ops, "matrix_shape": list(shape),
         "supernode_labels": [list(l) for l in labels],
         "audit": audit_result, "audit_problems": problems,
+        "membership": membership,
         "eta_squared": etas, "variance_map": vmap, "out_of_fold": res,
         "constant": base,
         "best_prompt_aware": {"name": best_name, "rel_mse": best, "gain_vs_constant": gain},
