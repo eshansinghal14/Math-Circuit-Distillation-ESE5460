@@ -916,24 +916,45 @@ def _seed_sort_key(seed: str):
     return (0, int(seed)) if seed.lstrip("-").isdigit() else (1, seed)
 
 
+_LAST_CURVE_STEP: Dict[str, int] = {}
+
+
 def refresh_curves(
     history: Dict[str, List],
     save_dir: str,
     losses: Sequence[Tuple[str, str]] = (("step_ce_loss", "CE Loss"),),
+    step: int | None = None,
+    every: int = 10,
 ) -> None:
     """Rewrite the history JSON and redraw training_curves.png mid-run.
 
     Called after every eval so a long run can be watched from the plot instead of
     the log. save_curves reads the history back out of the folder's JSON, so the
-    history has to be written first. Any failure is reported and swallowed: a
-    plotting or filesystem error must never take down a training run that is
-    hours in.
+    history has to be written first.
+
+    The two halves are throttled differently because they cost differently:
+    save_history is ~40 ms and is also the crash-safety net, so it runs at every
+    eval, while save_curves is ~375 ms of matplotlib and only redraws once
+    ``every`` train steps. Pass ``step`` to enable that; without it the figure is
+    drawn at every call. The end-of-run save_curves is separate and unthrottled.
+
+    Any failure is reported and swallowed: a plotting or filesystem error must
+    never take down a training run that is hours in.
     """
     try:
         save_history(history, save_dir)
-        save_curves(history, save_dir, losses=losses)
     except Exception as e:  # noqa: BLE001 - never fatal
-        print(f"  WARN: could not refresh training curves: {e}")
+        print(f"  WARN: could not write history: {e}")
+        return
+    if step is not None and every > 0:
+        if step - _LAST_CURVE_STEP.get(save_dir, -every) < every:
+            return
+    try:
+        save_curves(history, save_dir, losses=losses)
+        if step is not None:
+            _LAST_CURVE_STEP[save_dir] = step
+    except Exception as e:  # noqa: BLE001 - never fatal
+        print(f"  WARN: could not redraw training curves: {e}")
 
 
 def save_curves(

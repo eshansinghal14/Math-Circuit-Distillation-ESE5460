@@ -670,7 +670,7 @@ class GraphKDTrainer:
                 self.history[f"accuracy_{ds}"].append(ds_acc)
             extra_str = "".join(f" | {ds}={a:.4f}" for ds, a in extra_accs.items())
             print(f"  [eval] step {self._train_step}/{cfg.steps} | Acc={acc:.4f}{extra_str}")
-            refresh_curves(self.history, cfg.save_dir,
+            refresh_curves(self.history, cfg.save_dir, step=self._train_step,
                            losses=[("step_kl_loss", "KL Loss"), ("step_graph_loss", "Graph Loss")])
 
         if self.teacher_target_cache is not None:
