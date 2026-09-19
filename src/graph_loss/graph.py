@@ -740,6 +740,120 @@ def select_arg_supernodes(
 
 
 SUPERGRAPH_AGGREGATIONS = ("normalised", "raw-signed")
+SUPERNODE_MEMBERSHIP_TYPES = ("topk", "soft")
+
+
+def soft_membership_weights(
+    scored_rows: list[tuple[int, float]],
+    nodes_per_label: int,
+    temperature: float,
+    n_rows: int,
+    *,
+    device=None,
+    dtype=torch.float32,
+) -> torch.Tensor:
+    """A soft membership indicator in [0, 1] over ``n_rows`` graph rows.
+
+    ``scored_rows`` is (row index, score) with higher scores meaning stronger
+    membership -- exactly what ``select_anova_supernodes`` sorts before taking the
+    top k. Instead of cutting, every candidate gets
+
+        u(n) = sigmoid((score(n) - score_(k)) / T)
+
+    centred midway between the k-th and (k+1)-th ranked scores, so the top k sit
+    above 0.5 and the effective mass ``sum(u)`` stays near k on every prompt. As ``T`` approaches 0
+    this becomes the hard top-k indicator and the whole aggregation reproduces the
+    ``topk`` path exactly, which is the regression test for this code.
+
+    The scale of ``T`` is the score scale, so it is taken relative to the spread
+    of the candidate scores: ``T_eff = temperature * (score_(k) - median)``, with
+    a fallback to the absolute temperature when that spread is degenerate. Rows
+    that were never scored (not candidates for this label) get weight 0.
+
+    A sigmoid indicator is used rather than a softmax over the pool deliberately.
+    A softmax spreads a unit of mass over thousands of rows, which drives every
+    weight to nearly zero, collapses the internal inbound mass, saturates
+    frac_external at 1 and reduces the aggregation to a plain mean -- the same
+    degeneracy already observed when the RMSNorm freeze pushed frac_external to
+    0.995.
+    """
+    u = torch.zeros(n_rows, device=device, dtype=dtype)
+    if not scored_rows:
+        return u
+    idx = torch.tensor([r for r, _ in scored_rows], device=device, dtype=torch.long)
+    s = torch.tensor([float(v) for _, v in scored_rows], device=device, dtype=dtype)
+    k = max(1, min(int(nodes_per_label), s.numel()))
+    ordered = torch.sort(s, descending=True).values
+    # Centre the sigmoid *between* the k-th and (k+1)-th scores, not on the k-th.
+    # Sitting on it would leave that candidate at sigmoid(0) = 0.5 for every
+    # temperature, so the effective mass would converge to k - 0.5 and the low-T
+    # limit would not reproduce the hard top-k.
+    if k < ordered.numel():
+        centre = 0.5 * (ordered[k - 1] + ordered[k])
+    else:
+        gap = (ordered[0] - ordered[-1]).abs() / max(ordered.numel() - 1, 1)
+        centre = ordered[k - 1] - gap.clamp(min=1e-6)
+    spread = (centre - s.median()).abs()
+    t_eff = float(temperature) * float(spread)
+    if not (t_eff > 0):
+        t_eff = float(temperature) if temperature > 0 else 1e-8
+    u[idx] = torch.sigmoid((s - centre) / t_eff)
+    return u
+
+
+def _aggregate_soft(
+    adjacency: torch.Tensor,
+    weights: list[torch.Tensor],
+    *,
+    aggregation: str,
+    n_neurons: int,
+    n_tokens: int,
+    constant_node_weighting: bool,
+    epsilon: float,
+) -> torch.Tensor:
+    """``aggregate_supernode_adjacency`` with membership as weights in [0, 1].
+
+    Every place the hard path writes ``j in supernodes[t]`` this writes a
+    ``u_t(j)``-weighted sum, in all three roles membership plays: the source sum,
+    the outer average over target rows, and the internal inbound mass inside
+    frac_external. With ``u`` a 0/1 indicator each expression is identical to the
+    hard path's, term for term.
+    """
+    if aggregation == "normalised":
+        E = normalize_matrix(adjacency)                 # already non-negative
+        En = E[:n_neurons, :n_neurons]
+        total = E[:n_neurons].sum(dim=1)                # over every source column
+        source = [En @ w for w in weights]
+        rows = []
+        for t, u in enumerate(weights):
+            if constant_node_weighting:
+                frac_external = torch.ones_like(total)
+            else:
+                internal = En @ u
+                frac_external = (total - internal) / total.clamp(min=epsilon)
+            g = u * frac_external
+            denom = g.sum().clamp(min=epsilon)
+            entries = [(g * src).sum() / denom for src in source]
+            for p in range(n_tokens):
+                entries.append((g * E[:n_neurons, n_neurons + p]).sum() / denom)
+            rows.append(torch.stack(entries))
+        return torch.stack(rows)
+
+    math_dtype = torch.float32 if adjacency.dtype in (torch.float16, torch.bfloat16) else adjacency.dtype
+    A = adjacency.to(dtype=math_dtype)
+    An = A[:n_neurons, :n_neurons]
+    source = [An @ w.to(dtype=math_dtype) for w in weights]
+    rows = []
+    for u in weights:
+        u = u.to(dtype=math_dtype)
+        denom = u.sum().clamp(min=epsilon)
+        entries = [(u * src).sum() / denom for src in source]
+        for p in range(n_tokens):
+            entries.append((u * A[:n_neurons, n_neurons + p]).sum() / denom)
+        rows.append(torch.stack(entries))
+    W = torch.stack(rows)
+    return W / W.abs().sum().clamp(min=epsilon)
+
 
 
 def aggregate_supernode_adjacency(
@@ -749,6 +863,7 @@ def aggregate_supernode_adjacency(
     aggregation: str = "normalised",
     constant_node_weighting: bool = False,
     token_source_columns: bool = False,
+    membership_weights: list[torch.Tensor] | None = None,
     epsilon: float = 1e-10,
 ) -> torch.Tensor:
     """The supernode adjacency for fixed membership -- the one arithmetic both the
@@ -789,6 +904,18 @@ def aggregate_supernode_adjacency(
         return torch.zeros((0, 0), device=adjacency.device, dtype=adjacency.dtype)
     n_neurons = graph.n_neurons
     n_tokens = graph.n_tokens if token_source_columns else 0
+
+    if membership_weights is not None:
+        if len(membership_weights) != num_supernodes:
+            raise ValueError(
+                f"membership_weights has {len(membership_weights)} entries for "
+                f"{num_supernodes} supernodes")
+        weights = [w.to(device=adjacency.device) for w in membership_weights]
+        return _aggregate_soft(
+            adjacency, weights, aggregation=aggregation, n_neurons=n_neurons,
+            n_tokens=n_tokens, constant_node_weighting=constant_node_weighting,
+            epsilon=epsilon,
+        )
 
     if aggregation == "normalised":
         adj_matrix_norm = normalize_matrix(adjacency)
