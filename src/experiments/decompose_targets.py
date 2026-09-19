@@ -296,15 +296,24 @@ def collect(entries: dict[str, dict]) -> tuple[list[str], np.ndarray, tuple, tup
     n_ops = max(counts, key=counts.get)
 
     keep, rows = [], []
+    n_nonfinite = n_degenerate = 0
     for p in sorted(prompts):
         args = parse_prompt(p)
         if args is None or len(args) != n_ops:
             continue
         y = entries[p]["adj"].detach().to(torch.float64).reshape(-1).numpy()
         if not np.isfinite(y).all():
+            n_nonfinite += 1
+            continue
+        # rel_mse divides by ||T||^2, so a zero or near-zero target would return a
+        # number like 1e12 and swamp every mean it entered. Drop them and say so.
+        if float((y ** 2).sum()) < 1e-10:
+            n_degenerate += 1
             continue
         keep.append(p)
         rows.append(y)
+    if n_nonfinite or n_degenerate:
+        print(f"  dropped {n_nonfinite} non-finite and {n_degenerate} zero-norm targets")
     if len(keep) < 50:
         raise SystemExit(f"only {len(keep)} usable prompts; need at least 50")
     return keep, np.stack(rows), labels, shape, n_ops
@@ -437,7 +446,12 @@ def kfold(Y: np.ndarray, X: np.ndarray, factor_cells: dict[str, list[Any]],
     for k in names:
         v = np.concatenate(acc[k])
         c = np.concatenate(acc_cos[k])
+        # The trainer minimises a mean, so the mean is the headline; the median is
+        # carried alongside it so a single skewed prompt cannot move the verdict
+        # without that being visible in the table.
         out[k] = {"rel_mse": float(v.mean()), "rel_mse_sd": float(v.std(ddof=1)),
+                  "rel_mse_median": float(np.median(v)),
+                  "rel_mse_p95": float(np.percentile(v, 95)),
                   "cos": float(c.mean()), "n": int(v.size)}
     out["probe"]["ridge_alphas"] = chosen_alphas
     return out
@@ -551,12 +565,17 @@ def main() -> None:
           "in the trainer's rel-mse units:")
     res = kfold(Y, X, factor_cells, args.folds, args.seed)
     base = res["constant"]["rel_mse"]
-    print(f"  {'predictor':<24} {'rel_mse':>9} {'sd':>8} {'cos':>7}   vs constant")
+    print(f"  {'predictor':<24} {'rel_mse':>9} {'median':>8} {'p95':>8} {'cos':>7}   vs constant")
     for k in sorted(res, key=lambda k: res[k]["rel_mse"]):
         r = res[k]
         gain = (base - r["rel_mse"]) / max(base, EPS)
         mark = "" if k == "constant" else f"  {gain:+6.1%}"
-        print(f"  {k:<24} {r['rel_mse']:9.4f} {r['rel_mse_sd']:8.4f} {r['cos']:7.3f}{mark}")
+        print(f"  {k:<24} {r['rel_mse']:9.4f} {r['rel_mse_median']:8.4f} "
+              f"{r['rel_mse_p95']:8.4f} {r['cos']:7.3f}{mark}")
+    skew = res["constant"]["rel_mse"] / max(res["constant"]["rel_mse_median"], EPS)
+    if skew > 3.0:
+        print(f"  NOTE: the mean is {skew:.1f}x the median -- a few prompts dominate it; "
+              "read the median column too.")
 
     prompt_aware = {k: v["rel_mse"] for k, v in res.items() if k not in ("constant", "other_prompt")}
     best_name = min(prompt_aware, key=prompt_aware.get)
