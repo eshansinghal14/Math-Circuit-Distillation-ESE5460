@@ -43,6 +43,7 @@ from training.utils import (
     resume_training_state,
     run_config_record,
     save_checkpoint,
+    refresh_curves,
     save_curves,
     save_history,
     student_autocast,
@@ -271,6 +272,7 @@ class SFTTrainer:
                 self.history[f"accuracy_{ds}"].append(ds_acc)
             extra_str = "".join(f" | {ds}={a:.4f}" for ds, a in extra_accs.items())
             print(f"  [eval] step {self._train_step}/{cfg.steps} | Acc={acc:.4f}{extra_str}")
+            refresh_curves(self.history, cfg.save_dir)
 
         save_history(self.history, cfg.save_dir)
         save_curves(self.history, cfg.save_dir)

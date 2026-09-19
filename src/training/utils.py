@@ -916,6 +916,26 @@ def _seed_sort_key(seed: str):
     return (0, int(seed)) if seed.lstrip("-").isdigit() else (1, seed)
 
 
+def refresh_curves(
+    history: Dict[str, List],
+    save_dir: str,
+    losses: Sequence[Tuple[str, str]] = (("step_ce_loss", "CE Loss"),),
+) -> None:
+    """Rewrite the history JSON and redraw training_curves.png mid-run.
+
+    Called after every eval so a long run can be watched from the plot instead of
+    the log. save_curves reads the history back out of the folder's JSON, so the
+    history has to be written first. Any failure is reported and swallowed: a
+    plotting or filesystem error must never take down a training run that is
+    hours in.
+    """
+    try:
+        save_history(history, save_dir)
+        save_curves(history, save_dir, losses=losses)
+    except Exception as e:  # noqa: BLE001 - never fatal
+        print(f"  WARN: could not refresh training curves: {e}")
+
+
 def save_curves(
     history: Dict[str, List],
     save_dir: str,
