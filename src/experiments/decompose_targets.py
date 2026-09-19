@@ -620,6 +620,110 @@ def report_membership(m: dict[str, Any] | None, reference_loss: float | None) ->
               "so the failure is in the gradient, not the objective." % reference_loss)
 
 # ---------------------------------------------------------------------------
+# Membership stability
+# ---------------------------------------------------------------------------
+
+def membership_stability(prompts: list[str], entries: dict[str, dict],
+                         labels: tuple) -> dict[str, Any] | None:
+    """Could the supernodes use one fixed neuron set for every prompt?
+
+    Per-prompt selection is what injects churn into the target. The fix is to
+    pick each supernode's members once, from the dataset-level statistics, and
+    reuse them. Whether that is viable depends on how concentrated the per-prompt
+    choices already are: if a small core of neurons is picked for most prompts,
+    freezing to that core costs little; if selections are spread thinly over the
+    pool, the label has no stable neurons and freezing would change the object.
+
+    For each supernode this reports how often each neuron is chosen, what share of
+    all selections the most frequent k account for (k = the supernode's own size),
+    and the mean Jaccard between each prompt's actual selection and that fixed top
+    k. That last number is the one that decides it: it is the fraction of
+    per-prompt membership a frozen set would reproduce.
+
+    ``uniform_coverage`` is what the top k would cover if selection were uniform
+    over the pool, as the null to beat.
+    """
+    from collections import Counter
+
+    per_sn: list[Counter] = []
+    sizes: list[int] = []
+    n_used = 0
+    for p in prompts:
+        sn = entries[p].get("supernodes") or []
+        if not sn:
+            continue
+        if not per_sn:
+            per_sn = [Counter() for _ in sn]
+            sizes = [0] * len(sn)
+        if len(sn) != len(per_sn):
+            continue
+        n_used += 1
+        for i, members in enumerate(sn):
+            per_sn[i].update(int(x) for x in members)
+            sizes[i] = max(sizes[i], len(members))
+    if not per_sn or n_used < 2:
+        return None
+
+    names = [l[0] if l else "sn%d" % i for i, l in enumerate(labels)]
+    names += ["sn%d" % i for i in range(len(names), len(per_sn))]
+
+    out = []
+    for i, counts in enumerate(per_sn):
+        k = max(sizes[i], 1)
+        total = sum(counts.values())
+        top = counts.most_common(k)
+        fixed = frozenset(n for n, _ in top)
+        coverage = sum(c for _, c in top) / max(total, 1)
+        pool_seen = len(counts)
+        jac = []
+        for p in prompts:
+            sn = entries[p].get("supernodes") or []
+            if len(sn) != len(per_sn):
+                continue
+            s = frozenset(int(x) for x in sn[i])
+            u = len(s | fixed)
+            jac.append(len(s & fixed) / u if u else 1.0)
+        out.append({
+            "supernode": names[i],
+            "size": k,
+            "distinct_neurons_ever_used": pool_seen,
+            "top_k_coverage": float(coverage),
+            "uniform_coverage": float(k / pool_seen) if pool_seen else None,
+            "mean_jaccard_to_fixed": float(np.mean(jac)) if jac else None,
+            "most_common_frac": float(top[0][1] / max(n_used, 1)) if top else None,
+        })
+    return {"n_prompts": n_used, "supernodes": out,
+            "mean_jaccard_to_fixed": float(np.mean([o["mean_jaccard_to_fixed"] for o in out
+                                                    if o["mean_jaccard_to_fixed"] is not None]))}
+
+
+def report_stability(st: dict[str, Any] | None) -> None:
+    """Print the stability profile and say whether freezing membership is viable."""
+    if st is None:
+        print("\nMembership stability: no supernode members recorded; skipped.")
+        return
+    print("\nMembership stability (could one fixed neuron set serve every prompt?):")
+    print("  %-14s %5s %9s %9s %9s %9s" % ("supernode", "size", "distinct", "top-k cov",
+                                           "if uniform", "jaccard"))
+    for o in st["supernodes"]:
+        uni = "n/a" if o["uniform_coverage"] is None else "%.3f" % o["uniform_coverage"]
+        print("  %-14s %5d %9d %9.3f %9s %9.3f"
+              % (o["supernode"], o["size"], o["distinct_neurons_ever_used"],
+                 o["top_k_coverage"], uni, o["mean_jaccard_to_fixed"]))
+    j = st["mean_jaccard_to_fixed"]
+    print("  a frozen top-k set would reproduce %.0f%% of per-prompt membership" % (100 * j))
+    if j >= 0.5:
+        print("    viable: selection is concentrated on a stable core, so freezing membership")
+        print("    removes the churn without changing what the supernode is.")
+    elif j >= 0.25:
+        print("    partial: a stable core exists but half the selection moves per prompt.")
+        print("    Freezing is worth testing, but expect the supernode to shift meaning.")
+    else:
+        print("    not viable: selections are spread thinly, so these labels have no stable")
+        print("    neurons. Freezing would define a different object; prefer soft membership")
+        print("    (ANOVA-weighted average over the pool) or a coarser aggregation.")
+
+# ---------------------------------------------------------------------------
 # Entry-level variance map
 # ---------------------------------------------------------------------------
 
@@ -725,6 +829,8 @@ def main() -> None:
         print(f"    {e['target']:<12} <- {e['source']:<12} mean {e['mean']:+.4f} sd {e['sd']:.4f}"
               f" | {e['share_of_variance']:5.1%} of variance")
 
+    stability = membership_stability(prompts, entries, labels)
+    report_stability(stability)
     membership = membership_analysis(prompts, Y, entries, args.pairs, args.seed)
     report_membership(membership, args.reference_loss)
 
@@ -775,7 +881,7 @@ def main() -> None:
         "n_prompts": len(prompts), "n_operands": n_ops, "matrix_shape": list(shape),
         "supernode_labels": [list(l) for l in labels],
         "audit": audit_result, "audit_problems": problems,
-        "membership": membership,
+        "membership": membership, "membership_stability": stability,
         "eta_squared": etas, "variance_map": vmap, "out_of_fold": res,
         "constant": base,
         "best_prompt_aware": {"name": best_name, "rel_mse": best, "gain_vs_constant": gain},
