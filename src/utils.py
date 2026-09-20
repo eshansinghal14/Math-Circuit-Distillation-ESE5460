@@ -76,6 +76,57 @@ def extract_svamp_answer(text: str) -> Optional[str]:
     return None
 
 
+_ANSWER_TYPE_CACHE: Dict[str, str] = {}
+
+
+def dataset_answer_type(dataset: str) -> str:
+    """``"text"`` or ``"int"`` for a local dataset, from ``datasets/<name>/meta.json``.
+
+    Explicit rather than inferred from the gold's Python type: load_split already
+    coerces an all-digit answer to int, so a context-grounded dataset whose answer
+    happens to be "1990" would silently take the arithmetic path. Datasets without
+    a meta.json are arithmetic, which is every dataset that predates this.
+    """
+    if dataset in _ANSWER_TYPE_CACHE:
+        return _ANSWER_TYPE_CACHE[dataset]
+    path = os.path.join(DIR_ROOT, "datasets", dataset, "meta.json")
+    kind = "int"
+    if os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                kind = str(json.load(f).get("answer_type", "int")).lower()
+        except Exception:
+            kind = "int"
+    _ANSWER_TYPE_CACHE[dataset] = kind
+    return kind
+
+
+_ARTICLES = re.compile(r"\b(a|an|the)\b", re.UNICODE)
+_PUNCT = re.compile(r"[^\w\s]", re.UNICODE)
+
+
+def normalize_answer_text(s: str) -> str:
+    """SQuAD-style normalisation: lowercase, drop articles and punctuation, squash space."""
+    s = s.lower()
+    s = _PUNCT.sub(" ", s)
+    s = _ARTICLES.sub(" ", s)
+    return " ".join(s.split())
+
+
+def extract_text_answer(text: str) -> Optional[str]:
+    """The model's answer from a continuation: the first non-empty line, normalised.
+
+    Generation is greedy and the prompt ends at "A:", so the answer is the first
+    thing emitted; cutting at the newline stops a rambling continuation or a
+    follow-up question from being scored.
+    """
+    for line in text.splitlines():
+        norm = normalize_answer_text(line)
+        if norm:
+            return norm
+    return None
+
+
 def parse_response(text: str, dataset: str) -> Optional:
     if dataset == "gsm8k":
         return extract_gsm8k_answer(text)
@@ -186,6 +237,7 @@ def eval_model(model, tokenizer, test_dataset, dataset_name: str, batch_size: in
     model.eval()
     original_side = tokenizer.padding_side
     tokenizer.padding_side = "left"
+    answer_type = dataset_answer_type(dataset_name)
     correct = total = 0
     samples = test_dataset.samples
     try:
@@ -217,6 +269,9 @@ def eval_model(model, tokenizer, test_dataset, dataset_name: str, batch_size: in
                 if is_hf:
                     pred = parse_response(text, dataset_name)
                     gold_parsed = gold if isinstance(gold, int) else parse_response(str(gold), dataset_name)
+                elif answer_type == "text":
+                    pred = extract_text_answer(text)
+                    gold_parsed = normalize_answer_text(str(gold)) or None
                 else:
                     pred = extract_leading_int(text)
                     gold_parsed = gold if isinstance(gold, int) else extract_leading_int(str(gold))
