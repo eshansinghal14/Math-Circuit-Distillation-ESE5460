@@ -81,9 +81,11 @@ def _squad_rows(split: str, limit: int, max_context_words: int,
             continue
         context = _clean(ex["context"])
         if len(context.split()) > max_context_words:
+            dropped["too_long_context"] = dropped.get("too_long_context", 0) + 1
             continue
         answer = _clean(answers[0])
         if not answer or answer.lower() not in context.lower():
+            dropped["answer_not_in_context"] = dropped.get("answer_not_in_context", 0) + 1
             continue  # keep it extractive: the span must be in the passage
         dropped.setdefault("lengths", []).append(len(answer.split()))
         if len(answer.split()) > max_answer_words:
@@ -100,19 +102,47 @@ def _squad_rows(split: str, limit: int, max_context_words: int,
 
 
 def _hotpot_rows(split: str, limit: int, max_context_words: int,
-                 max_answer_words: int, dropped: dict) -> list[dict]:
+                 max_answer_words: int, dropped: dict, n_paragraphs: int = 4,
+                 seed: int = 0) -> list[dict]:
+    """HotpotQA distractor, trimmed to a fixed number of paragraphs.
+
+    The raw distractor setting concatenates ten paragraphs, typically 800-1200
+    words, so a context cap sized for SQuAD rejects essentially every example.
+    Keeping the supporting paragraphs plus a few distractors preserves what makes
+    the task useful here -- the answer needs two passages, and the gold ones sit
+    at a position that moves between examples -- at a length the token-path
+    backward can afford.
+
+    The kept paragraphs are shuffled so the gold ones are not always first, which
+    would otherwise make position predictable and hand the loss a constant.
+    """
     ds = _load_split(["hotpotqa/hotpot_qa", "hotpot_qa"], split, "distractor")
+    rng = random.Random(seed)
     rows, seen = [], set()
     for ex in ds:
         answer = _clean(ex["answer"])
-        if not answer or answer.lower() in ("yes", "no"):
+        if not answer:
+            dropped["no_answer"] = dropped.get("no_answer", 0) + 1
+            continue
+        if answer.lower() in ("yes", "no"):
+            dropped["yes_no"] = dropped.get("yes_no", 0) + 1
             continue  # yes/no needs no span, so it carries no positional signal
-        titles = ex["context"]["title"]
+
+        titles = list(ex["context"]["title"])
         sentences = ex["context"]["sentences"]
-        context = _clean(" ".join(" ".join(s) for s in sentences))
+        gold_titles = set(ex["supporting_facts"]["title"])
+        gold = [i for i, t in enumerate(titles) if t in gold_titles]
+        distract = [i for i in range(len(titles)) if i not in set(gold)]
+        rng.shuffle(distract)
+        keep = gold + distract[: max(n_paragraphs - len(gold), 0)]
+        rng.shuffle(keep)                       # gold position must vary
+        context = _clean(" ".join(" ".join(sentences[i]) for i in keep))
+
         if len(context.split()) > max_context_words:
+            dropped["too_long_context"] = dropped.get("too_long_context", 0) + 1
             continue
         if answer.lower() not in context.lower():
+            dropped["answer_not_in_context"] = dropped.get("answer_not_in_context", 0) + 1
             continue
         dropped.setdefault("lengths", []).append(len(answer.split()))
         if len(answer.split()) > max_answer_words:
@@ -125,7 +155,6 @@ def _hotpot_rows(split: str, limit: int, max_context_words: int,
         rows.append({"q_str": q, "a_str": answer})
         if len(rows) >= limit:
             break
-    _ = titles  # titles are unused; the passages are concatenated in order
     return rows
 
 
@@ -154,6 +183,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "forces a large --max-eval-tokens on every prompt, which costs generation "
                         "time on all of them; capping lets the eval budget match the median. "
                         "Applied to train and test alike so the eval distribution matches training.")
+    p.add_argument("--hotpot-paragraphs", type=int, default=4, dest="n_paragraphs",
+                   help="HotpotQA only: keep this many paragraphs, the supporting ones plus "
+                        "distractors, shuffled so the gold position varies. The raw distractor "
+                        "setting has 10 (800-1200 words), which a SQuAD-sized context cap rejects "
+                        "almost entirely.")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--no-shuffle", action="store_false", dest="shuffle")
     return p
@@ -168,10 +202,11 @@ def main() -> None:
     stats: dict = {}
     # One pass for train + sft so the sft rows are the ones straight after train's,
     # then a slice: taking two independent passes would return the same rows twice.
+    extra = {"n_paragraphs": args.n_paragraphs, "seed": args.seed} if args.source == "hotpotqa" else {}
     pool = fn(train_split, args.n_train + args.n_sft, args.max_context_words,
-              args.max_answer_words, stats)
+              args.max_answer_words, stats, **extra)
     train, sft = pool[: args.n_train], pool[args.n_train:]
-    test = fn(test_split, args.n_test, args.max_context_words, args.max_answer_words, stats)
+    test = fn(test_split, args.n_test, args.max_context_words, args.max_answer_words, stats, **extra)
     if args.shuffle:
         rng.shuffle(train)
         rng.shuffle(test)
@@ -185,6 +220,17 @@ def main() -> None:
     if overlap:
         raise SystemExit(f"{overlap} prompts are shared between splits; refusing to write")
 
+    reasons = {k: v for k, v in stats.items() if k != "lengths"}
+    if not train or not test:
+        detail = ", ".join(f"{k}={v}" for k, v in sorted(reasons.items())) or "no rows reached the filters"
+        raise SystemExit(
+            f"produced {len(train)} train and {len(test)} test rows. Dropped by filter: {detail}.\n"
+            "  too_long_context dominating usually means --max-context-words is sized for one source "
+            "and you are building another: HotpotQA's raw distractor setting is 800-1200 words, so "
+            "either raise the cap or lower --hotpot-paragraphs.")
+    reasons = {k: v for k, v in stats.items() if k != "lengths"}
+    if reasons:
+        print("dropped by filter: " + ", ".join(f"{k}={v}" for k, v in sorted(reasons.items())))
     out_dir = os.path.join(DIR_ROOT, "datasets", args.dataset_name)
     os.makedirs(out_dir, exist_ok=True)
 
