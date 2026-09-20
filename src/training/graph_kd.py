@@ -483,9 +483,11 @@ class GraphKDTrainer:
                     if p.grad is None:
                         continue
                     before = grads_before.get(n)
-                    if before is None:
-                        before = torch.zeros_like(p.grad)
-                    g_kl = before.to(p.grad.device, non_blocking=True).float()
+                    # The snapshot lives on the host; bring this tensor back once
+                    # and use that copy for both the KL gradient and the delta.
+                    before = (torch.zeros_like(p.grad) if before is None
+                              else before.to(p.grad.device))
+                    g_kl = before.float()
                     if grads_at_start is not None:
                         start = grads_at_start.get(n)
                         if start is not None:
