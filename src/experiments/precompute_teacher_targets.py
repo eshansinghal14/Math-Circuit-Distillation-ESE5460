@@ -87,7 +87,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="ANOVA supernode labels, exactly as passed to graph_kd (omit for arg-token + DLA; "
                         "'tokens' appends the token-embedding source columns).")
     p.add_argument("--supergraph-aggregation", type=str, default="normalised", dest="supergraph_aggregation",
-                   choices=["normalised", "raw-signed"], help="Must match graph_kd's flag.")
+                   choices=["normalised", "raw-signed", "token-path"], help="Must match graph_kd's flag.")
     p.add_argument("--token-source-columns", action="store_true", dest="token_source_columns",
                    help="Must match graph_kd's flag (or pass 'tokens' as a label).")
     p.add_argument("--nodes-per-label", type=int, default=10, dest="nodes_per_label")

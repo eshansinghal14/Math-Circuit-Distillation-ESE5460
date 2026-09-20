@@ -739,7 +739,7 @@ def select_arg_supernodes(
     return raw_supernodes, supernode_labels_out
 
 
-SUPERGRAPH_AGGREGATIONS = ("normalised", "raw-signed")
+SUPERGRAPH_AGGREGATIONS = ("normalised", "raw-signed", "token-path")
 SUPERNODE_MEMBERSHIP_TYPES = ("topk", "soft")
 
 
@@ -856,6 +856,71 @@ def _aggregate_soft(
 
 
 
+def gold_logit_position(graph, gold_token: int) -> int | None:
+    """Index of ``gold_token`` among the graph's logit targets, or None."""
+    for i, t in enumerate(getattr(graph, "logit_targets", []) or []):
+        if int(t.vocab_idx) == int(gold_token):
+            return i
+    return None
+
+
+def token_path_supergraph(graph, gold_token: int, *, epsilon: float = 1e-10) -> SuperGraph:
+    """A 1 x T target over input positions: what the answer actually draws on.
+
+    Entry p is token p's total attribution to the gold answer's logit, the direct
+    residual path plus one hop through the pre-selected neurons::
+
+        total[p] = A[L, tok_p] + sum_n A[L, n] * A[n, tok_p]
+
+    then |.| and normalised over positions.
+
+    Unlike every supernode construction this is indexed by *token position*, which
+    the teacher and student share exactly -- same tokenizer, same ids, same
+    length, checked once per run by the trainer's sequence check -- while they
+    share no neurons at all and no correspondence between their neuron spaces
+    exists. So it needs no membership: no ANOVA, no top-k selection, no churn, no
+    label alignment, and no operand grid, which is also why it ports to tasks that
+    have no operands.
+
+    It depends on the prompt the opposite way round to the sum categories, which
+    measured as ~80% a function of sum range and so were redundant with the KD
+    term. This is a function of *which inputs* the answer draws on rather than of
+    the answer's value.
+
+    Normalising over positions is what makes it comparable: raw attribution
+    magnitudes carry each model's own activation scale, which is the
+    pool-dependence problem in another guise. As a distribution the scale divides
+    out and only the shape survives.
+
+    Built out-of-place so the gradient flows from the loss back through the
+    student's adjacency into its weights, exactly as aggregate_supernode_adjacency
+    does. It is returned as a one-row SuperGraph labelled ``token-path`` so the
+    teacher/student alignment, the scramble and every graph_loss_type work on it
+    unchanged.
+    """
+    gi = gold_logit_position(graph, gold_token)
+    if gi is None:
+        raise ValueError(
+            f"gold token {gold_token} is not among the graph's {len(graph.logit_targets)} "
+            "logit targets; token-path needs the gold logit to attribute to"
+        )
+    A = graph.adjacency_matrix
+    math_dtype = torch.float32 if A.dtype in (torch.float16, torch.bfloat16) else A.dtype
+    A = A.to(dtype=math_dtype)
+    n, n_tok = graph.n_neurons, graph.n_tokens
+    logit_row = n + n_tok + gi
+    tok = slice(n, n + n_tok)
+    direct = A[logit_row, tok]                     # [T]  token -> gold logit
+    one_hop = A[logit_row, :n] @ A[:n, tok]        # [T]  token -> neuron -> gold logit
+    total = (direct + one_hop).abs()
+    v = (total / total.sum().clamp(min=epsilon)).unsqueeze(0)
+    return SuperGraph(
+        supernode_adjacency_matrix=v,
+        supernodes=[list(range(n_tok))],
+        supernode_labels=[["token-path"]],
+    )
+
+
 def aggregate_supernode_adjacency(
     graph: Graph,
     supernodes: list[list[int]],
@@ -896,6 +961,10 @@ def aggregate_supernode_adjacency(
     Built out-of-place (torch.stack) so gradient flows through the student's
     adjacency into the model.
     """
+    if aggregation == "token-path":
+        raise NotImplementedError(
+            "token-path does not aggregate supernodes; call token_path_supergraph(graph, "
+            "gold_token) instead. Reaching here means a caller branched on the wrong flag.")
     if aggregation not in SUPERGRAPH_AGGREGATIONS:
         raise ValueError(f"aggregation must be one of {SUPERGRAPH_AGGREGATIONS}, got {aggregation!r}")
     adjacency = graph.adjacency_matrix

@@ -715,7 +715,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     group.add_argument(
         "--supergraph-aggregation", type=str, default="normalised", dest="supergraph_aggregation",
-        choices=["normalised", "raw-signed"],
+        choices=["normalised", "raw-signed", "token-path"],
         help="normalised: per-target |inbound| shares with frac_external weighting (pool-size "
              "dependent; only row shape is comparable across models). raw-signed: mean over "
              "target members of the summed raw signed edges, whole matrix divided once by its "

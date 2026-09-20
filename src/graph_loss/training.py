@@ -19,7 +19,12 @@ from utils import parse_response, tokenize_prompt_answer
 import torch
 
 from graph_loss.create_graph import create_graph
-from graph_loss.graph import aggregate_supernode_adjacency, SuperGraph, normalize_matrix
+from graph_loss.graph import (
+    aggregate_supernode_adjacency,
+    SuperGraph,
+    normalize_matrix,
+    token_path_supergraph,
+)
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
 from graph_loss.loss import compute_graph_loss
 from graph_loss.utils import normalize_node_labels
@@ -439,7 +444,7 @@ def _compute_teacher_target(
             freeze_attention=config.freeze_attention,
             freeze_rms_norm=config.freeze_rms_norm,
             constant_node_weighting=config.constant_node_weighting,
-            supergraph_aggregation=config.supergraph_aggregation,
+            supergraph_aggregation=_inner_aggregation(config),
             token_source_columns=config.token_source_columns,
         )
     # Same ids as the KD batch row (BOS + prompt, answer + EOS): the teacher's
@@ -456,9 +461,76 @@ def _compute_teacher_target(
     if prompt_len > 0 and full_logits.shape[0] >= prompt_len:
         teacher_dla_logits = full_logits[prompt_len - 1].to(device)
     logit_token_ids = teacher_result.graph.logit_token_ids.to(device)
-    teacher_supergraph = teacher_result.supergraph
+    if config.supergraph_aggregation == "token-path":
+        # The supernode supergraph create_graph built is discarded; the target is
+        # the token-position distribution derived from the same raw graph.
+        teacher_supergraph = token_path_supergraph(
+            teacher_result.graph, int(answer_ids[0]),
+        )
+    else:
+        teacher_supergraph = teacher_result.supergraph
     del teacher_result
     return teacher_supergraph, logit_token_ids, teacher_dla_logits
+
+
+def _inner_aggregation(config: "GraphAuxConfig") -> str:
+    """The aggregation create_graph should run internally.
+
+    token-path does not aggregate supernodes, so create_graph is given a real
+    aggregation whose output is discarded; the target is built from the raw graph
+    afterwards. Passing "token-path" through would hit the guard in
+    aggregate_supernode_adjacency.
+    """
+    return "normalised" if config.supergraph_aggregation == "token-path" else config.supergraph_aggregation
+
+
+def _token_path_loss(
+    prompt: str,
+    answer: Any,
+    student_adapter: HFLlamaGraphAdapter,
+    config: "GraphAuxConfig",
+    student_graph: Any,
+    teacher_supergraph: SuperGraph,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Loss for the token-path target: one row, so no label alignment is needed.
+
+    Teacher and student index the same token positions by construction, so the
+    mapping is the identity and the "supernodes aligned" counters are trivially
+    1 of 1. Everything else -- the scramble, the real-target diagnostic and every
+    graph_loss_type -- works on the 1 x T matrix unchanged.
+    """
+    _, answer_ids = tokenize_prompt_answer(student_adapter.tokenizer, prompt, str(answer))
+    student_supergraph = token_path_supergraph(student_graph, int(answer_ids[0]))
+
+    W_S = student_supergraph.supernode_adjacency_matrix
+    W_T = teacher_supergraph.supernode_adjacency_matrix.detach().to(
+        device=W_S.device, dtype=W_S.dtype,
+    )
+    if W_T.shape != W_S.shape:
+        raise ValueError(
+            f"token-path shape mismatch for prompt={prompt!r}: teacher {tuple(W_T.shape)} vs "
+            f"student {tuple(W_S.shape)}; teacher and student must tokenise identically")
+
+    mapping = {0: {0}}
+    real_target_loss = None
+    if config.scramble_teacher_graph:
+        with torch.no_grad():
+            real_target_loss, _ = compute_graph_loss(
+                W_T, W_S.detach(), mapping, [0], [0], similarity=config.graph_loss_type)
+        W_T = scramble_teacher_rows(W_T, config)
+
+    graph_loss, loss_breakdown = compute_graph_loss(
+        W_T, W_S, mapping, [0], [0], similarity=config.graph_loss_type)
+    metrics = {
+        "teacher_supernodes": 1,
+        "student_supernodes": 1,
+        "student_graph_neurons": int(student_graph.n_neurons),
+        "aligned_teacher_supernodes": 1,
+        **loss_breakdown,
+    }
+    if real_target_loss is not None:
+        metrics["edge_loss_real_target"] = float(real_target_loss.item())
+    return graph_loss, metrics
 
 
 def compute_prompt_graph_loss(
@@ -469,6 +541,7 @@ def compute_prompt_graph_loss(
     teacher_supergraph: SuperGraph,
     logit_token_ids: torch.Tensor | None,
     teacher_dla_logits: torch.Tensor | None,
+    answer: Any = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     if config.verbose:
         print(
@@ -514,6 +587,9 @@ def compute_prompt_graph_loss(
         ) from e
 
     student_graph = student_result.graph
+    if config.supergraph_aggregation == "token-path":
+        return _token_path_loss(
+            prompt, answer, student_adapter, config, student_graph, teacher_supergraph)
     student_supergraph_structure = student_result.supergraph
 
     # Filter supernodes to only the requested labels (if specified).
@@ -870,6 +946,7 @@ def backward_batch_graph_loss(
                 teacher_supergraph=teacher_supergraph,
                 logit_token_ids=logit_token_ids,
                 teacher_dla_logits=teacher_dla_logits,
+                answer=answers[i],
             )
             detached_losses.append(prompt_loss.detach())
             scaled_loss = (loss_scale / denom) * prompt_loss
