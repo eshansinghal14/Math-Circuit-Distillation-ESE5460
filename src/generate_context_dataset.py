@@ -37,8 +37,10 @@ import json
 import os
 import random
 import re
+import sys
 
-from utils import DIR_ROOT
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from utils import DIR_ROOT  # noqa: E402
 
 PROMPT = "{context}\nQ: {question}\nA:"
 
