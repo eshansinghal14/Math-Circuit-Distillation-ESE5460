@@ -57,15 +57,31 @@ AUTOCAST_DTYPE = torch.bfloat16
 DEFAULT_SEED = 42
 
 
-def load_student(model_name: str):
-    """Load the trainable student in fp32 master weights.
+DTYPES = {"float32": torch.float32, "bfloat16": torch.bfloat16}
+
+
+def load_student(model_name: str, dtype: str | None = None):
+    """Load the trainable model, fp32 master weights by default.
 
     Also disables the KV cache and turns on gradient checkpointing, which every
     trainer wants. The forward must then run under :func:`student_autocast`.
+
+    ``dtype="bfloat16"`` halves the weight, gradient and Adam-moment footprint,
+    which is what makes an 8B fit on one 80 GB card (fp32 needs ~120 GB for the
+    four buffers). It is not free: bf16 carries ~8 significant bits, so an Adam
+    step of size lr lands below a ULP of the weight it updates unless lr is large
+    enough. At lr=1e-6 that is 7x below for a weight of 1e-3 and 488x below for
+    0.1, and the update is simply lost -- this is the 2026-09 failure where only
+    ~2% of parameters moved. It is independent of the loss, because Adam's step is
+    ~lr per coordinate whatever the gradient scale. Check
+    ``params_changed_step1`` in the history: it should be near 1.0, and a small
+    value means the learning rate is too low for this precision, not that the
+    objective is weak.
     """
     from utils import load_model
 
-    model, tokenizer = load_model(model_name, dtype=STUDENT_DTYPE)
+    resolved = DTYPES[dtype] if dtype else STUDENT_DTYPE
+    model, tokenizer = load_model(model_name, dtype=resolved)
     if hasattr(model.config, "use_cache"):
         model.config.use_cache = False
     if hasattr(model, "gradient_checkpointing_enable"):
@@ -1126,6 +1142,12 @@ def add_standard_args(parser: argparse.ArgumentParser) -> None:
                          "short prompts, so it can run far larger batches than training; it used to "
                          "share --batch-size. Default 256.")
     group.add_argument("--test-limit", type=int, default=None, dest="test_limit")
+    group.add_argument("--dtype", type=str, default="float32", choices=sorted(DTYPES), dest="dtype",
+                       help="Master weight precision. float32 (default) is the regime every recorded "
+                            "result used. bfloat16 halves weights, gradients and Adam moments -- the "
+                            "only way an 8B fits on one 80 GB card -- but an Adam step below a bf16 "
+                            "ULP is dropped, so raise the learning rate and check "
+                            "params_changed_step1 is near 1.0.")
     group.add_argument("--seeds", "--seed", type=int, nargs="+", default=[DEFAULT_SEED], dest="seeds",
                     help="One or more seeds for python, numpy and torch: data order, any sampling, "
                          "and (graph KD) the scramble permutations. The trainer runs once per seed, "

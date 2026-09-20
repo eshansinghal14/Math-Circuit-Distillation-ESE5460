@@ -100,6 +100,7 @@ class SFTConfig:
     grad_accum_steps: int = 1
     eval_datasets: List[str] = field(default_factory=list)
     test_limit: Optional[int] = None
+    dtype: Optional[str] = None
     resume: bool = False
     seed: int = _SEED
 
@@ -125,7 +126,7 @@ class SFTTrainer:
         # fp32 master weights with a bf16 autocast forward; see training/utils.py.
         # --resume loads the weights the periodic checkpoint saved instead.
         student_src = resume_checkpoint_dir(config.save_dir) if config.resume else config.model
-        self.model, self.tokenizer = load_student(student_src)
+        self.model, self.tokenizer = load_student(student_src, getattr(config, "dtype", None))
 
         dataset = PromptAnswerDataset(config.dataset, train_data, self.tokenizer)
         self.test_dataset = PromptAnswerDataset(config.dataset, test_data, self.tokenizer)
@@ -340,6 +341,7 @@ def main() -> None:
                 eval_batch_size=args.eval_batch_size,
                 eval_datasets=args.eval_datasets,
                 test_limit=args.test_limit,
+                dtype=args.dtype,
                 resume=args.resume,
                 seed=seed,
             ),
