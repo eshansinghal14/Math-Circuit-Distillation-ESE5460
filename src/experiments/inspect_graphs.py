@@ -98,7 +98,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils import DIR_ROOT, load_data, load_model, tokenize_prompt_answer  # noqa: E402
 from training.utils import load_student, student_autocast  # noqa: E402
 from graph_loss.hf_adapter import HFLlamaGraphAdapter  # noqa: E402
-from graph_loss.graph import aggregate_supernode_adjacency  # noqa: E402
+from graph_loss.graph import (  # noqa: E402
+    aggregate_supernode_adjacency,
+    salient_targets_with_gold,
+)
 from graph_loss.utils import normalize_node_labels  # noqa: E402
 from graph_loss.training import GraphAuxConfig  # noqa: E402
 from graph_loss.create_graph import create_graph  # noqa: E402
@@ -207,22 +210,6 @@ def bucket_of(rec: dict[str, Any], tags: dict[str, bool], confident: float, unsu
     if kd_correct:
         return None
     return "wrong_carry" if tags.get("carry_units") else "wrong_nocarry"
-
-
-def salient_targets_with_gold(logits: torch.Tensor, gold_token: int, top_k_logits: float,
-                              temperature: float) -> tuple[torch.Tensor, bool]:
-    """The teacher's salient logit set (AttributionTargets._from_salient: fewest top
-    logits reaching ``top_k_logits`` cumulative mass, capped at 10) with the gold
-    token appended when it is missing. Returns (token ids, gold_was_in_salient)."""
-    probs = torch.softmax(logits.float() / temperature, dim=-1)
-    sorted_probs, sorted_indices = torch.sort(probs, descending=True)
-    k = int((torch.cumsum(sorted_probs, dim=-1) < top_k_logits).sum().item()) + 1
-    k = min(k, 10, probs.numel())
-    top = sorted_indices[:k].cpu()
-    in_salient = bool((top == gold_token).any())
-    if not in_salient:
-        top = torch.cat([top, torch.tensor([gold_token], dtype=top.dtype)])
-    return top, in_salient
 
 
 # ---------------------------------------------------------------------------

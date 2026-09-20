@@ -88,6 +88,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "'tokens' appends the token-embedding source columns).")
     p.add_argument("--supergraph-aggregation", type=str, default="normalised", dest="supergraph_aggregation",
                    choices=["normalised", "raw-signed", "token-path"], help="Must match graph_kd's flag.")
+    p.add_argument("--token-path-rows", type=str, default="weighted", dest="token_path_rows",
+                   choices=["weighted", "gold", "all"], help="Must match graph_kd's flag.")
     p.add_argument("--token-source-columns", action="store_true", dest="token_source_columns",
                    help="Must match graph_kd's flag (or pass 'tokens' as a label).")
     p.add_argument("--nodes-per-label", type=int, default=10, dest="nodes_per_label")
@@ -161,6 +163,7 @@ def main() -> None:
         constant_node_weighting=args.constant_node_weighting,
         supergraph_aggregation=args.supergraph_aggregation,
         token_source_columns=token_source_columns,
+        token_path_rows=args.token_path_rows,
         dataset_name=args.dataset,
     )
     cache_dir = args.teacher_target_cache_dir

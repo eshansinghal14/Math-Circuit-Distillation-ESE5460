@@ -110,6 +110,7 @@ class GraphKDConfig:
     constant_node_weighting: bool = False
     supergraph_aggregation: str = "normalised"
     token_source_columns: bool = False
+    token_path_rows: str = "weighted"
     top_k_logits: float = 0.95
     teacher_graph_batch_size: int = 512
     student_graph_batch_size: int = 1
@@ -227,6 +228,7 @@ class GraphKDTrainer:
             constant_node_weighting=config.constant_node_weighting,
             supergraph_aggregation=config.supergraph_aggregation,
             token_source_columns=config.token_source_columns,
+            token_path_rows=config.token_path_rows,
             verbose=config.graph_verbose,
             mlp_input_cache=student_mlp_cache,
             teacher_mlp_input_cache=teacher_mlp_cache,
@@ -719,7 +721,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="normalised: per-target |inbound| shares with frac_external weighting (pool-size "
              "dependent; only row shape is comparable across models). raw-signed: mean over "
              "target members of the summed raw signed edges, whole matrix divided once by its "
-             "|mass| (pool-independent; keeps sign and relative edge strength).",
+             "|mass| (pool-independent; keeps sign and relative edge strength). token-path: no "
+             "supernodes at all -- a distribution over input token positions (see "
+             "--token-path-rows).",
+    )
+    group.add_argument(
+        "--token-path-rows", type=str, default="weighted", dest="token_path_rows",
+        choices=["weighted", "gold", "all"],
+        help="Only with --supergraph-aggregation token-path. 'weighted' (default): one row, the "
+             "logit rows combined with the teacher's probabilities -- needs no gold token. 'gold': "
+             "one row, attribution to the gold answer's logit. 'all': the full L x T, one row per "
+             "logit target, keeping which tokens push toward the wrong candidates.",
     )
     group.add_argument(
         "--token-source-columns", action="store_true", dest="token_source_columns",
@@ -884,6 +896,7 @@ def main() -> None:
                 constant_node_weighting=args.constant_node_weighting,
                 supergraph_aggregation=args.supergraph_aggregation,
                 token_source_columns=args.token_source_columns,
+                token_path_rows=args.token_path_rows,
                 top_k_logits=args.top_k_logits,
                 teacher_prop_neurons_per_layer=args.teacher_prop_neurons_per_layer,
                 student_prop_neurons_per_layer=args.student_prop_neurons_per_layer,

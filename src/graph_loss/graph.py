@@ -856,6 +856,22 @@ def _aggregate_soft(
 
 
 
+def salient_targets_with_gold(logits: torch.Tensor, gold_token: int, top_k_logits: float,
+                              temperature: float) -> tuple[torch.Tensor, bool]:
+    """The teacher's salient logit set (AttributionTargets._from_salient: fewest top
+    logits reaching ``top_k_logits`` cumulative mass, capped at 10) with the gold
+    token appended when it is missing. Returns (token ids, gold_was_in_salient)."""
+    probs = torch.softmax(logits.float() / temperature, dim=-1)
+    sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+    k = int((torch.cumsum(sorted_probs, dim=-1) < top_k_logits).sum().item()) + 1
+    k = min(k, 10, probs.numel())
+    top = sorted_indices[:k].cpu()
+    in_salient = bool((top == gold_token).any())
+    if not in_salient:
+        top = torch.cat([top, torch.tensor([gold_token], dtype=top.dtype)])
+    return top, in_salient
+
+
 def gold_logit_position(graph, gold_token: int) -> int | None:
     """Index of ``gold_token`` among the graph's logit targets, or None."""
     for i, t in enumerate(getattr(graph, "logit_targets", []) or []):
@@ -864,60 +880,105 @@ def gold_logit_position(graph, gold_token: int) -> int | None:
     return None
 
 
-def token_path_supergraph(graph, gold_token: int, *, epsilon: float = 1e-10) -> SuperGraph:
-    """A 1 x T target over input positions: what the answer actually draws on.
+TOKEN_PATH_ROWS = ("weighted", "gold", "all")
 
-    Entry p is token p's total attribution to the gold answer's logit, the direct
-    residual path plus one hop through the pre-selected neurons::
 
-        total[p] = A[L, tok_p] + sum_n A[L, n] * A[n, tok_p]
+def token_path_matrix(graph, *, epsilon: float = 1e-10) -> torch.Tensor:
+    """``[L, T]`` path attribution from each input token to each logit target.
 
-    then |.| and normalised over positions.
+    Row L, column p is token p's total effect on logit L: the direct residual
+    path plus one hop through the pre-selected neurons::
 
-    Unlike every supernode construction this is indexed by *token position*, which
-    the teacher and student share exactly -- same tokenizer, same ids, same
-    length, checked once per run by the trainer's sequence check -- while they
-    share no neurons at all and no correspondence between their neuron spaces
-    exists. So it needs no membership: no ANOVA, no top-k selection, no churn, no
-    label alignment, and no operand grid, which is also why it ports to tasks that
-    have no operands.
+        P[L, p] = A[L, tok_p] + sum_n A[L, n] * A[n, tok_p]
 
-    It depends on the prompt the opposite way round to the sum categories, which
-    measured as ~80% a function of sum range and so were redundant with the KD
-    term. This is a function of *which inputs* the answer draws on rather than of
-    the answer's value.
-
-    Normalising over positions is what makes it comparable: raw attribution
-    magnitudes carry each model's own activation scale, which is the
-    pool-dependence problem in another guise. As a distribution the scale divides
-    out and only the shape survives.
-
-    Built out-of-place so the gradient flows from the loss back through the
-    student's adjacency into its weights, exactly as aggregate_supernode_adjacency
-    does. It is returned as a one-row SuperGraph labelled ``token-path`` so the
-    teacher/student alignment, the scramble and every graph_loss_type work on it
-    unchanged.
+    Built out-of-place so the gradient flows back into the student's weights.
     """
-    gi = gold_logit_position(graph, gold_token)
-    if gi is None:
-        raise ValueError(
-            f"gold token {gold_token} is not among the graph's {len(graph.logit_targets)} "
-            "logit targets; token-path needs the gold logit to attribute to"
-        )
     A = graph.adjacency_matrix
     math_dtype = torch.float32 if A.dtype in (torch.float16, torch.bfloat16) else A.dtype
     A = A.to(dtype=math_dtype)
     n, n_tok = graph.n_neurons, graph.n_tokens
-    logit_row = n + n_tok + gi
+    n_logits = int(A.shape[0]) - n - n_tok
+    logits = slice(n + n_tok, n + n_tok + n_logits)
     tok = slice(n, n + n_tok)
-    direct = A[logit_row, tok]                     # [T]  token -> gold logit
-    one_hop = A[logit_row, :n] @ A[:n, tok]        # [T]  token -> neuron -> gold logit
-    total = (direct + one_hop).abs()
-    v = (total / total.sum().clamp(min=epsilon)).unsqueeze(0)
+    return A[logits, tok] + A[logits, :n] @ A[:n, tok]
+
+
+def token_path_supergraph(
+    graph,
+    gold_token: int | None = None,
+    *,
+    rows: str = "weighted",
+    logit_weights: torch.Tensor | None = None,
+    epsilon: float = 1e-10,
+) -> SuperGraph:
+    """A target over input positions: what the prediction actually draws on.
+
+    Indexed by token position, which teacher and student share exactly -- same
+    tokenizer, same ids, same length, checked once per run by the trainer's
+    sequence check -- while they share no neurons at all and no correspondence
+    between their neuron spaces exists. So it needs no membership: no ANOVA, no
+    top-k, no churn, nothing to freeze, and no operand grid, which is why it ports
+    to tasks that have no operands. It depends on *which inputs* the prediction
+    draws on rather than on the answer's value, unlike the sum categories that
+    measured as ~80% a function of sum range and so were redundant with the KD
+    term.
+
+    ``rows`` picks the reduction of the [L, T] path matrix:
+
+    * ``weighted`` (default): one row, the logit rows combined with
+      ``logit_weights`` -- the teacher's probability over its own salient set.
+      Needs no gold token, so nothing has to be forced into the attribution
+      targets, and the target stays a property of the model's own prediction
+      rather than of the supervision label. Both models must be given the
+      *teacher's* weights or the comparison is confounded.
+    * ``gold``: one row, the attribution to the gold answer's logit. The most
+      interpretable, but it requires the gold token to be among the attribution
+      targets, so the caller has to force it in.
+    * ``all``: the full [L, T], one row per logit target, each a distribution over
+      positions. Richest, and it keeps which tokens push toward the *wrong*
+      candidates, which the KL only sees the endpoint of. Two costs: L varies per
+      prompt, so the rows are comparable within a prompt but not across prompts;
+      and the row-JSD losses weight every row equally, so a low-probability logit
+      counts as much as the top one -- ``weighted`` is the variant that folds the
+      probabilities in instead.
+
+    Normalising over positions is what makes any of these comparable: raw
+    attribution magnitudes carry each model's own activation scale. As
+    distributions the scale divides out and only the shape survives.
+    """
+    if rows not in TOKEN_PATH_ROWS:
+        raise ValueError(f"rows must be one of {TOKEN_PATH_ROWS}, got {rows!r}")
+    P = token_path_matrix(graph, epsilon=epsilon).abs()
+
+    if rows == "all":
+        M = P / P.sum(dim=1, keepdim=True).clamp(min=epsilon)
+        labels = [[f"token-path:{i}"] for i in range(M.shape[0])]
+    else:
+        if rows == "gold":
+            gi = gold_logit_position(graph, gold_token)
+            if gi is None:
+                raise ValueError(
+                    f"gold token {gold_token} is not among the graph's logit targets; "
+                    "rows='gold' needs it forced into the attribution targets")
+            v = P[gi]
+        else:
+            w = logit_weights
+            if w is None:
+                raise ValueError("rows='weighted' needs logit_weights (the teacher's probabilities)")
+            w = w.to(device=P.device, dtype=P.dtype).reshape(-1)
+            if w.numel() != P.shape[0]:
+                raise ValueError(
+                    f"logit_weights has {w.numel()} entries for {P.shape[0]} logit targets")
+            w = w / w.sum().clamp(min=epsilon)
+            v = w @ P
+        M = (v / v.sum().clamp(min=epsilon)).unsqueeze(0)
+        labels = [["token-path"]]
+
+    n_tok = graph.n_tokens
     return SuperGraph(
-        supernode_adjacency_matrix=v,
-        supernodes=[list(range(n_tok))],
-        supernode_labels=[["token-path"]],
+        supernode_adjacency_matrix=M,
+        supernodes=[list(range(n_tok)) for _ in labels],
+        supernode_labels=labels,
     )
 
 

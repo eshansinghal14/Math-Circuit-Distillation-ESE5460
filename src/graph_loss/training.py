@@ -23,6 +23,7 @@ from graph_loss.graph import (
     aggregate_supernode_adjacency,
     SuperGraph,
     normalize_matrix,
+    salient_targets_with_gold,
     token_path_supergraph,
 )
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
@@ -58,6 +59,7 @@ class GraphAuxConfig:
     # Append the token-embedding nodes as extra source columns (raw-signed only
     # makes sense with it; harmless otherwise).
     token_source_columns: bool = False
+    token_path_rows: str = "weighted"
     # Stop-gradient the attention pattern / RMSNorm denominator when computing
     # attribution-graph edges, matching the published direct-path linearisation.
     # Applied identically to teacher and student. See graph_loss.freeze.
@@ -230,6 +232,7 @@ def teacher_target_cache_key(config: GraphAuxConfig, teacher_name: str) -> str:
         "constant_node_weighting": config.constant_node_weighting,
         "supergraph_aggregation": config.supergraph_aggregation,
         "token_source_columns": config.token_source_columns,
+        "token_path_rows": config.token_path_rows,
         "tokens_dla_nodes": config.tokens_dla_nodes,
         "mlp_cache": {
             "n_prompts": cache_meta.get("n_prompts"),
@@ -426,10 +429,26 @@ def _compute_teacher_target(
     device: torch.device,
 ) -> tuple[SuperGraph, torch.Tensor, torch.Tensor | None]:
     """The teacher's supergraph, logit-target ids and DLA reference logits for one prompt."""
+    token_path = config.supergraph_aggregation == "token-path"
+    needs_gold = token_path and config.token_path_rows == "gold"
+    forced_targets = None
+    if needs_gold:
+        # rows="gold" attributes to the gold logit, so it has to be among the
+        # attribution targets. The 95% salient set usually contains it but is not
+        # guaranteed to, and a miss would raise mid-run, so force it in the way
+        # inspect_graphs does. Nothing else about the graph changes.
+        _p_ids, _a_ids = tokenize_prompt_answer(teacher_adapter.tokenizer, prompt, str(answer))
+        _full = torch.cat([_p_ids, _a_ids]).to(device)
+        with torch.no_grad():
+            _dla = teacher_adapter.model(_full.unsqueeze(0)).logits[0, int(_p_ids.numel()) - 1].detach()
+        forced_targets, _gold_in_salient = salient_targets_with_gold(
+            _dla, int(_a_ids[0]), config.top_k_logits, config.temperature,
+        )
     with torch.enable_grad():
         teacher_result = create_graph(
             teacher_adapter,
             prompt,
+            attribution_targets=forced_targets,
             prop_neurons_per_layer=config.teacher_prop_neurons_per_layer,
             top_k_logits=config.top_k_logits,
             temperature=config.temperature,
@@ -465,12 +484,35 @@ def _compute_teacher_target(
         # The supernode supergraph create_graph built is discarded; the target is
         # the token-position distribution derived from the same raw graph.
         teacher_supergraph = token_path_supergraph(
-            teacher_result.graph, int(answer_ids[0]),
+            teacher_result.graph,
+            int(answer_ids[0]) if config.token_path_rows == "gold" else None,
+            rows=config.token_path_rows,
+            logit_weights=_logit_weights(teacher_dla_logits, logit_token_ids, config),
         )
     else:
         teacher_supergraph = teacher_result.supergraph
     del teacher_result
     return teacher_supergraph, logit_token_ids, teacher_dla_logits
+
+
+def _logit_weights(
+    dla_logits: torch.Tensor | None, logit_token_ids: torch.Tensor, config: "GraphAuxConfig",
+) -> torch.Tensor | None:
+    """The teacher's probability over its own logit targets, for rows='weighted'.
+
+    Derived from teacher_dla_logits, which both sides already hold, so the student
+    is weighted by the *teacher's* probabilities rather than its own -- weighting
+    each model by its own beliefs would confound the comparison with the very
+    difference the loss is trying to measure. Falls back to uniform if the DLA
+    reference is missing.
+    """
+    if config.token_path_rows != "weighted":
+        return None
+    n = int(logit_token_ids.numel())
+    if dla_logits is None:
+        return torch.full((n,), 1.0 / max(n, 1))
+    probs = torch.softmax(dla_logits.float() / max(config.temperature, 1e-6), dim=-1)
+    return probs[logit_token_ids.to(probs.device)].detach().cpu()
 
 
 def _inner_aggregation(config: "GraphAuxConfig") -> str:
@@ -491,6 +533,7 @@ def _token_path_loss(
     config: "GraphAuxConfig",
     student_graph: Any,
     teacher_supergraph: SuperGraph,
+    logit_weights: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Loss for the token-path target: one row, so no label alignment is needed.
 
@@ -499,8 +542,12 @@ def _token_path_loss(
     1 of 1. Everything else -- the scramble, the real-target diagnostic and every
     graph_loss_type -- works on the 1 x T matrix unchanged.
     """
-    _, answer_ids = tokenize_prompt_answer(student_adapter.tokenizer, prompt, str(answer))
-    student_supergraph = token_path_supergraph(student_graph, int(answer_ids[0]))
+    gold = None
+    if config.token_path_rows == "gold":
+        _, answer_ids = tokenize_prompt_answer(student_adapter.tokenizer, prompt, str(answer))
+        gold = int(answer_ids[0])
+    student_supergraph = token_path_supergraph(
+        student_graph, gold, rows=config.token_path_rows, logit_weights=logit_weights)
 
     W_S = student_supergraph.supernode_adjacency_matrix
     W_T = teacher_supergraph.supernode_adjacency_matrix.detach().to(
@@ -511,21 +558,23 @@ def _token_path_loss(
             f"token-path shape mismatch for prompt={prompt!r}: teacher {tuple(W_T.shape)} vs "
             f"student {tuple(W_S.shape)}; teacher and student must tokenise identically")
 
-    mapping = {0: {0}}
+    n_rows = int(W_T.shape[0])
+    mapping = {i: {i} for i in range(n_rows)}
+    ids = list(range(n_rows))
     real_target_loss = None
     if config.scramble_teacher_graph:
         with torch.no_grad():
             real_target_loss, _ = compute_graph_loss(
-                W_T, W_S.detach(), mapping, [0], [0], similarity=config.graph_loss_type)
+                W_T, W_S.detach(), mapping, ids, ids, similarity=config.graph_loss_type)
         W_T = scramble_teacher_rows(W_T, config)
 
     graph_loss, loss_breakdown = compute_graph_loss(
-        W_T, W_S, mapping, [0], [0], similarity=config.graph_loss_type)
+        W_T, W_S, mapping, ids, ids, similarity=config.graph_loss_type)
     metrics = {
-        "teacher_supernodes": 1,
-        "student_supernodes": 1,
+        "teacher_supernodes": n_rows,
+        "student_supernodes": n_rows,
         "student_graph_neurons": int(student_graph.n_neurons),
-        "aligned_teacher_supernodes": 1,
+        "aligned_teacher_supernodes": n_rows,
         **loss_breakdown,
     }
     if real_target_loss is not None:
@@ -589,7 +638,8 @@ def compute_prompt_graph_loss(
     student_graph = student_result.graph
     if config.supergraph_aggregation == "token-path":
         return _token_path_loss(
-            prompt, answer, student_adapter, config, student_graph, teacher_supergraph)
+            prompt, answer, student_adapter, config, student_graph, teacher_supergraph,
+            logit_weights=_logit_weights(teacher_dla_logits, logit_token_ids, config))
     student_supergraph_structure = student_result.supergraph
 
     # Filter supernodes to only the requested labels (if specified).
