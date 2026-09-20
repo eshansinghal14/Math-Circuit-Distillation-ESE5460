@@ -246,6 +246,10 @@ class GraphKDTrainer:
         self._step_tracker = ParamStepTracker(self.model)
         self.teacher_target_cache: TeacherTargetCache | None = None
         cache_dir = config.teacher_target_cache_dir
+        if config.supergraph_aggregation == "token-path":
+            # token-path targets are a forward and a backward, cheaper to recompute
+            # than to round-trip through a growing .pt on Drive.
+            cache_dir = None
         if cache_dir and cache_dir.lower() != "none":
             if shared is not None and "teacher_target_cache" in shared:
                 self.teacher_target_cache = shared["teacher_target_cache"]
