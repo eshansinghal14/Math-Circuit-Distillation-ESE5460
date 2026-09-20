@@ -6,6 +6,14 @@ import re
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
+
+# Read by the CUDA caching allocator when it first initialises, so it has to be
+# set before the first allocation; this module is the first project import of
+# every trainer. Expandable segments stop long-context batches (a 1.5k-token
+# eval prefill next to a 9-token arithmetic one) from fragmenting the pool:
+# the HotpotQA baseline eval died with 11 GB reserved-but-unallocated.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch
 from torch.utils.data import DataLoader, Dataset
 
@@ -229,6 +237,13 @@ def eval_model(model, tokenizer, test_dataset, dataset_name: str, batch_size: in
     arithmetic datasets the continuation alone is decoded and graded by
     :func:`extract_leading_int`; the prompt echo is never parsed, so a truncated
     digit-by-digit answer or a second echoed equation cannot flip the score.
+
+    Memory: prompts are batched longest first, so the padded length of each
+    batch is as small as it can be and the first batch is the worst case; a
+    batch that runs out of GPU memory is retried at half the size for the rest
+    of the eval. ``batch_size`` is therefore an upper bound. Every prompt is
+    still decoded greedily on its own row, so the score does not depend on
+    the batching; on the fixed-length arithmetic sets nothing changes at all.
     """
     if max_eval_tokens is None:
         max_eval_tokens = default_eval_tokens(dataset_name)
@@ -239,25 +254,38 @@ def eval_model(model, tokenizer, test_dataset, dataset_name: str, batch_size: in
     tokenizer.padding_side = "left"
     answer_type = dataset_answer_type(dataset_name)
     correct = total = 0
-    samples = test_dataset.samples
+    samples = sorted(test_dataset.samples, key=lambda s: len(s["formatted_prompt"]), reverse=True)
+    bos = tokenizer.bos_token or ""
     try:
-        for i in range(0, len(samples), batch_size):
+        i = 0
+        while i < len(samples):
             batch = samples[i : i + batch_size]
             prompts = [s["formatted_prompt"] for s in batch]
             golds = [s["answer"] for s in batch]
             # Same rule as tokenize_prompt_answer: BOS leads the prompt unless the
             # text (a chat template) already carries it.
-            bos = tokenizer.bos_token or ""
             inputs = tokenizer(
                 prompts, return_tensors="pt", padding=True, truncation=True,
                 add_special_tokens=not (bos and prompts[0].startswith(bos)),
             ).to(device)
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=max_eval_tokens,
-                do_sample=False,
-                pad_token_id=tokenizer.pad_token_id,
-            )
+            try:
+                outputs = model.generate(
+                    **inputs,
+                    max_new_tokens=max_eval_tokens,
+                    do_sample=False,
+                    pad_token_id=tokenizer.pad_token_id,
+                )
+            except torch.OutOfMemoryError:
+                if batch_size <= 1:
+                    raise
+                del inputs
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
+                print(f"  [eval] OOM on a batch of {batch_size} x {len(prompts[0])} chars; "
+                      f"continuing at batch {batch_size // 2}")
+                batch_size //= 2
+                continue
+            i += len(batch)
             prompt_len = inputs["input_ids"].shape[1]
             if is_hf:
                 # gsm8k / svamp extraction keys on markers ("####", the last "=")
