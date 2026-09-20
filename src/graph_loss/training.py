@@ -1323,6 +1323,12 @@ def _one_position_loss(
     so the graph is released on return; only the forward graph behind
     ``out_all`` survives to the next position.
     """
+    if rows == "all" and n_rows > 1:
+        _one_position_loss_rows_all(
+            out_all, e, step, B, n_rows, prompt_lens, read_positions, logit_ids,
+            logit_weights, gold_tokens, teacher_profiles, losses, reals, counts,
+            config=config, scale=scale, epsilon=epsilon)
+        return
     rows_here: list[list[torch.Tensor]] = [[] for _ in range(B)]
     for j in range(n_rows):
         terms, members = [], []
@@ -1365,6 +1371,101 @@ def _one_position_loss(
     if step_loss is not None and step_loss.requires_grad:
         step_loss.backward(retain_graph=True)
     del rows_here, step_loss
+
+
+def _one_position_loss_rows_all(
+    out_all: torch.Tensor,
+    e: torch.Tensor,
+    step: int,
+    B: int,
+    n_rows: int,
+    prompt_lens: list[int],
+    read_positions: list[list[int]],
+    logit_ids: list[torch.Tensor],
+    logit_weights: list[torch.Tensor | None],
+    gold_tokens: list[int],
+    teacher_profiles: list[list[torch.Tensor]],
+    losses: list[float],
+    reals: list[float],
+    counts: list[int],
+    *,
+    config: "GraphAuxConfig",
+    scale: float,
+    epsilon: float,
+) -> None:
+    """rows='all', one logit row at a time: score and backward before the next.
+
+    The stacked path keeps every row's normalised profile in ``rows_here`` until
+    the position's single backward, and each of those profiles holds its own
+    ``create_graph=True`` graph alive. With one row that is the peak the
+    'weighted' runs measured (55 GB at a 444-token context); with the up-to-11
+    rows ``salient_logits`` returns it is that peak times the row count, which is
+    the 79 GB OOM inside the first position of the first step.
+
+    Splitting is exact rather than an approximation: the rows='all' loss is
+    ``sum_j w_j * dist(W_T[j], W_S[j])`` (see ``_weighted_row_similarity``, whose
+    every branch reduces over ``dim=1`` before the weighted sum), so each row's
+    term can be backwarded on its own and the gradients accumulate to the same
+    total. ``w`` is normalised over the full row set once, outside the loop, so
+    the weights match the stacked path exactly. ``scramble_teacher_rows`` permutes
+    within each row independently, so it too is taken a row at a time -- built
+    from the full matrix so the cached permutation keys on the same shape.
+    """
+    weights: list[torch.Tensor | None] = []
+    for b in range(B):
+        w = logit_weights[b]
+        if w is None:
+            weights.append(None)
+            continue
+        w = w.to(device=e.device, dtype=torch.float32).reshape(-1)
+        weights.append(w / w.sum().clamp(min=epsilon))
+    scored = [False] * B
+
+    for j in range(n_rows):
+        terms, members = [], []
+        for b in range(B):
+            if step >= len(read_positions[b]) or step >= len(teacher_profiles[b]):
+                continue
+            t = _position_target(out_all[b, read_positions[b][step]].float(), "all", j,
+                                 logit_ids[b], logit_weights[b], gold_tokens[b], epsilon)
+            if t is None:
+                continue
+            terms.append(t)
+            members.append(b)
+        if not terms:
+            continue
+        g = torch.autograd.grad(
+            torch.stack(terms).sum(), e, create_graph=True, retain_graph=True)[0]
+        attr = (g * e).sum(dim=-1).abs()
+        row_loss = None
+        for b in members:
+            W_T_all = teacher_profiles[b][step]
+            if j >= int(W_T_all.shape[0]):
+                continue
+            pr = attr[b, : prompt_lens[b]]
+            s_row = (pr / pr.sum().clamp(min=epsilon)).unsqueeze(0)
+            W_T_all = W_T_all.to(device=s_row.device, dtype=s_row.dtype)
+            wj = 1.0 if weights[b] is None else float(weights[b][j])
+            t_row = W_T_all[j : j + 1]
+            if config.scramble_teacher_graph:
+                with torch.no_grad():
+                    reals[b] += wj * float(edge_similarity(
+                        t_row, s_row.detach(), config.graph_loss_type).item())
+                t_row = scramble_teacher_rows(W_T_all, config)[j : j + 1]
+            d = edge_similarity(t_row, s_row, config.graph_loss_type)
+            losses[b] += wj * float(d.detach().item())
+            scored[b] = True
+            contrib = d * (wj * scale / max(len(read_positions[b]), 1))
+            row_loss = contrib if row_loss is None else row_loss + contrib
+            del s_row, t_row, W_T_all, d, contrib
+        del g, attr, terms
+        if row_loss is not None and row_loss.requires_grad:
+            row_loss.backward(retain_graph=True)
+        del row_loss
+
+    for b in range(B):
+        if scored[b]:
+            counts[b] += 1
 
 
 def _double_backward_attention():
