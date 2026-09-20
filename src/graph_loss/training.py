@@ -1034,7 +1034,7 @@ def _token_path_batched(
         with torch.no_grad():
             dla_all = teacher_adapter.model(ids, attention_mask=attn).logits.detach()
         lids_c, w_c = [], []
-        for r, i in enumerate(idxs):
+        for r in range(len(idxs)):
             dla = dla_all[r, p_lens[r] - 1].float()
             lids, probs = salient_logits(
                 dla, config.top_k_logits, config.temperature,
@@ -1042,34 +1042,21 @@ def _token_path_batched(
             lids_c.append(lids.to(device))
             w_c.append(probs.to(device))
         del dla_all
-        targets_c = [t.detach() for t in _attribute_batch(
-            teacher_adapter.model, ids, attn, p_lens, rds, lids_c, w_c, gds,
-            rows=rows, create_graph=False)]
+        t_profiles = _position_profiles(
+            teacher_adapter.model, ids, attn, p_lens, rds, lids_c, w_c, gds, rows=rows)
         time_teacher += time.perf_counter() - t0
 
         t0 = time.perf_counter()
-        S_list = _attribute_batch(
-            student_adapter.model, ids, attn, p_lens, rds, lids_c, w_c, gds,
-            rows=rows, create_graph=True)
-        per_row = []
+        losses, reals = _student_position_losses(
+            student_adapter.model, ids, attn, p_lens, rds, lids_c, w_c, gds, t_profiles,
+            rows=rows, config=config, scale=loss_scale / denom)
         for r in range(len(idxs)):
-            W_S = S_list[r]
-            W_T = targets_c[r].to(device=W_S.device, dtype=W_S.dtype)
-            rw = w_c[r] if (rows == "all" and W_T.shape[0] > 1) else None
+            detached.append(torch.tensor(losses[r]))
+            metric_sums["edge_loss"] = metric_sums.get("edge_loss", 0.0) + losses[r]
             if config.scramble_teacher_graph:
-                with torch.no_grad():
-                    real = edge_similarity(W_T, W_S.detach(), config.graph_loss_type, row_weights=rw)
                 metric_sums["edge_loss_real_target"] = (
-                    metric_sums.get("edge_loss_real_target", 0.0) + float(real.item()))
-                W_T = scramble_teacher_rows(W_T, config)
-            per_row.append(edge_similarity(W_T, W_S, config.graph_loss_type, row_weights=rw))
-        total = torch.stack(per_row)
-        scaled = (loss_scale / denom) * total.sum()
-        if scaled.requires_grad:
-            scaled.backward()
-        detached.extend(total.detach().unbind())
-        metric_sums["edge_loss"] = metric_sums.get("edge_loss", 0.0) + float(total.detach().sum().item())
-        del S_list, per_row, total, scaled, targets_c, ids, attn
+                    metric_sums.get("edge_loss_real_target", 0.0) + reals[r])
+        del t_profiles, ids, attn
         time_student += time.perf_counter() - t0
         if on_prompt_done is not None:
             on_prompt_done(min(lo + chunk, len(prompts)), len(prompts))
@@ -1091,6 +1078,180 @@ def _token_path_batched(
     if "edge_loss_real_target" in metrics:
         metrics["edge_loss_real_target"] /= max(len(prompts), 1)
     return mean_loss, metrics
+
+
+@contextlib.contextmanager
+def _no_gradient_checkpointing(model):
+    """Turn gradient checkpointing off for a double-backward region.
+
+    Checkpointing trades memory for a recomputed forward. Under
+    ``create_graph=True`` that recomputed forward is *also* retained, because the
+    second derivative has to differentiate through it, so it saves nothing and
+    adds the recompute on top -- the OOM traceback lands in
+    ``checkpoint.recompute_fn`` for exactly this reason. Restored on the way out
+    so the KD term keeps it.
+    """
+    was_on = bool(getattr(model, "is_gradient_checkpointing", False))
+    if was_on and hasattr(model, "gradient_checkpointing_disable"):
+        model.gradient_checkpointing_disable()
+    try:
+        yield
+    finally:
+        if was_on and hasattr(model, "gradient_checkpointing_enable"):
+            model.gradient_checkpointing_enable()
+
+
+def _position_profiles(
+    model: Any,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    prompt_lens: list[int],
+    read_positions: list[list[int]],
+    logit_ids: list[torch.Tensor],
+    logit_weights: list[torch.Tensor | None],
+    gold_tokens: list[int],
+    *,
+    rows: str,
+    epsilon: float = 1e-10,
+) -> list[list[torch.Tensor]]:
+    """``[b][step] -> [R, T_prompt]`` profiles, no graph retained.
+
+    The teacher side: one forward, a backward per answer position, each freed
+    immediately since no second derivative is needed.
+    """
+    embed = model.get_input_embeddings()
+    e = embed(input_ids).detach().clone().requires_grad_(True)
+    out_all = model(inputs_embeds=e, attention_mask=attention_mask).logits
+    B = len(prompt_lens)
+    n_rows = int(logit_ids[0].numel()) if rows == "all" else 1
+    profiles: list[list[torch.Tensor]] = [[] for _ in range(B)]
+    max_steps = max(len(r) for r in read_positions)
+    for step in range(max_steps):
+        rows_here: list[list[torch.Tensor]] = [[] for _ in range(B)]
+        for j in range(n_rows):
+            terms, members = [], []
+            for b in range(B):
+                if step >= len(read_positions[b]):
+                    continue
+                t = _position_target(out_all[b, read_positions[b][step]].float(), rows, j,
+                                     logit_ids[b], logit_weights[b], gold_tokens[b], epsilon)
+                if t is None:
+                    continue
+                terms.append(t)
+                members.append(b)
+            if not terms:
+                continue
+            g = torch.autograd.grad(torch.stack(terms).sum(), e, retain_graph=True)[0]
+            attr = (g * e).sum(dim=-1).abs()
+            for b in members:
+                p = attr[b, : prompt_lens[b]]
+                rows_here[b].append((p / p.sum().clamp(min=epsilon)).detach())
+            del g, attr
+        for b in range(B):
+            if rows_here[b]:
+                profiles[b].append(torch.stack(rows_here[b]))
+    del out_all, e
+    return profiles
+
+
+def _position_target(
+    logits: torch.Tensor, rows: str, j: int, ids: torch.Tensor,
+    weights: torch.Tensor | None, gold: int, epsilon: float,
+) -> torch.Tensor | None:
+    """The scalar attributed at one position, for one row of the target."""
+    if rows == "gold":
+        return logits[int(gold)]
+    ids = ids.to(logits.device).reshape(-1)
+    if rows == "all":
+        return logits[int(ids[j])] if j < ids.numel() else None
+    w = weights
+    w = (torch.full((ids.numel(),), 1.0 / max(ids.numel(), 1), device=logits.device)
+         if w is None else w.to(device=logits.device, dtype=logits.dtype).reshape(-1))
+    return ((w / w.sum().clamp(min=epsilon)) * logits[ids]).sum()
+
+
+def _student_position_losses(
+    model: Any,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    prompt_lens: list[int],
+    read_positions: list[list[int]],
+    logit_ids: list[torch.Tensor],
+    logit_weights: list[torch.Tensor | None],
+    gold_tokens: list[int],
+    teacher_profiles: list[list[torch.Tensor]],
+    *,
+    rows: str,
+    config: "GraphAuxConfig",
+    scale: float,
+    epsilon: float = 1e-10,
+) -> tuple[list[float], list[float]]:
+    """Per-position distance for each example, backwarded position by position.
+
+    The loss is the mean over answer positions of the per-position distance,
+    which is what the KD term does with its per-position KL. Scoring the distance
+    between the *averaged* profiles instead would force every position's gradient
+    graph to stay alive until one final backward; with six-token answers and a
+    444-token context that is what filled 80 GB. Here each position's graph is
+    released as soon as its own backward runs.
+
+    Returns (mean loss per example, mean real-target loss per example).
+    """
+    embed = model.get_input_embeddings()
+    e = embed(input_ids).detach().clone().requires_grad_(True)
+    B = len(prompt_lens)
+    n_rows = int(logit_ids[0].numel()) if rows == "all" else 1
+    losses = [0.0] * B
+    reals = [0.0] * B
+    counts = [0] * B
+    max_steps = max(len(r) for r in read_positions)
+
+    with _no_gradient_checkpointing(model), _double_backward_attention():
+        out_all = model(inputs_embeds=e, attention_mask=attention_mask).logits
+        for step in range(max_steps):
+            rows_here: list[list[torch.Tensor]] = [[] for _ in range(B)]
+            for j in range(n_rows):
+                terms, members = [], []
+                for b in range(B):
+                    if step >= len(read_positions[b]):
+                        continue
+                    t = _position_target(out_all[b, read_positions[b][step]].float(), rows, j,
+                                         logit_ids[b], logit_weights[b], gold_tokens[b], epsilon)
+                    if t is None:
+                        continue
+                    terms.append(t)
+                    members.append(b)
+                if not terms:
+                    continue
+                g = torch.autograd.grad(
+                    torch.stack(terms).sum(), e, create_graph=True, retain_graph=True)[0]
+                attr = (g * e).sum(dim=-1).abs()
+                for b in members:
+                    pr = attr[b, : prompt_lens[b]]
+                    rows_here[b].append(pr / pr.sum().clamp(min=epsilon))
+            step_loss = None
+            for b in range(B):
+                if not rows_here[b] or step >= len(teacher_profiles[b]):
+                    continue
+                W_S = torch.stack(rows_here[b])
+                W_T = teacher_profiles[b][step].to(device=W_S.device, dtype=W_S.dtype)
+                rw = logit_weights[b] if (rows == "all" and W_T.shape[0] > 1) else None
+                if config.scramble_teacher_graph:
+                    with torch.no_grad():
+                        reals[b] += float(edge_similarity(
+                            W_T, W_S.detach(), config.graph_loss_type, row_weights=rw).item())
+                    W_T = scramble_teacher_rows(W_T, config)
+                d = edge_similarity(W_T, W_S, config.graph_loss_type, row_weights=rw)
+                losses[b] += float(d.detach().item())
+                counts[b] += 1
+                contrib = d * (scale / max(len(read_positions[b]), 1))
+                step_loss = contrib if step_loss is None else step_loss + contrib
+            if step_loss is not None and step_loss.requires_grad:
+                step_loss.backward(retain_graph=True)
+            del rows_here, step_loss
+    del out_all, e
+    return ([losses[b] / max(counts[b], 1) for b in range(B)],
+            [reals[b] / max(counts[b], 1) for b in range(B)])
 
 
 def _double_backward_attention():
