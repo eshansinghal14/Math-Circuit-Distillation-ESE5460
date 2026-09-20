@@ -115,6 +115,7 @@ class GraphKDConfig:
     token_source_columns: bool = False
     token_path_rows: str = "weighted"
     token_path_micro_batch: int = 4
+    token_path_micro_tokens: Optional[int] = 1024
     top_k_logits: float = 0.95
     teacher_graph_batch_size: int = 512
     student_graph_batch_size: int = 1
@@ -234,6 +235,7 @@ class GraphKDTrainer:
             token_source_columns=config.token_source_columns,
             token_path_rows=config.token_path_rows,
             token_path_micro_batch=config.token_path_micro_batch,
+            token_path_micro_tokens=config.token_path_micro_tokens,
             verbose=config.graph_verbose,
             mlp_input_cache=student_mlp_cache,
             teacher_mlp_input_cache=teacher_mlp_cache,
@@ -396,7 +398,7 @@ class GraphKDTrainer:
             grads_at_start = None
             if cfg.track_grad_metrics and grad_accum > 1:
                 grads_at_start = {
-                    n: p.grad.detach().clone()
+                    n: p.grad.detach().to("cpu", copy=True)
                     for n, p in self.model.named_parameters() if p.grad is not None
                 }
 
@@ -436,8 +438,12 @@ class GraphKDTrainer:
                 prompts = [prompts[i] for i in sel]
                 answers = [answers[i] for i in sel]
             if cfg.track_grad_metrics:
+                # Held on the host: an fp32 copy of every gradient is 4.9 GB on
+                # the 1B student, and it would otherwise sit on the GPU through
+                # the graph term, whose double-backward graph is the run's peak.
+                # Two transfers of that size cost ~2 s against a ~40 s step.
                 grads_before = {
-                    n: p.grad.detach().clone() if p.grad is not None else None
+                    n: p.grad.detach().to("cpu", copy=True) if p.grad is not None else None
                     for n, p in self.model.named_parameters()
                 }
             with flop_counter:
@@ -479,11 +485,11 @@ class GraphKDTrainer:
                     before = grads_before.get(n)
                     if before is None:
                         before = torch.zeros_like(p.grad)
-                    g_kl = before.float()
+                    g_kl = before.to(p.grad.device, non_blocking=True).float()
                     if grads_at_start is not None:
                         start = grads_at_start.get(n)
                         if start is not None:
-                            g_kl = g_kl - start.float()
+                            g_kl = g_kl - start.to(p.grad.device).float()
                     g_graph = (p.grad - before).float()
                     dot += float((g_kl * g_graph).sum().item())
                     kl_sq += float((g_kl * g_kl).sum().item())
@@ -504,6 +510,7 @@ class GraphKDTrainer:
                 # would read as the fraction of parameters the graph term touches
                 # (~0.70), not as a flip rate. Report NaN instead, as ratio does.
                 accum_flip += (flipped / total_elems) if (total_elems and kl_sq > 0) else float("nan")
+                del grads_before, grads_at_start
 
             micro_step += 1
 
@@ -770,7 +777,16 @@ def build_parser() -> argparse.ArgumentParser:
              "sequence's activations alive, so a 444-token batch of 32 keeps ~36 GB of MLP "
              "intermediates on an 8B teacher, while 4 keeps ~4.5 GB. Raise it for short prompts, "
              "lower it if the graph term runs out of memory. Changes peak memory only, not the "
-             "result.",
+             "result. --token-path-micro-tokens caps the same chunks by padded tokens.",
+    )
+    group.add_argument(
+        "--token-path-micro-tokens", type=int, default=1024, dest="token_path_micro_tokens",
+        help="Padded tokens (prompts x longest sequence) per token-path micro-batch, on top of "
+             "--token-path-micro-batch; 0 disables the cap. The student's double-backward graph "
+             "scales with this, so it is what holds the peak steady across batches of "
+             "different length: at 4 x ~450-token prompts the peak swung 66-76 GB and "
+             "then overflowed 80, at 1024 tokens (2 such prompts) it is ~15 GB lower. "
+             "Irrelevant for 9-token arithmetic prompts (4 x 9 is far under the cap).",
     )
     group.add_argument(
         "--token-source-columns", action="store_true", dest="token_source_columns",
@@ -939,6 +955,7 @@ def main() -> None:
                 token_source_columns=args.token_source_columns,
                 token_path_rows=args.token_path_rows,
                 token_path_micro_batch=args.token_path_micro_batch,
+                token_path_micro_tokens=args.token_path_micro_tokens or None,
                 top_k_logits=args.top_k_logits,
                 teacher_prop_neurons_per_layer=args.teacher_prop_neurons_per_layer,
                 student_prop_neurons_per_layer=args.student_prop_neurons_per_layer,

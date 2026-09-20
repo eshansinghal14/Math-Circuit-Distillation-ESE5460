@@ -61,6 +61,9 @@ class GraphAuxConfig:
     token_source_columns: bool = False
     token_path_rows: str = "weighted"
     token_path_micro_batch: int = 4
+    # Padded tokens (prompts x longest sequence) per token-path micro-batch; the
+    # student's double-backward graph scales with this, not with the prompt count.
+    token_path_micro_tokens: int | None = 1024
     # Stop-gradient the attention pattern / RMSNorm denominator when computing
     # attribution-graph edges, matching the published direct-path linearisation.
     # Applied identically to teacher and student. See graph_loss.freeze.
@@ -1018,9 +1021,20 @@ def _token_path_batched(
     # next. A 444-token batch of 32 through the 8B keeps ~36 GB of MLP
     # intermediates alive for the backward; at chunk 4 that is ~4.5 GB. Arithmetic
     # never hit this because its sequences were 9 tokens.
-    chunk = max(int(getattr(config, "token_path_micro_batch", 4) or 4), 1)
-    for lo in range(0, len(prompts), chunk):
-        idxs = list(range(lo, min(lo + chunk, len(prompts))))
+    #
+    # Chunks are cut by padded tokens as well as by prompt count. The student's
+    # double-backward graph scales with prompts x padded length, so a fixed
+    # prompt count gave a peak that swung with each batch's longest prompt
+    # (66-76 GB across the first nine HotpotQA steps, then over 80). Sorting
+    # longest-first also means every chunk pads to a member of its own length
+    # class rather than to the batch maximum. The loss is a sum over prompts
+    # with one denominator, so the grouping changes nothing about it.
+    chunks = _token_path_chunks(
+        [int(x.numel()) for x in seqs],
+        max_prompts=int(getattr(config, "token_path_micro_batch", 4) or 4),
+        max_tokens=getattr(config, "token_path_micro_tokens", None))
+    n_done = 0
+    for idxs in chunks:
         sub = [seqs[i] for i in idxs]
         L = max(int(x.numel()) for x in sub)
         ids = torch.full((len(sub), L), pad_id, dtype=torch.long, device=device)
@@ -1062,8 +1076,9 @@ def _token_path_batched(
                     metric_sums.get("edge_loss_real_target", 0.0) + reals[r])
         del t_profiles, ids, attn
         time_student += time.perf_counter() - t0
+        n_done += len(idxs)
         if on_prompt_done is not None:
-            on_prompt_done(min(lo + chunk, len(prompts)), len(prompts))
+            on_prompt_done(n_done, len(prompts))
 
     for key, val in (("teacher_supernodes", float(len(prompts))),
                      ("student_supernodes", float(len(prompts))),
@@ -1097,6 +1112,34 @@ def _graph_autocast(adapter: HFLlamaGraphAdapter, config: "GraphAuxConfig"):
     a bf16 model and off CUDA.
     """
     return adapter.autocast_context(getattr(config, "graph_dtype", None))
+
+
+def _token_path_chunks(
+    lengths: list[int], *, max_prompts: int, max_tokens: int | None,
+) -> list[list[int]]:
+    """Index groups for the token-path micro-batches, longest sequence first.
+
+    A group holds at most ``max_prompts`` sequences and, when ``max_tokens`` is
+    set, at most that many padded tokens (group size x its longest member). A
+    single sequence longer than the budget still forms a group of one. Every
+    index appears exactly once.
+    """
+    max_prompts = max(int(max_prompts or 1), 1)
+    order = sorted(range(len(lengths)), key=lambda i: lengths[i], reverse=True)
+    chunks: list[list[int]] = []
+    cur: list[int] = []
+    for i in order:
+        if cur:
+            longest = lengths[cur[0]]  # longest-first, so the first member sets the pad
+            full = len(cur) >= max_prompts or (
+                max_tokens is not None and (len(cur) + 1) * longest > max_tokens)
+            if full:
+                chunks.append(cur)
+                cur = []
+        cur.append(i)
+    if cur:
+        chunks.append(cur)
+    return chunks
 
 
 @contextlib.contextmanager
