@@ -25,6 +25,11 @@ two attributions:
     sums add coherently instead of cancelling.
   * ``gold-path``: the two-hop path attribution to the gold logit,
     edge(t<-s) * e(gold<-t) / a_t, aggregated like ``raw-signed``.
+  * ``token-path``: a 1 x T distribution over input positions -- each token's
+    total attribution to the gold logit, direct plus one hop through the
+    neurons. The only construction with no membership and no neuron indexing,
+    so it is comparable across two models that share a tokenizer but no
+    neurons, and it ports to any task without an operand grid.
   * ``composition``: per target block, the distribution of inbound |mass| over
     three source groups -- arg-type blocks, sum/DLA-type blocks, token
     embeddings. How deep the block's inputs are, with no sign and no per-edge
@@ -110,6 +115,7 @@ CONSTRUCTIONS: dict[str, tuple[bool, bool]] = {
     "gold-signed": (True, True),
     "gold-path": (True, True),
     "composition": (False, False),
+    "token-path": (False, True),
 }
 # Constructions that get figure rows. The signed edge-level variants (raw-signed,
 # gold-signed, gold-path) were ruled out on 2026-09-18 -- the teacher's signed
@@ -303,6 +309,50 @@ def composition_matrix(W_raw: torch.Tensor, labels: list[str]) -> torch.Tensor:
     return groups / groups.sum(dim=1, keepdim=True).clamp(min=EPS)
 
 
+def token_path_vector(graph, gold_token: int) -> torch.Tensor:
+    """1 x T distribution over input positions: what the answer depends on.
+
+    Entry p is token p's total attribution to the gold answer's logit, the direct
+    residual path plus one hop through the pre-selected neurons::
+
+        total[p] = A[L, tok_p] + sum_n A[L, n] * A[n, tok_p]
+
+    then |.| and normalised over positions.
+
+    This is the one construction here that is indexed by token position rather
+    than by neurons, which matters for two reasons. Teacher and student share the
+    token space exactly -- same tokenizer, same ids, same length, verified by the
+    trainer's sequence check -- while sharing no neurons at all, so this is
+    directly comparable across the two models where every K x K block needs a
+    correspondence that does not exist. And it has no membership: no ANOVA, no
+    top-k selection, no churn, and nothing that has to be frozen or softened.
+
+    It also depends on the prompt in the opposite way to the sum-category
+    constructions. Those were a function of the answer's *value*, which is why
+    they were redundant with the KD term. This is a function of *which inputs the
+    answer draws on*: two prompts with the same answer but different operands get
+    different profiles, two with different answers but the same structure get
+    similar ones.
+
+    Normalising over positions is what makes it comparable at all -- raw
+    attribution magnitudes carry each model's own activation scale, the same
+    pool-dependence problem in another guise. As a distribution the scale divides
+    out and only the shape survives, which is also why the row-JSD distances are
+    the natural ones to read for it.
+    """
+    gi = gold_logit_index(graph, gold_token)
+    if gi is None:
+        raise ValueError(f"gold token {gold_token} is not among the graph's logit targets")
+    A = graph.adjacency_matrix.detach().float()
+    n, n_tok = graph.n_neurons, graph.n_tokens
+    logit_row = n + n_tok + gi
+    tok = slice(n, n + n_tok)
+    direct = A[logit_row, tok]                    # [T]   token -> gold logit
+    one_hop = A[logit_row, :n] @ A[:n, tok]       # [T]   token -> neuron -> gold logit
+    total = (direct + one_hop).abs()
+    return (total / total.sum().clamp(min=EPS)).unsqueeze(0).cpu()
+
+
 def build_constructions(graph, supernodes: list[list[int]], ids: list[int], labels: list[str],
                         gold_token: int) -> dict[str, torch.Tensor]:
     """Every construction, aligned to ``labels`` (rows and block columns in ``ids`` order)."""
@@ -317,6 +367,7 @@ def build_constructions(graph, supernodes: list[list[int]], ids: list[int], labe
         out[mode] = submatrix(aggregate_supernode_adjacency(view, supernodes, aggregation="raw-signed",
                                                             token_source_columns=True), ids, n_super)
     out["composition"] = composition_matrix(out["raw-signed"], labels)
+    out["token-path"] = token_path_vector(graph, gold_token)
     return out
 
 
