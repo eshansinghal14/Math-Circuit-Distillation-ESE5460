@@ -506,7 +506,8 @@ def _token_path_teacher_target(
     attr = _attribute_batch(
         teacher_adapter.model, full_ids.unsqueeze(0), attn, [n_p], reads,
         [logit_ids.to(device)], [probs.to(device)], [gold],
-        rows=config.token_path_rows, create_graph=False)[0].detach()
+        rows=config.token_path_rows, create_graph=False,
+        autocast=_graph_autocast(teacher_adapter, config))[0].detach()
     labels = ([["token-path"]] if attr.shape[0] == 1
               else [[f"token-path:{i}"] for i in range(attr.shape[0])])
     supergraph = SuperGraph(
@@ -579,7 +580,8 @@ def _token_path_loss(
     W_S = _attribute_batch(
         student_adapter.model, full_ids.unsqueeze(0), attn, [n_p], reads,
         [lids.to(device)], [logit_weights], [int(answer_ids[0])],
-        rows=config.token_path_rows, create_graph=True)[0]
+        rows=config.token_path_rows, create_graph=True,
+        autocast=_graph_autocast(student_adapter, config))[0]
     W_T = teacher_supergraph.supernode_adjacency_matrix.detach().to(
         device=W_S.device, dtype=W_S.dtype)
     if W_T.shape != W_S.shape:
@@ -1043,13 +1045,15 @@ def _token_path_batched(
             w_c.append(probs.to(device))
         del dla_all
         t_profiles = _position_profiles(
-            teacher_adapter.model, ids, attn, p_lens, rds, lids_c, w_c, gds, rows=rows)
+            teacher_adapter.model, ids, attn, p_lens, rds, lids_c, w_c, gds, rows=rows,
+            autocast=_graph_autocast(teacher_adapter, config))
         time_teacher += time.perf_counter() - t0
 
         t0 = time.perf_counter()
         losses, reals = _student_position_losses(
             student_adapter.model, ids, attn, p_lens, rds, lids_c, w_c, gds, t_profiles,
-            rows=rows, config=config, scale=loss_scale / denom)
+            rows=rows, config=config, scale=loss_scale / denom,
+            autocast=_graph_autocast(student_adapter, config))
         for r in range(len(idxs)):
             detached.append(torch.tensor(losses[r]))
             metric_sums["edge_loss"] = metric_sums.get("edge_loss", 0.0) + losses[r]
@@ -1078,6 +1082,21 @@ def _token_path_batched(
     if "edge_loss_real_target" in metrics:
         metrics["edge_loss_real_target"] /= max(len(prompts), 1)
     return mean_loss, metrics
+
+
+def _graph_autocast(adapter: HFLlamaGraphAdapter, config: "GraphAuxConfig"):
+    """Autocast for an attribution forward, from the run's ``graph_dtype``.
+
+    The trainer holds fp32 master weights and runs the KD forward under bf16
+    autocast. The attribution forwards did not, so with fp32 weights they ran
+    fp32 end to end: the student's token-path term went from 26 s to 97 s a
+    step and its double-backward graph doubled, which is what took the
+    HotpotQA run from 76 GB at step 1 to OOM at step 2. Under autocast the
+    matmuls are bf16 and the residual stream stays fp32 -- the same regime
+    the neuron-graph paths already use through ``graph_dtype``. A no-op for
+    a bf16 model and off CUDA.
+    """
+    return adapter.autocast_context(getattr(config, "graph_dtype", None))
 
 
 @contextlib.contextmanager
@@ -1112,6 +1131,7 @@ def _position_profiles(
     gold_tokens: list[int],
     *,
     rows: str,
+    autocast: Any = None,
     epsilon: float = 1e-10,
 ) -> list[list[torch.Tensor]]:
     """``[b][step] -> [R, T_prompt]`` profiles, no graph retained.
@@ -1121,7 +1141,8 @@ def _position_profiles(
     """
     embed = model.get_input_embeddings()
     e = embed(input_ids).detach().clone().requires_grad_(True)
-    out_all = model(inputs_embeds=e, attention_mask=attention_mask).logits
+    with (autocast if autocast is not None else contextlib.nullcontext()):
+        out_all = model(inputs_embeds=e, attention_mask=attention_mask).logits
     B = len(prompt_lens)
     n_rows = int(logit_ids[0].numel()) if rows == "all" else 1
     profiles: list[list[torch.Tensor]] = [[] for _ in range(B)]
@@ -1184,6 +1205,7 @@ def _student_position_losses(
     rows: str,
     config: "GraphAuxConfig",
     scale: float,
+    autocast: Any = None,
     epsilon: float = 1e-10,
 ) -> tuple[list[float], list[float]]:
     """Per-position distance for each example, backwarded position by position.
@@ -1217,7 +1239,10 @@ def _student_position_losses(
     max_steps = max(len(r) for r in read_positions)
 
     with _no_gradient_checkpointing(model), _double_backward_attention():
-        out_all = model(inputs_embeds=e, attention_mask=attention_mask).logits
+        # Autocast covers the forward only; the inner and outer backwards run in
+        # the dtypes the forward recorded, exactly as the KD term's do.
+        with (autocast if autocast is not None else contextlib.nullcontext()):
+            out_all = model(inputs_embeds=e, attention_mask=attention_mask).logits
         for step in range(max_steps):
             _one_position_loss(
                 out_all, e, step, B, n_rows, prompt_lens, read_positions, logit_ids,
@@ -1339,6 +1364,7 @@ def _attribute_batch(
     *,
     rows: str,
     create_graph: bool,
+    autocast: Any = None,
     epsilon: float = 1e-10,
 ) -> list[torch.Tensor]:
     """Per-example ``[R, T_prompt]`` attribution, averaged over answer positions.
@@ -1371,7 +1397,8 @@ def _attribute_batch(
     with ctx:
         # Native dtype, cast per position below: .float() on [B, L, vocab] doubles
         # a tensor that is already gigabytes and only a few rows are ever read.
-        out_all = model(inputs_embeds=e, attention_mask=attention_mask).logits
+        with (autocast if autocast is not None else contextlib.nullcontext()):
+            out_all = model(inputs_embeds=e, attention_mask=attention_mask).logits
 
         B = int(input_ids.shape[0])
         n_rows = len(logit_ids[0]) if rows == "all" else 1
