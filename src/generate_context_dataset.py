@@ -71,7 +71,8 @@ def _clean(text: str) -> str:
     return re.sub(r"\s+", " ", str(text)).strip()
 
 
-def _squad_rows(split: str, limit: int, max_context_words: int) -> list[dict]:
+def _squad_rows(split: str, limit: int, max_context_words: int,
+                max_answer_words: int, dropped: dict) -> list[dict]:
     ds = _load_split(["rajpurkar/squad", "squad"], split)
     rows, seen = [], set()
     for ex in ds:
@@ -84,6 +85,10 @@ def _squad_rows(split: str, limit: int, max_context_words: int) -> list[dict]:
         answer = _clean(answers[0])
         if not answer or answer.lower() not in context.lower():
             continue  # keep it extractive: the span must be in the passage
+        dropped.setdefault("lengths", []).append(len(answer.split()))
+        if len(answer.split()) > max_answer_words:
+            dropped["long"] = dropped.get("long", 0) + 1
+            continue
         q = PROMPT.format(context=context, question=_clean(ex["question"]))
         if q in seen:
             continue
@@ -94,7 +99,8 @@ def _squad_rows(split: str, limit: int, max_context_words: int) -> list[dict]:
     return rows
 
 
-def _hotpot_rows(split: str, limit: int, max_context_words: int) -> list[dict]:
+def _hotpot_rows(split: str, limit: int, max_context_words: int,
+                 max_answer_words: int, dropped: dict) -> list[dict]:
     ds = _load_split(["hotpotqa/hotpot_qa", "hotpot_qa"], split, "distractor")
     rows, seen = [], set()
     for ex in ds:
@@ -107,6 +113,10 @@ def _hotpot_rows(split: str, limit: int, max_context_words: int) -> list[dict]:
         if len(context.split()) > max_context_words:
             continue
         if answer.lower() not in context.lower():
+            continue
+        dropped.setdefault("lengths", []).append(len(answer.split()))
+        if len(answer.split()) > max_answer_words:
+            dropped["long"] = dropped.get("long", 0) + 1
             continue
         q = PROMPT.format(context=context, question=_clean(ex["question"]))
         if q in seen:
@@ -134,6 +144,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-context-words", type=int, default=180, dest="max_context_words",
                    help="Skip longer passages. The token-path backward runs over the whole "
                         "sequence, so this bounds memory and step time.")
+    p.add_argument("--max-answer-words", type=int, default=6, dest="max_answer_words",
+                   help="Drop examples whose answer is longer. A long tail of many-word spans "
+                        "forces a large --max-eval-tokens on every prompt, which costs generation "
+                        "time on all of them; capping lets the eval budget match the median. "
+                        "Applied to train and test alike so the eval distribution matches training.")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--no-shuffle", action="store_false", dest="shuffle")
     return p
@@ -145,8 +160,9 @@ def main() -> None:
     rng = random.Random(args.seed)
 
     # Train and test come from different upstream splits, so they cannot overlap.
-    train = fn(train_split, args.n_train, args.max_context_words)
-    test = fn(test_split, args.n_test, args.max_context_words)
+    stats: dict = {}
+    train = fn(train_split, args.n_train, args.max_context_words, args.max_answer_words, stats)
+    test = fn(test_split, args.n_test, args.max_context_words, args.max_answer_words, stats)
     if args.shuffle:
         rng.shuffle(train)
         rng.shuffle(test)
@@ -173,6 +189,16 @@ def main() -> None:
         "n_train": len(train),
         "n_test": len(test),
     })
+    seen_lengths = sorted(stats.get("lengths", []))
+    if seen_lengths:
+        def pct(q: float) -> int:
+            return seen_lengths[min(int(q * len(seen_lengths)), len(seen_lengths) - 1)]
+        n_long = stats.get("long", 0)
+        print(f"answer length before the cap ({len(seen_lengths)} candidates): "
+              f"median {pct(0.5)}, p90 {pct(0.90)}, p95 {pct(0.95)}, p99 {pct(0.99)}, "
+              f"max {seen_lengths[-1]} words")
+        print(f"  --max-answer-words {args.max_answer_words} dropped {n_long} "
+              f"({100 * n_long / len(seen_lengths):.1f}%)")
     words = [len(r["q_str"].split()) for r in train]
     ans = [len(r["a_str"].split()) for r in train]
     print(f"Wrote {len(train)} train + {len(test)} test rows to {out_dir}/")
