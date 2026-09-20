@@ -43,6 +43,27 @@ from utils import DIR_ROOT
 PROMPT = "{context}\nQ: {question}\nA:"
 
 
+def _load_split(candidates: list[str], split: str, config: str | None = None):
+    """First of ``candidates`` that resolves, so a hub rename does not break this.
+
+    The hub now requires a namespaced repo id, so a bare "squad" raises
+    HfUriError ("Repository id must be 'namespace/name'"). The namespaced id is
+    tried first and the legacy bare name kept as a fallback for older hub
+    versions; every failure is reported so a genuine network or auth error is not
+    mistaken for a rename.
+    """
+    from datasets import load_dataset
+
+    errors = []
+    for repo in candidates:
+        try:
+            return load_dataset(repo, config, split=split) if config else load_dataset(repo, split=split)
+        except Exception as e:  # noqa: BLE001 - report them all and move on
+            errors.append(f"  {repo}: {type(e).__name__}: {e}")
+    raise SystemExit(
+        "could not load any of " + ", ".join(candidates) + ":\n" + "\n".join(errors))
+
+
 def _clean(text: str) -> str:
     """Collapse whitespace so a passage stays one block and the prompt's own
     newlines remain the only line breaks -- extract_text_answer cuts the model's
@@ -51,9 +72,7 @@ def _clean(text: str) -> str:
 
 
 def _squad_rows(split: str, limit: int, max_context_words: int) -> list[dict]:
-    from datasets import load_dataset
-
-    ds = load_dataset("squad", split=split)
+    ds = _load_split(["rajpurkar/squad", "squad"], split)
     rows, seen = [], set()
     for ex in ds:
         answers = ex["answers"]["text"]
@@ -76,9 +95,7 @@ def _squad_rows(split: str, limit: int, max_context_words: int) -> list[dict]:
 
 
 def _hotpot_rows(split: str, limit: int, max_context_words: int) -> list[dict]:
-    from datasets import load_dataset
-
-    ds = load_dataset("hotpot_qa", "distractor", split=split)
+    ds = _load_split(["hotpotqa/hotpot_qa", "hotpot_qa"], split, "distractor")
     rows, seen = [], set()
     for ex in ds:
         answer = _clean(ex["answer"])
