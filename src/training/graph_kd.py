@@ -113,6 +113,7 @@ class GraphKDConfig:
     supergraph_aggregation: str = "normalised"
     token_source_columns: bool = False
     token_path_rows: str = "weighted"
+    token_path_micro_batch: int = 4
     top_k_logits: float = 0.95
     teacher_graph_batch_size: int = 512
     student_graph_batch_size: int = 1
@@ -231,6 +232,7 @@ class GraphKDTrainer:
             supergraph_aggregation=config.supergraph_aggregation,
             token_source_columns=config.token_source_columns,
             token_path_rows=config.token_path_rows,
+            token_path_micro_batch=config.token_path_micro_batch,
             verbose=config.graph_verbose,
             mlp_input_cache=student_mlp_cache,
             teacher_mlp_input_cache=teacher_mlp_cache,
@@ -740,6 +742,14 @@ def build_parser() -> argparse.ArgumentParser:
              "logit target, keeping which tokens push toward the wrong candidates.",
     )
     group.add_argument(
+        "--token-path-micro-batch", type=int, default=4, dest="token_path_micro_batch",
+        help="Prompts per forward inside the token-path attribution. The backward needs the whole "
+             "sequence's activations alive, so a 444-token batch of 32 keeps ~36 GB of MLP "
+             "intermediates on an 8B teacher, while 4 keeps ~4.5 GB. Raise it for short prompts, "
+             "lower it if the graph term runs out of memory. Changes peak memory only, not the "
+             "result.",
+    )
+    group.add_argument(
         "--token-source-columns", action="store_true", dest="token_source_columns",
         help="Append the token-embedding nodes as extra source columns of the supergraph "
              "(present in both models regardless of pre-selection). Same as passing "
@@ -905,6 +915,7 @@ def main() -> None:
                 supergraph_aggregation=args.supergraph_aggregation,
                 token_source_columns=args.token_source_columns,
                 token_path_rows=args.token_path_rows,
+                token_path_micro_batch=args.token_path_micro_batch,
                 top_k_logits=args.top_k_logits,
                 teacher_prop_neurons_per_layer=args.teacher_prop_neurons_per_layer,
                 student_prop_neurons_per_layer=args.student_prop_neurons_per_layer,

@@ -59,6 +59,7 @@ class GraphAuxConfig:
     # makes sense with it; harmless otherwise).
     token_source_columns: bool = False
     token_path_rows: str = "weighted"
+    token_path_micro_batch: int = 4
     # Stop-gradient the attention pattern / RMSNorm denominator when computing
     # attribution-graph edges, matching the published direct-path linearisation.
     # Applied identically to teacher and student. See graph_loss.freeze.
@@ -1009,66 +1010,74 @@ def _token_path_batched(
         # same places rather than the graph term seeing only the first.
         reads.append([n_p - 1 + k for k in range(int(a_ids.numel()))])
 
-    L = max(int(x.numel()) for x in seqs)
-    ids = torch.full((len(seqs), L), pad_id, dtype=torch.long, device=device)
-    attn = torch.zeros((len(seqs), L), dtype=torch.long, device=device)
-    for r, x in enumerate(seqs):
-        ids[r, : x.numel()] = x
-        attn[r, : x.numel()] = 1
+    # ---- process in micro-batches: one padded forward per model per chunk, and
+    # the student's loss backwarded per chunk so activations are freed before the
+    # next. A 444-token batch of 32 through the 8B keeps ~36 GB of MLP
+    # intermediates alive for the backward; at chunk 4 that is ~4.5 GB. Arithmetic
+    # never hit this because its sequences were 9 tokens.
+    chunk = max(int(getattr(config, "token_path_micro_batch", 4) or 4), 1)
+    for lo in range(0, len(prompts), chunk):
+        idxs = list(range(lo, min(lo + chunk, len(prompts))))
+        sub = [seqs[i] for i in idxs]
+        L = max(int(x.numel()) for x in sub)
+        ids = torch.full((len(sub), L), pad_id, dtype=torch.long, device=device)
+        attn = torch.zeros((len(sub), L), dtype=torch.long, device=device)
+        for r, x in enumerate(sub):
+            ids[r, : x.numel()] = x
+            attn[r, : x.numel()] = 1
+        p_lens = [prompt_lens[i] for i in idxs]
+        rds = [reads[i] for i in idxs]
+        gds = [golds[i] for i in idxs]
 
-    # ---- teacher targets: one padded forward, a backward per answer position.
-    # Not cached: at a forward and a backward they are cheaper to recompute than
-    # to round-trip through a growing .pt on Drive.
-    t0 = time.perf_counter()
-    with torch.no_grad():
-        dla_all = teacher_adapter.model(ids, attention_mask=attn).logits.detach()
-    logit_ids, weights, dlas = [], [], []
-    for i in range(len(prompts)):
-        dla = dla_all[i, prompt_lens[i] - 1]
-        lids, probs = salient_logits(
-            dla, config.top_k_logits, config.temperature,
-            gold_token=golds[i] if rows == "gold" else None,
-        )
-        logit_ids.append(lids.to(device))
-        weights.append(probs.to(device))
-        dlas.append(dla)
-    targets = _attribute_batch(
-        teacher_adapter.model, ids, attn, prompt_lens, reads, logit_ids, weights, golds,
-        rows=rows, create_graph=False)
-    targets = [t.detach() for t in targets]
-    time_teacher += time.perf_counter() - t0
+        t0 = time.perf_counter()
+        with torch.no_grad():
+            dla_all = teacher_adapter.model(ids, attention_mask=attn).logits.detach()
+        lids_c, w_c = [], []
+        for r, i in enumerate(idxs):
+            dla = dla_all[r, p_lens[r] - 1].float()
+            lids, probs = salient_logits(
+                dla, config.top_k_logits, config.temperature,
+                gold_token=gds[r] if rows == "gold" else None)
+            lids_c.append(lids.to(device))
+            w_c.append(probs.to(device))
+        del dla_all
+        targets_c = [t.detach() for t in _attribute_batch(
+            teacher_adapter.model, ids, attn, p_lens, rds, lids_c, w_c, gds,
+            rows=rows, create_graph=False)]
+        time_teacher += time.perf_counter() - t0
 
-    # ---- student: same batch, loss backwarded once
-    t0 = time.perf_counter()
-    S_list = _attribute_batch(
-        student_adapter.model, ids, attn, prompt_lens, reads, logit_ids, weights, golds,
-        rows=rows, create_graph=True)
-    per_row = []
-    for i in range(len(prompts)):
-        W_S = S_list[i]
-        W_T = targets[i].to(device=W_S.device, dtype=W_S.dtype)
-        rw = weights[i] if (rows == "all" and W_T.shape[0] > 1) else None
-        if config.scramble_teacher_graph:
-            with torch.no_grad():
-                real = edge_similarity(W_T, W_S.detach(), config.graph_loss_type, row_weights=rw)
-            metric_sums["edge_loss_real_target"] = (
-                metric_sums.get("edge_loss_real_target", 0.0) + float(real.item()))
-            W_T = scramble_teacher_rows(W_T, config)
-        per_row.append(edge_similarity(W_T, W_S, config.graph_loss_type, row_weights=rw))
-    total = torch.stack(per_row)
-    scaled = (loss_scale / denom) * total.sum()
-    if scaled.requires_grad:
-        scaled.backward()
-    detached.extend(total.detach().unbind())
-    for key, val in (("edge_loss", float(total.detach().sum().item())),
-                     ("teacher_supernodes", float(len(prompts))),
+        t0 = time.perf_counter()
+        S_list = _attribute_batch(
+            student_adapter.model, ids, attn, p_lens, rds, lids_c, w_c, gds,
+            rows=rows, create_graph=True)
+        per_row = []
+        for r in range(len(idxs)):
+            W_S = S_list[r]
+            W_T = targets_c[r].to(device=W_S.device, dtype=W_S.dtype)
+            rw = w_c[r] if (rows == "all" and W_T.shape[0] > 1) else None
+            if config.scramble_teacher_graph:
+                with torch.no_grad():
+                    real = edge_similarity(W_T, W_S.detach(), config.graph_loss_type, row_weights=rw)
+                metric_sums["edge_loss_real_target"] = (
+                    metric_sums.get("edge_loss_real_target", 0.0) + float(real.item()))
+                W_T = scramble_teacher_rows(W_T, config)
+            per_row.append(edge_similarity(W_T, W_S, config.graph_loss_type, row_weights=rw))
+        total = torch.stack(per_row)
+        scaled = (loss_scale / denom) * total.sum()
+        if scaled.requires_grad:
+            scaled.backward()
+        detached.extend(total.detach().unbind())
+        metric_sums["edge_loss"] = metric_sums.get("edge_loss", 0.0) + float(total.detach().sum().item())
+        del S_list, per_row, total, scaled, targets_c, ids, attn
+        time_student += time.perf_counter() - t0
+        if on_prompt_done is not None:
+            on_prompt_done(min(lo + chunk, len(prompts)), len(prompts))
+
+    for key, val in (("teacher_supernodes", float(len(prompts))),
                      ("student_supernodes", float(len(prompts))),
                      ("aligned_teacher_supernodes", float(len(prompts))),
                      ("student_graph_neurons", 0.0)):
         metric_sums[key] = metric_sums.get(key, 0.0) + val
-    time_student += time.perf_counter() - t0
-    if on_prompt_done is not None:
-        on_prompt_done(len(prompts), len(prompts))
 
     mean_loss = torch.stack(detached).mean() if detached else torch.tensor(0.0, device=device)
     metrics = {k: v for k, v in metric_sums.items()}
@@ -1121,7 +1130,9 @@ def _attribute_batch(
     """
     embed = model.get_input_embeddings()
     e = embed(input_ids).detach().clone().requires_grad_(True)
-    out_all = model(inputs_embeds=e, attention_mask=attention_mask).logits.float()
+    # Native dtype, cast per position below: .float() on [B, L, vocab] doubles a
+    # tensor that is already gigabytes and only a handful of rows are ever read.
+    out_all = model(inputs_embeds=e, attention_mask=attention_mask).logits
 
     B = int(input_ids.shape[0])
     n_rows = len(logit_ids[0]) if rows == "all" else 1
@@ -1136,7 +1147,7 @@ def _attribute_batch(
                 if step >= len(read_positions[b]):
                     continue
                 pos = read_positions[b][step]
-                logits_b = out_all[b, pos]
+                logits_b = out_all[b, pos].float()
                 if rows == "gold":
                     terms.append(logits_b[int(gold_tokens[b])])
                 elif rows == "all":
