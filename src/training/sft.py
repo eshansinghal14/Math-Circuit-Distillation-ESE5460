@@ -20,6 +20,7 @@ from utils import (
     collate_fn,
     eval_model,
     load_data,
+    load_split,
     seed_all,
 )
 
@@ -293,12 +294,31 @@ class SFTTrainer:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="SFT on GSM8K / SVAMP / local datasets.")
     add_standard_args(parser)
+    parser.add_argument(
+        "--use-sft-split", action="store_true", dest="use_sft_split",
+        help="Fine-tune on datasets/<name>/sft.json instead of train.json. That split is written "
+             "by generate_context_dataset.py --sft and is disjoint from both train and test, so a "
+             "format-fixing SFT pass leaves every distillation run fresh prompts: the student is "
+             "not fitted twice on the same data, and a fine-tuned teacher's soft targets on the "
+             "distillation set are not memorised.")
     return parser
 
 
 def main() -> None:
     args = build_parser().parse_args()
     train_data, test_data = load_data(args.dataset, test_limit=args.test_limit)
+    if args.use_sft_split:
+        # Fine-tune the answer format on a slice no distillation run ever sees, so
+        # the student is not fitted twice on the same prompts and the teacher's
+        # soft targets on the distillation set are not memorised.
+        train_data = load_split(args.dataset, "sft")
+        shared = set(train_data) & set(load_data(args.dataset)[0])
+        if shared:
+            raise SystemExit(
+                f"{len(shared)} sft.json prompts also appear in train.json; "
+                "regenerate the dataset with --sft")
+        print(f"--use-sft-split: fine-tuning on {len(train_data)} held-out prompts "
+              f"(train.json untouched)")
     print(f"Train: {len(train_data)} | Test: {len(test_data)}")
     save_dir = os.path.join(DIR_ROOT, args.save_dir, args.model.split("/")[-1], args.dataset)
 

@@ -141,6 +141,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--source", required=True, choices=sorted(SOURCES))
     p.add_argument("--train", type=int, default=5000, dest="n_train")
     p.add_argument("--test", type=int, default=5000, dest="n_test")
+    p.add_argument("--sft", type=int, default=0, dest="n_sft",
+                   help="Also write sft.json with this many rows, taken from the upstream train "
+                        "split *after* the ones used for train.json, so it is disjoint from both "
+                        "train and test. Fine-tune the answer format on it (sft.py --use-sft-split) "
+                        "and every distillation run still sees fresh prompts.")
     p.add_argument("--max-context-words", type=int, default=180, dest="max_context_words",
                    help="Skip longer passages. The token-path backward runs over the whole "
                         "sequence, so this bounds memory and step time.")
@@ -161,16 +166,24 @@ def main() -> None:
 
     # Train and test come from different upstream splits, so they cannot overlap.
     stats: dict = {}
-    train = fn(train_split, args.n_train, args.max_context_words, args.max_answer_words, stats)
+    # One pass for train + sft so the sft rows are the ones straight after train's,
+    # then a slice: taking two independent passes would return the same rows twice.
+    pool = fn(train_split, args.n_train + args.n_sft, args.max_context_words,
+              args.max_answer_words, stats)
+    train, sft = pool[: args.n_train], pool[args.n_train:]
     test = fn(test_split, args.n_test, args.max_context_words, args.max_answer_words, stats)
     if args.shuffle:
         rng.shuffle(train)
         rng.shuffle(test)
 
+    if args.shuffle:
+        rng.shuffle(sft)
     train_q = {r["q_str"] for r in train}
     overlap = sum(1 for r in test if r["q_str"] in train_q)
+    overlap += sum(1 for r in sft if r["q_str"] in train_q)
+    overlap += sum(1 for r in test if r["q_str"] in {x["q_str"] for x in sft})
     if overlap:
-        raise SystemExit(f"{overlap} test prompts also appear in train; refusing to write")
+        raise SystemExit(f"{overlap} prompts are shared between splits; refusing to write")
 
     out_dir = os.path.join(DIR_ROOT, "datasets", args.dataset_name)
     os.makedirs(out_dir, exist_ok=True)
@@ -181,13 +194,16 @@ def main() -> None:
 
     _write("train.json", train)
     _write("test.json", test)
-    _write("all.json", train + test)
+    _write("all.json", train + test + sft)
+    if sft:
+        _write("sft.json", sft)
     _write("meta.json", {
         "answer_type": "text",
         "source": args.source,
         "max_context_words": args.max_context_words,
         "n_train": len(train),
         "n_test": len(test),
+        "n_sft": len(sft),
     })
     seen_lengths = sorted(stats.get("lengths", []))
     if seen_lengths:
@@ -201,7 +217,8 @@ def main() -> None:
               f"({100 * n_long / len(seen_lengths):.1f}%)")
     words = [len(r["q_str"].split()) for r in train]
     ans = [len(r["a_str"].split()) for r in train]
-    print(f"Wrote {len(train)} train + {len(test)} test rows to {out_dir}/")
+    print(f"Wrote {len(train)} train + {len(test)} test"
+          + (f" + {len(sft)} sft" if sft else "") + f" rows to {out_dir}/")
     print(f"  prompt words: median {sorted(words)[len(words) // 2]}, max {max(words)}")
     print(f"  answer words: median {sorted(ans)[len(ans) // 2]}, max {max(ans)}")
     print(f"  example prompt:\n{train[0]['q_str'][:300]}\n  answer: {train[0]['a_str']!r}")
