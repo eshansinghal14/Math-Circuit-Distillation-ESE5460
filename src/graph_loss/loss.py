@@ -69,11 +69,68 @@ def _compute_edge_loss(
     return edge_similarity(teacher_rows, W_S_aligned, similarity, epsilon)
 
 
+def _weighted_row_similarity(
+    teacher_rows: torch.Tensor,
+    W_S_aligned: torch.Tensor,
+    similarity: str,
+    epsilon: float,
+    row_weights: torch.Tensor,
+) -> torch.Tensor:
+    """Per-row distance, then a weighted sum instead of an equal-weight mean.
+
+    Used by token-path with rows='all', where each row is one logit target and
+    most of them are low-probability tokens whose attribution is mostly noise.
+    Averaging rows equally would let those outvote the top logit -- the same
+    complaint as an empty supernode row getting the same vote as the circuit row.
+    The weights are the teacher's probability over its own logit set, applied
+    *after* the distance so each row is still compared as a distribution over
+    positions.
+
+    Kept separate from the unweighted path so that stays bit-identical: rel-mse
+    there divides by the whole matrix's energy rather than per row, and changing
+    it would silently move every existing supernode result.
+    """
+    w = row_weights.to(device=W_S_aligned.device, dtype=torch.float32).reshape(-1)
+    if w.numel() != teacher_rows.shape[0]:
+        raise ValueError(
+            f"row_weights has {w.numel()} entries for {teacher_rows.shape[0]} rows")
+    w = w / w.sum().clamp(min=epsilon)
+    t = teacher_rows.float().detach()
+    s_ = W_S_aligned.float()
+
+    if similarity == "rel-mse":
+        per_row = (s_ - t).pow(2).sum(dim=1) / t.pow(2).sum(dim=1).clamp(min=epsilon)
+        return (w * per_row).sum().to(W_S_aligned.dtype)
+
+    t_abs, s_abs = t.abs(), s_.abs()
+    t_dist = t_abs / t_abs.sum(dim=1, keepdim=True).clamp(min=epsilon)
+    s_dist = s_abs / s_abs.sum(dim=1, keepdim=True).clamp(min=epsilon)
+    log_t, log_s = (t_dist + epsilon).log(), (s_dist + epsilon).log()
+
+    if similarity == "kld":
+        per_row = (t_dist * (log_t - log_s)).sum(dim=1)
+    elif similarity == "mse":
+        per_row = (s_abs - t_abs).pow(2).mean(dim=1)
+    elif similarity == "mse-norm":
+        per_row = (s_dist - t_dist).pow(2).mean(dim=1)
+    elif similarity == "mse-scale":
+        shape = (s_dist - t_dist).pow(2).mean(dim=1)
+        scale = (s_abs.sum(dim=1) - t_abs.sum(dim=1)).pow(2)
+        per_row = shape + 0.1 * scale
+    else:  # jsd
+        m_dist = 0.5 * (t_dist + s_dist)
+        log_m = (m_dist + epsilon).log()
+        per_row = 0.5 * ((t_dist * (log_t - log_m)).sum(dim=1)
+                         + (s_dist * (log_s - log_m)).sum(dim=1))
+    return (w * per_row).sum().to(W_S_aligned.dtype)
+
+
 def edge_similarity(
     teacher_rows: torch.Tensor,
     W_S_aligned: torch.Tensor,
     similarity: str = "jsd",
     epsilon: float = 1e-8,
+    row_weights: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Distance between two already-aligned matrices of identical shape.
 
@@ -84,6 +141,9 @@ def edge_similarity(
     not hold and indexing them raises once there is more than one row.
     """
     device, dtype = W_S_aligned.device, W_S_aligned.dtype
+    if row_weights is not None:
+        return _weighted_row_similarity(
+            teacher_rows, W_S_aligned, similarity, epsilon, row_weights)
     if similarity == "rel-mse":
         # Relative squared error on the signed, globally normalised matrices: the
         # fraction of the teacher's edge energy the student fails to reproduce.

@@ -517,7 +517,7 @@ def _token_path_teacher_target(
 def _logit_weights(
     dla_logits: torch.Tensor | None, logit_token_ids: torch.Tensor, config: "GraphAuxConfig",
 ) -> torch.Tensor | None:
-    """The teacher's probability over its own logit targets, for rows='weighted'.
+    """The teacher's probability over its own logit targets.
 
     Derived from teacher_dla_logits, which both sides already hold, so the student
     is weighted by the *teacher's* probabilities rather than its own -- weighting
@@ -525,7 +525,9 @@ def _logit_weights(
     difference the loss is trying to measure. Falls back to uniform if the DLA
     reference is missing.
     """
-    if config.token_path_rows != "weighted":
+    # Needed by rows='weighted' to combine the logit rows, and by rows='all' to
+    # weight the per-row distances. Only rows='gold' has no use for them.
+    if config.token_path_rows == "gold":
         return None
     n = int(logit_token_ids.numel())
     if dla_logits is None:
@@ -588,10 +590,17 @@ def _token_path_loss(
     real_target_loss = None
     if config.scramble_teacher_graph:
         with torch.no_grad():
-            real_target_loss = edge_similarity(W_T, W_S.detach(), config.graph_loss_type)
+            real_target_loss = edge_similarity(
+                W_T, W_S.detach(), config.graph_loss_type,
+                row_weights=(logit_weights if (config.token_path_rows == "all" and n_rows > 1) else None))
         W_T = scramble_teacher_rows(W_T, config)
 
-    graph_loss = edge_similarity(W_T, W_S, config.graph_loss_type)
+    # rows='all' is one row per logit target, most of them low-probability tokens
+    # whose attribution is mostly noise. Weight the per-row distances by the
+    # teacher's probability over its logit set, applied after the distance so each
+    # row is still compared as a distribution over positions.
+    row_w = logit_weights if (config.token_path_rows == "all" and n_rows > 1) else None
+    graph_loss = edge_similarity(W_T, W_S, config.graph_loss_type, row_weights=row_w)
     loss_breakdown = {"edge_loss": float(graph_loss.item())}
     metrics = {
         "teacher_supernodes": n_rows,
