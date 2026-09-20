@@ -312,7 +312,17 @@ def main() -> None:
         # Fine-tune the answer format on a slice no distillation run ever sees, so
         # the student is not fitted twice on the same prompts and the teacher's
         # soft targets on the distillation set are not memorised.
-        train_data = load_split(args.dataset, "sft")
+        try:
+            train_data = load_split(args.dataset, "sft")
+        except FileNotFoundError as e:
+            raise SystemExit(
+                f"--use-sft-split needs datasets/{args.dataset}/sft.json, which does not exist "
+                f"({e.filename}).\n"
+                f"  Rebuild the dataset with a held-out slice:\n"
+                f"    python generate_context_dataset.py --dataset-name {args.dataset} "
+                f"--source <squad|hotpotqa> --train N --test N --sft M\n"
+                f"  Or drop --use-sft-split to fine-tune on train.json, accepting that the "
+                f"distillation runs then see the same prompts.") from e
         shared = set(train_data) & set(load_data(args.dataset)[0])
         if shared:
             raise SystemExit(
