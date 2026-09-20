@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import os
+import contextlib
 import random
 import time
 
@@ -1092,6 +1093,34 @@ def _token_path_batched(
     return mean_loss, metrics
 
 
+def _double_backward_attention():
+    """Force the math SDPA kernel, which is the only one with a double backward.
+
+    token-path's student side differentiates through its own attribution, so the
+    inner backward runs with ``create_graph=True`` and the loss backward then asks
+    for a second derivative. The fused kernels do not implement one:
+    ``derivative for aten::_scaled_dot_product_efficient_attention_backward is
+    not implemented``. The math backend does, at the cost of materialising the
+    full B x heads x L x L attention matrix, which is why this is scoped to the
+    student's attribution rather than turned on globally -- the teacher's target
+    needs no second derivative and keeps the fast kernel.
+
+    A no-op off CUDA, and tolerant of either the new or the legacy API.
+    """
+    if not torch.cuda.is_available():
+        return contextlib.nullcontext()
+    try:
+        from torch.nn.attention import SDPBackend, sdpa_kernel
+        return sdpa_kernel(SDPBackend.MATH)
+    except Exception:  # noqa: BLE001 - older torch
+        pass
+    try:
+        return torch.backends.cuda.sdp_kernel(
+            enable_math=True, enable_flash=False, enable_mem_efficient=False)
+    except Exception:  # noqa: BLE001 - nothing to force; let it fail loudly instead
+        return contextlib.nullcontext()
+
+
 def _attribute_batch(
     model: Any,
     input_ids: torch.Tensor,
@@ -1130,63 +1159,67 @@ def _attribute_batch(
     """
     embed = model.get_input_embeddings()
     e = embed(input_ids).detach().clone().requires_grad_(True)
-    # Native dtype, cast per position below: .float() on [B, L, vocab] doubles a
-    # tensor that is already gigabytes and only a handful of rows are ever read.
-    out_all = model(inputs_embeds=e, attention_mask=attention_mask).logits
+    # The forward and every inner backward must sit inside the same kernel choice,
+    # since the second derivative is taken through this graph.
+    ctx = _double_backward_attention() if create_graph else contextlib.nullcontext()
+    with ctx:
+        # Native dtype, cast per position below: .float() on [B, L, vocab] doubles
+        # a tensor that is already gigabytes and only a few rows are ever read.
+        out_all = model(inputs_embeds=e, attention_mask=attention_mask).logits
 
-    B = int(input_ids.shape[0])
-    n_rows = len(logit_ids[0]) if rows == "all" else 1
-    sums: list[torch.Tensor | None] = [None] * B
-    counts = [0] * B
-    max_steps = max(len(r) for r in read_positions)
+        B = int(input_ids.shape[0])
+        n_rows = len(logit_ids[0]) if rows == "all" else 1
+        sums: list[torch.Tensor | None] = [None] * B
+        counts = [0] * B
+        max_steps = max(len(r) for r in read_positions)
 
-    for step in range(max_steps):
-        for j in range(n_rows if rows == "all" else 1):
-            terms, members = [], []
-            for b in range(B):
-                if step >= len(read_positions[b]):
-                    continue
-                pos = read_positions[b][step]
-                logits_b = out_all[b, pos].float()
-                if rows == "gold":
-                    terms.append(logits_b[int(gold_tokens[b])])
-                elif rows == "all":
-                    ids = logit_ids[b].to(logits_b.device).reshape(-1)
-                    if j >= ids.numel():
+        for step in range(max_steps):
+            for j in range(n_rows if rows == "all" else 1):
+                terms, members = [], []
+                for b in range(B):
+                    if step >= len(read_positions[b]):
                         continue
-                    terms.append(logits_b[int(ids[j])])
-                else:
-                    ids = logit_ids[b].to(logits_b.device).reshape(-1)
-                    w = logit_weights[b]
-                    w = (torch.full((ids.numel(),), 1.0 / max(ids.numel(), 1), device=logits_b.device)
-                         if w is None else w.to(device=logits_b.device, dtype=logits_b.dtype).reshape(-1))
-                    terms.append(((w / w.sum().clamp(min=epsilon)) * logits_b[ids]).sum())
-                members.append(b)
-            if not terms:
-                continue
-            last = (step == max_steps - 1) and (j == (n_rows - 1 if rows == "all" else 0))
-            g = torch.autograd.grad(
-                torch.stack(terms).sum(), e,
-                create_graph=create_graph, retain_graph=create_graph or not last)[0]
-            attr = (g * e).sum(dim=-1).abs()                       # [B, T_padded]
-            for b in members:
-                prof = attr[b, : prompt_lens[b]]
-                prof = prof / prof.sum().clamp(min=epsilon)
-                row = prof.unsqueeze(0) if rows != "all" else None
-                if rows == "all":
-                    cur = sums[b]
-                    if cur is None:
-                        cur = [None] * n_rows
-                        sums[b] = cur
-                    cur[j] = prof if cur[j] is None else cur[j] + prof
-                else:
-                    sums[b] = row if sums[b] is None else sums[b] + row
-            if rows != "all":
+                    pos = read_positions[b][step]
+                    logits_b = out_all[b, pos].float()
+                    if rows == "gold":
+                        terms.append(logits_b[int(gold_tokens[b])])
+                    elif rows == "all":
+                        ids = logit_ids[b].to(logits_b.device).reshape(-1)
+                        if j >= ids.numel():
+                            continue
+                        terms.append(logits_b[int(ids[j])])
+                    else:
+                        ids = logit_ids[b].to(logits_b.device).reshape(-1)
+                        w = logit_weights[b]
+                        w = (torch.full((ids.numel(),), 1.0 / max(ids.numel(), 1), device=logits_b.device)
+                             if w is None else w.to(device=logits_b.device, dtype=logits_b.dtype).reshape(-1))
+                        terms.append(((w / w.sum().clamp(min=epsilon)) * logits_b[ids]).sum())
+                    members.append(b)
+                if not terms:
+                    continue
+                last = (step == max_steps - 1) and (j == (n_rows - 1 if rows == "all" else 0))
+                g = torch.autograd.grad(
+                    torch.stack(terms).sum(), e,
+                    create_graph=create_graph, retain_graph=create_graph or not last)[0]
+                attr = (g * e).sum(dim=-1).abs()                       # [B, T_padded]
                 for b in members:
-                    counts[b] += 1
-            elif j == 0:
-                for b in members:
-                    counts[b] += 1
+                    prof = attr[b, : prompt_lens[b]]
+                    prof = prof / prof.sum().clamp(min=epsilon)
+                    row = prof.unsqueeze(0) if rows != "all" else None
+                    if rows == "all":
+                        cur = sums[b]
+                        if cur is None:
+                            cur = [None] * n_rows
+                            sums[b] = cur
+                        cur[j] = prof if cur[j] is None else cur[j] + prof
+                    else:
+                        sums[b] = row if sums[b] is None else sums[b] + row
+                if rows != "all":
+                    for b in members:
+                        counts[b] += 1
+                elif j == 0:
+                    for b in members:
+                        counts[b] += 1
 
     out = []
     for b in range(B):
