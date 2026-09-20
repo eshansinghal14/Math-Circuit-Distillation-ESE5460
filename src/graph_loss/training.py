@@ -1146,7 +1146,7 @@ def _position_profiles(
             for b in members:
                 p = attr[b, : prompt_lens[b]]
                 rows_here[b].append((p / p.sum().clamp(min=epsilon)).detach())
-            del g, attr
+            del g, attr, terms
         for b in range(B):
             if rows_here[b]:
                 profiles[b].append(torch.stack(rows_here[b]))
@@ -1195,6 +1195,16 @@ def _student_position_losses(
     444-token context that is what filled 80 GB. Here each position's graph is
     released as soon as its own backward runs.
 
+    Memory: ``retain_graph=True`` on the per-position backward is required, since
+    every position's attribution runs through the one forward graph. It also
+    means the backward frees nothing, so the double-backward graph built for a
+    position (the dense grad-of-logits and every backward intermediate, several
+    GB at a 444-token context) lives until the last Python reference to it goes.
+    Each position's graph is therefore built and released inside
+    ``_one_position_loss`` rather than in this frame, where the previous
+    position's ``g``, ``attr`` and loss would otherwise stay bound until the
+    next one overwrote them and the peak held two positions instead of one.
+
     Returns (mean loss per example, mean real-target loss per example).
     """
     embed = model.get_input_embeddings()
@@ -1209,49 +1219,84 @@ def _student_position_losses(
     with _no_gradient_checkpointing(model), _double_backward_attention():
         out_all = model(inputs_embeds=e, attention_mask=attention_mask).logits
         for step in range(max_steps):
-            rows_here: list[list[torch.Tensor]] = [[] for _ in range(B)]
-            for j in range(n_rows):
-                terms, members = [], []
-                for b in range(B):
-                    if step >= len(read_positions[b]):
-                        continue
-                    t = _position_target(out_all[b, read_positions[b][step]].float(), rows, j,
-                                         logit_ids[b], logit_weights[b], gold_tokens[b], epsilon)
-                    if t is None:
-                        continue
-                    terms.append(t)
-                    members.append(b)
-                if not terms:
-                    continue
-                g = torch.autograd.grad(
-                    torch.stack(terms).sum(), e, create_graph=True, retain_graph=True)[0]
-                attr = (g * e).sum(dim=-1).abs()
-                for b in members:
-                    pr = attr[b, : prompt_lens[b]]
-                    rows_here[b].append(pr / pr.sum().clamp(min=epsilon))
-            step_loss = None
-            for b in range(B):
-                if not rows_here[b] or step >= len(teacher_profiles[b]):
-                    continue
-                W_S = torch.stack(rows_here[b])
-                W_T = teacher_profiles[b][step].to(device=W_S.device, dtype=W_S.dtype)
-                rw = logit_weights[b] if (rows == "all" and W_T.shape[0] > 1) else None
-                if config.scramble_teacher_graph:
-                    with torch.no_grad():
-                        reals[b] += float(edge_similarity(
-                            W_T, W_S.detach(), config.graph_loss_type, row_weights=rw).item())
-                    W_T = scramble_teacher_rows(W_T, config)
-                d = edge_similarity(W_T, W_S, config.graph_loss_type, row_weights=rw)
-                losses[b] += float(d.detach().item())
-                counts[b] += 1
-                contrib = d * (scale / max(len(read_positions[b]), 1))
-                step_loss = contrib if step_loss is None else step_loss + contrib
-            if step_loss is not None and step_loss.requires_grad:
-                step_loss.backward(retain_graph=True)
-            del rows_here, step_loss
+            _one_position_loss(
+                out_all, e, step, B, n_rows, prompt_lens, read_positions, logit_ids,
+                logit_weights, gold_tokens, teacher_profiles, losses, reals, counts,
+                rows=rows, config=config, scale=scale, epsilon=epsilon)
     del out_all, e
     return ([losses[b] / max(counts[b], 1) for b in range(B)],
             [reals[b] / max(counts[b], 1) for b in range(B)])
+
+
+def _one_position_loss(
+    out_all: torch.Tensor,
+    e: torch.Tensor,
+    step: int,
+    B: int,
+    n_rows: int,
+    prompt_lens: list[int],
+    read_positions: list[list[int]],
+    logit_ids: list[torch.Tensor],
+    logit_weights: list[torch.Tensor | None],
+    gold_tokens: list[int],
+    teacher_profiles: list[list[torch.Tensor]],
+    losses: list[float],
+    reals: list[float],
+    counts: list[int],
+    *,
+    rows: str,
+    config: "GraphAuxConfig",
+    scale: float,
+    epsilon: float,
+) -> None:
+    """Attribute one answer position for the whole micro-batch and backward it.
+
+    Everything this builds with ``create_graph=True`` is local to this frame,
+    so the graph is released on return; only the forward graph behind
+    ``out_all`` survives to the next position.
+    """
+    rows_here: list[list[torch.Tensor]] = [[] for _ in range(B)]
+    for j in range(n_rows):
+        terms, members = [], []
+        for b in range(B):
+            if step >= len(read_positions[b]):
+                continue
+            t = _position_target(out_all[b, read_positions[b][step]].float(), rows, j,
+                                 logit_ids[b], logit_weights[b], gold_tokens[b], epsilon)
+            if t is None:
+                continue
+            terms.append(t)
+            members.append(b)
+        if not terms:
+            continue
+        g = torch.autograd.grad(
+            torch.stack(terms).sum(), e, create_graph=True, retain_graph=True)[0]
+        attr = (g * e).sum(dim=-1).abs()
+        for b in members:
+            pr = attr[b, : prompt_lens[b]]
+            rows_here[b].append(pr / pr.sum().clamp(min=epsilon))
+        del g, attr, terms
+    step_loss = None
+    for b in range(B):
+        if not rows_here[b] or step >= len(teacher_profiles[b]):
+            continue
+        W_S = torch.stack(rows_here[b])
+        W_T = teacher_profiles[b][step].to(device=W_S.device, dtype=W_S.dtype)
+        rw = logit_weights[b] if (rows == "all" and W_T.shape[0] > 1) else None
+        if config.scramble_teacher_graph:
+            with torch.no_grad():
+                reals[b] += float(edge_similarity(
+                    W_T, W_S.detach(), config.graph_loss_type, row_weights=rw).item())
+            W_T = scramble_teacher_rows(W_T, config)
+        d = edge_similarity(W_T, W_S, config.graph_loss_type, row_weights=rw)
+        losses[b] += float(d.detach().item())
+        counts[b] += 1
+        contrib = d * (scale / max(len(read_positions[b]), 1))
+        step_loss = contrib if step_loss is None else step_loss + contrib
+        del W_S, W_T, d, contrib
+    if step_loss is not None and step_loss.requires_grad:
+        step_loss.backward(retain_graph=True)
+    del rows_here, step_loss
 
 
 def _double_backward_attention():

@@ -379,6 +379,8 @@ class GraphKDTrainer:
         flop_counter = step_flop_counter(cfg.track_flops)
 
         self.optimizer.zero_grad()
+        if _DEVICE.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(_DEVICE)
         for batch in self.loader:
             if max_steps is not None and n_steps >= max_steps:
                 break
@@ -419,6 +421,10 @@ class GraphKDTrainer:
                 # lambda_kl == 1.0 takes the original path unchanged.
                 if kl_finite and cfg.lambda_kl != 0.0:
                     (kl if cfg.lambda_kl == 1.0 else kl * cfg.lambda_kl).backward()
+                # The graph term below builds a double-backward graph over the
+                # student; the two B x L x V logit tensors (3.6 GB each in bf16 at
+                # a 444-token context) are done and must not sit next to it.
+                del student_logits, teacher_logits
 
             # ── Graph loss ────────────────────────────────────────────────────
             prompts: List[str] = batch["prompts"]
@@ -588,6 +594,20 @@ class GraphKDTrainer:
                 self.history["step_graph_time_teacher"].append(accum_time_teacher)
                 self.history["step_graph_time_student"].append(accum_time_student)
                 self.history["step_teacher_cache_hits"].append(accum_cache_hits)
+                # Peak allocation over the step, and what is still resident once
+                # the step is over. A run that OOMs after n identical steps is
+                # either a peak that finally landed on a long batch (peak varies,
+                # resident flat) or a leak (resident climbs step over step); the
+                # traceback alone cannot tell the two apart.
+                if _DEVICE.type == "cuda":
+                    peak_gb = torch.cuda.max_memory_allocated(_DEVICE) / 2**30
+                    resident_gb = torch.cuda.memory_allocated(_DEVICE) / 2**30
+                    torch.cuda.reset_peak_memory_stats(_DEVICE)
+                    self.history["step_peak_mem_gb"].append(peak_gb)
+                    self.history["step_resident_mem_gb"].append(resident_gb)
+                    mem_str = f" | mem peak {peak_gb:.1f}G resident {resident_gb:.1f}G"
+                else:
+                    mem_str = ""
                 hits_str = (
                     f", cache hits {accum_cache_hits:.0f}/{accum_graph_prompts:.0f}"
                     if self.teacher_target_cache is not None else ""
@@ -598,7 +618,7 @@ class GraphKDTrainer:
                 )
                 print(
                     f"  step {self._train_step} | KL={accum_kl:.4f} | "
-                    f"Graph={accum_graph:.4f}{scramble_str}{gnorm_str}{flops_str}{time_str}"
+                    f"Graph={accum_graph:.4f}{scramble_str}{gnorm_str}{flops_str}{time_str}{mem_str}"
                 )
                 self._last_save_step = maybe_save_periodic_checkpoint(
                     self.model, self.tokenizer, self.config.save_dir,
