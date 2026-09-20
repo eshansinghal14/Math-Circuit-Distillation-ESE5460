@@ -82,6 +82,7 @@ def _squad_rows(split: str, limit: int, max_context_words: int,
         if not answers:
             continue
         context = _clean(ex["context"])
+        dropped.setdefault("context_words", []).append(len(context.split()))
         if len(context.split()) > max_context_words:
             dropped["too_long_context"] = dropped.get("too_long_context", 0) + 1
             continue
@@ -140,6 +141,7 @@ def _hotpot_rows(split: str, limit: int, max_context_words: int,
         rng.shuffle(keep)                       # gold position must vary
         context = _clean(" ".join(" ".join(sentences[i]) for i in keep))
 
+        dropped.setdefault("context_words", []).append(len(context.split()))
         if len(context.split()) > max_context_words:
             dropped["too_long_context"] = dropped.get("too_long_context", 0) + 1
             continue
@@ -222,7 +224,23 @@ def main() -> None:
     if overlap:
         raise SystemExit(f"{overlap} prompts are shared between splits; refusing to write")
 
-    reasons = {k: v for k, v in stats.items() if k != "lengths"}
+    reasons = {k: v for k, v in stats.items() if k not in ("lengths", "context_words")}
+    ctx = sorted(stats.get("context_words", []))
+    if ctx:
+        def cpct(q: float) -> int:
+            return ctx[min(int(q * len(ctx)), len(ctx) - 1)]
+        kept = sum(1 for c in ctx if c <= args.max_context_words)
+        print(f"context words before the cap ({len(ctx)} candidates): median {cpct(0.5)}, "
+              f"p75 {cpct(0.75)}, p90 {cpct(0.90)}, p95 {cpct(0.95)}, max {ctx[-1]}")
+        print(f"  --max-context-words {args.max_context_words} keeps {kept} "
+              f"({100 * kept / len(ctx):.1f}%); p90 would need {cpct(0.90)}")
+    if args.n_sft and len(sft) < args.n_sft:
+        raise SystemExit(
+            f"asked for {args.n_sft} sft rows but only {len(sft)} were left over after filling "
+            f"train ({len(train)}/{args.n_train}).\n"
+            "  The source ran out of examples that pass the filters, so sft.json would be short or "
+            "empty and --use-sft-split would fail later. Lower --train/--sft, or loosen the "
+            "filters (--max-context-words is usually the binding one; see the line above).")
     if not train or not test:
         detail = ", ".join(f"{k}={v}" for k, v in sorted(reasons.items())) or "no rows reached the filters"
         raise SystemExit(
