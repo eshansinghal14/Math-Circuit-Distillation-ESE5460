@@ -100,6 +100,22 @@ def student_autocast():
     return torch.autocast(device_type="cuda", dtype=AUTOCAST_DTYPE)
 
 
+def eval_batch_size_for(value, is_teacher: bool = False) -> int:
+    """Resolve --eval-batch-size for one model.
+
+    Accepts an int or a 1-2 element list: ``[student]`` or ``[student, teacher]``.
+    The teacher is the larger model and its eval activations scale with batch x
+    sequence length, so on long-context datasets it needs a smaller batch than the
+    student even though both are no-grad greedy decoding. With one value both
+    models share it, which is the old behaviour.
+    """
+    if isinstance(value, (list, tuple)):
+        if not value:
+            raise ValueError("--eval-batch-size got an empty list")
+        return int(value[1] if (is_teacher and len(value) > 1) else value[0])
+    return int(value)
+
+
 def make_optimizer(model, lr: float):
     """torch AdamW with fp32 moments. See the precision note at the top of this file."""
     from torch.optim import AdamW
@@ -1137,10 +1153,13 @@ def add_standard_args(parser: argparse.ArgumentParser) -> None:
                     help="Greedy-decoded tokens per eval prompt. Default: 8 for the local arithmetic "
                          "datasets (4-digit answers, worst case one digit per token), 256 for gsm8k/svamp. "
                          "1 truncates any digit-by-digit answer and caps 33_add, which needs two tokens.")
-    group.add_argument("--eval-batch-size", type=int, default=256, dest="eval_batch_size",
-                    help="Prompts per generate() call during eval. Eval is no-grad greedy decoding of "
-                         "short prompts, so it can run far larger batches than training; it used to "
-                         "share --batch-size. Default 256.")
+    group.add_argument("--eval-batch-size", type=int, nargs="+", default=[256], dest="eval_batch_size",
+                    metavar="N",
+                    help="Prompts per generate() call during eval, as one value for both models or "
+                         "two as 'student teacher'. Eval is no-grad greedy decoding, so it can run "
+                         "larger batches than training, but activations scale with batch x sequence "
+                         "length: on a 450-token context the 8B teacher needs a far smaller batch "
+                         "than the 1B student. Default 256.")
     group.add_argument("--test-limit", type=int, default=None, dest="test_limit")
     group.add_argument("--dtype", type=str, default="float32", choices=sorted(DTYPES), dest="dtype",
                        help="Master weight precision. float32 (default) is the regime every recorded "

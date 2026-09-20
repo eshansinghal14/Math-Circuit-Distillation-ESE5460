@@ -27,6 +27,7 @@ from utils import (
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from training.utils import (
+    eval_batch_size_for,
     DEFAULT_SEED,
     ParamChangeCanary,
     add_standard_args,
@@ -93,7 +94,7 @@ class SFTConfig:
     warmup_steps: int = 10
     lr_floor: float = 0.3  # see training.utils.scheduled_lr
     max_eval_tokens: Optional[int] = None  # None -> utils.default_eval_tokens(dataset)
-    eval_batch_size: int = 256
+    eval_batch_size: Any = 256
     save_dir: str = "results/sft"
     eval_every_n_steps: int = 1
     save_every_n_steps: int = 0
@@ -161,7 +162,7 @@ class SFTTrainer:
         with self._autocast():
             return eval_model(
                 self.model, self.tokenizer, test_dataset, dataset_name,
-                cfg.eval_batch_size, cfg.max_eval_tokens,
+                eval_batch_size_for(cfg.eval_batch_size), cfg.max_eval_tokens,
             )
 
     def _eval(self) -> float:

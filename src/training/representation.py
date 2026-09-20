@@ -62,6 +62,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from graph_loss.freeze import without_gradient_checkpointing
 from training.utils import (
+    eval_batch_size_for,
     DEFAULT_SEED,
     ParamChangeCanary,
     describe_run_setup,
@@ -418,7 +419,7 @@ class RepKDConfig:
     temperature: float = 1.0
     kl_token_chunk_size: int = 64
     max_eval_tokens: Optional[int] = None  # None -> utils.default_eval_tokens(dataset)
-    eval_batch_size: int = 256
+    eval_batch_size: Any = 256
     save_dir: str = "results/rep_kd"
     eval_every_n_steps: int = 1
     save_every_n_steps: int = 0
@@ -610,7 +611,9 @@ class RepKDTrainer:
         with self._autocast():
             return eval_model(
                 model, self.tokenizer, test_dataset, dataset_name,
-                cfg.eval_batch_size, cfg.max_eval_tokens,
+                eval_batch_size_for(cfg.eval_batch_size,
+                                    model is getattr(self, "teacher", None)),
+                cfg.max_eval_tokens,
             )
 
     def _eval(self) -> float:
