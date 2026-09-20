@@ -84,6 +84,7 @@ class StandardKDConfig:
     save_every_n_steps: int = 0
     grad_accum_steps: int = 1
     eval_datasets: List[str] = field(default_factory=list)
+    test_limit: Optional[int] = None
     resume: bool = False
     track_flops: bool = False
     seed: int = _SEED
@@ -126,7 +127,7 @@ class StandardKDTrainer:
 
         self.extra_test_datasets: Dict[str, PromptAnswerDataset] = {}
         for ds in config.eval_datasets:
-            _, ds_test_data = load_data(ds)
+            _, ds_test_data = load_data(ds, test_limit=config.test_limit)
             self.extra_test_datasets[ds] = PromptAnswerDataset(ds, ds_test_data, self.tokenizer)
 
         self.optimizer = make_optimizer(self.model, config.learning_rate)
@@ -355,6 +356,7 @@ def main() -> None:
                 max_eval_tokens=args.max_eval_tokens,
                 eval_batch_size=args.eval_batch_size,
                 eval_datasets=args.eval_datasets,
+                test_limit=args.test_limit,
                 resume=args.resume,
                 track_flops=args.track_flops,
                 seed=seed,
