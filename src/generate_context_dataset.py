@@ -228,7 +228,6 @@ def main() -> None:
             "  too_long_context dominating usually means --max-context-words is sized for one source "
             "and you are building another: HotpotQA's raw distractor setting is 800-1200 words, so "
             "either raise the cap or lower --hotpot-paragraphs.")
-    reasons = {k: v for k, v in stats.items() if k != "lengths"}
     if reasons:
         print("dropped by filter: " + ", ".join(f"{k}={v}" for k, v in sorted(reasons.items())))
     out_dir = os.path.join(DIR_ROOT, "datasets", args.dataset_name)
