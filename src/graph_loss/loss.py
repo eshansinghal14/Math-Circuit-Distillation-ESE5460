@@ -66,6 +66,24 @@ def _compute_edge_loss(
 
     teacher_rows = W_T[t_idx].to(device=device, dtype=dtype)
 
+    return edge_similarity(teacher_rows, W_S_aligned, similarity, epsilon)
+
+
+def edge_similarity(
+    teacher_rows: torch.Tensor,
+    W_S_aligned: torch.Tensor,
+    similarity: str = "jsd",
+    epsilon: float = 1e-8,
+) -> torch.Tensor:
+    """Distance between two already-aligned matrices of identical shape.
+
+    Split out of _compute_edge_loss so callers whose rows and columns already
+    correspond can skip the supernode alignment entirely. The token-path target
+    is such a caller: its columns are token positions, not supernodes, so the
+    alignment's assumption that the first K columns are the supernode block does
+    not hold and indexing them raises once there is more than one row.
+    """
+    device, dtype = W_S_aligned.device, W_S_aligned.dtype
     if similarity == "rel-mse":
         # Relative squared error on the signed, globally normalised matrices: the
         # fraction of the teacher's edge energy the student fails to reproduce.

@@ -23,11 +23,10 @@ from graph_loss.graph import (
     aggregate_supernode_adjacency,
     SuperGraph,
     normalize_matrix,
-    salient_targets_with_gold,
-    token_path_supergraph,
 )
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
-from graph_loss.loss import compute_graph_loss
+from graph_loss.token_attribution import salient_logits, token_attribution
+from graph_loss.loss import compute_graph_loss, edge_similarity
 from graph_loss.utils import normalize_node_labels
 
 
@@ -122,21 +121,26 @@ def _aggregate_supergraph_adjacency(
     )
 
 
-def _derangements(k: int, rng: random.Random) -> list[list[int]]:
-    """One random derangement of ``range(k)`` per row index.
+def _derangements(k: int, rng: random.Random, width: int | None = None) -> list[list[int]]:
+    """``k`` random derangements of ``range(width)`` (default: ``width = k``).
+
+    ``width`` is separate because a target can have more rows than columns --
+    token-path with rows='all' is L x T with L > T -- and drawing one
+    derangement per column then left too few for the rows.
 
     A derangement has no fixed point, so no entry of a scrambled row stays at
     its true source. ``k < 2`` has no derangement and gets the identity.
     """
+    width = k if width is None else width
     perms: list[list[int]] = []
     for _ in range(k):
-        if k < 2:
-            perms.append(list(range(k)))
+        if width < 2:
+            perms.append(list(range(width)))
             continue
         while True:
-            p = list(range(k))
+            p = list(range(width))
             rng.shuffle(p)
-            if all(p[i] != i for i in range(k)):
+            if all(p[i] != i for i in range(width)):
                 perms.append(p)
                 break
     return perms
@@ -160,13 +164,15 @@ def scramble_teacher_rows(W_T: torch.Tensor, config: GraphAuxConfig) -> torch.Te
         raise ValueError(f"Expected a 2-D supernode adjacency, got {tuple(W_T.shape)}")
     # Each row is permuted over all its columns (supernode and any token columns),
     # so a rectangular raw-signed target is scrambled the same way as a square one.
-    k = int(W_T.shape[1])
-    perms = config.scramble_permutations.get(k)
+    n_rows, k = int(W_T.shape[0]), int(W_T.shape[1])
+    key = (n_rows, k) if n_rows != k else k
+    perms = config.scramble_permutations.get(key)
     if perms is None:
-        perms = _derangements(k, random.Random(config.scramble_seed * 1_000_003 + k))
-        config.scramble_permutations[k] = perms
-        print(f"  [graph] scrambled teacher target: width={k}, row permutations {perms}")
-    idx = torch.tensor(perms[: W_T.shape[0]], device=W_T.device, dtype=torch.long)
+        perms = _derangements(n_rows, random.Random(config.scramble_seed * 1_000_003 + k), width=k)
+        config.scramble_permutations[key] = perms
+        print(f"  [graph] scrambled teacher target: {n_rows} rows x width {k}, "
+              f"row permutations {perms}")
+    idx = torch.tensor(perms[:n_rows], device=W_T.device, dtype=torch.long)
     return torch.gather(W_T, 1, idx)
 
 
@@ -430,25 +436,12 @@ def _compute_teacher_target(
 ) -> tuple[SuperGraph, torch.Tensor, torch.Tensor | None]:
     """The teacher's supergraph, logit-target ids and DLA reference logits for one prompt."""
     token_path = config.supergraph_aggregation == "token-path"
-    needs_gold = token_path and config.token_path_rows == "gold"
-    forced_targets = None
-    if needs_gold:
-        # rows="gold" attributes to the gold logit, so it has to be among the
-        # attribution targets. The 95% salient set usually contains it but is not
-        # guaranteed to, and a miss would raise mid-run, so force it in the way
-        # inspect_graphs does. Nothing else about the graph changes.
-        _p_ids, _a_ids = tokenize_prompt_answer(teacher_adapter.tokenizer, prompt, str(answer))
-        _full = torch.cat([_p_ids, _a_ids]).to(device)
-        with torch.no_grad():
-            _dla = teacher_adapter.model(_full.unsqueeze(0)).logits[0, int(_p_ids.numel()) - 1].detach()
-        forced_targets, _gold_in_salient = salient_targets_with_gold(
-            _dla, int(_a_ids[0]), config.top_k_logits, config.temperature,
-        )
+    if token_path:
+        return _token_path_teacher_target(prompt, answer, teacher_adapter, config, device)
     with torch.enable_grad():
         teacher_result = create_graph(
             teacher_adapter,
             prompt,
-            attribution_targets=forced_targets,
             prop_neurons_per_layer=config.teacher_prop_neurons_per_layer,
             top_k_logits=config.top_k_logits,
             temperature=config.temperature,
@@ -480,19 +473,45 @@ def _compute_teacher_target(
     if prompt_len > 0 and full_logits.shape[0] >= prompt_len:
         teacher_dla_logits = full_logits[prompt_len - 1].to(device)
     logit_token_ids = teacher_result.graph.logit_token_ids.to(device)
-    if config.supergraph_aggregation == "token-path":
-        # The supernode supergraph create_graph built is discarded; the target is
-        # the token-position distribution derived from the same raw graph.
-        teacher_supergraph = token_path_supergraph(
-            teacher_result.graph,
-            int(answer_ids[0]) if config.token_path_rows == "gold" else None,
-            rows=config.token_path_rows,
-            logit_weights=_logit_weights(teacher_dla_logits, logit_token_ids, config),
-        )
-    else:
-        teacher_supergraph = teacher_result.supergraph
+    teacher_supergraph = teacher_result.supergraph
     del teacher_result
     return teacher_supergraph, logit_token_ids, teacher_dla_logits
+
+
+def _token_path_teacher_target(
+    prompt: str, answer: Any, teacher_adapter: HFLlamaGraphAdapter,
+    config: "GraphAuxConfig", device: torch.device,
+) -> tuple[SuperGraph, torch.Tensor, torch.Tensor | None]:
+    """Teacher target for token-path: gradient x input, no attribution graph.
+
+    One forward and one backward instead of ~1.8 s of neuron-level attribution,
+    and nothing in this path touches pre-selection, supernodes, ANOVA labels or
+    the MLP-input cache. The result is wrapped as a SuperGraph so the alignment,
+    scramble, cache and every graph_loss_type work on it unchanged.
+    """
+    prompt_ids, answer_ids = tokenize_prompt_answer(teacher_adapter.tokenizer, prompt, str(answer))
+    full_ids = torch.cat([prompt_ids, answer_ids]).to(device)
+    read_pos = int(prompt_ids.numel()) - 1
+    gold = int(answer_ids[0])
+    with torch.no_grad():
+        dla_logits = teacher_adapter.model(full_ids.unsqueeze(0)).logits[0, read_pos].detach()
+    logit_ids, probs = salient_logits(
+        dla_logits, config.top_k_logits, config.temperature,
+        gold_token=gold if config.token_path_rows == "gold" else None,
+    )
+    attr = token_attribution(
+        teacher_adapter.model, full_ids[: read_pos + 1], read_pos, logit_ids,
+        rows=config.token_path_rows, logit_weights=probs, gold_token=gold,
+        create_graph=False,
+    ).detach()
+    labels = ([["token-path"]] if attr.shape[0] == 1
+              else [[f"token-path:{i}"] for i in range(attr.shape[0])])
+    supergraph = SuperGraph(
+        supernode_adjacency_matrix=attr,
+        supernodes=[list(range(attr.shape[1])) for _ in labels],
+        supernode_labels=labels,
+    )
+    return supergraph, logit_ids.to(device), dla_logits.to(device)
 
 
 def _logit_weights(
@@ -534,46 +553,50 @@ def _token_path_loss(
     student_graph: Any,
     teacher_supergraph: SuperGraph,
     logit_weights: torch.Tensor | None = None,
+    logit_token_ids: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
-    """Loss for the token-path target: one row, so no label alignment is needed.
+    """Student side of the token-path loss: gradient x input, no attribution graph.
+
+    create_graph=True on the inner backward so the loss can differentiate through
+    the student's own attribution -- this target is itself a gradient, so training
+    on it needs double backward, at roughly 2-3x a normal step.
 
     Teacher and student index the same token positions by construction, so the
-    mapping is the identity and the "supernodes aligned" counters are trivially
-    1 of 1. Everything else -- the scramble, the real-target diagnostic and every
-    graph_loss_type -- works on the 1 x T matrix unchanged.
+    alignment is the identity and the "aligned" counters are trivially R of R.
     """
-    gold = None
-    if config.token_path_rows == "gold":
-        _, answer_ids = tokenize_prompt_answer(student_adapter.tokenizer, prompt, str(answer))
-        gold = int(answer_ids[0])
-    student_supergraph = token_path_supergraph(
-        student_graph, gold, rows=config.token_path_rows, logit_weights=logit_weights)
-
-    W_S = student_supergraph.supernode_adjacency_matrix
-    W_T = teacher_supergraph.supernode_adjacency_matrix.detach().to(
-        device=W_S.device, dtype=W_S.dtype,
+    prompt_ids, answer_ids = tokenize_prompt_answer(student_adapter.tokenizer, prompt, str(answer))
+    device = student_adapter.device
+    full_ids = torch.cat([prompt_ids, answer_ids]).to(device)
+    read_pos = int(prompt_ids.numel()) - 1
+    W_S = token_attribution(
+        student_adapter.model, full_ids[: read_pos + 1], read_pos,
+        (logit_token_ids if logit_token_ids is not None else torch.tensor([int(answer_ids[0])])),
+        rows=config.token_path_rows, logit_weights=logit_weights,
+        gold_token=int(answer_ids[0]), create_graph=True,
     )
+    W_T = teacher_supergraph.supernode_adjacency_matrix.detach().to(
+        device=W_S.device, dtype=W_S.dtype)
     if W_T.shape != W_S.shape:
         raise ValueError(
             f"token-path shape mismatch for prompt={prompt!r}: teacher {tuple(W_T.shape)} vs "
             f"student {tuple(W_S.shape)}; teacher and student must tokenise identically")
 
+    # Columns are token positions, already corresponding one-to-one, so the
+    # supernode alignment is skipped entirely (it would index the first K columns
+    # as a supernode block, which raises as soon as there is more than one row).
     n_rows = int(W_T.shape[0])
-    mapping = {i: {i} for i in range(n_rows)}
-    ids = list(range(n_rows))
     real_target_loss = None
     if config.scramble_teacher_graph:
         with torch.no_grad():
-            real_target_loss, _ = compute_graph_loss(
-                W_T, W_S.detach(), mapping, ids, ids, similarity=config.graph_loss_type)
+            real_target_loss = edge_similarity(W_T, W_S.detach(), config.graph_loss_type)
         W_T = scramble_teacher_rows(W_T, config)
 
-    graph_loss, loss_breakdown = compute_graph_loss(
-        W_T, W_S, mapping, ids, ids, similarity=config.graph_loss_type)
+    graph_loss = edge_similarity(W_T, W_S, config.graph_loss_type)
+    loss_breakdown = {"edge_loss": float(graph_loss.item())}
     metrics = {
         "teacher_supernodes": n_rows,
         "student_supernodes": n_rows,
-        "student_graph_neurons": int(student_graph.n_neurons),
+        "student_graph_neurons": 0,
         "aligned_teacher_supernodes": n_rows,
         **loss_breakdown,
     }
@@ -597,6 +620,12 @@ def compute_prompt_graph_loss(
             f"  [graph] teacher supergraph ready: "
             f"{len(teacher_supergraph.supernodes)} supernodes"
         )
+
+    if config.supergraph_aggregation == "token-path":
+        return _token_path_loss(
+            prompt, answer, student_adapter, config, None, teacher_supergraph,
+            logit_weights=_logit_weights(teacher_dla_logits, logit_token_ids, config),
+            logit_token_ids=logit_token_ids)
 
     if config.verbose:
         print(f"  [graph] building student graph for prompt: {prompt!r}")
@@ -636,10 +665,6 @@ def compute_prompt_graph_loss(
         ) from e
 
     student_graph = student_result.graph
-    if config.supergraph_aggregation == "token-path":
-        return _token_path_loss(
-            prompt, answer, student_adapter, config, student_graph, teacher_supergraph,
-            logit_weights=_logit_weights(teacher_dla_logits, logit_token_ids, config))
     student_supergraph_structure = student_result.supergraph
 
     # Filter supernodes to only the requested labels (if specified).
