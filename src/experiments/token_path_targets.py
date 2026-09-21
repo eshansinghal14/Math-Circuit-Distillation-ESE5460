@@ -85,6 +85,55 @@ TOPKS = (0, 8, 16, 32, 64)
 EPS = 1e-10
 
 
+_PUNCT = set(""".,:;!?()[]{}<>"'`-/\\|*#&%$@~+= """)
+_TEMPLATE_TOKENS = {"Q", "A"}
+
+
+def structural_keep_mask(prompt_ids: torch.Tensor, tok: Any) -> torch.Tensor:
+    """True at positions worth scoring; False at punctuation, template and specials.
+
+    Group 3 of the first run found 31-53% of the teacher top-k slots were these:
+    colon, period, 'A', BOS, newline-period, newline-question, 'Q', comma. They
+    are also positions where teacher and student agree trivially -- both models
+    attend to BOS -- so they inflate the free agreement and compress the
+    distance's dynamic range while contributing nothing about which passage holds
+    the answer.
+
+    Masked positions are zeroed and the row renormalised rather than deleted, so
+    every index still refers to the same prompt token and the answer-span mapping
+    in Group 4 stays valid. A zeroed position can never enter a top-k.
+
+    'Q' and 'A' are masked as the prompt template markers, which also masks them
+    where they occur as ordinary words. On a context/question/answer prompt that
+    is a handful of positions and worth the simplicity.
+    """
+    keep = torch.ones(int(prompt_ids.numel()), dtype=torch.bool)
+    specials = {i for i in (getattr(tok, "bos_token_id", None),
+                            getattr(tok, "eos_token_id", None),
+                            getattr(tok, "pad_token_id", None)) if i is not None}
+    for pos in range(int(prompt_ids.numel())):
+        tid = int(prompt_ids[pos])
+        if tid in specials:
+            keep[pos] = False
+            continue
+        txt = tok.decode([tid])
+        stripped = txt.strip()
+        if stripped == "" or stripped in _TEMPLATE_TOKENS or all(c in _PUNCT for c in stripped):
+            keep[pos] = False
+    return keep
+
+
+def apply_mask(profiles: list[torch.Tensor], keep: torch.Tensor) -> list[torch.Tensor]:
+    """Zero the masked columns and renormalise each row."""
+    out = []
+    for prof in profiles:
+        m = keep.to(prof.device).unsqueeze(0).to(prof.dtype)
+        x = prof.abs() * m
+        tot = x.sum(dim=1, keepdim=True)
+        out.append(torch.where(tot > EPS, x / tot.clamp(min=EPS), prof.abs()))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Collection
 # ---------------------------------------------------------------------------
@@ -96,6 +145,8 @@ def collect(
     config: GraphAuxConfig,
     micro_tokens: int,
     micro_batch: int,
+    mask_structural: bool = True,
+    drop_eos_position: bool = True,
     verbose: bool = True,
 ) -> list[dict[str, Any]]:
     """Teacher and student token-path profiles for each prompt.
@@ -117,7 +168,13 @@ def collect(
         n_p = int(p_ids.numel())
         p_lens.append(n_p)
         golds.append(int(a_ids[0]))
-        reads.append([n_p - 1 + k for k in range(int(a_ids.numel()))])
+        # The last answer position predicts EOS. "Which prompt token influences
+        # the decision to stop" is not an evidence question, and on a 3-token
+        # answer it is a third of the equally weighted mean over positions.
+        n_read = int(a_ids.numel())
+        if drop_eos_position and n_read > 1:
+            n_read -= 1
+        reads.append([n_p - 1 + k for k in range(n_read)])
         prompts.append(prompt)
 
     out: list[dict[str, Any]] = []
@@ -157,13 +214,23 @@ def collect(
             autocast=_graph_autocast(student_adapter, config))
 
         for r, i in enumerate(idxs):
+            ids_cpu = seqs[i][: pl[r]].cpu()
+            t_rows = [x.detach().float().cpu() for x in t_prof[r]]
+            s_rows = [x.detach().float().cpu() for x in s_prof[r]]
+            keep = (structural_keep_mask(ids_cpu, tok) if mask_structural
+                    else torch.ones(int(ids_cpu.numel()), dtype=torch.bool))
+            if mask_structural:
+                t_rows = apply_mask(t_rows, keep)
+                s_rows = apply_mask(s_rows, keep)
             out.append({
                 "prompt": prompts[i],
                 "prompt_len": pl[r],
                 "n_positions": len(rd[r]),
-                "prompt_ids": seqs[i][: pl[r]].cpu(),
-                "teacher": [x.detach().float().cpu() for x in t_prof[r]],
-                "student": [x.detach().float().cpu() for x in s_prof[r]],
+                "prompt_ids": ids_cpu,
+                "keep": keep,
+                "n_kept": int(keep.sum()),
+                "teacher": t_rows,
+                "student": s_rows,
             })
         done += len(idxs)
         del t_prof, s_prof
@@ -371,7 +438,10 @@ def answer_span_mass(recs: list[dict], items: list[tuple[str, str]], tok: Any, k
             continue
         span = {p for p, (s0, s1) in enumerate(offs)
                 if s1 > start and s0 < start + len(a) and s1 > s0}
-        span = {p for p in span if p < r["prompt_len"]}
+        # Chance is over the positions that survive masking, and a span token that
+        # was itself masked (punctuation inside the answer) cannot be hit.
+        keep = r["keep"]
+        span = {p for p in span if p < r["prompt_len"] and bool(keep[p])}
         if not span:
             continue
         hits += 1
@@ -380,7 +450,7 @@ def answer_span_mass(recs: list[dict], items: list[tuple[str, str]], tok: Any, k
         idx = list(span)
         t_mass.append(float(agg_t[0, idx].sum()) / max(float(agg_t.sum()), EPS))
         s_mass.append(float(agg_s[0, idx].sum()) / max(float(agg_s.sum()), EPS))
-        base.append(len(span) / max(r["prompt_len"], 1))
+        base.append(len(span) / max(r["n_kept"], 1))
         t_top.append(len(topk_idx(agg_t, k) & span) / max(len(span), 1))
         s_top.append(len(topk_idx(agg_s, k) & span) / max(len(span), 1))
     if not hits:
@@ -476,6 +546,18 @@ def main() -> None:
                     choices=("weighted", "gold", "all"))
     ap.add_argument("--micro-tokens", type=int, default=2048)
     ap.add_argument("--micro-batch", type=int, default=8)
+    ap.add_argument("--mask-structural", action=argparse.BooleanOptionalAction, default=True,
+                    help="Zero the punctuation, prompt-template ('Q', 'A', ':') and special-token "
+                         "positions and renormalise. On by default: they were 31-53%% of the "
+                         "teacher top-k in the first run and are positions where teacher and "
+                         "student agree trivially, so they compress the distance's range while "
+                         "saying nothing about which passage holds the answer. "
+                         "--no-mask-structural restores the full profile.")
+    ap.add_argument("--drop-eos-position", action=argparse.BooleanOptionalAction, default=True,
+                    help="Drop the final answer position, the one predicting EOS, from the "
+                         "equally weighted mean over answer positions. On by default: it is not "
+                         "an evidence question and on a 3-token answer it is a third of the loss. "
+                         "--no-drop-eos-position keeps it.")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="results/token_path_targets")
     args = ap.parse_args()
@@ -508,9 +590,14 @@ def main() -> None:
     config.scramble_permutations = {}
 
     print("collecting profiles (teacher and student, no create_graph)...")
-    recs = collect(ta, sa, items, config, args.micro_tokens, args.micro_batch)
+    recs = collect(ta, sa, items, config, args.micro_tokens, args.micro_batch,
+                   mask_structural=args.mask_structural,
+                   drop_eos_position=args.drop_eos_position)
+    kept = float(np.mean([r["n_kept"] / max(r["prompt_len"], 1) for r in recs]))
     print(f"collected {len(recs)} prompts, "
           f"{sum(r['n_positions'] for r in recs)} answer positions")
+    print(f"  mask_structural={args.mask_structural} -> {kept:.1%} of prompt positions kept")
+    print(f"  drop_eos_position={args.drop_eos_position}")
 
     res = {
         "config": vars(args),
@@ -521,6 +608,9 @@ def main() -> None:
             "median": float(np.median([r["prompt_len"] for r in recs])),
             "max": max(r["prompt_len"] for r in recs),
         },
+        "mask_structural": args.mask_structural,
+        "drop_eos_position": args.drop_eos_position,
+        "frac_positions_kept": kept,
         "distances": distance_table(recs, config, rng),
         "topk": topk_structure(recs, tokenizer, rng),
         "answer_span": answer_span_mass(recs, items, tokenizer, k=16),
@@ -529,7 +619,9 @@ def main() -> None:
 
     out_dir = args.out if os.path.isabs(args.out) else os.path.join(DIR_ROOT, args.out)
     os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, f"{args.dataset}_{args.token_path_rows}.json")
+    tag = ("masked" if args.mask_structural else "full")
+    tag += "-noeos" if args.drop_eos_position else "-eos"
+    path = os.path.join(out_dir, f"{args.dataset}_{args.token_path_rows}_{tag}.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(res, f, indent=2)
     print(f"\nwrote {path}")
