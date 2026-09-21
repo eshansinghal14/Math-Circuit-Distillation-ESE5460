@@ -151,6 +151,37 @@ def _derangements(k: int, rng: random.Random, width: int | None = None) -> list[
     return perms
 
 
+_SCRAMBLE_LOG_FULL_WIDTH = 24
+_SCRAMBLE_LOG_SHAPES = 3
+
+
+def _log_scramble_shape(config: GraphAuxConfig, n_rows: int, k: int, perms: list) -> None:
+    """One line per new target shape, and only while the lines stay informative.
+
+    Under a supernode aggregation the columns are supernodes: a handful of shapes
+    for a whole run, each narrow enough that printing the permutation is a
+    readable record of what the control actually scrambled. token-path's columns
+    are token positions, so the cache key is the prompt length -- a new shape per
+    distinct prompt length, each printing a list as long as the prompt. On
+    HotpotQA that is hundreds of ~500-element lines and it buries the step log.
+
+    So the full permutation is still printed at supernode widths, and anything
+    wider prints one summary line for the first few shapes and nothing after.
+    """
+    n_shapes = len(config.scramble_permutations)
+    if k <= _SCRAMBLE_LOG_FULL_WIDTH:
+        print(f"  [graph] scrambled teacher target: {n_rows} rows x width {k}, "
+              f"row permutations {perms}")
+        return
+    if n_shapes <= _SCRAMBLE_LOG_SHAPES:
+        head = ", ".join(str(int(x)) for x in perms[0][:8])
+        print(f"  [graph] scrambled teacher target: {n_rows} rows x width {k} "
+              f"(row 0: {head}, ...)")
+        if n_shapes == _SCRAMBLE_LOG_SHAPES:
+            print("  [graph] further scramble shapes are not logged: token-path keys "
+                  "one permutation per prompt length.")
+
+
 def scramble_teacher_rows(W_T: torch.Tensor, config: GraphAuxConfig) -> torch.Tensor:
     """Permute each row of the teacher's supernode adjacency by a fixed derangement.
 
@@ -175,8 +206,7 @@ def scramble_teacher_rows(W_T: torch.Tensor, config: GraphAuxConfig) -> torch.Te
     if perms is None:
         perms = _derangements(n_rows, random.Random(config.scramble_seed * 1_000_003 + k), width=k)
         config.scramble_permutations[key] = perms
-        print(f"  [graph] scrambled teacher target: {n_rows} rows x width {k}, "
-              f"row permutations {perms}")
+        _log_scramble_shape(config, n_rows, k, perms)
     idx = torch.tensor(perms[:n_rows], device=W_T.device, dtype=torch.long)
     return torch.gather(W_T, 1, idx)
 
