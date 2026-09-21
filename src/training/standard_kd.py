@@ -34,6 +34,7 @@ from training.utils import (
     add_standard_args,
     describe_run_setup,
     kd_position_mask,
+    kl_position_mask,
     first_answer_token_accuracy,
     kl_loss,
     load_student,
@@ -78,6 +79,7 @@ class StandardKDConfig:
     lr_floor: float = 0.3  # see training.utils.scheduled_lr
     temperature: float = 1.0
     kl_token_chunk_size: int = 64
+    kl_tokens: str = "resp"
     max_eval_tokens: Optional[int] = None  # None -> utils.default_eval_tokens(dataset)
     eval_batch_size: Any = 256
     save_dir: str = "results/standard_kd"
@@ -191,7 +193,8 @@ class StandardKDTrainer:
             flop_counter.reset()
             input_ids = batch["input_ids"].to(_DEVICE)
             attention_mask = batch["attention_mask"].to(_DEVICE)
-            kd_mask = kd_position_mask(attention_mask, batch["response_mask"].to(_DEVICE))
+            kd_mask = kl_position_mask(
+                attention_mask, batch["response_mask"].to(_DEVICE), cfg.kl_tokens)
 
             with flop_counter:
                 with self._autocast():
@@ -353,6 +356,7 @@ def main() -> None:
                 lr_floor=args.lr_floor,
                 temperature=args.temperature,
                 kl_token_chunk_size=args.kl_token_chunk_size,
+                kl_tokens=args.kl_tokens,
                 save_dir=save_dir,
                 eval_every_n_steps=args.eval_every_n_steps,
                 save_every_n_steps=args.save_every_n_steps,

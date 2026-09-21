@@ -67,6 +67,7 @@ from training.utils import (
     ParamChangeCanary,
     describe_run_setup,
     kd_position_mask,
+    kl_position_mask,
     first_answer_token_accuracy,
     kl_loss,
     load_student,
@@ -418,6 +419,7 @@ class RepKDConfig:
     lr_floor: float = 0.3  # see training.utils.scheduled_lr
     temperature: float = 1.0
     kl_token_chunk_size: int = 64
+    kl_tokens: str = "resp"
     max_eval_tokens: Optional[int] = None  # None -> utils.default_eval_tokens(dataset)
     eval_batch_size: Any = 256
     save_dir: str = "results/rep_kd"
@@ -672,7 +674,8 @@ class RepKDTrainer:
             )
             with flop_counter:
                 kl = kl_loss(
-                    s_logits, t_logits, kd_position_mask(attention_mask, response_mask),
+                    s_logits, t_logits,
+                    kl_position_mask(attention_mask, response_mask, cfg.kl_tokens),
                     cfg.temperature, cfg.kl_token_chunk_size,
                 ) / grad_accum
                 with _fp32_math():
@@ -891,6 +894,7 @@ def base_config_kwargs(args: argparse.Namespace, dir_root: str, seed: int | None
         lr_floor=args.lr_floor,
         temperature=args.temperature,
         kl_token_chunk_size=args.kl_token_chunk_size,
+        kl_tokens=args.kl_tokens,
         save_dir=os.path.join(dir_root, args.save_dir),
         eval_every_n_steps=args.eval_every_n_steps,
         save_every_n_steps=args.save_every_n_steps,

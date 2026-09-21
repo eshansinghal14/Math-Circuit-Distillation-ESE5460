@@ -394,6 +394,31 @@ def kd_position_mask(attention_mask: torch.Tensor, response_mask: torch.Tensor) 
     return mask & attention_mask.bool()
 
 
+KL_TOKENS = ("resp", "all")
+
+
+def kl_position_mask(
+    attention_mask: torch.Tensor, response_mask: torch.Tensor, tokens: str = "resp",
+) -> torch.Tensor:
+    """``[B, L]`` logit positions the KD term is scored on.
+
+    ``resp`` (the default) is :func:`kd_position_mask`: the positions that predict
+    an answer token or the EOS after it, the same set the SFT loss scores.
+
+    ``all`` scores every position whose next token is real, prompt included. That
+    is what the trainers did before 2026-09-17, and it is kept as a flag because
+    runs from that era used it and reproducing them needs it back. It is not a
+    neutral choice -- see :func:`kd_position_mask` for what it spends the loss on.
+    """
+    if tokens not in KL_TOKENS:
+        raise ValueError(f"kl_tokens must be one of {KL_TOKENS}, got {tokens!r}")
+    if tokens == "resp":
+        return kd_position_mask(attention_mask, response_mask)
+    mask = torch.zeros_like(attention_mask, dtype=torch.bool)
+    mask[:, :-1] = attention_mask[:, 1:].bool()
+    return mask & attention_mask.bool()
+
+
 def first_answer_token_accuracy(logits: torch.Tensor, input_ids: torch.Tensor, response_mask: torch.Tensor) -> float:
     """Teacher-forced accuracy of the first answer token on a training batch.
 
@@ -1109,6 +1134,18 @@ def add_kd_args(parser: argparse.ArgumentParser) -> None:
                             "rivals the answer's, and the mode-covering forward KL made the student "
                             "emit '?' within five steps (2026-09-17).")
     group.add_argument("--kl-token-chunk-size", type=int, default=64, dest="kl_token_chunk_size")
+    group.add_argument("--kl-tokens", type=str, default="resp", choices=sorted(KL_TOKENS),
+                       dest="kl_tokens",
+                       help="Which logit positions the KD term is scored on. 'resp' (default): the "
+                            "positions that predict an answer token or the EOS after it, the same set "
+                            "the SFT loss scores. 'all': every position whose next token is real, "
+                            "prompt included, which is what the trainers did before 2026-09-17 and is "
+                            "kept here for reproducing runs from that era. 'all' spends most of the "
+                            "loss off the task: with BOS in the sequence the largest single term is "
+                            "the two models' disagreement over how a document starts, scored at the "
+                            "attention-sink position (~2.4 of ~14 nats per sequence), and the prompt "
+                            "positions score the teacher's prior over random operands. On 22_add that "
+                            "drove the student to ~0.01 accuracy within ten steps.")
     group.add_argument(
         "--track-flops", "--track_flops", action="store_true", dest="track_flops",
         help="Count the FLOPs of every matmul, attention and convolution kernel in each "
