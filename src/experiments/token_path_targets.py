@@ -55,6 +55,7 @@ import argparse
 import json
 import os
 import random
+import re
 import sys
 from collections import Counter
 from typing import Any
@@ -465,6 +466,139 @@ def answer_span_mass(recs: list[dict], items: list[tuple[str, str]], tok: Any, k
         "student_lift_over_chance": m(s_mass) / max(m(base), EPS),
         f"teacher_top{k}_recall_of_span": m(t_top),
         f"student_top{k}_recall_of_span": m(s_top),
+        "student_minus_teacher": paired_ci(s_mass, t_mass),
+    }
+
+
+def paired_ci(a: list[float], b: list[float], n_boot: int = 5000, seed: int = 0) -> dict:
+    """Paired mean difference a - b with a bootstrap CI.
+
+    The student-versus-teacher comparison is the load-bearing claim once the
+    absolute lifts are near chance, so it needs an interval rather than two means
+    printed next to each other. Bootstrap rather than a t-test because the
+    per-prompt masses are bounded and skewed.
+    """
+    d = np.asarray(a, dtype=float) - np.asarray(b, dtype=float)
+    if d.size == 0:
+        return {"n": 0}
+    rng = np.random.default_rng(seed)
+    boots = np.array([rng.choice(d, size=d.size, replace=True).mean() for _ in range(n_boot)])
+    return {
+        "n": int(d.size),
+        "mean_diff": float(d.mean()),
+        "ci95_low": float(np.percentile(boots, 2.5)),
+        "ci95_high": float(np.percentile(boots, 97.5)),
+        "frac_student_higher": float((d > 0).mean()),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Group 5: evidence localisation at sentence granularity
+# ---------------------------------------------------------------------------
+
+_SENT_END = re.compile(r"[.!?](?=\s|$)")
+
+
+def context_sentences(prompt: str) -> list[tuple[int, int]]:
+    """Character spans of the context sentences, excluding the question and template.
+
+    The generator builds prompts as context, then a newline, 'Q:', the question, a
+    newline and 'A:'. Everything from the first such marker on is the question and
+    the template, which are not evidence, so only the context is segmented.
+
+    Sentence boundaries are recovered from the text rather than from the dataset,
+    so this needs no regeneration. HotpotQA paragraphs are joined by plain spaces
+    in the generator, so paragraph boundaries are *not* recoverable this way;
+    sentences are the finest unit available and also the unit HotpotQA annotates
+    its supporting facts at.
+    """
+    cut = prompt.find("\nQ:")
+    ctx = prompt if cut < 0 else prompt[:cut]
+    spans, start = [], 0
+    for match in _SENT_END.finditer(ctx):
+        end = match.end()
+        if end - start > 1:
+            spans.append((start, end))
+        start = end
+    if len(ctx) - start > 1:
+        spans.append((start, len(ctx)))
+    return spans
+
+
+def sentence_localisation(recs: list[dict], items: list[tuple[str, str]], tok: Any) -> dict:
+    """Does either model concentrate on the sentence that contains the answer?
+
+    The token-level Group 4 asks about a ~3-token span, which a model has no need
+    to attend to precisely -- reading the right sentence is enough. Summed over a
+    sentence, per-token attribution noise partly cancels, so the teacher can look
+    better here than it does token by token. This is the measurement that decides
+    whether a span-aggregated target is worth a training arm: if the teacher
+    ranks the answer-bearing sentence above the student does, there is something
+    to distil; if it does not, gradient times input exposes no teacher advantage
+    on this task at any granularity.
+
+    Reported as mass and lift, as in Group 4, plus two retrieval metrics that do
+    not depend on the absolute scale: how often the answer-bearing sentence is the
+    single highest-mass sentence (top-1), and the mean reciprocal rank.
+    """
+    t_mass, s_mass, base, t_top1, s_top1, t_rr, s_rr, n_sents = [], [], [], [], [], [], [], []
+    hits = 0
+    for r, (prompt, answer) in zip(recs, items):
+        a = str(answer).strip()
+        low, al = prompt.lower(), a.lower()
+        if not al or al not in low:
+            continue
+        start = low.index(al)
+        try:
+            offs = tok(prompt, return_offsets_mapping=True,
+                       add_special_tokens=True)["offset_mapping"]
+        except Exception:
+            continue
+        spans = context_sentences(prompt)
+        gold = next((i for i, (lo, hi) in enumerate(spans) if lo <= start < hi), None)
+        if gold is None or len(spans) < 2:
+            continue
+        keep = r["keep"]
+        groups = []
+        for lo, hi in spans:
+            pos = {p for p, (c0, c1) in enumerate(offs)
+                   if c1 > lo and c0 < hi and c1 > c0
+                   and p < r["prompt_len"] and bool(keep[p])}
+            groups.append(pos)
+        if not groups[gold]:
+            continue
+        hits += 1
+        agg_t, agg_s = aggregate(r["teacher"]), aggregate(r["student"])
+        tot_t, tot_s = max(float(agg_t.sum()), EPS), max(float(agg_s.sum()), EPS)
+        mt = [float(agg_t[0, list(g)].sum()) / tot_t if g else 0.0 for g in groups]
+        ms = [float(agg_s[0, list(g)].sum()) / tot_s if g else 0.0 for g in groups]
+        t_mass.append(mt[gold])
+        s_mass.append(ms[gold])
+        base.append(len(groups[gold]) / max(r["n_kept"], 1))
+        n_sents.append(len(spans))
+        for vals, top1, rr in ((mt, t_top1, t_rr), (ms, s_top1, s_rr)):
+            order = sorted(range(len(vals)), key=lambda i: vals[i], reverse=True)
+            rank = order.index(gold) + 1
+            top1.append(float(rank == 1))
+            rr.append(1.0 / rank)
+    if not hits:
+        return {"prompts_usable": 0}
+    m = lambda v: float(np.mean(v))  # noqa: E731
+    return {
+        "prompts_usable": hits,
+        "mean_sentences_per_prompt": m(n_sents),
+        "gold_sentence_frac_of_prompt": m(base),
+        "teacher_mass_on_gold_sentence": m(t_mass),
+        "student_mass_on_gold_sentence": m(s_mass),
+        "teacher_lift_over_chance": m(t_mass) / max(m(base), EPS),
+        "student_lift_over_chance": m(s_mass) / max(m(base), EPS),
+        "teacher_top1": m(t_top1),
+        "student_top1": m(s_top1),
+        "chance_top1": float(np.mean([1.0 / n for n in n_sents])),
+        "teacher_mrr": m(t_rr),
+        "student_mrr": m(s_rr),
+        "student_minus_teacher_mass": paired_ci(s_mass, t_mass),
+        "student_minus_teacher_mrr": paired_ci(s_rr, t_rr),
     }
 
 
@@ -530,6 +664,50 @@ def report(res: dict) -> None:
     for key, val in g.items():
         if "recall_of_span" in key:
             print(f"  {key:<37}: {val:.4f}")
+    d = g.get("student_minus_teacher", {})
+    if d.get("n"):
+        print(f"  student - teacher (mass)             : {d['mean_diff']:+.4f}"
+              f"   95% CI [{d['ci95_low']:+.4f}, {d['ci95_high']:+.4f}]"
+              f"   student higher on {d['frac_student_higher']:.0%} of prompts")
+
+    print()
+    print("=" * 84)
+    print("GROUP 5   evidence localisation at sentence granularity")
+    print("=" * 84)
+    print("  The gate on a span-aggregated target: if the teacher ranks the")
+    print("  answer-bearing sentence above the student, there is something to distil.")
+    print()
+    v = res.get("sentence", {})
+    if not v.get("prompts_usable"):
+        print("  no prompt could be segmented with its answer inside a context sentence; skipped.")
+        return
+    print(f"  prompts usable                       : {v['prompts_usable']}")
+    print(f"  sentences per prompt                 : {v['mean_sentences_per_prompt']:.1f}")
+    print(f"  gold sentence as a fraction of prompt: {v['gold_sentence_frac_of_prompt']:.4f}   (chance)")
+    print(f"  teacher mass on the gold sentence    : {v['teacher_mass_on_gold_sentence']:.4f}"
+          f"   ({v['teacher_lift_over_chance']:.2f}x chance)")
+    print(f"  student mass on the gold sentence    : {v['student_mass_on_gold_sentence']:.4f}"
+          f"   ({v['student_lift_over_chance']:.2f}x chance)")
+    print(f"  top-1 (gold is the highest sentence) : teacher {v['teacher_top1']:.3f}"
+          f"   student {v['student_top1']:.3f}   chance {v['chance_top1']:.3f}")
+    print(f"  mean reciprocal rank                 : teacher {v['teacher_mrr']:.3f}"
+          f"   student {v['student_mrr']:.3f}")
+    for key, lbl in (("student_minus_teacher_mass", "mass"),
+                     ("student_minus_teacher_mrr", "MRR ")):
+        d = v.get(key, {})
+        if d.get("n"):
+            print(f"  student - teacher ({lbl})           : {d['mean_diff']:+.4f}"
+                  f"   95% CI [{d['ci95_low']:+.4f}, {d['ci95_high']:+.4f}]"
+                  f"   student higher on {d['frac_student_higher']:.0%}")
+    print()
+    if v["teacher_mrr"] > v["student_mrr"] and v.get(
+            "student_minus_teacher_mrr", {}).get("ci95_high", 1.0) < 0:
+        print("  => teacher ranks the evidence sentence better than the student.")
+        print("     A span-aggregated target has something to transfer; run the arm.")
+    else:
+        print("  => the teacher does not rank the evidence sentence better than the student.")
+        print("     Aggregating the same signal by span will not create headroom that is")
+        print("     not there; the attribution method itself has to change.")
 
 
 def main() -> None:
@@ -614,6 +792,7 @@ def main() -> None:
         "distances": distance_table(recs, config, rng),
         "topk": topk_structure(recs, tokenizer, rng),
         "answer_span": answer_span_mass(recs, items, tokenizer, k=16),
+        "sentence": sentence_localisation(recs, items, tokenizer),
     }
     report(res)
 
