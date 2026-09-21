@@ -116,6 +116,7 @@ class GraphKDConfig:
     token_path_rows: str = "weighted"
     token_path_micro_batch: int = 4
     token_path_micro_tokens: Optional[int] = 1024
+    token_path_top_tokens: int = 0
     top_k_logits: float = 0.95
     teacher_graph_batch_size: int = 512
     student_graph_batch_size: int = 1
@@ -236,6 +237,7 @@ class GraphKDTrainer:
             token_path_rows=config.token_path_rows,
             token_path_micro_batch=config.token_path_micro_batch,
             token_path_micro_tokens=config.token_path_micro_tokens,
+            token_path_top_tokens=config.token_path_top_tokens,
             verbose=config.graph_verbose,
             mlp_input_cache=student_mlp_cache,
             teacher_mlp_input_cache=teacher_mlp_cache,
@@ -791,6 +793,18 @@ def build_parser() -> argparse.ArgumentParser:
              "Irrelevant for 9-token arithmetic prompts (4 x 9 is far under the cap).",
     )
     group.add_argument(
+        "--token-path-top-tokens", type=int, default=0, dest="token_path_top_tokens",
+        help="Score only the teacher's top-k attributed prompt positions, plus one "
+             "aggregate column for the mass each model puts everywhere else; 0 (the "
+             "default) keeps the full profile. A full row is a distribution over every "
+             "prompt token, so on a ~450-token context the ~440 near-zero entries set "
+             "the scale of the distance and the positions carrying the evidence barely "
+             "move it. The residual column is what keeps the loss proper: without it "
+             "the student's attribution off the teacher's positions is unconstrained. "
+             "Indices come from the teacher, and under --scramble-teacher-graph the "
+             "permutation is applied at full width before the top-k is taken.",
+    )
+    group.add_argument(
         "--token-source-columns", action="store_true", dest="token_source_columns",
         help="Append the token-embedding nodes as extra source columns of the supergraph "
              "(present in both models regardless of pre-selection). Same as passing "
@@ -958,6 +972,7 @@ def main() -> None:
                 token_path_rows=args.token_path_rows,
                 token_path_micro_batch=args.token_path_micro_batch,
                 token_path_micro_tokens=args.token_path_micro_tokens or None,
+                token_path_top_tokens=args.token_path_top_tokens,
                 top_k_logits=args.top_k_logits,
                 teacher_prop_neurons_per_layer=args.teacher_prop_neurons_per_layer,
                 student_prop_neurons_per_layer=args.student_prop_neurons_per_layer,

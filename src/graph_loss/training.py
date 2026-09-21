@@ -64,6 +64,9 @@ class GraphAuxConfig:
     # Padded tokens (prompts x longest sequence) per token-path micro-batch; the
     # student's double-backward graph scales with this, not with the prompt count.
     token_path_micro_tokens: int | None = 1024
+    # Score only the teacher's top-k attributed positions plus one aggregate
+    # "everywhere else" column; 0 keeps the full profile over every prompt token.
+    token_path_top_tokens: int = 0
     # Stop-gradient the attention pattern / RMSNorm denominator when computing
     # attribution-graph edges, matching the published direct-path linearisation.
     # Applied identically to teacher and student. See graph_loss.freeze.
@@ -149,6 +152,49 @@ def _derangements(k: int, rng: random.Random, width: int | None = None) -> list[
                 perms.append(p)
                 break
     return perms
+
+
+_TOPK_LOG_CALLS = [0]
+_TOPK_LOG_LIMIT = 3
+
+
+def _top_token_view(
+    W_T: torch.Tensor, W_S: torch.Tensor, k: int, epsilon: float = 1e-10,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Both profiles reduced to the teacher's top-k positions plus a 'rest' column.
+
+    A full token-path row is a distribution over every prompt token, so on a
+    450-token context ~440 near-zero entries set the scale of any distance and
+    the handful of positions that carry the teacher's evidence barely move it.
+    Scoring only the teacher's top-k restores the dynamic range.
+
+    The extra column is the mass each model puts *outside* that set, and it is
+    what keeps the loss proper: without it the student's attribution off the
+    teacher's positions is unconstrained, so it could attend to distractors for
+    free and still score perfectly. With it the loss asks two things -- does the
+    student concentrate as much on the teacher's positions, and does it spread
+    that mass the same way among them.
+
+    The indices come from the teacher, which is detached, so this only masks the
+    student's gradient; both the selected entries and the residual stay
+    differentiable. A k at or above the row width is a no-op.
+    """
+    width = int(W_T.shape[1])
+    if k <= 0 or k >= width:
+        return W_T, W_S
+    t_abs, s_abs = W_T.abs(), W_S.abs()
+    idx = t_abs.topk(k, dim=1).indices
+    t_sel, s_sel = torch.gather(t_abs, 1, idx), torch.gather(s_abs, 1, idx)
+    t_rest = (t_abs.sum(dim=1, keepdim=True) - t_sel.sum(dim=1, keepdim=True)).clamp(min=0.0)
+    s_rest = (s_abs.sum(dim=1, keepdim=True) - s_sel.sum(dim=1, keepdim=True)).clamp(min=0.0)
+    if _TOPK_LOG_CALLS[0] < _TOPK_LOG_LIMIT:
+        _TOPK_LOG_CALLS[0] += 1
+        frac = float((t_sel.sum() / t_abs.sum().clamp(min=epsilon)).item())
+        print(f"  [graph] token-path top-{k} of {width} positions: "
+              f"teacher mass in the top-{k} = {frac:.3f}")
+        if _TOPK_LOG_CALLS[0] == _TOPK_LOG_LIMIT:
+            print("  [graph] further top-k reductions are not logged.")
+    return torch.cat([t_sel, t_rest], dim=1), torch.cat([s_sel, s_rest], dim=1)
 
 
 _SCRAMBLE_LOG_FULL_WIDTH = 24
@@ -1387,11 +1433,17 @@ def _one_position_loss(
         W_S = torch.stack(rows_here[b])
         W_T = teacher_profiles[b][step].to(device=W_S.device, dtype=W_S.dtype)
         rw = logit_weights[b] if (rows == "all" and W_T.shape[0] > 1) else None
+        topk = int(getattr(config, "token_path_top_tokens", 0) or 0)
         if config.scramble_teacher_graph:
             with torch.no_grad():
+                t_r, s_r = _top_token_view(W_T, W_S.detach(), topk)
                 reals[b] += float(edge_similarity(
-                    W_T, W_S.detach(), config.graph_loss_type, row_weights=rw).item())
+                    t_r, s_r, config.graph_loss_type, row_weights=rw).item())
+            # Scrambled at full width, then reduced: the control has to move which
+            # positions the teacher points at before the top-k is taken, or it
+            # would only shuffle within the set the real target already chose.
             W_T = scramble_teacher_rows(W_T, config)
+        W_T, W_S = _top_token_view(W_T, W_S, topk)
         d = edge_similarity(W_T, W_S, config.graph_loss_type, row_weights=rw)
         losses[b] += float(d.detach().item())
         counts[b] += 1
@@ -1477,11 +1529,14 @@ def _one_position_loss_rows_all(
             W_T_all = W_T_all.to(device=s_row.device, dtype=s_row.dtype)
             wj = 1.0 if weights[b] is None else float(weights[b][j])
             t_row = W_T_all[j : j + 1]
+            topk = int(getattr(config, "token_path_top_tokens", 0) or 0)
             if config.scramble_teacher_graph:
                 with torch.no_grad():
+                    t_r, s_r = _top_token_view(t_row, s_row.detach(), topk)
                     reals[b] += wj * float(edge_similarity(
-                        t_row, s_row.detach(), config.graph_loss_type).item())
+                        t_r, s_r, config.graph_loss_type).item())
                 t_row = scramble_teacher_rows(W_T_all, config)[j : j + 1]
+            t_row, s_row = _top_token_view(t_row, s_row, topk)
             d = edge_similarity(t_row, s_row, config.graph_loss_type)
             losses[b] += wj * float(d.detach().item())
             scored[b] = True
