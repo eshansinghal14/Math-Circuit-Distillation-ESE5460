@@ -676,7 +676,9 @@ class RepKDTrainer:
             with flop_counter:
                 kl = kl_loss(
                     s_logits, t_logits,
-                    kl_position_mask(attention_mask, response_mask, cfg.kl_tokens),
+                    kl_position_mask(attention_mask, response_mask, cfg.kl_tokens,
+                                     input_ids=input_ids,
+                                     bos_token_id=self.tokenizer.bos_token_id),
                     cfg.temperature, cfg.kl_token_chunk_size,
                 ) / grad_accum
                 with _fp32_math():

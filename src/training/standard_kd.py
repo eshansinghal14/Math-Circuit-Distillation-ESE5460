@@ -196,7 +196,8 @@ class StandardKDTrainer:
             input_ids = batch["input_ids"].to(_DEVICE)
             attention_mask = batch["attention_mask"].to(_DEVICE)
             kd_mask = kl_position_mask(
-                attention_mask, batch["response_mask"].to(_DEVICE), cfg.kl_tokens)
+                attention_mask, batch["response_mask"].to(_DEVICE), cfg.kl_tokens,
+                input_ids=input_ids, bos_token_id=self.tokenizer.bos_token_id)
 
             with flop_counter:
                 with self._autocast():

@@ -419,7 +419,8 @@ class GraphKDTrainer:
             input_ids = batch["input_ids"].to(_DEVICE)
             attention_mask = batch["attention_mask"].to(_DEVICE)
             kd_mask = kl_position_mask(
-                attention_mask, batch["response_mask"].to(_DEVICE), cfg.kl_tokens)
+                attention_mask, batch["response_mask"].to(_DEVICE), cfg.kl_tokens,
+                input_ids=input_ids, bos_token_id=self.tokenizer.bos_token_id)
 
             # With grad_accum == 1 the optimizer has just zeroed .grad, so the
             # gradient after kl.backward() *is* this step's KL gradient and no

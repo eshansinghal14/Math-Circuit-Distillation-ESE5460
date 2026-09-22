@@ -394,21 +394,41 @@ def kd_position_mask(attention_mask: torch.Tensor, response_mask: torch.Tensor) 
     return mask & attention_mask.bool()
 
 
-KL_TOKENS = ("resp", "all")
+KL_TOKENS = ("resp", "all", "all-no-bos")
 
 
 def kl_position_mask(
-    attention_mask: torch.Tensor, response_mask: torch.Tensor, tokens: str = "resp",
+    attention_mask: torch.Tensor,
+    response_mask: torch.Tensor,
+    tokens: str = "resp",
+    input_ids: torch.Tensor | None = None,
+    bos_token_id: int | None = None,
 ) -> torch.Tensor:
     """``[B, L]`` logit positions the KD term is scored on.
 
     ``resp`` (the default) is :func:`kd_position_mask`: the positions that predict
     an answer token or the EOS after it, the same set the SFT loss scores.
 
-    ``all`` scores every position whose next token is real, prompt included. That
-    is what the trainers did before 2026-09-17, and it is kept as a flag because
-    runs from that era used it and reproducing them needs it back. It is not a
-    neutral choice -- see :func:`kd_position_mask` for what it spends the loss on.
+    ``all`` scores every position whose next token is real, prompt included.
+
+    ``all-no-bos`` is ``all`` with the BOS position dropped. That position's logits
+    predict the first prompt token, and it is the one the 2026-09-17 change
+    actually indicted: the two models disagree most about how a document starts,
+    and at the attention sink that single term was ~2.4 of ~14 nats per sequence.
+    The prompt positions were dropped along with it, as one option, without being
+    measured separately.
+
+    This is what every pre-2026-09-17 run was doing without a flag for it: those
+    sequences carried no BOS, so "all positions" was already "all but BOS". It is
+    therefore the objective the recorded results were trained under, expressible
+    on correct tokenisation -- the same supervision without the train/eval
+    mismatch that came from dropping BOS from the sequence entirely.
+
+    Under ``--bos-mode legacy`` or ``off`` there is no BOS in the sequence, so
+    ``all-no-bos`` and ``all`` select the same positions.
+
+    ``input_ids`` and ``bos_token_id`` locate BOS wherever it sits, which also
+    covers left padding. Without them the first position is assumed to hold it.
     """
     if tokens not in KL_TOKENS:
         raise ValueError(f"kl_tokens must be one of {KL_TOKENS}, got {tokens!r}")
@@ -416,7 +436,14 @@ def kl_position_mask(
         return kd_position_mask(attention_mask, response_mask)
     mask = torch.zeros_like(attention_mask, dtype=torch.bool)
     mask[:, :-1] = attention_mask[:, 1:].bool()
-    return mask & attention_mask.bool()
+    mask = mask & attention_mask.bool()
+    if tokens == "all-no-bos":
+        if input_ids is not None and bos_token_id is not None:
+            mask = mask & (input_ids != int(bos_token_id))
+        else:
+            mask = mask.clone()
+            mask[:, 0] = False
+    return mask
 
 
 def first_answer_token_accuracy(logits: torch.Tensor, input_ids: torch.Tensor, response_mask: torch.Tensor) -> float:
@@ -1140,7 +1167,11 @@ def add_kd_args(parser: argparse.ArgumentParser) -> None:
                             "positions that predict an answer token or the EOS after it, the same set "
                             "the SFT loss scores. 'all': every position whose next token is real, "
                             "prompt included, which is what the trainers did before 2026-09-17 and is "
-                            "kept here for reproducing runs from that era. 'all' spends most of the "
+                            "kept here for reproducing runs from that era. 'all-no-bos' is 'all' with "
+                            "the BOS position dropped -- the position the 2026-09-17 change actually "
+                            "indicted, since the prompt positions were dropped alongside it without "
+                            "being measured separately. Under --bos-mode legacy or off there is no BOS "
+                            "in the sequence, so 'all-no-bos' and 'all' are the same set. 'all' spends most of the "
                             "loss off the task: with BOS in the sequence the largest single term is "
                             "the two models' disagreement over how a document starts, scored at the "
                             "attention-sink position (~2.4 of ~14 nats per sequence), and the prompt "
