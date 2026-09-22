@@ -36,7 +36,7 @@ from training.representation import (
     base_config_kwargs,
     linear_cka,
 )
-from training.utils import add_kd_args, add_standard_args, run_seeds
+from training.utils import add_kd_args, add_standard_args, run_seeds, sweep_apply
 
 
 @dataclass
@@ -86,7 +86,6 @@ def main() -> None:
     args = build_parser().parse_args()
     # Before any dataset, tokenizer or adapter is built: the training sequence,
     # eval and attribution paths must all see the same setting.
-    set_bos_mode(args.bos_mode)
     train_data, test_data = load_data(args.dataset, test_limit=args.test_limit)
     print(f"Train: {len(train_data)} | Test: {len(test_data)}")
 
@@ -98,8 +97,15 @@ def main() -> None:
             shared=shared,
         )
 
-    run_seeds(args.seeds, args.resume, build, save_dir=os.path.join(DIR_ROOT, args.save_dir),
-              steps=args.steps, redo=args.redo_seeds)
+    base_dir = os.path.join(DIR_ROOT, args.save_dir)
+    for point in sweep_apply(args):
+        set_bos_mode(args.bos_mode)
+        where = os.path.join(base_dir, point) if point else base_dir
+        if point:
+            print()
+            print("=== sweep point: " + point + " ===")
+        run_seeds(args.seeds, args.resume, build, save_dir=where,
+                  steps=args.steps, redo=args.redo_seeds)
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ import contextlib
 import dataclasses
 import gc
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -791,6 +792,56 @@ def completed_seeds(save_dir: str, steps: int) -> Dict[int, int]:
     return done
 
 
+SWEEP_PARAMS = (
+    # shared across every trainer
+    "lr", "steps", "batch_size", "warmup_steps", "lr_floor",
+    "temperature", "dtype", "bos_mode", "kl_tokens",
+    # graph KD only; absent on the other trainers and skipped there
+    "lambda_graph", "lambda_kl", "graph_loss_type", "nodes_per_label",
+    "teacher_prop_neurons_per_layer", "student_prop_neurons_per_layer",
+    "top_k_logits", "supergraph_aggregation", "token_path_rows",
+    "token_path_top_tokens",
+)
+
+
+def _sweep_tag(value: Any) -> str:
+    """Filesystem-safe rendering of one swept value."""
+    text = f"{value:g}" if isinstance(value, float) else str(value)
+    return "".join(c if (c.isalnum() or c in ".-+") else "_" for c in text)
+
+
+def sweep_apply(args: argparse.Namespace, params: Sequence[str] = SWEEP_PARAMS):
+    """Yield a label per point in the cartesian product of the multi-valued args.
+
+    Every parameter in ``params`` that argparse collected as a list is a sweep
+    axis; a single value is just an axis of length one. On each iteration the
+    scalar for that point is written back onto ``args``, so the trainer's
+    ``build`` closure -- which reads ``args`` directly -- needs no changes, and
+    code that ran before the loop sees the list while code inside sees a scalar.
+
+    The label names only the axes with more than one value, so a single-valued
+    run yields ``""`` and writes to the save_dir the user asked for, exactly as
+    before. A real sweep gets one subdirectory per point, which keeps run_seeds'
+    resume-and-skip logic working per point rather than colliding in one history.
+
+    Parameters absent from this trainer are skipped, so one list serves all of
+    them.
+    """
+    axes = [(p, list(getattr(args, p))) for p in params
+            if isinstance(getattr(args, p, None), (list, tuple))]
+    if not axes:
+        yield ""
+        return
+    names = [p for p, _ in axes]
+    for point in itertools.product(*[vals for _, vals in axes]):
+        parts = []
+        for name, value, (_, vals) in zip(names, point, axes):
+            setattr(args, name, value)
+            if len(vals) > 1:
+                parts.append(f"{name}={_sweep_tag(value)}")
+        yield "_".join(parts)
+
+
 def run_seeds(
     seeds: Sequence[int],
     resume: bool,
@@ -1155,13 +1206,13 @@ def save_curves(
 def add_kd_args(parser: argparse.ArgumentParser) -> None:
     group = parser.add_argument_group("kd_args")
     group.add_argument("--teacher", type=str, required=True)
-    group.add_argument("--temperature", type=float, default=1.0,
+    group.add_argument("--temperature", type=float, nargs="+", default=[1.0],
                        help="KD softening temperature, also used for the graph term's logit targets. "
                             "1.0: at 2.0 the teacher's tail mass on non-answer tokens after '=' (a '?') "
                             "rivals the answer's, and the mode-covering forward KL made the student "
                             "emit '?' within five steps (2026-09-17).")
     group.add_argument("--kl-token-chunk-size", type=int, default=64, dest="kl_token_chunk_size")
-    group.add_argument("--kl-tokens", type=str, default="resp", choices=sorted(KL_TOKENS),
+    group.add_argument("--kl-tokens", type=str, nargs="+", default=["resp"], choices=sorted(KL_TOKENS),
                        dest="kl_tokens",
                        help="Which logit positions the KD term is scored on. 'resp' (default): the "
                             "positions that predict an answer token or the EOS after it, the same set "
@@ -1199,13 +1250,19 @@ def add_standard_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--dataset", type=str, required=True)
     group.add_argument("--eval-datasets", type=str, nargs="*", default=[], dest="eval_datasets",
                     metavar="DATASET", help="Additional datasets to evaluate on at every eval step.")
-    group.add_argument("--steps", type=int, default=15)
-    group.add_argument("--batch-size", type=int, default=32, dest="batch_size")
-    group.add_argument("--lr", type=float, default=5e-7, help="Peak learning rate; see --warmup-steps.")
-    group.add_argument("--warmup-steps", type=int, default=10, dest="warmup_steps",
+    group.add_argument("--steps", type=int, nargs="+", default=[15],
+                       help="Training steps. Several values sweep; see --lr.")
+    group.add_argument("--batch-size", type=int, nargs="+", default=[32], dest="batch_size",
+                       help="Prompts per step. Several values sweep; see --lr.")
+    group.add_argument("--lr", type=float, nargs="+", default=[5e-7],
+                       help="Peak learning rate; see --warmup-steps. Several values run the "
+                            "cartesian product with every other multi-valued argument, one "
+                            "subdirectory per point named after the axes that vary, each with "
+                            "the full seed list.")
+    group.add_argument("--warmup-steps", type=int, nargs="+", default=[10], dest="warmup_steps",
                        help="Linear warmup from 0 to --lr over this many steps, then cosine decay to "
                             "--lr-floor x --lr at --steps. 0 disables the warmup.")
-    group.add_argument("--lr-floor", type=float, default=0.3, dest="lr_floor",
+    group.add_argument("--lr-floor", type=float, nargs="+", default=[0.3], dest="lr_floor",
                        help="Fraction of --lr the cosine decay reaches at the last step; 1 keeps the "
                             "rate constant after warmup.")
     group.add_argument("--save-dir", type=str, default="results/sft")
@@ -1231,7 +1288,7 @@ def add_standard_args(parser: argparse.ArgumentParser) -> None:
                          "length: on a 450-token context the 8B teacher needs a far smaller batch "
                          "than the 1B student. Default 256.")
     group.add_argument("--test-limit", type=int, default=None, dest="test_limit")
-    group.add_argument("--bos-mode", type=str, default="on", choices=sorted(BOS_MODES),
+    group.add_argument("--bos-mode", type=str, nargs="+", default=["on"], choices=sorted(BOS_MODES),
                        dest="bos_mode",
                        help="Where the leading BOS appears. 'on' (default): training sequence, eval "
                             "and attribution adapter alike, which is what every result after "
@@ -1242,7 +1299,8 @@ def add_standard_args(parser: argparse.ArgumentParser) -> None:
                             "untrained student most of its accuracy (0.653 to 0.015 on 22_add) "
                             "because Llama-3 is pretrained with BOS and its first token is an "
                             "attention sink.")
-    group.add_argument("--dtype", type=str, default="float32", choices=sorted(DTYPES), dest="dtype",
+    group.add_argument("--dtype", type=str, nargs="+", default=["float32"], choices=sorted(DTYPES),
+                       dest="dtype",
                        help="Master weight precision. float32 (default) is the regime every recorded "
                             "result used. bfloat16 halves weights, gradients and Adam moments -- the "
                             "only way an 8B fits on one 80 GB card -- but an Adam step below a bf16 "

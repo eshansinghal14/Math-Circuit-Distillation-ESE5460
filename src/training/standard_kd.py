@@ -48,6 +48,7 @@ from training.utils import (
     run_baselines,
     shared_teacher,
     run_seeds,
+    sweep_apply,
     resume_training_state,
     run_config_record,
     save_checkpoint,
@@ -342,9 +343,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    # Before any dataset, tokenizer or adapter is built: the training sequence,
-    # eval and attribution paths must all see the same setting.
-    set_bos_mode(args.bos_mode)
     train_data, test_data = load_data(args.dataset, test_limit=args.test_limit)
     print(f"Train: {len(train_data)} | Test: {len(test_data)}")
     save_dir = os.path.join(DIR_ROOT, args.save_dir)
@@ -382,7 +380,14 @@ def main() -> None:
             shared=shared,
         )
 
-    run_seeds(args.seeds, args.resume, build, save_dir=save_dir, steps=args.steps, redo=args.redo_seeds)
+    for point in sweep_apply(args):
+        set_bos_mode(args.bos_mode)
+        where = os.path.join(save_dir, point) if point else save_dir
+        if point:
+            print()
+            print("=== sweep point: " + point + " ===")
+        run_seeds(args.seeds, args.resume, build, save_dir=where, steps=args.steps,
+                  redo=args.redo_seeds)
 
 
 if __name__ == "__main__":

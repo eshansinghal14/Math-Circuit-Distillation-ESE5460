@@ -63,6 +63,7 @@ from training.utils import (
     run_baselines,
     shared_teacher,
     run_seeds,
+    sweep_apply,
     resume_training_state,
     run_config_record,
     save_checkpoint,
@@ -773,21 +774,23 @@ def build_parser() -> argparse.ArgumentParser:
     add_standard_args(parser)
     add_kd_args(parser)
     group = parser.add_argument_group("kd_graph_args")
-    group.add_argument("--lambda-graph", type=float, default=1.0, dest="lambda_graph")
-    group.add_argument("--lambda-kl", type=float, default=1.0, dest="lambda_kl",
+    group.add_argument("--lambda-graph", type=float, nargs="+", default=[1.0], dest="lambda_graph",
+                       help="Weight on the graph term. Several values sweep; see --lr.")
+    group.add_argument("--lambda-kl", type=float, nargs="+", default=[1.0], dest="lambda_kl",
                        help="Weight on the KD term. 0 trains on the graph loss alone; the KL is "
                             "still computed and logged as step_kl_loss, it just gets no backward.")
-    group.add_argument("--nodes-per-label", type=int, default=10, dest="nodes_per_label",
+    group.add_argument("--nodes-per-label", type=int, nargs="+", default=[10], dest="nodes_per_label",
                        help="Neurons per arg-token supernode and DLA supernode.")
     group.add_argument(
-        "--graph-loss-type", type=str, default="jsd", dest="graph_loss_type",
+        "--graph-loss-type", type=str, nargs="+", default=["jsd"], dest="graph_loss_type",
         choices=["jsd", "kld", "mse", "mse-norm", "mse-scale", "rel-mse"],
         help="rel-mse: relative squared error on the signed, globally normalised matrices "
              "(pair it with --supergraph-aggregation raw-signed); the others act on "
              "|entries| row-normalised.",
     )
     group.add_argument(
-        "--supergraph-aggregation", type=str, default="normalised", dest="supergraph_aggregation",
+        "--supergraph-aggregation", type=str, nargs="+", default=["normalised"],
+        dest="supergraph_aggregation",
         choices=["normalised", "raw-signed", "token-path"],
         help="normalised: per-target |inbound| shares with frac_external weighting (pool-size "
              "dependent; only row shape is comparable across models). raw-signed: mean over "
@@ -797,7 +800,7 @@ def build_parser() -> argparse.ArgumentParser:
              "--token-path-rows).",
     )
     group.add_argument(
-        "--token-path-rows", type=str, default="weighted", dest="token_path_rows",
+        "--token-path-rows", type=str, nargs="+", default=["weighted"], dest="token_path_rows",
         choices=["weighted", "gold", "all"],
         help="Only with --supergraph-aggregation token-path. 'weighted' (default): one row, the "
              "logit rows combined with the teacher's probabilities -- needs no gold token. 'gold': "
@@ -822,7 +825,7 @@ def build_parser() -> argparse.ArgumentParser:
              "Irrelevant for 9-token arithmetic prompts (4 x 9 is far under the cap).",
     )
     group.add_argument(
-        "--token-path-top-tokens", type=int, default=0, dest="token_path_top_tokens",
+        "--token-path-top-tokens", type=int, nargs="+", default=[0], dest="token_path_top_tokens",
         help="Score only the teacher's top-k attributed prompt positions, plus one "
              "aggregate column for the mass each model puts everywhere else; 0 (the "
              "default) keeps the full profile. A full row is a distribution over every "
@@ -850,15 +853,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Stop-gradient the RMSNorm reciprocal-norm scale when computing "
              "attribution-graph edges. No speed penalty.",
     )
-    group.add_argument("--top-k-logits", "--top_k_logits", type=float, default=0.95,
+    group.add_argument("--top-k-logits", "--top_k_logits", type=float, nargs="+", default=[0.95],
                        dest="top_k_logits")
     # Matched pools: 0.003 x (32 x 14336) and 0.01 x (16 x 8192) are both ~1.3-1.4k
     # nodes per position, so the ten most specific members per label are drawn from
     # pools of the same size in both models (and the teacher graph is ~30x cheaper
     # than at the old 0.1).
-    group.add_argument("--teacher-prop-neurons", type=float, default=0.003,
+    group.add_argument("--teacher-prop-neurons", type=float, nargs="+", default=[0.003],
                        dest="teacher_prop_neurons_per_layer")
-    group.add_argument("--student-prop-neurons", type=float, default=0.01,
+    group.add_argument("--student-prop-neurons", type=float, nargs="+", default=[0.01],
                        dest="student_prop_neurons_per_layer")
     group.add_argument("--teacher-graph-batch-size", type=int, default=512,
                        dest="teacher_graph_batch_size")
@@ -958,9 +961,6 @@ def _cache_gb(cache: dict | None) -> float:
 
 def main() -> None:
     args = build_parser().parse_args()
-    # Before any dataset, tokenizer or adapter is built: the training sequence,
-    # eval and attribution paths must all see the same setting.
-    set_bos_mode(args.bos_mode)
     graph_node_labels, tokens_label = normalize_node_labels(args.graph_node_labels)
     if tokens_label:
         args.token_source_columns = True
@@ -1029,7 +1029,14 @@ def main() -> None:
             shared=shared,
         )
 
-    run_seeds(args.seeds, args.resume, build, save_dir=save_dir, steps=args.steps, redo=args.redo_seeds)
+    for point in sweep_apply(args):
+        set_bos_mode(args.bos_mode)
+        where = os.path.join(save_dir, point) if point else save_dir
+        if point:
+            print()
+            print("=== sweep point: " + point + " ===")
+        run_seeds(args.seeds, args.resume, build, save_dir=where, steps=args.steps,
+                  redo=args.redo_seeds)
 
 
 if __name__ == "__main__":
