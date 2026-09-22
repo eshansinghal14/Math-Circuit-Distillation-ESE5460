@@ -22,7 +22,10 @@ from utils import (
     load_data,
     load_model,
     seed_all,
-    set_bos_in_sequences,
+    bos_in_eval,
+    bos_in_training,
+    bos_mode,
+    set_bos_mode,
     tokenize_prompt_answer,
 )
 
@@ -318,19 +321,39 @@ class GraphKDTrainer:
                 "KD batch row and graph-term tokenisation disagree for the first prompt: "
                 f"batch {row.tolist()} vs graph {seq.tolist()}"
             )
+        # Under --bos-mode legacy the training sequence deliberately carries no BOS
+        # while eval and the adapter do, so the comparison is against p_ids with the
+        # BOS they add stripped. That is the whole point of the mode, and checking
+        # the remainder still catches any *other* drift between the four paths.
+        bos_id = self.tokenizer.bos_token_id
+        lead = bos_in_eval() and not bos_in_training()
+        def _strip(ids: list) -> list:
+            if lead and ids and bos_id is not None and int(ids[0]) == int(bos_id):
+                return list(ids[1:])
+            return list(ids)
+
         adapter_ids = self.student_adapter.ensure_tokenized(batch["prompts"][0])
-        if not torch.equal(adapter_ids.cpu(), p_ids.cpu()):
+        if _strip(adapter_ids.tolist()) != p_ids.tolist():
             raise RuntimeError(
                 "attribution adapter tokenises the prompt differently from the KD batch: "
                 f"adapter {adapter_ids.tolist()} vs batch {p_ids.tolist()}"
             )
-        eval_ids = self.tokenizer([batch["prompts"][0]], add_special_tokens=True)["input_ids"][0]
-        if list(eval_ids) != p_ids.tolist():
+        eval_ids = self.tokenizer(
+            [batch["prompts"][0]], add_special_tokens=bos_in_eval())["input_ids"][0]
+        if _strip(eval_ids) != p_ids.tolist():
             raise RuntimeError(
                 f"eval_model tokenisation differs from the KD batch prompt: eval {eval_ids} vs batch {p_ids.tolist()}"
             )
+        if lead:
+            for name, ids in (("adapter", adapter_ids.tolist()), ("eval", list(eval_ids))):
+                if bos_id is not None and (not ids or int(ids[0]) != int(bos_id)):
+                    raise RuntimeError(
+                        f"--bos-mode legacy expects {name} to lead with BOS (id {bos_id}), got {ids[:4]}"
+                    )
+        where = {"on": "everywhere", "legacy": "at eval and in the adapter only",
+                 "off": "nowhere"}[bos_mode()]
         print(f"  sequence check passed: KD batch, graph term, adapter and eval agree on {n} tokens "
-              f"(BOS id {self.tokenizer.bos_token_id} leads)")
+              f"(--bos-mode {bos_mode()}: BOS id {bos_id} leads {where})")
 
     def _eval_on(self, model, dataset_name: str, test_dataset: PromptAnswerDataset) -> float:
         cfg = self.config
@@ -935,7 +958,7 @@ def main() -> None:
     args = build_parser().parse_args()
     # Before any dataset, tokenizer or adapter is built: the training sequence,
     # eval and attribution paths must all see the same setting.
-    set_bos_in_sequences(args.bos)
+    set_bos_mode(args.bos_mode)
     graph_node_labels, tokens_label = normalize_node_labels(args.graph_node_labels)
     if tokens_label:
         args.token_source_columns = True

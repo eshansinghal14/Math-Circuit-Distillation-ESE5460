@@ -266,7 +266,7 @@ def eval_model(model, tokenizer, test_dataset, dataset_name: str, batch_size: in
             # text (a chat template) already carries it.
             inputs = tokenizer(
                 prompts, return_tensors="pt", padding=True, truncation=True,
-                add_special_tokens=bos_in_sequences() and not (bos and prompts[0].startswith(bos)),
+                add_special_tokens=bos_in_eval() and not (bos and prompts[0].startswith(bos)),
             ).to(device)
             try:
                 outputs = model.generate(
@@ -323,32 +323,47 @@ def seed_all(seed: int) -> None:
 _HF_DATASETS = ("gsm8k", "svamp")
 
 
-_BOS_IN_SEQUENCES = True
+BOS_MODES = ("on", "off", "legacy")
+_BOS_MODE = "on"
 
 
-def set_bos_in_sequences(enabled: bool) -> None:
-    """Turn the leading BOS on or off for training, eval and attribution at once.
+def set_bos_mode(mode: str) -> None:
+    """Where the leading BOS appears. Process-wide, applied before anything is built.
 
-    Process-wide rather than threaded through every call because the three paths
-    that must agree -- :func:`tokenize_prompt_answer`, :func:`eval_model` and the
-    attribution adapter -- are reached from places that carry no config, and the
-    one thing that must never happen is for them to disagree. graph_kd's sequence
-    check compares all four tokenisations per run, so a half-applied switch fails
-    loudly instead of silently reintroducing the 2026-04/09 mismatch.
+    ``on`` (the default) puts BOS in the training sequence, at eval and in the
+    attribution adapter. Every result after 2026-09-17 used this.
 
-    Off reproduces the pre-2026-09-17 sequence format, where nothing carried BOS.
-    It is for rerunning the results recorded under that convention, not a setting
-    to train new results with: Llama-3 is pretrained with BOS, the first token is
-    an attention sink, and dropping it moves that sink onto the first real token
-    and distorts every attribution computed downstream.
+    ``legacy`` reproduces the convention every result *before* 2026-09-17 was
+    recorded under: the training sequence carries no BOS while eval_model
+    (``add_special_tokens=True`` since 2026-04-20) and the adapter both do. It is
+    a mismatch, deliberately, because that is what those runs trained under -- the
+    KD term optimised a distribution the student was never scored on and the graph
+    term was the only part of the objective that saw the evaluated format.
+
+    ``off`` removes BOS everywhere. Self-consistent, but no recorded result used
+    it, and it is not a sensible training setting: Llama-3 is pretrained with BOS,
+    its first token is an attention sink, and removing it at eval costs the
+    untrained student most of its accuracy (0.653 to 0.015 on 22_add).
     """
-    global _BOS_IN_SEQUENCES
-    _BOS_IN_SEQUENCES = bool(enabled)
+    global _BOS_MODE
+    if mode not in BOS_MODES:
+        raise ValueError(f"bos mode must be one of {BOS_MODES}, got {mode!r}")
+    _BOS_MODE = mode
 
 
-def bos_in_sequences() -> bool:
-    """Whether sequences lead with BOS; see :func:`set_bos_in_sequences`."""
-    return _BOS_IN_SEQUENCES
+def bos_mode() -> str:
+    """The active mode; see :func:`set_bos_mode`."""
+    return _BOS_MODE
+
+
+def bos_in_training() -> bool:
+    """Whether the training sequence built by tokenize_prompt_answer leads with BOS."""
+    return _BOS_MODE == "on"
+
+
+def bos_in_eval() -> bool:
+    """Whether eval_model and the attribution adapter lead the prompt with BOS."""
+    return _BOS_MODE != "off"
 
 
 def tokenize_prompt_answer(tokenizer, formatted_prompt: str, answer_text: str):
@@ -371,7 +386,7 @@ def tokenize_prompt_answer(tokenizer, formatted_prompt: str, answer_text: str):
     # A chat template already carries the BOS string in its text; it keeps its own
     # either way, so --no-bos cannot strip one the template put there.
     text_has_bos = bool(bos and formatted_prompt.startswith(bos))
-    add_bos = bos_in_sequences() and not text_has_bos
+    add_bos = bos_in_training() and not text_has_bos
     prompt_ids = tokenizer(
         formatted_prompt, return_tensors="pt", padding=False, add_special_tokens=add_bos,
     )["input_ids"].squeeze(0)
@@ -379,7 +394,7 @@ def tokenize_prompt_answer(tokenizer, formatted_prompt: str, answer_text: str):
         answer_text + tokenizer.eos_token, return_tensors="pt", padding=False, add_special_tokens=False,
     )["input_ids"].squeeze(0)
     bos_id = getattr(tokenizer, "bos_token_id", None)
-    expect_bos = bos_in_sequences() or text_has_bos
+    expect_bos = bos_in_training() or text_has_bos
     if bos_id is not None and prompt_ids.numel():
         leads = int(prompt_ids[0]) == int(bos_id)
         if expect_bos and not leads:
@@ -390,7 +405,7 @@ def tokenize_prompt_answer(tokenizer, formatted_prompt: str, answer_text: str):
         if not expect_bos and leads:
             raise RuntimeError(
                 f"training sequence for {formatted_prompt!r:.60} starts with BOS (id {bos_id}) under "
-                "--no-bos; eval and the attribution adapter are both suppressing it, so training must too"
+                f"under --bos-mode {bos_mode()}, which builds the training sequence without one"
             )
     if bos_id is not None and prompt_ids.numel() > 1 and int(prompt_ids[1]) == int(bos_id):
         raise RuntimeError(f"training sequence for {formatted_prompt!r:.60} has two BOS tokens")

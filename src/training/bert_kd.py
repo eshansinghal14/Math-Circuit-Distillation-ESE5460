@@ -32,7 +32,7 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from utils import DIR_ROOT, load_data, seed_all, set_bos_in_sequences
+from utils import DIR_ROOT, load_data, seed_all, set_bos_mode
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -206,7 +206,7 @@ def main() -> None:
     args = build_parser().parse_args()
     # Before any dataset, tokenizer or adapter is built: the training sequence,
     # eval and attribution paths must all see the same setting.
-    set_bos_in_sequences(args.bos)
+    set_bos_mode(args.bos_mode)
     train_data, test_data = load_data(args.dataset, test_limit=args.test_limit)
     print(f"Train: {len(train_data)} | Test: {len(test_data)}")
 

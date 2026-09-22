@@ -7,7 +7,7 @@ from typing import Any
 
 import torch
 
-from utils import bos_in_sequences
+from utils import bos_in_eval
 import torch.nn.functional as F
 
 from graph_loss.attribution.targets import AttributionTargets, TargetSpec
@@ -125,7 +125,7 @@ class HFLlamaGraphAdapter:
             )
         tokens = tokens.to(self.device)
         bos_token_id = self.tokenizer.bos_token_id
-        if bos_in_sequences() and bos_token_id is not None and int(tokens[0].item()) != int(bos_token_id):
+        if bos_in_eval() and bos_token_id is not None and int(tokens[0].item()) != int(bos_token_id):
             tokens = torch.cat(
                 [torch.tensor([bos_token_id], device=self.device, dtype=tokens.dtype), tokens]
             )

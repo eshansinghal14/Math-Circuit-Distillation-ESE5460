@@ -1161,6 +1161,8 @@ def add_kd_args(parser: argparse.ArgumentParser) -> None:
 
 
 def add_standard_args(parser: argparse.ArgumentParser) -> None:
+    from utils import BOS_MODES
+
     group = parser.add_argument_group("standard_args")
     group.add_argument("--model", type=str, required=True)
     group.add_argument("--dataset", type=str, required=True)
@@ -1198,15 +1200,17 @@ def add_standard_args(parser: argparse.ArgumentParser) -> None:
                          "length: on a 450-token context the 8B teacher needs a far smaller batch "
                          "than the 1B student. Default 256.")
     group.add_argument("--test-limit", type=int, default=None, dest="test_limit")
-    group.add_argument("--bos", action=argparse.BooleanOptionalAction, default=True, dest="bos",
-                       help="Lead every sequence with BOS, in training, eval and attribution alike "
-                            "(the default, and what every post-2026-09-17 result used). --no-bos "
-                            "reproduces the earlier convention, where nothing carried BOS. It exists "
-                            "to rerun results recorded under that convention, not to train new ones: "
-                            "Llama-3 is pretrained with BOS, its first token is an attention sink, and "
-                            "removing it moves that sink onto the first real token and distorts every "
-                            "attribution computed downstream. The switch is applied to all three paths "
-                            "at once and graph_kd's sequence check verifies they agree.")
+    group.add_argument("--bos-mode", type=str, default="on", choices=sorted(BOS_MODES),
+                       dest="bos_mode",
+                       help="Where the leading BOS appears. 'on' (default): training sequence, eval "
+                            "and attribution adapter alike, which is what every result after "
+                            "2026-09-17 used. 'legacy': no BOS in the training sequence while eval "
+                            "and the adapter keep it -- the mismatch every result before that date "
+                            "was recorded under, provided for rerunning them. 'off': no BOS anywhere; "
+                            "self-consistent but no recorded result used it, and it costs the "
+                            "untrained student most of its accuracy (0.653 to 0.015 on 22_add) "
+                            "because Llama-3 is pretrained with BOS and its first token is an "
+                            "attention sink.")
     group.add_argument("--dtype", type=str, default="float32", choices=sorted(DTYPES), dest="dtype",
                        help="Master weight precision. float32 (default) is the regime every recorded "
                             "result used. bfloat16 halves weights, gradients and Adam moments -- the "

@@ -22,7 +22,7 @@ from utils import (
     load_data,
     load_split,
     seed_all,
-    set_bos_in_sequences,
+    set_bos_mode,
 )
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -311,7 +311,7 @@ def main() -> None:
     args = build_parser().parse_args()
     # Before any dataset, tokenizer or adapter is built: the training sequence,
     # eval and attribution paths must all see the same setting.
-    set_bos_in_sequences(args.bos)
+    set_bos_mode(args.bos_mode)
     train_data, test_data = load_data(args.dataset, test_limit=args.test_limit)
     if args.use_sft_split:
         # Fine-tune the answer format on a slice no distillation run ever sees, so
