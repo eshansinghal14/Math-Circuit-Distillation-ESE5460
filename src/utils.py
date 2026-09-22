@@ -266,7 +266,7 @@ def eval_model(model, tokenizer, test_dataset, dataset_name: str, batch_size: in
             # text (a chat template) already carries it.
             inputs = tokenizer(
                 prompts, return_tensors="pt", padding=True, truncation=True,
-                add_special_tokens=not (bos and prompts[0].startswith(bos)),
+                add_special_tokens=bos_in_sequences() and not (bos and prompts[0].startswith(bos)),
             ).to(device)
             try:
                 outputs = model.generate(
@@ -323,6 +323,34 @@ def seed_all(seed: int) -> None:
 _HF_DATASETS = ("gsm8k", "svamp")
 
 
+_BOS_IN_SEQUENCES = True
+
+
+def set_bos_in_sequences(enabled: bool) -> None:
+    """Turn the leading BOS on or off for training, eval and attribution at once.
+
+    Process-wide rather than threaded through every call because the three paths
+    that must agree -- :func:`tokenize_prompt_answer`, :func:`eval_model` and the
+    attribution adapter -- are reached from places that carry no config, and the
+    one thing that must never happen is for them to disagree. graph_kd's sequence
+    check compares all four tokenisations per run, so a half-applied switch fails
+    loudly instead of silently reintroducing the 2026-04/09 mismatch.
+
+    Off reproduces the pre-2026-09-17 sequence format, where nothing carried BOS.
+    It is for rerunning the results recorded under that convention, not a setting
+    to train new results with: Llama-3 is pretrained with BOS, the first token is
+    an attention sink, and dropping it moves that sink onto the first real token
+    and distorts every attribution computed downstream.
+    """
+    global _BOS_IN_SEQUENCES
+    _BOS_IN_SEQUENCES = bool(enabled)
+
+
+def bos_in_sequences() -> bool:
+    """Whether sequences lead with BOS; see :func:`set_bos_in_sequences`."""
+    return _BOS_IN_SEQUENCES
+
+
 def tokenize_prompt_answer(tokenizer, formatted_prompt: str, answer_text: str):
     """The one tokenisation of a training sequence: ``(prompt_ids, answer_ids)``.
 
@@ -340,7 +368,10 @@ def tokenize_prompt_answer(tokenizer, formatted_prompt: str, answer_text: str):
     on while the graph term alone saw the evaluated format.
     """
     bos = tokenizer.bos_token or ""
-    add_bos = not (bos and formatted_prompt.startswith(bos))
+    # A chat template already carries the BOS string in its text; it keeps its own
+    # either way, so --no-bos cannot strip one the template put there.
+    text_has_bos = bool(bos and formatted_prompt.startswith(bos))
+    add_bos = bos_in_sequences() and not text_has_bos
     prompt_ids = tokenizer(
         formatted_prompt, return_tensors="pt", padding=False, add_special_tokens=add_bos,
     )["input_ids"].squeeze(0)
@@ -348,11 +379,19 @@ def tokenize_prompt_answer(tokenizer, formatted_prompt: str, answer_text: str):
         answer_text + tokenizer.eos_token, return_tensors="pt", padding=False, add_special_tokens=False,
     )["input_ids"].squeeze(0)
     bos_id = getattr(tokenizer, "bos_token_id", None)
-    if bos_id is not None and int(prompt_ids[0]) != int(bos_id):
-        raise RuntimeError(
-            f"training sequence for {formatted_prompt!r:.60} does not start with BOS (id {bos_id}); "
-            "eval_model and the attribution adapter both prepend it, so training must too"
-        )
+    expect_bos = bos_in_sequences() or text_has_bos
+    if bos_id is not None and prompt_ids.numel():
+        leads = int(prompt_ids[0]) == int(bos_id)
+        if expect_bos and not leads:
+            raise RuntimeError(
+                f"training sequence for {formatted_prompt!r:.60} does not start with BOS (id {bos_id}); "
+                "eval_model and the attribution adapter both prepend it, so training must too"
+            )
+        if not expect_bos and leads:
+            raise RuntimeError(
+                f"training sequence for {formatted_prompt!r:.60} starts with BOS (id {bos_id}) under "
+                "--no-bos; eval and the attribution adapter are both suppressing it, so training must too"
+            )
     if bos_id is not None and prompt_ids.numel() > 1 and int(prompt_ids[1]) == int(bos_id):
         raise RuntimeError(f"training sequence for {formatted_prompt!r:.60} has two BOS tokens")
     return prompt_ids, answer_ids

@@ -22,6 +22,7 @@ from utils import (
     load_data,
     load_model,
     seed_all,
+    set_bos_in_sequences,
     tokenize_prompt_answer,
 )
 
@@ -932,6 +933,9 @@ def _cache_gb(cache: dict | None) -> float:
 
 def main() -> None:
     args = build_parser().parse_args()
+    # Before any dataset, tokenizer or adapter is built: the training sequence,
+    # eval and attribution paths must all see the same setting.
+    set_bos_in_sequences(args.bos)
     graph_node_labels, tokens_label = normalize_node_labels(args.graph_node_labels)
     if tokens_label:
         args.token_source_columns = True

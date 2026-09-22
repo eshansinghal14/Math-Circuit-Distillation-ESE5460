@@ -21,6 +21,7 @@ from utils import (
     load_data,
     load_model,
     seed_all,
+    set_bos_in_sequences,
 )
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -339,6 +340,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    # Before any dataset, tokenizer or adapter is built: the training sequence,
+    # eval and attribution paths must all see the same setting.
+    set_bos_in_sequences(args.bos)
     train_data, test_data = load_data(args.dataset, test_limit=args.test_limit)
     print(f"Train: {len(train_data)} | Test: {len(test_data)}")
     save_dir = os.path.join(DIR_ROOT, args.save_dir)
