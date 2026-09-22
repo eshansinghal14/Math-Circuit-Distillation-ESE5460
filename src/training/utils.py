@@ -842,6 +842,20 @@ SWEEP_PARAMS = (
 )
 
 
+def _sweep_signature(args: argparse.Namespace, params: Sequence[str]) -> str:
+    """Short digest of every sweepable value at this point, varying or not.
+
+    A label names only the axes that vary, which keeps it readable but means two
+    sweeps over the same axes at different fixed values produce the same label.
+    That collided in practice: a dtype x kl_tokens sweep re-run at a new learning
+    rate matched the earlier points and every one was skipped as already done.
+    The digest disambiguates them without putting nineteen parameters in the name.
+    """
+    vals = [(name, getattr(args, name, None)) for name in sorted(params)]
+    blob = json.dumps(vals, sort_keys=True, default=str)
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:6]
+
+
 def _sweep_tag(value: Any) -> str:
     """Filesystem-safe rendering of one swept value."""
     text = f"{value:g}" if isinstance(value, float) else str(value)
@@ -882,6 +896,10 @@ def sweep_apply(args: argparse.Namespace, params: Sequence[str] = SWEEP_PARAMS):
             if len(vals) > 1:
                 parts.append(f"{name}={_sweep_tag(value)}")
         label = "_".join(parts)
+        if label:
+            # Only swept runs carry the digest, so a single-valued run keeps the
+            # bare-seed key it has always had and old history files still read.
+            label = f"{label}#{_sweep_signature(args, params)}"
         set_sweep_point(label)
         yield label
     set_sweep_point("")
