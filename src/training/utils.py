@@ -927,7 +927,7 @@ def sweep_apply(args: argparse.Namespace, params: Sequence[str] = SWEEP_PARAMS):
             if isinstance(getattr(args, p, None), (list, tuple))]
     if not axes:
         set_run_params(args, params)
-        set_sweep_point("")
+        set_sweep_point(f"#{_sweep_signature(args, params)}")
         yield ""
         return
     names = [p for p, _ in axes]
@@ -938,11 +938,14 @@ def sweep_apply(args: argparse.Namespace, params: Sequence[str] = SWEEP_PARAMS):
             if len(vals) > 1:
                 parts.append(f"{name}={_sweep_tag(value)}")
         set_run_params(args, params)
+        # Every run carries the digest, swept or not: the key has to identify the
+        # run, or a second run with a different config lands on the same key and
+        # silently replaces the first. A single-valued run therefore keys on
+        # "#<digest>|seed=<n>" rather than the bare seed. Histories written before
+        # this still load; their runs simply do not match a new run's key, so the
+        # new one is trained and stored alongside instead of over them.
         label = "_".join(parts)
-        if label:
-            # Only swept runs carry the digest, so a single-valued run keeps the
-            # bare-seed key it has always had and old history files still read.
-            label = f"{label}#{_sweep_signature(args, params)}"
+        label = f"{label}#{_sweep_signature(args, params)}" if label else f"#{_sweep_signature(args, params)}"
         set_sweep_point(label)
         yield label
     set_sweep_point("")
