@@ -90,6 +90,7 @@ class StandardKDConfig:
     eval_datasets: List[str] = field(default_factory=list)
     test_limit: Optional[int] = None
     dtype: Optional[str] = None
+    bos_mode: str = "on"
     resume: bool = False
     track_flops: bool = False
     seed: int = _SEED
@@ -370,6 +371,7 @@ def main() -> None:
                 eval_datasets=args.eval_datasets,
                 test_limit=args.test_limit,
                 dtype=args.dtype,
+                bos_mode=args.bos_mode,
                 resume=args.resume,
                 track_flops=args.track_flops,
                 seed=seed,
