@@ -752,8 +752,37 @@ def history_path(save_dir: str) -> str:
     return os.path.join(save_dir, f"{folder}.json")
 
 
-# Key under which a history JSON keeps every seed that has written to its folder.
+# Key under which a history JSON keeps every run that has written to its folder.
 HISTORY_RUNS_KEY = "runs"
+# Separator in a composite run key, "<sweep point>|seed=<n>". A run with no sweep
+# point keys on the bare seed, so files written before sweeps read back unchanged.
+_RUN_KEY_SEP = "|seed="
+_SWEEP_POINT = ""
+
+
+def sweep_point() -> str:
+    """The sweep point currently being trained; "" when nothing is being swept."""
+    return _SWEEP_POINT
+
+
+def set_sweep_point(point: str) -> None:
+    """Set by :func:`sweep_apply` so save_history and completed_seeds key on it."""
+    global _SWEEP_POINT
+    _SWEEP_POINT = point or ""
+
+
+def run_key(seed: int, point: str | None = None) -> str:
+    """The key one run occupies in a history's ``runs`` map."""
+    point = sweep_point() if point is None else (point or "")
+    return f"{point}{_RUN_KEY_SEP}{int(seed)}" if point else str(int(seed))
+
+
+def split_run_key(key: str) -> Tuple[str, int]:
+    """``(sweep point, seed)`` for a run key, point "" when there is none."""
+    if _RUN_KEY_SEP in key:
+        point, seed = key.rsplit(_RUN_KEY_SEP, 1)
+        return point, int(seed)
+    return "", int(key)
 # Seeds sharing a history file must have trained the same way; settings that only
 # change what is written or measured on the side are not differences.
 _SAME_FILE_CONFIG_IGNORED = _RESUME_CONFIG_IGNORED | {
@@ -784,11 +813,20 @@ def completed_seeds(save_dir: str, steps: int) -> Dict[int, int]:
         print(f"WARN: could not read {path} ({e}); treating no seed as done")
         return {}
     done: Dict[int, int] = {}
+    point = sweep_point()
     for key, run in runs.items():
+        try:
+            key_point, seed = split_run_key(key)
+        except ValueError:
+            continue
+        # Only this sweep point's runs count: the same seed at a different point
+        # is a different run and must still be trained.
+        if key_point != point:
+            continue
         train_steps = run.get("train_step") or []
         last = max(train_steps) if train_steps else 0
         if last >= steps:
-            done[int(key)] = last
+            done[seed] = last
     return done
 
 
@@ -820,9 +858,12 @@ def sweep_apply(args: argparse.Namespace, params: Sequence[str] = SWEEP_PARAMS):
     code that ran before the loop sees the list while code inside sees a scalar.
 
     The label names only the axes with more than one value, so a single-valued
-    run yields ``""`` and writes to the save_dir the user asked for, exactly as
-    before. A real sweep gets one subdirectory per point, which keeps run_seeds'
-    resume-and-skip logic working per point rather than colliding in one history.
+    run yields ``""`` and keys its history on the bare seed, exactly as before.
+    A sweep publishes each label through :func:`set_sweep_point`, so every point
+    lands in the *same* history JSON under ``runs``, keyed "<point>|seed=<n>" --
+    one file for the whole sweep, the way seeds already share one. run_seeds'
+    resume-and-skip is scoped to the current point, so re-issuing a command trains
+    only the points and seeds that are missing.
 
     Parameters absent from this trainer are skipped, so one list serves all of
     them.
@@ -830,6 +871,7 @@ def sweep_apply(args: argparse.Namespace, params: Sequence[str] = SWEEP_PARAMS):
     axes = [(p, list(getattr(args, p))) for p in params
             if isinstance(getattr(args, p, None), (list, tuple))]
     if not axes:
+        set_sweep_point("")
         yield ""
         return
     names = [p for p, _ in axes]
@@ -839,7 +881,10 @@ def sweep_apply(args: argparse.Namespace, params: Sequence[str] = SWEEP_PARAMS):
             setattr(args, name, value)
             if len(vals) > 1:
                 parts.append(f"{name}={_sweep_tag(value)}")
-        yield "_".join(parts)
+        label = "_".join(parts)
+        set_sweep_point(label)
+        yield label
+    set_sweep_point("")
 
 
 def run_seeds(
@@ -1003,7 +1048,10 @@ def save_history(history: Dict[str, Any], save_dir: str) -> None:
     os.makedirs(save_dir, exist_ok=True)
     path = history_path(save_dir)
     this = {k: v for k, v in dict(history).items() if k != HISTORY_RUNS_KEY}
-    seed = str(history_seed(this))
+    point = sweep_point()
+    if point:
+        this["sweep_point"] = point
+    seed = run_key(history_seed(this), point)
     runs: Dict[str, Dict[str, Any]] = {}
     if os.path.exists(path):
         try:
@@ -1016,6 +1064,13 @@ def save_history(history: Dict[str, Any], save_dir: str) -> None:
             other_config = other.get("config")
             if other_seed == seed or not isinstance(other_config, dict):
                 continue
+            # Different sweep points are supposed to differ; only runs at the same
+            # point should agree on everything but the seed.
+            try:
+                if split_run_key(other_seed)[0] != point:
+                    continue
+            except ValueError:
+                pass
             diffs = sorted(
                 k for k in set(this_config) | set(other_config)
                 if k not in _SAME_FILE_CONFIG_IGNORED and this_config.get(k) != other_config.get(k)

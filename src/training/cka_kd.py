@@ -100,11 +100,10 @@ def main() -> None:
     base_dir = os.path.join(DIR_ROOT, args.save_dir)
     for point in sweep_apply(args):
         set_bos_mode(args.bos_mode)
-        where = os.path.join(base_dir, point) if point else base_dir
         if point:
             print()
             print("=== sweep point: " + point + " ===")
-        run_seeds(args.seeds, args.resume, build, save_dir=where,
+        run_seeds(args.seeds, args.resume, build, save_dir=base_dir,
                   steps=args.steps, redo=args.redo_seeds)
 
 
