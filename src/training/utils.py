@@ -825,8 +825,14 @@ def completed_seeds(save_dir: str, steps: int) -> Dict[int, int]:
             continue
         train_steps = run.get("train_step") or []
         last = max(train_steps) if train_steps else 0
-        if last >= steps:
-            done[seed] = last
+        if last < steps:
+            continue
+        ok, differs = _config_matches(run)
+        if not ok:
+            print(f"Seed {seed} in this folder finished {last} steps but with a different "
+                  f"config ({', '.join(differs)}); training it again.")
+            continue
+        done[seed] = last
     return done
 
 
@@ -840,6 +846,41 @@ SWEEP_PARAMS = (
     "top_k_logits", "supergraph_aggregation", "token_path_rows",
     "token_path_top_tokens",
 )
+
+
+# Sweepable argument names that are stored in a run's config under another name.
+_PARAM_TO_CONFIG = {"lr": "learning_rate"}
+_CURRENT_PARAMS: Dict[str, Any] = {}
+
+
+def set_run_params(args: argparse.Namespace, params: Sequence[str] = ()) -> None:
+    """Record this run's sweepable values so completed_seeds can compare configs.
+
+    Skipping used to key on the seed alone, so re-running the same folder with a
+    different learning rate, temperature or precision reported "already finished"
+    and trained nothing. A run only counts as done now if every sweepable value
+    it recorded matches the one about to train.
+    """
+    global _CURRENT_PARAMS
+    params = params or SWEEP_PARAMS
+    current: Dict[str, Any] = {}
+    for name in params:
+        if not hasattr(args, name):
+            continue
+        value = getattr(args, name)
+        if isinstance(value, (list, tuple)):
+            continue  # an axis not yet collapsed to this point's scalar
+        current[_PARAM_TO_CONFIG.get(name, name)] = value
+    _CURRENT_PARAMS = current
+
+
+def _config_matches(run: Dict[str, Any]) -> Tuple[bool, List[str]]:
+    """Whether a stored run trained with the values about to be used."""
+    config = run.get("config")
+    if not isinstance(config, dict) or not _CURRENT_PARAMS:
+        return True, []
+    differs = [k for k, v in _CURRENT_PARAMS.items() if k in config and config[k] != v]
+    return not differs, differs
 
 
 def _sweep_signature(args: argparse.Namespace, params: Sequence[str]) -> str:
@@ -885,6 +926,7 @@ def sweep_apply(args: argparse.Namespace, params: Sequence[str] = SWEEP_PARAMS):
     axes = [(p, list(getattr(args, p))) for p in params
             if isinstance(getattr(args, p, None), (list, tuple))]
     if not axes:
+        set_run_params(args, params)
         set_sweep_point("")
         yield ""
         return
@@ -895,6 +937,7 @@ def sweep_apply(args: argparse.Namespace, params: Sequence[str] = SWEEP_PARAMS):
             setattr(args, name, value)
             if len(vals) > 1:
                 parts.append(f"{name}={_sweep_tag(value)}")
+        set_run_params(args, params)
         label = "_".join(parts)
         if label:
             # Only swept runs carry the digest, so a single-valued run keeps the
