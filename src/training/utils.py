@@ -781,6 +781,10 @@ def split_run_key(key: str) -> Tuple[str, int]:
     """``(sweep point, seed)`` for a run key, point "" when there is none."""
     if _RUN_KEY_SEP in key:
         point, seed = key.rsplit(_RUN_KEY_SEP, 1)
+        # Keys written while the axis names were part of the point normalise to
+        # the digest, so those runs still match the same config today.
+        if "#" in point:
+            point = "#" + point.rsplit("#", 1)[1]
         return point, int(seed)
     return "", int(key)
 # Seeds sharing a history file must have trained the same way; settings that only
@@ -914,11 +918,12 @@ def sweep_apply(args: argparse.Namespace, params: Sequence[str] = SWEEP_PARAMS):
 
     The label names only the axes with more than one value, so a single-valued
     run yields ``""`` and keys its history on the bare seed, exactly as before.
-    A sweep publishes each label through :func:`set_sweep_point`, so every point
-    lands in the *same* history JSON under ``runs``, keyed "<point>|seed=<n>" --
-    one file for the whole sweep, the way seeds already share one. run_seeds'
-    resume-and-skip is scoped to the current point, so re-issuing a command trains
-    only the points and seeds that are missing.
+    Every point lands in the *same* history JSON under ``runs``, keyed
+    "#<digest>|seed=<n>", where the digest covers this point's sweepable values
+    and nothing about the grid. So a config keys identically whether it was run
+    alone or inside a sweep, and resume works across differently shaped grids.
+    The label yielded here names only the varying axes and is used for the log
+    line, not the key.
 
     Parameters absent from this trainer are skipped, so one list serves all of
     them.
@@ -938,16 +943,12 @@ def sweep_apply(args: argparse.Namespace, params: Sequence[str] = SWEEP_PARAMS):
             if len(vals) > 1:
                 parts.append(f"{name}={_sweep_tag(value)}")
         set_run_params(args, params)
-        # Every run carries the digest, swept or not: the key has to identify the
-        # run, or a second run with a different config lands on the same key and
-        # silently replaces the first. A single-valued run therefore keys on
-        # "#<digest>|seed=<n>" rather than the bare seed. Histories written before
-        # this still load; their runs simply do not match a new run's key, so the
-        # new one is trained and stored alongside instead of over them.
-        label = "_".join(parts)
-        label = f"{label}#{_sweep_signature(args, params)}" if label else f"#{_sweep_signature(args, params)}"
-        set_sweep_point(label)
-        yield label
+        # The key is the digest of this run's parameters and nothing else, so a
+        # config keys the same whether it ran alone or as one point of a sweep,
+        # and whether the grid around it had one axis or five. The readable
+        # label built from the varying axes is for the log line only.
+        set_sweep_point(f"#{_sweep_signature(args, params)}")
+        yield "_".join(parts)
     set_sweep_point("")
 
 
