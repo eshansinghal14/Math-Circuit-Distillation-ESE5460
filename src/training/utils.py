@@ -538,7 +538,10 @@ def weights_fingerprint(model) -> Dict[str, str]:
         t = param.detach().contiguous().cpu()
         h = hashlib.blake2b(digest_size=16)
         h.update(f"{tuple(t.shape)}:{t.dtype}".encode())
-        h.update(np.ascontiguousarray(t.numpy()).reshape(-1).view(np.uint8))
+        # Reinterpreted as bytes through torch, not numpy: NumPy has no bfloat16,
+        # so t.numpy() raised "unsupported ScalarType BFloat16" and every bf16 run
+        # with --save-every-n-steps died at its first periodic checkpoint.
+        h.update(t.flatten().view(torch.uint8).numpy())
         out[name] = h.hexdigest()
     return out
 
