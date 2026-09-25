@@ -37,6 +37,7 @@ from utils import DIR_ROOT, load_data, seed_all, set_bos_mode
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from training.representation import (
+    REP_SWEEP_PARAMS,
     _DEVICE,
     ActivationCapture,
     HiddenProjector,
@@ -228,7 +229,7 @@ def main() -> None:
         )
 
     base_dir = os.path.join(DIR_ROOT, args.save_dir)
-    for point in sweep_apply(args):
+    for point in sweep_apply(args, REP_SWEEP_PARAMS):
         set_bos_mode(args.bos_mode)
         if point:
             print()

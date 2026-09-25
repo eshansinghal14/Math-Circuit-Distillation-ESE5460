@@ -64,6 +64,7 @@ from graph_loss.freeze import without_gradient_checkpointing
 from training.utils import (
     eval_batch_size_for,
     DEFAULT_SEED,
+    SWEEP_PARAMS,
     ParamChangeCanary,
     describe_run_setup,
     kd_position_mask,
@@ -442,11 +443,22 @@ class RepKDConfig:
     track_grad_metrics: bool = False
 
 
+REP_SWEEP_PARAMS = SWEEP_PARAMS + ("lambda_rep",)
+"""Sweepable names for the representation trainers: the shared set plus their own weight.
+
+Scoped here rather than added to SWEEP_PARAMS because _sweep_signature hashes
+``getattr(args, name, None)`` for every name in the tuple -- a global addition would put
+``("lambda_rep", None)`` into graph_kd's and standard_kd's digests and re-key every run
+already on disk.
+"""
+
+
 def add_rep_args(parser: argparse.ArgumentParser) -> None:
     group = parser.add_argument_group("representation_args")
-    group.add_argument("--lambda-rep", "--lambda_rep", type=float, default=0.1, dest="lambda_rep",
+    group.add_argument("--lambda-rep", "--lambda_rep", type=float, nargs="+", default=[0.1],
+                       dest="lambda_rep",
                        help="Weight of the representation term next to the KL term; the analogue "
-                            "of graph_kd's --lambda-graph.")
+                            "of graph_kd's --lambda-graph. Several values sweep; see --lr.")
     group.add_argument("--layer-map", "--layer_map", type=str, default="uniform", dest="layer_map",
                        help="'uniform' pairs student layer j with teacher layer round(j*N/M) "
                             "(TinyBERT); or an explicit 's:t,s:t' list of 1-based decoder layers.")
