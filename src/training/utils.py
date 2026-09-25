@@ -321,6 +321,45 @@ def log_first_step_canary(report: Dict[str, float], history: Dict[str, Any]) -> 
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+_SDPA_PREFIXES = (
+    "_scaled_dot_product_efficient_attention",
+    "_scaled_dot_product_flash_attention",
+    "_scaled_dot_product_cudnn_attention",
+)
+
+
+def _broadcast_gqa(func, args):
+    """SDPA args with grouped-query key/value replaced by their broadcast shapes.
+
+    Llama-3 attends with fewer key/value heads than query heads (8 against 32)
+    and the kernel broadcasts them. torch's sdpa flop formulas only learned that
+    in a later release; on torch 2.11 they raise "query/key/value shapes are
+    incompatible" and --track-flops dies partway through the first step. The
+    formulas are wrapped in shape_wrapper, whose get_shape passes non-tensors
+    through untouched, so handing them a shape tuple costs no allocation and
+    yields the count the broadcast attention actually performs -- the same
+    number a torch that does support GQA returns. A no-op on every other op and
+    on models whose query and key/value head counts already agree.
+    """
+    name = str(getattr(func, "_overloadpacket", ""))
+    base = name.split(".")[-1]
+    if not any(base.startswith(prefix) for prefix in _SDPA_PREFIXES):
+        return args
+    # the backward variants lead with grad_out, so query starts one later
+    i = 1 if base.endswith("_backward") else 0
+    if len(args) < i + 3:
+        return args
+    q, k, v = args[i], args[i + 1], args[i + 2]
+    if not all(isinstance(t, torch.Tensor) and t.dim() == 4 for t in (q, k, v)):
+        return args
+    h_q, h_kv = int(q.shape[1]), int(k.shape[1])
+    if h_kv == 0 or h_q == h_kv or h_q % h_kv:
+        return args
+    k_shape = (k.shape[0], h_q, k.shape[2], k.shape[3])
+    v_shape = (v.shape[0], h_q, v.shape[2], v.shape[3])
+    return tuple(args[: i + 1]) + (k_shape, v_shape) + tuple(args[i + 3:])
+
+
 class FlopCounter(TorchDispatchMode):
     """Sum the FLOPs of every matmul, attention and convolution kernel dispatched
     while the mode is active, forward and backward alike.
@@ -352,7 +391,7 @@ class FlopCounter(TorchDispatchMode):
         out = func(*args, **kwargs)
         formula = _TORCH_FLOP_REGISTRY.get(getattr(func, "_overloadpacket", None))
         if formula is not None:
-            self.flops += int(formula(*args, **kwargs, out_val=out))
+            self.flops += int(formula(*_broadcast_gqa(func, args), **kwargs, out_val=out))
         return out
 
 
