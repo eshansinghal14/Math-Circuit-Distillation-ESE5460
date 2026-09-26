@@ -1,0 +1,1048 @@
+{
+  "accuracy": {
+    "teacher": {
+      "22_add": 0.9595,
+      "222_add": 0.882,
+      "2222_add": 0.77,
+      "33_add": 0.9225,
+      "21_mult": 0.894,
+      "pairs": 0.9658605974395448
+    },
+    "base": {
+      "22_add": 0.67,
+      "222_add": 0.199,
+      "2222_add": 0.0465,
+      "33_add": 0.4875,
+      "21_mult": 0.124,
+      "pairs": 0.46799431009957326
+    },
+    "sft": {
+      "22_add": 0.993,
+      "222_add": 0.4255,
+      "2222_add": 0.0815,
+      "33_add": 0.6585,
+      "21_mult": 0.669,
+      "pairs": 0.8805120910384068
+    },
+    "kd": {
+      "22_add": 0.9805,
+      "222_add": 0.431,
+      "2222_add": 0.1155,
+      "33_add": 0.579,
+      "21_mult": 0.404,
+      "pairs": 0.7951635846372689
+    },
+    "graph": {
+      "22_add": 0.9995,
+      "222_add": 0.4775,
+      "2222_add": 0.1285,
+      "33_add": 0.6595,
+      "21_mult": 0.949,
+      "pairs": 0.9288762446657184
+    }
+  },
+  "models": {
+    "teacher": "meta-llama/Meta-Llama-3-8B-Instruct",
+    "base": "meta-llama/Llama-3.2-1B-Instruct",
+    "sft": "/home/ubuntu/mcd/FINAL_RESULTS/matched/22_add_sft/Llama-3.2-1B-Instruct/22_add/final_checkpoint",
+    "kd": "/home/ubuntu/mcd/FINAL_RESULTS/matched/22_add_kd/final_checkpoint",
+    "graph": "/home/ubuntu/mcd/ckpts/graph_lambda1"
+  },
+  "strata": {
+    "22_add": {
+      "all": {
+        "n": 2000,
+        "teacher": 0.9595,
+        "base": 0.67,
+        "sft": 0.993,
+        "kd": 0.9805,
+        "graph": 0.9995
+      },
+      "0 carries": {
+        "n": 601,
+        "teacher": 0.9650582362728786,
+        "base": 0.5291181364392679,
+        "sft": 0.9983361064891847,
+        "kd": 0.9767054908485857,
+        "graph": 0.9983361064891847
+      },
+      "1 carry": {
+        "n": 929,
+        "teacher": 0.9526372443487621,
+        "base": 0.6835306781485468,
+        "sft": 0.9935414424111948,
+        "kd": 0.984930032292788,
+        "graph": 1.0
+      },
+      "2+ carries": {
+        "n": 470,
+        "teacher": 0.9659574468085106,
+        "base": 0.823404255319149,
+        "sft": 0.9851063829787234,
+        "kd": 0.9765957446808511,
+        "graph": 1.0
+      },
+      "new digit": {
+        "n": 964,
+        "teacher": 0.941908713692946,
+        "base": 0.8101659751037344,
+        "sft": 0.9885892116182573,
+        "kd": 0.9813278008298755,
+        "graph": 1.0
+      },
+      "no new digit": {
+        "n": 1036,
+        "teacher": 0.9758687258687259,
+        "base": 0.5395752895752896,
+        "sft": 0.997104247104247,
+        "kd": 0.9797297297297297,
+        "graph": 0.999034749034749
+      },
+      "1-digit operand": {
+        "n": 372,
+        "teacher": 0.9650537634408602,
+        "base": 0.6129032258064516,
+        "sft": 0.9973118279569892,
+        "kd": 0.967741935483871,
+        "graph": 0.9973118279569892
+      }
+    },
+    "222_add": {
+      "all": {
+        "n": 2000,
+        "teacher": 0.882,
+        "base": 0.199,
+        "sft": 0.4255,
+        "kd": 0.431,
+        "graph": 0.4775
+      },
+      "0 carries": {
+        "n": 112,
+        "teacher": 0.9732142857142857,
+        "base": 0.2767857142857143,
+        "sft": 0.6696428571428571,
+        "kd": 0.6607142857142857,
+        "graph": 0.7857142857142857
+      },
+      "1 carry": {
+        "n": 611,
+        "teacher": 0.8936170212765957,
+        "base": 0.220949263502455,
+        "sft": 0.4909983633387889,
+        "kd": 0.4909983633387889,
+        "graph": 0.5499181669394435
+      },
+      "2+ carries": {
+        "n": 1277,
+        "teacher": 0.8684416601409554,
+        "base": 0.1816758026624902,
+        "sft": 0.3727486296006265,
+        "kd": 0.38214565387627253,
+        "graph": 0.4158183241973375
+      },
+      "new digit": {
+        "n": 1628,
+        "teacher": 0.8630221130221131,
+        "base": 0.18427518427518427,
+        "sft": 0.3906633906633907,
+        "kd": 0.4004914004914005,
+        "graph": 0.4342751842751843
+      },
+      "no new digit": {
+        "n": 372,
+        "teacher": 0.9650537634408602,
+        "base": 0.26344086021505375,
+        "sft": 0.5779569892473119,
+        "kd": 0.5645161290322581,
+        "graph": 0.6666666666666666
+      },
+      "1-digit operand": {
+        "n": 556,
+        "teacher": 0.8776978417266187,
+        "base": 0.289568345323741,
+        "sft": 0.5683453237410072,
+        "kd": 0.6061151079136691,
+        "graph": 0.685251798561151
+      }
+    },
+    "2222_add": {
+      "all": {
+        "n": 2000,
+        "teacher": 0.77,
+        "base": 0.0465,
+        "sft": 0.0815,
+        "kd": 0.1155,
+        "graph": 0.1285
+      },
+      "0 carries": {
+        "n": 4,
+        "teacher": 1.0,
+        "base": 0.0,
+        "sft": 0.5,
+        "kd": 0.5,
+        "graph": 0.5
+      },
+      "1 carry": {
+        "n": 197,
+        "teacher": 0.883248730964467,
+        "base": 0.08629441624365482,
+        "sft": 0.15228426395939088,
+        "kd": 0.2131979695431472,
+        "graph": 0.2233502538071066
+      },
+      "2+ carries": {
+        "n": 1799,
+        "teacher": 0.7570872707059477,
+        "base": 0.042245692051139525,
+        "sft": 0.07281823235130629,
+        "kd": 0.10394663702056699,
+        "graph": 0.11728738187882157
+      },
+      "new digit": {
+        "n": 1918,
+        "teacher": 0.7638164754953076,
+        "base": 0.043795620437956206,
+        "sft": 0.0735140771637122,
+        "kd": 0.10636079249217935,
+        "graph": 0.12200208550573514
+      },
+      "no new digit": {
+        "n": 82,
+        "teacher": 0.9146341463414634,
+        "base": 0.10975609756097561,
+        "sft": 0.2682926829268293,
+        "kd": 0.32926829268292684,
+        "graph": 0.2804878048780488
+      },
+      "1-digit operand": {
+        "n": 673,
+        "teacher": 0.8098068350668648,
+        "base": 0.0713224368499257,
+        "sft": 0.1263001485884101,
+        "kd": 0.1485884101040119,
+        "graph": 0.1738484398216939
+      }
+    },
+    "33_add": {
+      "all": {
+        "n": 2000,
+        "teacher": 0.9225,
+        "base": 0.4875,
+        "sft": 0.6585,
+        "kd": 0.579,
+        "graph": 0.6595
+      },
+      "0 carries": {
+        "n": 359,
+        "teacher": 0.8885793871866295,
+        "base": 0.6518105849582173,
+        "sft": 0.924791086350975,
+        "kd": 0.8189415041782729,
+        "graph": 0.924791086350975
+      },
+      "1 carry": {
+        "n": 723,
+        "teacher": 0.921161825726141,
+        "base": 0.5048409405255878,
+        "sft": 0.7136929460580913,
+        "kd": 0.6376210235131397,
+        "graph": 0.719225449515906
+      },
+      "2+ carries": {
+        "n": 918,
+        "teacher": 0.9368191721132898,
+        "base": 0.4095860566448802,
+        "sft": 0.5108932461873639,
+        "kd": 0.43899782135076254,
+        "graph": 0.5087145969498911
+      },
+      "new digit": {
+        "n": 1004,
+        "teacher": 0.9452191235059761,
+        "base": 0.30278884462151395,
+        "sft": 0.4153386454183267,
+        "kd": 0.34163346613545814,
+        "graph": 0.39741035856573703
+      },
+      "no new digit": {
+        "n": 996,
+        "teacher": 0.8995983935742972,
+        "base": 0.6736947791164659,
+        "sft": 0.9036144578313253,
+        "kd": 0.8182730923694779,
+        "graph": 0.9236947791164659
+      },
+      "1-digit operand": {
+        "n": 43,
+        "teacher": 0.7441860465116279,
+        "base": 0.4883720930232558,
+        "sft": 0.9534883720930233,
+        "kd": 0.7906976744186046,
+        "graph": 0.9767441860465116
+      }
+    },
+    "21_mult": {
+      "all": {
+        "n": 1000,
+        "teacher": 0.894,
+        "base": 0.124,
+        "sft": 0.669,
+        "kd": 0.404,
+        "graph": 0.949
+      },
+      "0 carries": {
+        "n": 270,
+        "teacher": 0.9185185185185185,
+        "base": 0.3814814814814815,
+        "sft": 0.9074074074074074,
+        "kd": 0.8592592592592593,
+        "graph": 0.9629629629629629
+      },
+      "1 carry": {
+        "n": 266,
+        "teacher": 0.9548872180451128,
+        "base": 0.03759398496240601,
+        "sft": 0.5789473684210527,
+        "kd": 0.29699248120300753,
+        "graph": 0.9398496240601504
+      },
+      "2+ carries": {
+        "n": 464,
+        "teacher": 0.8448275862068966,
+        "base": 0.023706896551724137,
+        "sft": 0.5818965517241379,
+        "kd": 0.20043103448275862,
+        "graph": 0.9461206896551724
+      },
+      "new digit": {
+        "n": 672,
+        "teacher": 0.875,
+        "base": 0.02976190476190476,
+        "sft": 0.5714285714285714,
+        "kd": 0.22916666666666666,
+        "graph": 0.9419642857142857
+      },
+      "no new digit": {
+        "n": 328,
+        "teacher": 0.9329268292682927,
+        "base": 0.3170731707317073,
+        "sft": 0.8689024390243902,
+        "kd": 0.7621951219512195,
+        "graph": 0.9634146341463414
+      }
+    }
+  },
+  "errors": {
+    "22_add": {
+      "teacher": {
+        "format": 75,
+        "copy_operand": 0,
+        "carry_dropped": 0,
+        "carry_extra": 0,
+        "transposition": 0,
+        "units_wrong": 6,
+        "tens_wrong": 0,
+        "high_wrong": 0
+      },
+      "base": {
+        "format": 571,
+        "copy_operand": 0,
+        "carry_dropped": 9,
+        "carry_extra": 16,
+        "transposition": 0,
+        "units_wrong": 61,
+        "tens_wrong": 3,
+        "high_wrong": 0
+      },
+      "sft": {
+        "format": 0,
+        "copy_operand": 0,
+        "carry_dropped": 5,
+        "carry_extra": 1,
+        "transposition": 0,
+        "units_wrong": 7,
+        "tens_wrong": 1,
+        "high_wrong": 0
+      },
+      "kd": {
+        "format": 15,
+        "copy_operand": 0,
+        "carry_dropped": 3,
+        "carry_extra": 7,
+        "transposition": 1,
+        "units_wrong": 13,
+        "tens_wrong": 0,
+        "high_wrong": 0
+      },
+      "graph": {
+        "format": 0,
+        "copy_operand": 1,
+        "carry_dropped": 0,
+        "carry_extra": 0,
+        "transposition": 0,
+        "units_wrong": 0,
+        "tens_wrong": 0,
+        "high_wrong": 0
+      }
+    },
+    "222_add": {
+      "teacher": {
+        "format": 179,
+        "copy_operand": 0,
+        "carry_dropped": 10,
+        "carry_extra": 0,
+        "transposition": 0,
+        "units_wrong": 8,
+        "tens_wrong": 39,
+        "high_wrong": 0
+      },
+      "base": {
+        "format": 484,
+        "copy_operand": 11,
+        "carry_dropped": 53,
+        "carry_extra": 192,
+        "transposition": 4,
+        "units_wrong": 565,
+        "tens_wrong": 293,
+        "high_wrong": 0
+      },
+      "sft": {
+        "format": 0,
+        "copy_operand": 1,
+        "carry_dropped": 298,
+        "carry_extra": 118,
+        "transposition": 8,
+        "units_wrong": 588,
+        "tens_wrong": 136,
+        "high_wrong": 0
+      },
+      "kd": {
+        "format": 48,
+        "copy_operand": 18,
+        "carry_dropped": 276,
+        "carry_extra": 218,
+        "transposition": 3,
+        "units_wrong": 385,
+        "tens_wrong": 190,
+        "high_wrong": 0
+      },
+      "graph": {
+        "format": 0,
+        "copy_operand": 4,
+        "carry_dropped": 323,
+        "carry_extra": 226,
+        "transposition": 1,
+        "units_wrong": 289,
+        "tens_wrong": 202,
+        "high_wrong": 0
+      }
+    },
+    "2222_add": {
+      "teacher": {
+        "format": 56,
+        "copy_operand": 0,
+        "carry_dropped": 41,
+        "carry_extra": 14,
+        "transposition": 0,
+        "units_wrong": 159,
+        "tens_wrong": 190,
+        "high_wrong": 0
+      },
+      "base": {
+        "format": 519,
+        "copy_operand": 11,
+        "carry_dropped": 32,
+        "carry_extra": 103,
+        "transposition": 12,
+        "units_wrong": 978,
+        "tens_wrong": 252,
+        "high_wrong": 0
+      },
+      "sft": {
+        "format": 0,
+        "copy_operand": 0,
+        "carry_dropped": 165,
+        "carry_extra": 67,
+        "transposition": 15,
+        "units_wrong": 1361,
+        "tens_wrong": 229,
+        "high_wrong": 0
+      },
+      "kd": {
+        "format": 10,
+        "copy_operand": 63,
+        "carry_dropped": 167,
+        "carry_extra": 117,
+        "transposition": 5,
+        "units_wrong": 1116,
+        "tens_wrong": 291,
+        "high_wrong": 0
+      },
+      "graph": {
+        "format": 0,
+        "copy_operand": 52,
+        "carry_dropped": 214,
+        "carry_extra": 127,
+        "transposition": 9,
+        "units_wrong": 1003,
+        "tens_wrong": 338,
+        "high_wrong": 0
+      }
+    },
+    "33_add": {
+      "teacher": {
+        "format": 112,
+        "copy_operand": 3,
+        "carry_dropped": 9,
+        "carry_extra": 6,
+        "transposition": 0,
+        "units_wrong": 8,
+        "tens_wrong": 4,
+        "high_wrong": 13
+      },
+      "base": {
+        "format": 107,
+        "copy_operand": 7,
+        "carry_dropped": 141,
+        "carry_extra": 185,
+        "transposition": 14,
+        "units_wrong": 290,
+        "tens_wrong": 250,
+        "high_wrong": 31
+      },
+      "sft": {
+        "format": 0,
+        "copy_operand": 0,
+        "carry_dropped": 168,
+        "carry_extra": 97,
+        "transposition": 12,
+        "units_wrong": 265,
+        "tens_wrong": 109,
+        "high_wrong": 32
+      },
+      "kd": {
+        "format": 10,
+        "copy_operand": 9,
+        "carry_dropped": 163,
+        "carry_extra": 138,
+        "transposition": 14,
+        "units_wrong": 240,
+        "tens_wrong": 231,
+        "high_wrong": 37
+      },
+      "graph": {
+        "format": 0,
+        "copy_operand": 2,
+        "carry_dropped": 187,
+        "carry_extra": 132,
+        "transposition": 11,
+        "units_wrong": 123,
+        "tens_wrong": 185,
+        "high_wrong": 41
+      }
+    },
+    "21_mult": {
+      "teacher": {
+        "format": 93,
+        "copy_operand": 3,
+        "carry_dropped": 1,
+        "carry_extra": 0,
+        "transposition": 0,
+        "units_wrong": 5,
+        "tens_wrong": 4,
+        "high_wrong": 0
+      },
+      "base": {
+        "format": 872,
+        "copy_operand": 0,
+        "carry_dropped": 0,
+        "carry_extra": 0,
+        "transposition": 0,
+        "units_wrong": 3,
+        "tens_wrong": 1,
+        "high_wrong": 0
+      },
+      "sft": {
+        "format": 116,
+        "copy_operand": 39,
+        "carry_dropped": 2,
+        "carry_extra": 0,
+        "transposition": 0,
+        "units_wrong": 114,
+        "tens_wrong": 54,
+        "high_wrong": 6
+      },
+      "kd": {
+        "format": 579,
+        "copy_operand": 1,
+        "carry_dropped": 0,
+        "carry_extra": 1,
+        "transposition": 0,
+        "units_wrong": 12,
+        "tens_wrong": 3,
+        "high_wrong": 0
+      },
+      "graph": {
+        "format": 1,
+        "copy_operand": 2,
+        "carry_dropped": 0,
+        "carry_extra": 1,
+        "transposition": 0,
+        "units_wrong": 34,
+        "tens_wrong": 13,
+        "high_wrong": 0
+      }
+    }
+  },
+  "pairs": {
+    "units_carry": {
+      "teacher": {
+        "base_acc": 0.98,
+        "variant_acc": 1.0,
+        "both": 0.98,
+        "breaks": 0.0,
+        "p_gold_base": 0.6205677999999999,
+        "p_gold_variant": 0.6832192,
+        "same_as_teacher": 1.0
+      },
+      "base": {
+        "base_acc": 0.48,
+        "variant_acc": 0.42,
+        "both": 0.34,
+        "breaks": 0.14,
+        "p_gold_base": 0.2792576,
+        "p_gold_variant": 0.2664254,
+        "same_as_teacher": 0.34
+      },
+      "sft": {
+        "base_acc": 1.0,
+        "variant_acc": 1.0,
+        "both": 1.0,
+        "breaks": 0.0,
+        "p_gold_base": 0.9799528000000001,
+        "p_gold_variant": 0.9890670000000001,
+        "same_as_teacher": 0.98
+      },
+      "kd": {
+        "base_acc": 1.0,
+        "variant_acc": 1.0,
+        "both": 1.0,
+        "breaks": 0.0,
+        "p_gold_base": 0.6833663999999999,
+        "p_gold_variant": 0.6836072000000002,
+        "same_as_teacher": 0.98
+      },
+      "graph": {
+        "base_acc": 1.0,
+        "variant_acc": 1.0,
+        "both": 1.0,
+        "breaks": 0.0,
+        "p_gold_base": 0.8807375999999999,
+        "p_gold_variant": 0.8817304000000001,
+        "same_as_teacher": 0.98
+      }
+    },
+    "carry_to_100": {
+      "teacher": {
+        "base_acc": 0.98,
+        "variant_acc": 0.98,
+        "both": 0.98,
+        "breaks": 0.0,
+        "p_gold_base": 0.6821668,
+        "p_gold_variant": 0.6444984000000001,
+        "same_as_teacher": 1.0
+      },
+      "base": {
+        "base_acc": 0.4,
+        "variant_acc": 0.48,
+        "both": 0.32,
+        "breaks": 0.08,
+        "p_gold_base": 0.2294116,
+        "p_gold_variant": 0.28093720000000005,
+        "same_as_teacher": 0.34
+      },
+      "sft": {
+        "base_acc": 1.0,
+        "variant_acc": 1.0,
+        "both": 1.0,
+        "breaks": 0.0,
+        "p_gold_base": 0.9889801999999998,
+        "p_gold_variant": 0.9772597999999997,
+        "same_as_teacher": 0.98
+      },
+      "kd": {
+        "base_acc": 0.94,
+        "variant_acc": 0.94,
+        "both": 0.9,
+        "breaks": 0.04,
+        "p_gold_base": 0.5803337999999999,
+        "p_gold_variant": 0.5754938,
+        "same_as_teacher": 0.88
+      },
+      "graph": {
+        "base_acc": 1.0,
+        "variant_acc": 1.0,
+        "both": 1.0,
+        "breaks": 0.0,
+        "p_gold_base": 0.8505564000000002,
+        "p_gold_variant": 0.7995275999999998,
+        "same_as_teacher": 0.98
+      }
+    },
+    "tens_carry": {
+      "teacher": {
+        "base_acc": 0.94,
+        "variant_acc": 0.92,
+        "both": 0.9,
+        "breaks": 0.04,
+        "p_gold_base": 0.6486256000000001,
+        "p_gold_variant": 0.6254582000000001,
+        "same_as_teacher": 1.0
+      },
+      "base": {
+        "base_acc": 0.54,
+        "variant_acc": 0.64,
+        "both": 0.44,
+        "breaks": 0.1,
+        "p_gold_base": 0.29192840000000003,
+        "p_gold_variant": 0.365775,
+        "same_as_teacher": 0.36
+      },
+      "sft": {
+        "base_acc": 1.0,
+        "variant_acc": 0.98,
+        "both": 0.98,
+        "breaks": 0.02,
+        "p_gold_base": 0.9896299999999998,
+        "p_gold_variant": 0.9649719999999999,
+        "same_as_teacher": 0.88
+      },
+      "kd": {
+        "base_acc": 0.98,
+        "variant_acc": 0.96,
+        "both": 0.94,
+        "breaks": 0.04,
+        "p_gold_base": 0.6821905999999999,
+        "p_gold_variant": 0.716677,
+        "same_as_teacher": 0.84
+      },
+      "graph": {
+        "base_acc": 0.98,
+        "variant_acc": 1.0,
+        "both": 0.98,
+        "breaks": 0.0,
+        "p_gold_base": 0.87997,
+        "p_gold_variant": 0.863986,
+        "same_as_teacher": 0.88
+      }
+    },
+    "extra_operand": {
+      "teacher": {
+        "base_acc": 0.94,
+        "variant_acc": 0.86,
+        "both": 0.82,
+        "breaks": 0.12,
+        "p_gold_base": 0.6192993999999998,
+        "p_gold_variant": 0.5733307999999998,
+        "same_as_teacher": 1.0
+      },
+      "base": {
+        "base_acc": 0.68,
+        "variant_acc": 0.24,
+        "both": 0.18,
+        "breaks": 0.5,
+        "p_gold_base": 0.47559019999999985,
+        "p_gold_variant": 0.07917400000000002,
+        "same_as_teacher": 0.32
+      },
+      "sft": {
+        "base_acc": 0.96,
+        "variant_acc": 0.48,
+        "both": 0.48,
+        "breaks": 0.48,
+        "p_gold_base": 0.9655550000000004,
+        "p_gold_variant": 0.37523700000000004,
+        "same_as_teacher": 0.5
+      },
+      "kd": {
+        "base_acc": 0.98,
+        "variant_acc": 0.44,
+        "both": 0.44,
+        "breaks": 0.54,
+        "p_gold_base": 0.7089792,
+        "p_gold_variant": 0.13167959999999998,
+        "same_as_teacher": 0.42
+      },
+      "graph": {
+        "base_acc": 1.0,
+        "variant_acc": 0.46,
+        "both": 0.46,
+        "breaks": 0.54,
+        "p_gold_base": 0.8872527999999998,
+        "p_gold_variant": 0.2529257999999999,
+        "same_as_teacher": 0.44
+      }
+    },
+    "widen_operands": {
+      "teacher": {
+        "base_acc": 0.96,
+        "variant_acc": 1.0,
+        "both": 0.96,
+        "breaks": 0.0,
+        "p_gold_base": 0.6510602000000002,
+        "p_gold_variant": 0.8089504000000001,
+        "same_as_teacher": 1.0
+      },
+      "base": {
+        "base_acc": 0.74,
+        "variant_acc": 0.54,
+        "both": 0.38,
+        "breaks": 0.36,
+        "p_gold_base": 0.5060388,
+        "p_gold_variant": 0.2621964,
+        "same_as_teacher": 0.36
+      },
+      "sft": {
+        "base_acc": 0.96,
+        "variant_acc": 0.68,
+        "both": 0.66,
+        "breaks": 0.3,
+        "p_gold_base": 0.9452382000000003,
+        "p_gold_variant": 0.5882706000000001,
+        "same_as_teacher": 0.64
+      },
+      "kd": {
+        "base_acc": 0.98,
+        "variant_acc": 0.62,
+        "both": 0.6,
+        "breaks": 0.38,
+        "p_gold_base": 0.6807126,
+        "p_gold_variant": 0.21720440000000005,
+        "same_as_teacher": 0.58
+      },
+      "graph": {
+        "base_acc": 1.0,
+        "variant_acc": 0.7,
+        "both": 0.7,
+        "breaks": 0.3,
+        "p_gold_base": 0.8786452000000001,
+        "p_gold_variant": 0.35114920000000005,
+        "same_as_teacher": 0.66
+      }
+    },
+    "double_to_mult": {
+      "teacher": {
+        "base_acc": 1.0,
+        "variant_acc": 1.0,
+        "both": 1.0,
+        "breaks": 0.0,
+        "p_gold_base": 0.7587176744186046,
+        "p_gold_variant": 0.8064832558139534,
+        "same_as_teacher": 1.0
+      },
+      "base": {
+        "base_acc": 0.9767441860465116,
+        "variant_acc": 0.09302325581395349,
+        "both": 0.09302325581395349,
+        "breaks": 0.8837209302325582,
+        "p_gold_base": 0.6394818604651163,
+        "p_gold_variant": 0.03789744186046511,
+        "same_as_teacher": 0.09302325581395349
+      },
+      "sft": {
+        "base_acc": 1.0,
+        "variant_acc": 0.9534883720930233,
+        "both": 0.9534883720930233,
+        "breaks": 0.046511627906976744,
+        "p_gold_base": 0.9874897674418607,
+        "p_gold_variant": 0.3345581395348838,
+        "same_as_teacher": 0.9534883720930233
+      },
+      "kd": {
+        "base_acc": 1.0,
+        "variant_acc": 0.8837209302325582,
+        "both": 0.8837209302325582,
+        "breaks": 0.11627906976744186,
+        "p_gold_base": 0.77290488372093,
+        "p_gold_variant": 0.21354767441860467,
+        "same_as_teacher": 0.8837209302325582
+      },
+      "graph": {
+        "base_acc": 1.0,
+        "variant_acc": 1.0,
+        "both": 1.0,
+        "breaks": 0.0,
+        "p_gold_base": 0.9040925581395347,
+        "p_gold_variant": 0.5033430232558138,
+        "same_as_teacher": 1.0
+      }
+    },
+    "triple_to_mult": {
+      "teacher": {
+        "base_acc": 1.0,
+        "variant_acc": 0.96,
+        "both": 0.96,
+        "breaks": 0.04,
+        "p_gold_base": 0.7700053999999998,
+        "p_gold_variant": 0.7460266,
+        "same_as_teacher": 1.0
+      },
+      "base": {
+        "base_acc": 0.86,
+        "variant_acc": 0.0,
+        "both": 0.0,
+        "breaks": 0.86,
+        "p_gold_base": 0.36017760000000004,
+        "p_gold_variant": 0.007604,
+        "same_as_teacher": 0.04
+      },
+      "sft": {
+        "base_acc": 0.92,
+        "variant_acc": 0.76,
+        "both": 0.7,
+        "breaks": 0.22,
+        "p_gold_base": 0.8545022000000002,
+        "p_gold_variant": 0.27521180000000006,
+        "same_as_teacher": 0.66
+      },
+      "kd": {
+        "base_acc": 0.98,
+        "variant_acc": 0.16,
+        "both": 0.16,
+        "breaks": 0.82,
+        "p_gold_base": 0.4604266000000001,
+        "p_gold_variant": 0.06233699999999997,
+        "same_as_teacher": 0.12
+      },
+      "graph": {
+        "base_acc": 0.96,
+        "variant_acc": 1.0,
+        "both": 0.96,
+        "breaks": 0.0,
+        "p_gold_base": 0.6494222000000001,
+        "p_gold_variant": 0.34236540000000004,
+        "same_as_teacher": 0.92
+      }
+    },
+    "mult_carry": {
+      "teacher": {
+        "base_acc": 1.0,
+        "variant_acc": 1.0,
+        "both": 1.0,
+        "breaks": 0.0,
+        "p_gold_base": 0.7783950000000004,
+        "p_gold_variant": 0.7643972000000002,
+        "same_as_teacher": 1.0
+      },
+      "base": {
+        "base_acc": 0.0,
+        "variant_acc": 0.0,
+        "both": 0.0,
+        "breaks": 0.0,
+        "p_gold_base": 0.018616399999999998,
+        "p_gold_variant": 0.0165704,
+        "same_as_teacher": 0.0
+      },
+      "sft": {
+        "base_acc": 0.54,
+        "variant_acc": 0.74,
+        "both": 0.46,
+        "breaks": 0.08,
+        "p_gold_base": 0.219268,
+        "p_gold_variant": 0.2389542000000001,
+        "same_as_teacher": 0.46
+      },
+      "kd": {
+        "base_acc": 0.24,
+        "variant_acc": 0.18,
+        "both": 0.1,
+        "breaks": 0.14,
+        "p_gold_base": 0.11413620000000003,
+        "p_gold_variant": 0.12184799999999996,
+        "same_as_teacher": 0.1
+      },
+      "graph": {
+        "base_acc": 0.86,
+        "variant_acc": 0.92,
+        "both": 0.8,
+        "breaks": 0.06,
+        "p_gold_base": 0.35269059999999997,
+        "p_gold_variant": 0.4135966,
+        "same_as_teacher": 0.8
+      }
+    }
+  },
+  "examples": {
+    "222_add/graph_right": [
+      "1+41+10=",
+      "12+61+52=",
+      "6+95+52=",
+      "40+21+33=",
+      "5+7+25="
+    ],
+    "222_add/graph_wrong": [
+      "5+80+14=",
+      "4+65+26="
+    ],
+    "2222_add/graph_right": [
+      "39+43+9+0=",
+      "71+39+80+10=",
+      "2+9+0+9=",
+      "22+42+74+12=",
+      "80+18+70+10="
+    ],
+    "2222_add/graph_wrong": [
+      "0+50+34+6=",
+      "50+99+7+13="
+    ],
+    "33_add/graph_right": [
+      "156+343=",
+      "115+679=",
+      "451+581=",
+      "787+254=",
+      "241+301="
+    ],
+    "33_add/graph_wrong": [
+      "135+830=",
+      "813+118="
+    ],
+    "21_mult/graph_right": [
+      "2*4=",
+      "21*5=",
+      "84*5=",
+      "21*4=",
+      "16*5="
+    ],
+    "21_mult/graph_wrong": [
+      "1*5=",
+      "92*5="
+    ]
+  },
+  "args": {
+    "teacher": "meta-llama/Meta-Llama-3-8B-Instruct",
+    "base": "meta-llama/Llama-3.2-1B-Instruct",
+    "sft": "/home/ubuntu/mcd/FINAL_RESULTS/matched/22_add_sft/Llama-3.2-1B-Instruct/22_add/final_checkpoint",
+    "kd": "/home/ubuntu/mcd/FINAL_RESULTS/matched/22_add_kd/final_checkpoint",
+    "graph": "/home/ubuntu/mcd/ckpts/graph_lambda1",
+    "datasets": [
+      "22_add",
+      "222_add",
+      "2222_add",
+      "33_add",
+      "21_mult"
+    ],
+    "train_dataset": "22_add",
+    "bos_mode": "legacy",
+    "max_eval_tokens": 5,
+    "eval_batch_size": 1024,
+    "score_batch_size": 256,
+    "test_limit": 2000,
+    "student_dtype": "bfloat16",
+    "n_pairs": 50,
+    "n_examples": 5,
+    "n_reverse": 2,
+    "seed": 0,
+    "reuse": false,
+    "out_dir": "/home/ubuntu/mcd/results_overnight/case_studies"
+  }
+}
