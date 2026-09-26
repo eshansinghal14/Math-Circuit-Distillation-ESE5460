@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -21,6 +22,8 @@ from utils import (
     load_data,
     load_model,
     seed_all,
+    _HF_DATASETS,
+    bos_mode,
     set_bos_mode,
 )
 
@@ -95,6 +98,10 @@ class StandardKDConfig:
     resume: bool = False
     track_flops: bool = False
     seed: int = _SEED
+    # Eval-format control (legacy BOS only): a loss on the same batch with BOS prepended.
+    # 'ce': gold-answer cross-entropy; 'commit': -log P(a number token) at the answer position.
+    bos_aux: str = "none"
+    lambda_bos_aux: float = 0.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -137,6 +144,13 @@ class StandardKDTrainer:
             _, ds_test_data = load_data(ds, test_limit=config.test_limit)
             self.extra_test_datasets[ds] = PromptAnswerDataset(ds, ds_test_data, self.tokenizer)
 
+        if config.bos_aux != "none":
+            if bos_mode() != "legacy" or self.tokenizer.bos_token_id is None or config.dataset in _HF_DATASETS:
+                raise ValueError("--bos-aux needs --bos-mode legacy, a BOS token and a local dataset")
+            vocab = [self.tokenizer.decode([i]) for i in range(len(self.tokenizer))]
+            self._number_ids = torch.tensor(
+                [i for i, t in enumerate(vocab) if re.fullmatch(r"\s?\d+", t)], device=_DEVICE)
+
         self.optimizer = make_optimizer(self.model, config.learning_rate)
         self._step_tracker = ParamStepTracker(self.model)
 
@@ -174,6 +188,21 @@ class StandardKDTrainer:
 
     def _eval_teacher_all_extra(self) -> Dict[str, float]:
         return {ds: self._eval_on(self.teacher, ds, td) for ds, td in self.extra_test_datasets.items()}
+
+    def _bos_aux_loss(self, input_ids, attention_mask, response_mask) -> torch.Tensor:
+        """The batch with BOS prepended, i.e. in the format eval_model scores."""
+        n = input_ids.size(0)
+        bos = torch.full((n, 1), self.tokenizer.bos_token_id, dtype=input_ids.dtype, device=input_ids.device)
+        ids = torch.cat([bos, input_ids], 1)
+        am = torch.cat([torch.ones_like(bos), attention_mask], 1)
+        tgt = torch.cat([torch.zeros_like(bos), response_mask], 1)[:, 1:].bool()
+        with self._autocast():
+            logp = torch.log_softmax(self.model(ids, attention_mask=am).logits[:, :-1].float(), -1)
+        if self.config.bos_aux == "ce":
+            tok = logp.gather(-1, ids[:, 1:].unsqueeze(-1)).squeeze(-1)
+            return -(tok * tgt).sum() / tgt.sum()
+        first = tgt.float().argmax(1)  # the position that predicts the first answer token
+        return -torch.logsumexp(logp[torch.arange(n, device=ids.device), first][:, self._number_ids], -1).mean()
 
     def train_epoch(self, *, max_steps: Optional[int] = None) -> Dict[str, float]:
         self.model.train()
@@ -213,15 +242,20 @@ class StandardKDTrainer:
                     student_logits, teacher_logits, kd_mask,
                     cfg.temperature, cfg.kl_token_chunk_size,
                 ) / grad_accum
+                total = loss
+                if cfg.bos_aux != "none":
+                    aux = self._bos_aux_loss(input_ids, attention_mask, batch["response_mask"].to(_DEVICE))
+                    self.history["step_bos_aux"].append(float(aux))
+                    total = loss + cfg.lambda_bos_aux * aux / grad_accum
 
-            if not torch.isfinite(loss):
+            if not torch.isfinite(total):
                 micro_step += 1
                 if micro_step % grad_accum == 0:
                     self.optimizer.zero_grad()
                 continue
 
             with flop_counter:
-                loss.backward()
+                total.backward()
             accum_loss += float(loss.item())
             accum_flops += flop_counter.flops
             micro_step += 1
@@ -338,6 +372,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="KL-only distillation on GSM8K / SVAMP / local datasets.")
     add_standard_args(parser)
     add_kd_args(parser)
+    parser.add_argument("--bos-aux", choices=["none", "ce", "commit"], default="none",
+                        help="Eval-format control under --bos-mode legacy: a loss on the batch with BOS "
+                             "prepended. 'ce' trains the gold answer, 'commit' only P(a number token).")
+    parser.add_argument("--lambda-bos-aux", type=float, default=0.0)
     return parser
 
 
@@ -374,6 +412,8 @@ def main() -> None:
                 resume=args.resume,
                 track_flops=args.track_flops,
                 seed=seed,
+                bos_aux=args.bos_aux,
+                lambda_bos_aux=args.lambda_bos_aux,
             ),
             train_data,
             test_data,
