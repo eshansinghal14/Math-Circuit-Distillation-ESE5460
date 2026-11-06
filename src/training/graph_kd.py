@@ -142,9 +142,12 @@ class GraphKDConfig:
     teacher_target_cache_dir: str | None = "cache/teacher_targets"
     # Which loss may move the BOS token's embedding row; see --bos-embedding.
     bos_embedding: str = "train"
+    # Remove the KD direction from the graph gradient; see --graph-grad-projection.
+    graph_grad_projection: str = "none"
 
 
 BOS_EMBEDDING_MODES = ("train", "freeze", "graph-only")
+GRAPH_GRAD_PROJECTIONS = ("none", "orthogonal")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -299,6 +302,17 @@ class GraphKDTrainer:
         if self._bos_id is None:
             raise RuntimeError("tokenizer has no BOS token; --bos-embedding and the BOS-row log need one")
         self._bos_row0 = self._bos_weight()[self._bos_id].detach().clone()
+        if config.graph_grad_projection not in GRAPH_GRAD_PROJECTIONS:
+            raise ValueError(f"graph_grad_projection must be one of {GRAPH_GRAD_PROJECTIONS}, "
+                             f"got {config.graph_grad_projection!r}")
+        if config.graph_grad_projection != "none":
+            # The snapshot taken before the graph backward must be this step's KD
+            # gradient alone; with accumulation it would also hold earlier micro-steps'
+            # graph gradients. graph-only rewrites the same .grad from its own snapshot.
+            if config.grad_accum_steps != 1:
+                raise ValueError("--graph-grad-projection needs --grad-accum-steps 1")
+            if config.bos_embedding == "graph-only":
+                raise ValueError("--graph-grad-projection cannot be combined with --bos-embedding graph-only")
 
         self.history: Dict[str, List] = defaultdict(list)
         self._train_step = 0
@@ -316,6 +330,38 @@ class GraphKDTrainer:
     def _bos_weight(self) -> torch.nn.Parameter:
         """The input-embedding matrix; on Llama-3.2 it is also the lm_head (tied)."""
         return self.model.get_input_embeddings().weight
+
+    def _project_graph_grad_off_kd(self, kd_grads: Dict[str, Optional[torch.Tensor]]) -> tuple[float, float]:
+        """--graph-grad-projection orthogonal: g <- g_KD + (g_graph - c * g_KD).
+
+        ``kd_grads`` is .grad before the graph backward (host copies), so the graph
+        gradient is the delta. c = <g_graph, g_KD> / |g_KD|^2 over the whole model
+        (one scalar, fp32), i.e. the graph term keeps only what is orthogonal to the
+        KD gradient of this step. Returns (cos before, |g_graph| after projection).
+        """
+        params = [(n, p) for n, p in self.model.named_parameters() if p.grad is not None]
+        dot = kd_sq = gr_sq = 0.0
+        for n, p in params:
+            kd = kd_grads.get(n)
+            kd = torch.zeros_like(p.grad, dtype=torch.float32) if kd is None else kd.to(p.grad.device).float()
+            g = p.grad.float() - kd
+            dot += float((g * kd).sum())
+            kd_sq += float((kd * kd).sum())
+            gr_sq += float((g * g).sum())
+        if kd_sq == 0.0 or gr_sq == 0.0:
+            return 0.0, gr_sq ** 0.5
+        c = dot / kd_sq
+        cos = dot / (kd_sq ** 0.5 * gr_sq ** 0.5)
+        with torch.no_grad():
+            for n, p in params:
+                kd = kd_grads.get(n)
+                if kd is None:
+                    continue
+                kd = kd.to(p.grad.device).float()
+                # g_KD + g_graph - c * g_KD, written back once (one rounding).
+                p.grad.copy_(p.grad.float() - c * kd)
+        # |g_graph - c g_KD|^2 = |g_graph|^2 - dot^2 / |g_KD|^2
+        return cos, max(gr_sq - dot * dot / kd_sq, 0.0) ** 0.5
 
     def _keep_graph_grad_on_bos_row_only(self, kd_grads: Dict[str, Optional[torch.Tensor]]) -> None:
         """--bos-embedding graph-only: drop the graph gradient everywhere but the BOS row.
@@ -534,6 +580,14 @@ class GraphKDTrainer:
                     n: p.grad.detach().clone() if p.grad is not None else None
                     for n, p in self.model.named_parameters()
                 }
+            # Projection: a host copy of the KD gradient (~2.5 GB in bf16); the graph
+            # backward is the run's memory peak, so it stays off the GPU.
+            proj_kd_grads = None
+            if cfg.graph_grad_projection != "none":
+                proj_kd_grads = {
+                    n: p.grad.detach().to("cpu", copy=True) if p.grad is not None else None
+                    for n, p in self.model.named_parameters()
+                }
             # Embedding-row gradient before the graph backward, for the BOS-row share.
             emb = self._bos_weight()
             bos_g_before = (emb.grad[self._bos_id].detach().float().clone()
@@ -614,6 +668,13 @@ class GraphKDTrainer:
                 accum_flip += (flipped / total_elems) if (total_elems and kl_sq > 0) else float("nan")
                 del grads_before, grads_at_start
 
+            # After the grad metrics, so step_grad_cosine / ratio stay the raw graph
+            # gradient and compare with every other run; the projection's own
+            # numbers are logged as step_proj_*.
+            if proj_kd_grads is not None:
+                self._proj_cos, self._proj_gnorm = self._project_graph_grad_off_kd(proj_kd_grads)
+                del proj_kd_grads
+
             micro_step += 1
 
             if not kl_finite:
@@ -675,6 +736,10 @@ class GraphKDTrainer:
                 self.history["step_bos_row_graph_gnorm"].append(accum_bos_graph_gnorm)
                 bos_str = (f" | BOS row: |g_KL|={accum_bos_kl_gnorm:.2e} |g_graph|={accum_bos_graph_gnorm:.2e}"
                            f" moved={bos_changed:.2f} drift={bos_drift_rel:.2e}")
+                if cfg.graph_grad_projection != "none":
+                    self.history["step_proj_cos"].append(self._proj_cos)
+                    self.history["step_proj_graph_gnorm"].append(self._proj_gnorm)
+                    bos_str += f" | proj: cos removed={self._proj_cos:+.3f} |g_graph⊥|={self._proj_gnorm:.3e}"
                 del bos_row_before, bos_row_after
                 accum_bos_kl_gnorm = 0.0
                 accum_bos_graph_gnorm = 0.0
@@ -822,6 +887,8 @@ class GraphKDTrainer:
             f" | nodes_per_label={cfg.nodes_per_label}"
             + (" | CONTROL: scrambled teacher graph" if cfg.scramble_teacher_graph else "")
             + (f" | BOS embedding row: {cfg.bos_embedding}" if cfg.bos_embedding != "train" else "")
+            + (f" | graph grad projection: {cfg.graph_grad_projection}"
+               if cfg.graph_grad_projection != "none" else "")
         )
 
         while self._train_step < cfg.steps:
@@ -1054,6 +1121,17 @@ def build_parser() -> argparse.ArgumentParser:
              "graph-only whether the row alone carries it. Every run logs the row's per-step "
              "update, drift and gradient shares as step_bos_row_*.",
     )
+    group.add_argument(
+        "--graph-grad-projection", type=str, nargs="+", default=["none"],
+        choices=list(GRAPH_GRAD_PROJECTIONS), dest="graph_grad_projection",
+        help="'orthogonal': each step, remove from the graph gradient its component along "
+             "that step's KD gradient (one scalar over the whole model, fp32), so the graph "
+             "term adds only directions KD is not already taking. Tests whether the graph "
+             "term fails under --bos-mode on because its gradient is ~75%% parallel to KD's "
+             "(under legacy it is ~orthogonal already). step_grad_cosine/ratio still log the "
+             "raw graph gradient; the removed cosine and the remaining norm are step_proj_*. "
+             "Needs --grad-accum-steps 1.",
+    )
     return parser
 
 
@@ -1114,6 +1192,7 @@ def config_from_args(args: argparse.Namespace, seed: int, save_dir: str) -> Grap
         anova_cache_device=args.anova_cache_device,
         teacher_target_cache_dir=args.teacher_target_cache_dir,
         bos_embedding=args.bos_embedding,
+        graph_grad_projection=args.graph_grad_projection,
     )
 
 
