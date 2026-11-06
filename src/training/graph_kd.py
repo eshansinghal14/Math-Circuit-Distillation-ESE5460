@@ -140,6 +140,11 @@ class GraphKDConfig:
     # Performance only; neither changes any number a run produces.
     anova_cache_device: str = "auto"
     teacher_target_cache_dir: str | None = "cache/teacher_targets"
+    # Which loss may move the BOS token's embedding row; see --bos-embedding.
+    bos_embedding: str = "train"
+
+
+BOS_EMBEDDING_MODES = ("train", "freeze", "graph-only")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -284,6 +289,17 @@ class GraphKDTrainer:
                 f"({len(self.teacher_target_cache)} prompts cached)"
             )
 
+        # The BOS row of the (tied) embedding. Under --bos-mode legacy the KD term
+        # never sees BOS as an input, so this row is the one parameter only the graph
+        # term reaches through the forward; --bos-embedding tests whether that is
+        # where the graph term's effect lives. The row is logged every step either way.
+        if config.bos_embedding not in BOS_EMBEDDING_MODES:
+            raise ValueError(f"bos_embedding must be one of {BOS_EMBEDDING_MODES}, got {config.bos_embedding!r}")
+        self._bos_id = self.tokenizer.bos_token_id
+        if self._bos_id is None:
+            raise RuntimeError("tokenizer has no BOS token; --bos-embedding and the BOS-row log need one")
+        self._bos_row0 = self._bos_weight()[self._bos_id].detach().clone()
+
         self.history: Dict[str, List] = defaultdict(list)
         self._train_step = 0
         self._last_save_step = 0
@@ -296,6 +312,36 @@ class GraphKDTrainer:
     def _autocast(self):
         """bf16 autocast for the student forward; it holds fp32 master weights."""
         return student_autocast()
+
+    def _bos_weight(self) -> torch.nn.Parameter:
+        """The input-embedding matrix; on Llama-3.2 it is also the lm_head (tied)."""
+        return self.model.get_input_embeddings().weight
+
+    def _keep_graph_grad_on_bos_row_only(self, kd_grads: Dict[str, Optional[torch.Tensor]]) -> None:
+        """--bos-embedding graph-only: drop the graph gradient everywhere but the BOS row.
+
+        ``kd_grads`` is .grad as it stood before the graph backward. Every parameter
+        is put back to it exactly (a copy, so nothing is rounded), except the BOS
+        row of the embedding, which keeps KD + graph as accumulated.
+        """
+        emb = self._bos_weight()
+        for n, p in self.model.named_parameters():
+            if n not in kd_grads:
+                continue
+            before = kd_grads[n]
+            if p is emb:
+                if p.grad is None:
+                    continue
+                row = p.grad[self._bos_id].clone()
+                if before is None:
+                    p.grad.zero_()
+                else:
+                    p.grad.copy_(before)
+                p.grad[self._bos_id] = row
+            elif before is None:
+                p.grad = None
+            elif p.grad is not None:
+                p.grad.copy_(before)
 
     def _rebuild_teacher_target(self, prompt: str, answer: Any) -> dict:
         """One prompt's teacher target with the current code (TeacherTargetCache.validate)."""
@@ -404,6 +450,8 @@ class GraphKDTrainer:
         accum_time_student = 0.0
         accum_cache_hits = 0.0
         accum_graph_prompts = 0.0
+        accum_bos_kl_gnorm = 0.0
+        accum_bos_graph_gnorm = 0.0
         micro_step = 0
         # Matmul / attention FLOPs of each micro-step's forward and backward
         # passes; a no-op unless --track-flops. Entered around the compute only,
@@ -478,6 +526,18 @@ class GraphKDTrainer:
                     n: p.grad.detach().to("cpu", copy=True) if p.grad is not None else None
                     for n, p in self.model.named_parameters()
                 }
+            # graph-only: an on-device copy of the KD gradient, restored after the
+            # graph backward everywhere except the BOS row (~2.5 GB in bf16).
+            kd_grads = None
+            if cfg.bos_embedding == "graph-only":
+                kd_grads = {
+                    n: p.grad.detach().clone() if p.grad is not None else None
+                    for n, p in self.model.named_parameters()
+                }
+            # Embedding-row gradient before the graph backward, for the BOS-row share.
+            emb = self._bos_weight()
+            bos_g_before = (emb.grad[self._bos_id].detach().float().clone()
+                            if emb.grad is not None else torch.zeros_like(self._bos_row0, dtype=torch.float32))
             with flop_counter:
                 graph_loss_tensor, graph_metrics = backward_batch_graph_loss(
                     prompts=prompts,
@@ -488,6 +548,14 @@ class GraphKDTrainer:
                     device=_DEVICE,
                     loss_scale=cfg.lambda_graph / grad_accum,
                 )
+            bos_g_after = (emb.grad[self._bos_id].detach().float()
+                           if emb.grad is not None else torch.zeros_like(bos_g_before))
+            accum_bos_kl_gnorm += float(bos_g_before.norm())
+            accum_bos_graph_gnorm += float((bos_g_after - bos_g_before).norm())
+            del bos_g_before, bos_g_after
+            if kd_grads is not None:
+                self._keep_graph_grad_on_bos_row_only(kd_grads)
+                del kd_grads
             graph_val = float(graph_loss_tensor.item())
             # Supernode alignment counts are the cheapest early warning that the
             # target has quietly degraded. arg:<token> labels collide whenever a
@@ -564,8 +632,14 @@ class GraphKDTrainer:
                 # estimates permanently. clip_grad_norm_ turns an infinite total
                 # norm into NaN grads, but those are discarded by the zero_grad
                 # below when the step is skipped.
+                emb = self._bos_weight()
+                if cfg.bos_embedding == "freeze" and emb.grad is not None:
+                    # Out of the clip norm too, so the rest of the update is what an
+                    # unfrozen run would take.
+                    emb.grad[self._bos_id] = 0
                 total_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), _GRAD_CLIP)
                 accum_clip = float(total_norm)
+                bos_row_before = emb[self._bos_id].detach().float().clone()
                 if torch.isfinite(total_norm):
                     canary = ParamChangeCanary(self.model) if self._train_step == 0 else None
                     self._last_lr = apply_lr_schedule(
@@ -573,6 +647,11 @@ class GraphKDTrainer:
                         cfg.warmup_steps, cfg.lr_floor)
                     self._step_tracker.snapshot(self.model)
                     self.optimizer.step()
+                    if cfg.bos_embedding == "freeze":
+                        # A zero gradient still leaves AdamW's decoupled weight decay
+                        # (and any momentum), so put the row back exactly.
+                        with torch.no_grad():
+                            emb[self._bos_id] = self._bos_row0
                     accum_dtheta, accum_dtheta_rel = self._step_tracker.delta(self.model)
                     if canary is not None:
                         log_first_step_canary(canary.report(self.model), self.history)
@@ -581,6 +660,24 @@ class GraphKDTrainer:
                         f"  step {self._train_step + 1} | WARN: non-finite grad norm "
                         f"({total_norm.item()}); skipping optimizer step"
                     )
+                # Did the BOS row move this step, and how far is it from where it
+                # started? In bf16 an Adam step below half a ULP is dropped, so
+                # changed_frac says whether the row can move at this lr at all.
+                bos_row_after = emb[self._bos_id].detach().float()
+                row0 = self._bos_row0.float()
+                bos_update_rel = float((bos_row_after - bos_row_before).norm() / bos_row_before.norm().clamp_min(1e-12))
+                bos_changed = float((bos_row_after != bos_row_before).float().mean())
+                bos_drift_rel = float((bos_row_after - row0).norm() / row0.norm().clamp_min(1e-12))
+                self.history["step_bos_row_update_rel"].append(bos_update_rel)
+                self.history["step_bos_row_changed_frac"].append(bos_changed)
+                self.history["step_bos_row_drift_rel"].append(bos_drift_rel)
+                self.history["step_bos_row_kl_gnorm"].append(accum_bos_kl_gnorm)
+                self.history["step_bos_row_graph_gnorm"].append(accum_bos_graph_gnorm)
+                bos_str = (f" | BOS row: |g_KL|={accum_bos_kl_gnorm:.2e} |g_graph|={accum_bos_graph_gnorm:.2e}"
+                           f" moved={bos_changed:.2f} drift={bos_drift_rel:.2e}")
+                del bos_row_before, bos_row_after
+                accum_bos_kl_gnorm = 0.0
+                accum_bos_graph_gnorm = 0.0
                 self.optimizer.zero_grad()
 
                 self._train_step += 1
@@ -659,7 +756,7 @@ class GraphKDTrainer:
                 )
                 print(
                     f"  step {self._train_step} | KL={accum_kl:.4f} | "
-                    f"Graph={accum_graph:.4f}{scramble_str}{gnorm_str}{flops_str}{time_str}{mem_str}"
+                    f"Graph={accum_graph:.4f}{scramble_str}{gnorm_str}{bos_str}{flops_str}{time_str}{mem_str}"
                 )
                 self._last_save_step = maybe_save_periodic_checkpoint(
                     self.model, self.tokenizer, self.config.save_dir,
@@ -724,6 +821,7 @@ class GraphKDTrainer:
             f" | lambda_graph={cfg.lambda_graph} | lambda_kl={cfg.lambda_kl}"
             f" | nodes_per_label={cfg.nodes_per_label}"
             + (" | CONTROL: scrambled teacher graph" if cfg.scramble_teacher_graph else "")
+            + (f" | BOS embedding row: {cfg.bos_embedding}" if cfg.bos_embedding != "train" else "")
         )
 
         while self._train_step < cfg.steps:
@@ -943,7 +1041,80 @@ def build_parser() -> argparse.ArgumentParser:
              "student, so rescale --lambda-graph to match the real run's step-1 "
              "step_grad_ratio before comparing arms.",
     )
+    group.add_argument(
+        "--bos-embedding", type=str, nargs="+", default=["train"], choices=list(BOS_EMBEDDING_MODES),
+        dest="bos_embedding",
+        help="Which loss may move the BOS token's embedding row (tied to its lm_head row on "
+             "Llama-3.2). 'train' (default): both, as every recorded run. 'freeze': neither -- the "
+             "row is held at its initial value (gradient zeroed before the clip, row restored "
+             "after the AdamW step). 'graph-only': the graph gradient is applied to the BOS row "
+             "and nowhere else, the KD gradient everywhere as usual. Under --bos-mode legacy the "
+             "KD term never feeds BOS in, so the row is the one parameter only the graph term "
+             "reaches through the forward; freeze tests whether the graph term's effect needs it, "
+             "graph-only whether the row alone carries it. Every run logs the row's per-step "
+             "update, drift and gradient shares as step_bos_row_*.",
+    )
     return parser
+
+
+def config_from_args(args: argparse.Namespace, seed: int, save_dir: str) -> GraphKDConfig:
+    """The run config for one seed, from args already collapsed to a sweep point."""
+    graph_node_labels, _ = normalize_node_labels(args.graph_node_labels)
+    return GraphKDConfig(
+        model=args.model,
+        teacher=args.teacher,
+        dataset=args.dataset,
+        steps=args.steps,
+        batch_size=args.batch_size,
+        learning_rate=args.lr,
+        warmup_steps=args.warmup_steps,
+        lr_floor=args.lr_floor,
+        temperature=args.temperature,
+        kl_token_chunk_size=args.kl_token_chunk_size,
+        kl_tokens=args.kl_tokens,
+        save_dir=save_dir,
+        eval_every_n_steps=args.eval_every_n_steps,
+        save_every_n_steps=args.save_every_n_steps,
+        grad_accum_steps=args.grad_accum_steps,
+        max_eval_tokens=args.max_eval_tokens,
+        eval_batch_size=args.eval_batch_size,
+        eval_datasets=args.eval_datasets,
+        test_limit=args.test_limit,
+        dtype=args.dtype,
+        bos_mode=args.bos_mode,
+        resume=args.resume,
+        seed=seed,
+        lambda_graph=args.lambda_graph,
+        lambda_kl=args.lambda_kl,
+        nodes_per_label=args.nodes_per_label,
+        graph_loss_type=args.graph_loss_type,
+        freeze_attention=args.freeze_attention,
+        freeze_rms_norm=args.freeze_rms_norm,
+        constant_node_weighting=args.constant_node_weighting,
+        supergraph_aggregation=args.supergraph_aggregation,
+        token_source_columns=args.token_source_columns,
+        token_path_rows=args.token_path_rows,
+        token_path_micro_batch=args.token_path_micro_batch,
+        token_path_micro_tokens=args.token_path_micro_tokens or None,
+        token_path_top_tokens=args.token_path_top_tokens,
+        top_k_logits=args.top_k_logits,
+        teacher_prop_neurons_per_layer=args.teacher_prop_neurons_per_layer,
+        student_prop_neurons_per_layer=args.student_prop_neurons_per_layer,
+        teacher_graph_batch_size=args.teacher_graph_batch_size,
+        student_graph_batch_size=args.student_graph_batch_size,
+        n_graph_prompts=args.n_graph_prompts,
+        graph_verbose=args.graph_verbose,
+        track_grad_metrics=args.track_grad_metrics,
+        track_flops=args.track_flops,
+        scramble_teacher_graph=args.scramble_teacher_graph,
+        graph_node_labels=graph_node_labels,
+        anova_range_radius=args.anova_range_radius,
+        mlp_cache_batch_size=args.cache_batch_size,
+        anova_neuron_chunk=args.anova_neuron_chunk,
+        anova_cache_device=args.anova_cache_device,
+        teacher_target_cache_dir=args.teacher_target_cache_dir,
+        bos_embedding=args.bos_embedding,
+    )
 
 
 def _anova_cache_devices(spec: str) -> tuple[str, str]:
@@ -970,60 +1141,7 @@ def main() -> None:
 
     def build(seed: int, shared: Dict[str, Any]):
         return GraphKDTrainer(
-            GraphKDConfig(
-                model=args.model,
-                teacher=args.teacher,
-                dataset=args.dataset,
-                steps=args.steps,
-                batch_size=args.batch_size,
-                learning_rate=args.lr,
-                warmup_steps=args.warmup_steps,
-                lr_floor=args.lr_floor,
-                temperature=args.temperature,
-                kl_token_chunk_size=args.kl_token_chunk_size,
-                kl_tokens=args.kl_tokens,
-                save_dir=save_dir,
-                eval_every_n_steps=args.eval_every_n_steps,
-                save_every_n_steps=args.save_every_n_steps,
-                grad_accum_steps=args.grad_accum_steps,
-                max_eval_tokens=args.max_eval_tokens,
-                eval_batch_size=args.eval_batch_size,
-                eval_datasets=args.eval_datasets,
-                test_limit=args.test_limit,
-                dtype=args.dtype,
-                bos_mode=args.bos_mode,
-                resume=args.resume,
-                seed=seed,
-                lambda_graph=args.lambda_graph,
-                lambda_kl=args.lambda_kl,
-                nodes_per_label=args.nodes_per_label,
-                graph_loss_type=args.graph_loss_type,
-                freeze_attention=args.freeze_attention,
-                freeze_rms_norm=args.freeze_rms_norm,
-                constant_node_weighting=args.constant_node_weighting,
-                supergraph_aggregation=args.supergraph_aggregation,
-                token_source_columns=args.token_source_columns,
-                token_path_rows=args.token_path_rows,
-                token_path_micro_batch=args.token_path_micro_batch,
-                token_path_micro_tokens=args.token_path_micro_tokens or None,
-                token_path_top_tokens=args.token_path_top_tokens,
-                top_k_logits=args.top_k_logits,
-                teacher_prop_neurons_per_layer=args.teacher_prop_neurons_per_layer,
-                student_prop_neurons_per_layer=args.student_prop_neurons_per_layer,
-                teacher_graph_batch_size=args.teacher_graph_batch_size,
-                student_graph_batch_size=args.student_graph_batch_size,
-                n_graph_prompts=args.n_graph_prompts,
-                graph_verbose=args.graph_verbose,
-                track_grad_metrics=args.track_grad_metrics,
-                track_flops=args.track_flops,
-                scramble_teacher_graph=args.scramble_teacher_graph,
-                graph_node_labels=graph_node_labels,
-                anova_range_radius=args.anova_range_radius,
-                mlp_cache_batch_size=args.cache_batch_size,
-                anova_neuron_chunk=args.anova_neuron_chunk,
-                anova_cache_device=args.anova_cache_device,
-                teacher_target_cache_dir=args.teacher_target_cache_dir,
-            ),
+            config_from_args(args, seed, save_dir),
             train_data,
             test_data,
             shared=shared,

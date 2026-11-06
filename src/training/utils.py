@@ -890,8 +890,13 @@ SWEEP_PARAMS = (
     "lambda_graph", "lambda_kl", "graph_loss_type", "nodes_per_label",
     "teacher_prop_neurons_per_layer", "student_prop_neurons_per_layer",
     "top_k_logits", "supergraph_aggregation", "token_path_rows",
-    "token_path_top_tokens",
+    "token_path_top_tokens", "bos_embedding",
 )
+
+# Parameters added after runs were already keyed. At these values (or absent, on
+# a trainer without them) they are left out of the run digest, so every run
+# recorded before they existed keeps its key; any other value is in the digest.
+_SIGNATURE_OMIT_AT = {"bos_embedding": "train"}
 
 
 # Sweepable argument names that are stored in a run's config under another name.
@@ -938,7 +943,9 @@ def _sweep_signature(args: argparse.Namespace, params: Sequence[str]) -> str:
     rate matched the earlier points and every one was skipped as already done.
     The digest disambiguates them without putting nineteen parameters in the name.
     """
-    vals = [(name, getattr(args, name, None)) for name in sorted(params)]
+    vals = [(name, getattr(args, name, None)) for name in sorted(params)
+            if not (name in _SIGNATURE_OMIT_AT
+                    and getattr(args, name, None) in (None, _SIGNATURE_OMIT_AT[name]))]
     blob = json.dumps(vals, sort_keys=True, default=str)
     return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:6]
 
