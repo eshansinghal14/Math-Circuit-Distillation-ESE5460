@@ -890,13 +890,13 @@ SWEEP_PARAMS = (
     "lambda_graph", "lambda_kl", "graph_loss_type", "nodes_per_label",
     "teacher_prop_neurons_per_layer", "student_prop_neurons_per_layer",
     "top_k_logits", "supergraph_aggregation", "token_path_rows",
-    "token_path_top_tokens", "bos_embedding", "graph_grad_projection",
+    "token_path_top_tokens", "bos_embedding", "graph_grad_projection", "kd_bos_fraction",
 )
 
 # Parameters added after runs were already keyed. At these values (or absent, on
 # a trainer without them) they are left out of the run digest, so every run
 # recorded before they existed keeps its key; any other value is in the digest.
-_SIGNATURE_OMIT_AT = {"bos_embedding": "train", "graph_grad_projection": "none"}
+_SIGNATURE_OMIT_AT = {"bos_embedding": "train", "graph_grad_projection": "none", "kd_bos_fraction": 0.0}
 
 
 # Sweepable argument names that are stored in a run's config under another name.

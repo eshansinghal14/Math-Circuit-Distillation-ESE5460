@@ -144,6 +144,8 @@ class GraphKDConfig:
     bos_embedding: str = "train"
     # Remove the KD direction from the graph gradient; see --graph-grad-projection.
     graph_grad_projection: str = "none"
+    # Under --bos-mode legacy: the fraction of each KD batch given a leading BOS.
+    kd_bos_fraction: float = 0.0
 
 
 BOS_EMBEDDING_MODES = ("train", "freeze", "graph-only")
@@ -313,6 +315,11 @@ class GraphKDTrainer:
                 raise ValueError("--graph-grad-projection needs --grad-accum-steps 1")
             if config.bos_embedding == "graph-only":
                 raise ValueError("--graph-grad-projection cannot be combined with --bos-embedding graph-only")
+        if not 0.0 <= config.kd_bos_fraction <= 1.0:
+            raise ValueError(f"kd_bos_fraction must be in [0, 1], got {config.kd_bos_fraction}")
+        if config.kd_bos_fraction > 0.0 and config.bos_mode != "legacy":
+            raise ValueError("--kd-bos-fraction only applies under --bos-mode legacy "
+                             "(under on every KD row already leads with BOS)")
 
         self.history: Dict[str, List] = defaultdict(list)
         self._train_step = 0
@@ -330,6 +337,35 @@ class GraphKDTrainer:
     def _bos_weight(self) -> torch.nn.Parameter:
         """The input-embedding matrix; on Llama-3.2 it is also the lm_head (tied)."""
         return self.model.get_input_embeddings().weight
+
+    def _mix_bos_into_kd_batch(self, input_ids, attention_mask, response_mask, frac: float):
+        """--kd-bos-fraction: prepend BOS to the last round(frac * B) rows of a legacy KD batch.
+
+        Rows are right-padded, so a BOS row shifts one to the right and the batch grows
+        one column. Returns the new (input_ids, attention_mask, response_mask) and a
+        [B] bool of the rows that now lead with BOS. The data order is already
+        shuffled, so taking the last rows is a random subset.
+        """
+        B, L = input_ids.shape
+        k = int(round(frac * B))
+        bos_rows = torch.zeros(B, dtype=torch.bool, device=input_ids.device)
+        if k == 0:
+            return input_ids, attention_mask, response_mask, bos_rows
+        bos_rows[B - k:] = True
+        pad = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
+        ids = torch.full((B, L + 1), int(pad), dtype=input_ids.dtype, device=input_ids.device)
+        att = torch.zeros((B, L + 1), dtype=attention_mask.dtype, device=attention_mask.device)
+        resp = torch.zeros((B, L + 1), dtype=response_mask.dtype, device=response_mask.device)
+        keep = ~bos_rows
+        ids[keep, :L] = input_ids[keep]
+        att[keep, :L] = attention_mask[keep]
+        resp[keep, :L] = response_mask[keep]
+        ids[bos_rows, 0] = self._bos_id
+        ids[bos_rows, 1:] = input_ids[bos_rows]
+        att[bos_rows, 0] = 1
+        att[bos_rows, 1:] = attention_mask[bos_rows]
+        resp[bos_rows, 1:] = response_mask[bos_rows]
+        return ids, att, resp, bos_rows
 
     def _project_graph_grad_off_kd(self, kd_grads: Dict[str, Optional[torch.Tensor]]) -> tuple[float, float]:
         """--graph-grad-projection orthogonal: g <- g_KD + (g_graph - c * g_KD).
@@ -513,9 +549,22 @@ class GraphKDTrainer:
             flop_counter.reset()
             input_ids = batch["input_ids"].to(_DEVICE)
             attention_mask = batch["attention_mask"].to(_DEVICE)
+            response_mask = batch["response_mask"].to(_DEVICE)
+            # The sequence check compares the KD row against the shared tokeniser, so
+            # it gets the batch as built, before any BOS rows are mixed in.
+            seq_ids, seq_mask = input_ids, attention_mask
+            bos_rows = None
+            if cfg.kd_bos_fraction > 0.0:
+                input_ids, attention_mask, response_mask, bos_rows = self._mix_bos_into_kd_batch(
+                    input_ids, attention_mask, response_mask, cfg.kd_bos_fraction)
             kd_mask = kl_position_mask(
-                attention_mask, batch["response_mask"].to(_DEVICE), cfg.kl_tokens,
+                attention_mask, response_mask, cfg.kl_tokens,
                 input_ids=input_ids, bos_token_id=self.tokenizer.bos_token_id)
+            if bos_rows is not None and bos_rows.any():
+                # The BOS position predicts the first prompt token, which no no-BOS row
+                # scores. Dropping it keeps the scored tokens identical at every
+                # fraction: only what those positions condition on changes.
+                kd_mask[bos_rows, 0] = False
 
             # With grad_accum == 1 the optimizer has just zeroed .grad, so the
             # gradient after kl.backward() *is* this step's KL gradient and no
@@ -533,7 +582,7 @@ class GraphKDTrainer:
                 with self._autocast():
                     student_logits = self.model(input_ids, attention_mask=attention_mask).logits
                 self._last_tf_acc = first_answer_token_accuracy(
-                    student_logits.detach(), input_ids, batch["response_mask"].to(_DEVICE))
+                    student_logits.detach(), input_ids, response_mask)
 
                 with torch.no_grad():
                     teacher_logits = self.teacher(input_ids, attention_mask=attention_mask).logits
@@ -558,7 +607,7 @@ class GraphKDTrainer:
             prompts: List[str] = batch["prompts"]
             answers = batch["answers"]
             if self._train_step == 0 and micro_step == 0:
-                self._check_sequence_consistency(batch, input_ids, attention_mask)
+                self._check_sequence_consistency(batch, seq_ids, seq_mask)
             if cfg.n_graph_prompts is not None and cfg.n_graph_prompts < len(prompts):
                 sel = random.sample(range(len(prompts)), cfg.n_graph_prompts)
                 prompts = [prompts[i] for i in sel]
@@ -889,6 +938,7 @@ class GraphKDTrainer:
             + (f" | BOS embedding row: {cfg.bos_embedding}" if cfg.bos_embedding != "train" else "")
             + (f" | graph grad projection: {cfg.graph_grad_projection}"
                if cfg.graph_grad_projection != "none" else "")
+            + (f" | KD rows with BOS: {cfg.kd_bos_fraction:g}" if cfg.kd_bos_fraction > 0 else "")
         )
 
         while self._train_step < cfg.steps:
@@ -1132,6 +1182,15 @@ def build_parser() -> argparse.ArgumentParser:
              "raw graph gradient; the removed cosine and the remaining norm are step_proj_*. "
              "Needs --grad-accum-steps 1.",
     )
+    group.add_argument(
+        "--kd-bos-fraction", type=float, nargs="+", default=[0.0], dest="kd_bos_fraction",
+        help="--bos-mode legacy only: give this fraction of each KD batch a leading BOS (the "
+             "last round(p*B) rows of the shuffled batch); the rest stay BOS-free. The BOS "
+             "position is never scored, so the KD term scores the same tokens at every p and "
+             "only their context changes. p=0 is legacy; p=1 is KD under the standard "
+             "convention with all-no-bos scoring. Tests whether the graph term helps only when "
+             "KD leaves the evaluated (BOS) regime to it. The graph term is unaffected.",
+    )
     return parser
 
 
@@ -1193,6 +1252,7 @@ def config_from_args(args: argparse.Namespace, seed: int, save_dir: str) -> Grap
         teacher_target_cache_dir=args.teacher_target_cache_dir,
         bos_embedding=args.bos_embedding,
         graph_grad_projection=args.graph_grad_projection,
+        kd_bos_fraction=args.kd_bos_fraction,
     )
 
 
