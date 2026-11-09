@@ -441,9 +441,12 @@ class RepKDConfig:
     match_positions: str = "all"
     keep_first_position: bool = False
     track_grad_metrics: bool = False
+    # Which sequences the representation term is computed on; see --rep-format.
+    rep_format: str = "train"
 
 
-REP_SWEEP_PARAMS = SWEEP_PARAMS + ("lambda_rep",)
+REP_FORMATS = ("train", "eval")
+REP_SWEEP_PARAMS = SWEEP_PARAMS + ("lambda_rep", "rep_format")
 """Sweepable names for the representation trainers: the shared set plus their own weight.
 
 Scoped here rather than added to SWEEP_PARAMS because _sweep_signature hashes
@@ -477,6 +480,14 @@ def add_rep_args(parser: argparse.ArgumentParser) -> None:
                        dest="track_grad_metrics",
                        help="Record |g_KL|, |g_rep|, their ratio, cosine and sign-flip fraction "
                             "per step, like graph_kd. Costs one extra gradient snapshot per step.")
+    group.add_argument("--rep-format", "--rep_format", type=str, nargs="+", default=["train"],
+                       choices=list(REP_FORMATS), dest="rep_format",
+                       help="'train' (default): the representation term runs on the KD batch. "
+                            "'eval' (--bos-mode legacy only): it runs on the same batch with BOS "
+                            "prepended -- the format eval and graph_kd's graph term use -- while KD "
+                            "stays BOS-free, so the term is the only loss on the evaluated format, "
+                            "as the graph term is. Matched positions are the same tokens either "
+                            "way (BOS is never matched). Costs a second student+teacher forward.")
 
 
 class RepKDTrainer:
@@ -524,6 +535,15 @@ class RepKDTrainer:
         self.layer_pairs = resolve_layer_map(config.layer_map, n_student, n_teacher, config.match_layers)
         self.student_layers = [s for s, _ in self.layer_pairs]
         self.teacher_layers = [t for _, t in self.layer_pairs]
+
+        if config.rep_format not in REP_FORMATS:
+            raise ValueError(f"rep_format must be one of {REP_FORMATS}, got {config.rep_format!r}")
+        if config.rep_format == "eval":
+            if config.bos_mode != "legacy":
+                raise ValueError("--rep-format eval only applies under --bos-mode legacy "
+                                 "(otherwise the KD batch already is the eval format)")
+            if self.tokenizer.bos_token_id is None:
+                raise RuntimeError("--rep-format eval needs a BOS token")
 
         self.optimizer = make_optimizer(self.model, config.learning_rate)
         # Subclasses may build extra trainable modules and add them to the optimizer
@@ -645,6 +665,13 @@ class RepKDTrainer:
 
     # ── training ──────────────────────────────────────────────────────────────
 
+    def _with_bos(self, input_ids, attention_mask, response_mask):
+        """The batch with BOS prepended to every row: the format eval and the graph adapter use."""
+        col = torch.full_like(input_ids[:, :1], int(self.tokenizer.bos_token_id))
+        return (torch.cat([col, input_ids], dim=1),
+                torch.cat([torch.ones_like(attention_mask[:, :1]), attention_mask], dim=1),
+                torch.cat([torch.zeros_like(response_mask[:, :1]), response_mask], dim=1))
+
     def _snapshot_grads(self) -> Dict[str, torch.Tensor]:
         return {
             n: p.grad.detach().clone()
@@ -679,12 +706,23 @@ class RepKDTrainer:
 
             with flop_counter:
                 s_logits, t_logits, s_cap, t_cap = self._forward_pair(input_ids, attention_mask)
-            self._check_student_grads(s_cap)
             self._last_tf_acc = first_answer_token_accuracy(s_logits.detach(), input_ids, response_mask)
 
             token_mask = matched_token_mask(
                 attention_mask, response_mask, cfg.match_positions, cfg.keep_first_position,
             )
+            if cfg.rep_format == "eval":
+                # Same batch with BOS prepended to every row (rows stay right-padded).
+                # The KD logits above come from the BOS-free forward; the
+                # representation term takes its activations from this one only.
+                del s_cap, t_cap
+                b_ids, b_att, b_resp = self._with_bos(input_ids, attention_mask, response_mask)
+                with flop_counter:
+                    _, _, s_cap, t_cap = self._forward_pair(b_ids, b_att)
+                # Shift the BOS-free mask one right: the same tokens are matched, BOS
+                # never is (nor, unless --keep-first-position, the first prompt token).
+                token_mask = torch.cat([torch.zeros_like(token_mask[:, :1]), token_mask], dim=1)
+            self._check_student_grads(s_cap)
             with flop_counter:
                 kl = kl_loss(
                     s_logits, t_logits,
@@ -862,6 +900,7 @@ class RepKDTrainer:
             f" | lambda_rep={cfg.lambda_rep} | layers={pairs_str}"
             f" | positions={cfg.match_positions}{'' if cfg.keep_first_position else ' (skip pos 0)'}"
             f"{self._banner_extra()}"
+            f"{' | rep term on the eval (BOS) format, KD BOS-free' if cfg.rep_format == 'eval' else ''}"
         )
 
         while self._train_step < cfg.steps:
@@ -929,4 +968,5 @@ def base_config_kwargs(args: argparse.Namespace, dir_root: str, seed: int | None
         match_positions=args.match_positions,
         keep_first_position=args.keep_first_position,
         track_grad_metrics=args.track_grad_metrics,
+        rep_format=args.rep_format,
     )

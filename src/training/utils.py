@@ -896,7 +896,8 @@ SWEEP_PARAMS = (
 # Parameters added after runs were already keyed. At these values (or absent, on
 # a trainer without them) they are left out of the run digest, so every run
 # recorded before they existed keeps its key; any other value is in the digest.
-_SIGNATURE_OMIT_AT = {"bos_embedding": "train", "graph_grad_projection": "none", "kd_bos_fraction": 0.0}
+_SIGNATURE_OMIT_AT = {"bos_embedding": "train", "graph_grad_projection": "none", "kd_bos_fraction": 0.0,
+                      "rep_format": "train"}
 
 
 # Sweepable argument names that are stored in a run's config under another name.
