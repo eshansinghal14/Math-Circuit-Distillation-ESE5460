@@ -38,6 +38,8 @@ from training.utils import (
     kl_position_mask,
     first_answer_token_accuracy,
     kl_loss,
+    argmax_kd_loss,
+    KD_TARGETS,
     load_student,
     log_first_step_canary,
     make_optimizer,
@@ -94,6 +96,9 @@ class StandardKDConfig:
     bos_mode: str = "on"
     resume: bool = False
     track_flops: bool = False
+    # 'soft': KL to the teacher's distribution. 'argmax': cross-entropy on the
+    # teacher's top-1 token at the same positions (no gold labels).
+    kd_target: str = "soft"
     seed: int = _SEED
 
 
@@ -113,6 +118,8 @@ class StandardKDTrainer:
         """``shared`` is run_seeds' cross-seed dict (teacher, baselines); None loads everything."""
         self.config = config
         self.shared = shared
+        if config.kd_target not in KD_TARGETS:
+            raise ValueError(f"kd_target must be one of {KD_TARGETS}, got {config.kd_target!r}")
         seed_all(config.seed)
 
         # fp32 master weights with a bf16 autocast forward; see training/utils.py.
@@ -209,10 +216,27 @@ class StandardKDTrainer:
                 with torch.no_grad():
                     teacher_logits = self.teacher(input_ids, attention_mask=attention_mask).logits
 
-                loss = kl_loss(
-                    student_logits, teacher_logits, kd_mask,
-                    cfg.temperature, cfg.kl_token_chunk_size,
-                ) / grad_accum
+                if cfg.kd_target == "argmax":
+                    loss = argmax_kd_loss(
+                        student_logits, teacher_logits, kd_mask, cfg.kl_token_chunk_size,
+                    ) / grad_accum
+                    # The soft KL the argmax run does not train on, for comparison
+                    # with soft-KD and graph runs (does the student leave the
+                    # teacher's distribution?), and how often the teacher's top-1
+                    # is the gold token on the scored answer positions.
+                    with torch.no_grad():
+                        self._last_soft_kl = float(kl_loss(
+                            student_logits.detach(), teacher_logits, kd_mask,
+                            1.0, cfg.kl_token_chunk_size))
+                        resp = batch["response_mask"].to(_DEVICE)[:, 1:].bool()
+                        t_top = teacher_logits[:, :-1].argmax(dim=-1)
+                        self._last_teacher_gold = float(
+                            (t_top[resp] == input_ids[:, 1:][resp]).float().mean())
+                else:
+                    loss = kl_loss(
+                        student_logits, teacher_logits, kd_mask,
+                        cfg.temperature, cfg.kl_token_chunk_size,
+                    ) / grad_accum
 
             if not torch.isfinite(loss):
                 micro_step += 1
@@ -246,13 +270,21 @@ class StandardKDTrainer:
                 self.history["step_kl_loss"].append(accum_loss)
                 self.history["step_tf_acc"].append(self._last_tf_acc)
                 self.history["step_lr"].append(self._last_lr)
+                if cfg.kd_target == "argmax":
+                    self.history["step_soft_kl"].append(self._last_soft_kl)
+                    self.history["step_teacher_gold_agree"].append(self._last_teacher_gold)
                 total_loss += accum_loss
                 if cfg.track_flops:
                     self.history["step_flops"].append(accum_flops)
                     flops_str = f" | FLOPs={accum_flops:.3e}"
                 else:
                     flops_str = ""
-                print(f"  step {self._train_step} | KL={accum_loss:.4f}{flops_str}")
+                if cfg.kd_target == "argmax":
+                    print(f"  step {self._train_step} | CE(teacher argmax)={accum_loss:.4f}"
+                          f" | soft KL={self._last_soft_kl:.4f}"
+                          f" | teacher top-1 = gold {self._last_teacher_gold:.3f}{flops_str}")
+                else:
+                    print(f"  step {self._train_step} | KL={accum_loss:.4f}{flops_str}")
                 self._last_save_step = maybe_save_periodic_checkpoint(
                     self.model, self.tokenizer, self.config.save_dir,
                     self._train_step, self.config.save_every_n_steps,
@@ -299,6 +331,7 @@ class StandardKDTrainer:
         print(
             f"KD | student={cfg.model} | teacher={cfg.teacher} | dataset={cfg.dataset}"
             f" | steps={cfg.steps} | lr={cfg.learning_rate} | temp={cfg.temperature}"
+            + (" | KD target: teacher argmax (hard labels, no gold)" if cfg.kd_target == "argmax" else "")
         )
 
         while self._train_step < cfg.steps:
@@ -338,6 +371,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="KL-only distillation on GSM8K / SVAMP / local datasets.")
     add_standard_args(parser)
     add_kd_args(parser)
+    parser.add_argument(
+        "--kd-target", type=str, nargs="+", default=["soft"], choices=list(KD_TARGETS),
+        dest="kd_target",
+        help="'soft' (default): KL to the teacher's distribution. 'argmax': cross-entropy on "
+             "the teacher's top-1 token at the same --kl-tokens positions -- KD with hard "
+             "teacher labels, no gold answers. --temperature is ignored under argmax. Logs "
+             "the unused soft KL (step_soft_kl) and the teacher-top-1 = gold rate.",
+    )
     return parser
 
 
@@ -373,6 +414,7 @@ def main() -> None:
                 bos_mode=args.bos_mode,
                 resume=args.resume,
                 track_flops=args.track_flops,
+                kd_target=args.kd_target,
                 seed=seed,
             ),
             train_data,

@@ -533,6 +533,32 @@ def kl_loss(
     return total / valid.numel() * (t**2)
 
 
+KD_TARGETS = ("soft", "argmax")
+
+
+def argmax_kd_loss(
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    attention_mask: torch.Tensor,
+    token_chunk_size: int = 64,
+) -> torch.Tensor:
+    """Cross-entropy of the student on the teacher's top-1 token at each masked
+    position: KD with the teacher's hard predictions and no gold labels
+    (--kd-target argmax). Same positions and averaging as :func:`kl_loss`."""
+    vocab = min(student_logits.shape[-1], teacher_logits.shape[-1])
+    student_flat = student_logits[..., :vocab].reshape(-1, vocab)
+    teacher_flat = teacher_logits[..., :vocab].reshape(-1, vocab)
+    valid = attention_mask.reshape(-1).bool().nonzero(as_tuple=False).squeeze(-1)
+    if valid.numel() == 0:
+        return student_logits.sum() * 0.0
+    total = student_logits.new_zeros((), dtype=torch.float32)
+    for idx in valid.split(max(1, token_chunk_size)):
+        s_chunk = student_flat.index_select(0, idx.to(student_flat.device)).float()
+        target = teacher_flat.index_select(0, idx.to(teacher_flat.device)).argmax(dim=-1)
+        total = total + F.cross_entropy(s_chunk, target.to(s_chunk.device), reduction="sum")
+    return total / valid.numel()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Checkpoints and resume
 # ─────────────────────────────────────────────────────────────────────────────
@@ -891,13 +917,13 @@ SWEEP_PARAMS = (
     "teacher_prop_neurons_per_layer", "student_prop_neurons_per_layer",
     "top_k_logits", "supergraph_aggregation", "token_path_rows",
     "token_path_top_tokens", "bos_embedding", "graph_grad_projection", "kd_bos_fraction",
-    "graph_warmup_steps",
+    "graph_warmup_steps", "kd_target",
 )
 
 # Parameters added after runs were already keyed. At these values (or absent, on
 # a trainer without them) they are left out of the run digest, so every run
 # recorded before they existed keeps its key; any other value is in the digest.
-_SIGNATURE_OMIT_AT = {"bos_embedding": "train", "graph_grad_projection": "none", "kd_bos_fraction": 0.0, "graph_warmup_steps": 0,
+_SIGNATURE_OMIT_AT = {"bos_embedding": "train", "graph_grad_projection": "none", "kd_bos_fraction": 0.0, "graph_warmup_steps": 0, "kd_target": "soft",
                       "rep_format": "train"}
 
 
