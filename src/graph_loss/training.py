@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
-from utils import parse_response, tokenize_prompt_answer
+from utils import bos_mode, parse_response, tokenize_prompt_answer
 
 import torch
 
@@ -327,6 +327,12 @@ def teacher_target_cache_key(config: GraphAuxConfig, teacher_name: str) -> str:
             "model_name": cache_meta.get("model_name"),
         },
     }
+    if not config.graph_node_labels:
+        # arg/DLA construction: labels became occurrence-indexed (repeated tokens no
+        # longer collide), and the teacher's DLA reference logits come from a forward
+        # whose BOS depends on the mode. Older arg/DLA caches must not be reused.
+        fields["arg_labels"] = "occurrence-indexed"
+        fields["bos_mode"] = bos_mode()
     return hashlib.sha1(json.dumps(fields, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
 

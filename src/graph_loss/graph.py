@@ -710,6 +710,15 @@ def select_arg_supernodes(
     bos_id = getattr(tokenizer, "bos_token_id", None)
     start_pos = 1 if (bos_id is not None and token_ids_list and token_ids_list[0] == bos_id) else 0
 
+    # Teacher and student supernodes are aligned by label through a dict, so a
+    # token that repeats in the prompt must not share a label: with "arg:<tok>"
+    # alone every earlier occurrence collapsed onto the last one and the teacher's
+    # position i was matched to the student's position j != i. The k-th
+    # occurrence (k >= 2) is "arg:<tok>#k"; both models see the same token
+    # sequence, so the k-th occurrence lines up with the k-th occurrence. A
+    # prompt without repeats keeps exactly the labels it always had.
+    seen: dict[str, int] = {}
+
     for pos in range(start_pos, n_pos):
         scores = d_f[:, pos]  # [n_neurons]
         k = min(nodes_per_token, n_neurons)
@@ -722,7 +731,8 @@ def select_arg_supernodes(
         except Exception:
             token_str = str(token_id)
 
-        label = f"arg:{token_str}"
+        seen[token_str] = seen.get(token_str, 0) + 1
+        label = f"arg:{token_str}" if seen[token_str] == 1 else f"arg:{token_str}#{seen[token_str]}"
         raw_supernodes.append(members)
         supernode_labels_out.append([label])
 

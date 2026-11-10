@@ -476,8 +476,11 @@ class GraphKDTrainer:
                 "attribution adapter tokenises the prompt differently from the KD batch: "
                 f"adapter {adapter_ids.tolist()} vs batch {p_ids.tolist()}"
             )
+        bos_text = self.tokenizer.bos_token or ""
         eval_ids = self.tokenizer(
-            [batch["prompts"][0]], add_special_tokens=bos_in_eval())["input_ids"][0]
+            [batch["prompts"][0]],
+            add_special_tokens=bos_in_eval() and not (bos_text and batch["prompts"][0].startswith(bos_text)),
+        )["input_ids"][0]
         if _strip(eval_ids) != p_ids.tolist():
             raise RuntimeError(
                 f"eval_model tokenisation differs from the KD batch prompt: eval {eval_ids} vs batch {p_ids.tolist()}"
