@@ -146,6 +146,9 @@ class GraphKDConfig:
     graph_grad_projection: str = "none"
     # Under --bos-mode legacy: the fraction of each KD batch given a leading BOS.
     kd_bos_fraction: float = 0.0
+    # The first N optimizer steps train on the graph term alone (KD gets no
+    # backward); see --graph-warmup-steps.
+    graph_warmup_steps: int = 0
 
 
 BOS_EMBEDDING_MODES = ("train", "freeze", "graph-only")
@@ -320,6 +323,11 @@ class GraphKDTrainer:
         if config.kd_bos_fraction > 0.0 and config.bos_mode != "legacy":
             raise ValueError("--kd-bos-fraction only applies under --bos-mode legacy "
                              "(under on every KD row already leads with BOS)")
+        if config.graph_warmup_steps < 0:
+            raise ValueError(f"graph_warmup_steps must be >= 0, got {config.graph_warmup_steps}")
+        if config.graph_warmup_steps > 0 and config.graph_grad_projection != "none":
+            # Projection divides by |g_KD|^2, which is zero during the graph-only phase.
+            raise ValueError("--graph-warmup-steps cannot be combined with --graph-grad-projection")
 
         self.history: Dict[str, List] = defaultdict(list)
         self._train_step = 0
@@ -596,7 +604,10 @@ class GraphKDTrainer:
                 # ``kl`` stays unscaled so step_kl_loss is comparable across
                 # --lambda-kl settings; only the backward carries the weight, and
                 # lambda_kl == 1.0 takes the original path unchanged.
-                if kl_finite and cfg.lambda_kl != 0.0:
+                # --graph-warmup-steps: KD is computed and logged but gets no
+                # backward until the graph-only phase is over.
+                kd_active = self._train_step >= cfg.graph_warmup_steps
+                if kl_finite and cfg.lambda_kl != 0.0 and kd_active:
                     (kl if cfg.lambda_kl == 1.0 else kl * cfg.lambda_kl).backward()
                 # The graph term below builds a double-backward graph over the
                 # student; the two B x L x V logit tensors (3.6 GB each in bf16 at
@@ -939,6 +950,8 @@ class GraphKDTrainer:
             + (f" | graph grad projection: {cfg.graph_grad_projection}"
                if cfg.graph_grad_projection != "none" else "")
             + (f" | KD rows with BOS: {cfg.kd_bos_fraction:g}" if cfg.kd_bos_fraction > 0 else "")
+            + (f" | graph-only for the first {cfg.graph_warmup_steps} steps (no KD backward)"
+               if cfg.graph_warmup_steps > 0 else "")
         )
 
         while self._train_step < cfg.steps:
@@ -1191,6 +1204,14 @@ def build_parser() -> argparse.ArgumentParser:
              "convention with all-no-bos scoring. Tests whether the graph term helps only when "
              "KD leaves the evaluated (BOS) regime to it. The graph term is unaffected.",
     )
+    group.add_argument(
+        "--graph-warmup-steps", type=int, nargs="+", default=[0], dest="graph_warmup_steps",
+        help="Train on the graph term alone for the first N optimizer steps (KD is still "
+             "computed and logged as step_kl_loss but gets no backward), then KD + graph as "
+             "usual. Under the standard BOS convention this gives the graph term the period "
+             "in which, under BOS-free training, it is the only signal on the evaluated format. "
+             "The lr schedule is unchanged (steps 1-10 are its warmup).",
+    )
     return parser
 
 
@@ -1253,6 +1274,7 @@ def config_from_args(args: argparse.Namespace, seed: int, save_dir: str) -> Grap
         bos_embedding=args.bos_embedding,
         graph_grad_projection=args.graph_grad_projection,
         kd_bos_fraction=args.kd_bos_fraction,
+        graph_warmup_steps=args.graph_warmup_steps,
     )
 
 
