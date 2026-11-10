@@ -101,10 +101,21 @@ def main() -> None:
     teacher, tok = load_student(args.teacher, "bfloat16")
     teacher.eval()
     students = {}
+    data_tok = None
     for s in args.students:
         path = s if (os.path.isabs(s) or not os.path.isdir(os.path.join(DIR_ROOT, s))) else os.path.join(DIR_ROOT, s)
         m, s_tok = load_student(path, "bfloat16")
-        assert s_tok.get_vocab() == tok.get_vocab(), f"{s}: tokenizer differs from the teacher's"
+        # Llama-3 and Llama-3.2 share every regular token id but name some reserved
+        # special slots differently, so compare the base vocabulary and the ids the
+        # sequences actually use (BOS, EOS), not the full map.
+        base = lambda t: {k: v for k, v in t.get_vocab().items() if k not in t.get_added_vocab()}
+        assert base(s_tok) == base(tok), f"{s}: regular vocabulary differs from the teacher's"
+        if (s_tok.bos_token_id, s_tok.eos_token_id) != (tok.bos_token_id, tok.eos_token_id):
+            # Not an error: the KD trainer builds sequences with the student's
+            # tokenizer and feeds the same ids to the teacher, and so does this script.
+            print(f"note: {s} BOS/EOS ids {(s_tok.bos_token_id, s_tok.eos_token_id)} vs teacher "
+                  f"{(tok.bos_token_id, tok.eos_token_id)}; sequences use the student's, as in KD training")
+        data_tok = data_tok or s_tok  # build sequences with the student's tokenizer, as the KD trainer does
         m.eval()
         students[s] = m
 
@@ -112,13 +123,13 @@ def main() -> None:
     report: Dict = {"args": vars(args), "datasets": {}}
     for ds, split in sets:
         data = _prompts(ds, split, args.n)
-        dataset = PromptAnswerDataset(ds, data, tok)
+        dataset = PromptAnswerDataset(ds, data, data_tok or tok)
         names = ["teacher"] + list(students)
         accs: Dict[str, Dict[int, _Acc]] = {nm: {} for nm in names}
         n_rows = 0
         for start in range(0, len(dataset), args.batch_size):
             batch = collate_fn([dataset[i] for i in range(start, min(start + args.batch_size, len(dataset)))],
-                               pad_id=tok.eos_token_id)
+                               pad_id=(data_tok or tok).eos_token_id)
             ids = batch["input_ids"].to(_DEVICE)
             att = batch["attention_mask"].to(_DEVICE)
             resp = batch["response_mask"].to(_DEVICE)
