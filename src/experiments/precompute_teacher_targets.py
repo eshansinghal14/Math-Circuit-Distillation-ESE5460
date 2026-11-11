@@ -37,7 +37,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils import DIR_ROOT, load_data, load_model  # noqa: E402
+from utils import DIR_ROOT, load_data, load_model, set_bos_mode, split_final_answer  # noqa: E402
 from graph_loss.utils import normalize_node_labels  # noqa: E402
 
 from graph_loss.training import (  # noqa: E402
@@ -115,18 +115,28 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--shard", type=int, nargs=2, default=(0, 1), metavar=("INDEX", "COUNT"),
                    help="Take every COUNT-th prompt starting at INDEX, so sessions can split the work.")
     p.add_argument("--limit", type=int, default=None, help="Stop after this many prompts (smoke test).")
+    p.add_argument("--bos-mode", choices=["on", "legacy", "off"], default="on", dest="bos_mode",
+                   help="Must match the training runs: arg/DLA cache keys include it.")
+    p.add_argument("--graph-position", choices=["prompt-end", "final-answer"], default="prompt-end",
+                   dest="graph_position",
+                   help="Must match graph_kd --graph-position. 'final-answer' builds each target on "
+                        "prompt + response up to the final answer number, the string graph_kd looks up.")
     p.add_argument("--flush-every", type=int, default=100, dest="flush_every")
     return p
 
 
 def main() -> None:
     args = build_parser().parse_args()
+    set_bos_mode(args.bos_mode)
     labels, tokens_label = normalize_node_labels(args.graph_node_labels)
     token_source_columns = args.token_source_columns or tokens_label
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     train_data, _ = load_data(args.dataset)
     items = sorted(train_data.items())
+    if args.graph_position == "final-answer":
+        cut = [(p, split_final_answer(str(a))) for p, a in items]
+        items = [(p + prefix, number) for p, (prefix, number) in cut]
     shard_idx, shard_n = args.shard
     items = items[shard_idx::shard_n]
     if args.limit is not None:
