@@ -68,6 +68,29 @@ def extract_leading_int(text: str) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
+# CoT datasets (answer_type "cot" in meta.json, e.g. svamp_cot) end every
+# response with this sentence; the number in it is the graded answer and the
+# token the graph term attributes from (--graph-position final-answer).
+FINAL_ANSWER_RE = re.compile(r"The answer is\s*(-?\d+)")
+
+
+def extract_cot_answer(text: str) -> Optional[int]:
+    """The integer in the first "The answer is N" of a continuation, else None."""
+    m = FINAL_ANSWER_RE.search(text or "")
+    return int(m.group(1)) if m else None
+
+
+def split_final_answer(response: str) -> Tuple[str, str]:
+    """``(prefix, number)``: the response text before the final answer number, and
+    the number. ``prefix`` keeps the space before the number, so in the Llama-3
+    tokenisation ``prompt + prefix`` ends exactly where the number's token starts."""
+    matches = list(FINAL_ANSWER_RE.finditer(response or ""))
+    if not matches:
+        raise ValueError(f"no 'The answer is N' in response {response!r:.120}")
+    m = matches[-1]
+    return response[: m.start(1)], m.group(1)
+
+
 def extract_gsm8k_answer(text: str) -> Optional[str]:
     text = (text or "").strip()
     m = re.search(r"####\s*(" + _NUM + r")", text)
@@ -224,8 +247,17 @@ LOCAL_EVAL_TOKENS = 8
 HF_EVAL_TOKENS = 256
 
 
+# A CoT response on svamp_cot is the equation plus "The answer is N." (~15-30
+# tokens); 64 leaves room for a longer derivation from a fine-tuned model.
+COT_EVAL_TOKENS = 64
+
+
 def default_eval_tokens(dataset_name: str) -> int:
-    return HF_EVAL_TOKENS if dataset_name in _HF_DATASETS else LOCAL_EVAL_TOKENS
+    if dataset_name in _HF_DATASETS:
+        return HF_EVAL_TOKENS
+    if dataset_answer_type(dataset_name) == "cot":
+        return COT_EVAL_TOKENS
+    return LOCAL_EVAL_TOKENS
 
 
 @torch.no_grad()
@@ -297,6 +329,9 @@ def eval_model(model, tokenizer, test_dataset, dataset_name: str, batch_size: in
                 if is_hf:
                     pred = parse_response(text, dataset_name)
                     gold_parsed = gold if isinstance(gold, int) else parse_response(str(gold), dataset_name)
+                elif answer_type == "cot":
+                    pred = extract_cot_answer(text)
+                    gold_parsed = gold if isinstance(gold, int) else extract_cot_answer(str(gold))
                 elif answer_type == "text":
                     pred = extract_text_answer(text)
                     gold_parsed = normalize_answer_text(str(gold)) or None

@@ -26,6 +26,7 @@ from utils import (
     bos_in_training,
     bos_mode,
     set_bos_mode,
+    split_final_answer,
     tokenize_prompt_answer,
 )
 
@@ -149,9 +150,12 @@ class GraphKDConfig:
     # The first N optimizer steps train on the graph term alone (KD gets no
     # backward); see --graph-warmup-steps.
     graph_warmup_steps: int = 0
+    # Where the graph term attributes from; see --graph-position.
+    graph_position: str = "prompt-end"
 
 
 BOS_EMBEDDING_MODES = ("train", "freeze", "graph-only")
+GRAPH_POSITIONS = ("prompt-end", "final-answer")
 GRAPH_GRAD_PROJECTIONS = ("none", "orthogonal")
 
 
@@ -323,6 +327,8 @@ class GraphKDTrainer:
         if config.kd_bos_fraction > 0.0 and config.bos_mode != "legacy":
             raise ValueError("--kd-bos-fraction only applies under --bos-mode legacy "
                              "(under on every KD row already leads with BOS)")
+        if config.graph_position not in GRAPH_POSITIONS:
+            raise ValueError(f"graph_position must be one of {GRAPH_POSITIONS}, got {config.graph_position!r}")
         if config.graph_warmup_steps < 0:
             raise ValueError(f"graph_warmup_steps must be >= 0, got {config.graph_warmup_steps}")
         if config.graph_warmup_steps > 0 and config.graph_grad_projection != "none":
@@ -439,6 +445,38 @@ class GraphKDTrainer:
             prompt, answer, self.teacher_adapter, self.graph_config, _DEVICE,
         )
         return _teacher_target_entry(supergraph, logit_ids, dla_logits, answer=answer)
+
+    @staticmethod
+    def _final_answer_graph_inputs(prompts: List[str], responses: List[Any]) -> tuple[List[str], List[str]]:
+        """--graph-position final-answer: (prompt + response before the final number, number)."""
+        out_p, out_a = [], []
+        for p, r in zip(prompts, responses):
+            prefix, number = split_final_answer(str(r))
+            out_p.append(p + prefix)
+            out_a.append(number)
+        return out_p, out_a
+
+    def _check_final_answer_position(self, batch, input_ids, attention_mask, graph_prompt: str, number: str) -> None:
+        """Once per run: the graph's sequence must be the KD row cut at the final answer.
+
+        The adapter tokenises ``prompt + prefix`` on its own; that must give exactly
+        the KD row's tokens up to the final-answer position, and the KD row's next
+        token must be the answer number's first token. Otherwise the graph would
+        attribute a position the KD sequence never has (a token merged across the
+        cut, a missing space), silently.
+        """
+        n = int(attention_mask[0].sum())
+        row = input_ids[0][:n].tolist()
+        g_ids = self.student_adapter.ensure_tokenized(graph_prompt).tolist()
+        num_ids = self.tokenizer(number, add_special_tokens=False)["input_ids"]
+        k = len(g_ids)
+        if row[:k] != g_ids or row[k:k + len(num_ids)] != num_ids:
+            raise RuntimeError(
+                "--graph-position final-answer: the graph prefix does not cut the KD row at the "
+                f"final answer.\n  KD row tail: {row[max(0, k - 6):k + 4]}\n  graph tail:  {g_ids[-6:]} "
+                f"then answer {num_ids}")
+        print(f"  final-answer check passed: graph on {k} of {n} tokens, attributing the prediction of "
+              f"{self.tokenizer.decode(num_ids)!r} (KD scores the whole response)")
 
     def _check_sequence_consistency(self, batch, input_ids, attention_mask) -> None:
         """Once per run: the ids the graph term will build on must equal the KD batch row.
@@ -622,6 +660,13 @@ class GraphKDTrainer:
             answers = batch["answers"]
             if self._train_step == 0 and micro_step == 0:
                 self._check_sequence_consistency(batch, seq_ids, seq_mask)
+            if cfg.graph_position == "final-answer":
+                # The graph is built on prompt + response up to the final answer
+                # number and attributes the prediction of that number; the KD term
+                # still scores the whole response.
+                prompts, answers = self._final_answer_graph_inputs(prompts, answers)
+                if self._train_step == 0 and micro_step == 0:
+                    self._check_final_answer_position(batch, seq_ids, seq_mask, prompts[0], answers[0])
             if cfg.n_graph_prompts is not None and cfg.n_graph_prompts < len(prompts):
                 sel = random.sample(range(len(prompts)), cfg.n_graph_prompts)
                 prompts = [prompts[i] for i in sel]
@@ -955,6 +1000,7 @@ class GraphKDTrainer:
             + (f" | KD rows with BOS: {cfg.kd_bos_fraction:g}" if cfg.kd_bos_fraction > 0 else "")
             + (f" | graph-only for the first {cfg.graph_warmup_steps} steps (no KD backward)"
                if cfg.graph_warmup_steps > 0 else "")
+            + (" | graph at the final answer token" if cfg.graph_position == "final-answer" else "")
         )
 
         while self._train_step < cfg.steps:
@@ -1208,6 +1254,15 @@ def build_parser() -> argparse.ArgumentParser:
              "KD leaves the evaluated (BOS) regime to it. The graph term is unaffected.",
     )
     group.add_argument(
+        "--graph-position", type=str, nargs="+", default=["prompt-end"], choices=list(GRAPH_POSITIONS),
+        dest="graph_position",
+        help="Where the graph term attributes from. 'prompt-end' (default): the last prompt "
+             "position, which predicts the first response token. 'final-answer': the position "
+             "that predicts the number in the response's final 'The answer is N' (CoT datasets "
+             "such as svamp_cot); the graph is built on prompt + response up to there, while KD "
+             "still scores the whole response.",
+    )
+    group.add_argument(
         "--graph-warmup-steps", type=int, nargs="+", default=[0], dest="graph_warmup_steps",
         help="Train on the graph term alone for the first N optimizer steps (KD is still "
              "computed and logged as step_kl_loss but gets no backward), then KD + graph as "
@@ -1278,6 +1333,7 @@ def config_from_args(args: argparse.Namespace, seed: int, save_dir: str) -> Grap
         graph_grad_projection=args.graph_grad_projection,
         kd_bos_fraction=args.kd_bos_fraction,
         graph_warmup_steps=args.graph_warmup_steps,
+        graph_position=args.graph_position,
     )
 
 
