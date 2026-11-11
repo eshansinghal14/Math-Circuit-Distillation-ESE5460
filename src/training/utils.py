@@ -917,13 +917,13 @@ SWEEP_PARAMS = (
     "teacher_prop_neurons_per_layer", "student_prop_neurons_per_layer",
     "top_k_logits", "supergraph_aggregation", "token_path_rows",
     "token_path_top_tokens", "bos_embedding", "graph_grad_projection", "kd_bos_fraction",
-    "graph_warmup_steps", "kd_target", "graph_position",
+    "graph_warmup_steps", "kd_target", "graph_position", "graph_rows", "graph_edge_topk",
 )
 
 # Parameters added after runs were already keyed. At these values (or absent, on
 # a trainer without them) they are left out of the run digest, so every run
 # recorded before they existed keeps its key; any other value is in the digest.
-_SIGNATURE_OMIT_AT = {"bos_embedding": "train", "graph_grad_projection": "none", "kd_bos_fraction": 0.0, "graph_warmup_steps": 0, "kd_target": "soft", "graph_position": "prompt-end",
+_SIGNATURE_OMIT_AT = {"bos_embedding": "train", "graph_grad_projection": "none", "kd_bos_fraction": 0.0, "graph_warmup_steps": 0, "kd_target": "soft", "graph_position": "prompt-end", "graph_rows": "all", "graph_edge_topk": 0,
                       "rep_format": "train"}
 
 

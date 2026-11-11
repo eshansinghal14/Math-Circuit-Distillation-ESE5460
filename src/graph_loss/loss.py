@@ -14,6 +14,8 @@ def _compute_edge_loss(
     student_ids: list[int],
     epsilon: float = 1e-8,
     similarity: Literal["jsd", "kld", "mse", "mse-norm", "mse-scale", "rel-mse"] = "jsd",
+    keep_rows: set[int] | None = None,
+    edge_topk: int = 0,
 ) -> torch.Tensor:
     """Edge-level structural loss: row-wise similarity between aligned supernode adjacency.
 
@@ -65,7 +67,21 @@ def _compute_edge_loss(
         W_S_aligned[:, n_T:] = W_S[s_idx][:, n_S:]
 
     teacher_rows = W_T[t_idx].to(device=device, dtype=dtype)
-
+    # Row subset (--graph-rows): alignment above uses every matched supernode, so
+    # the kept rows still compare every column; only which rows count changes.
+    if keep_rows is not None:
+        sel = [r for r, ti in enumerate(valid_t) if teacher_ids[ti] in keep_rows]
+        if not sel:
+            return torch.tensor(0.0, device=device, dtype=dtype)
+        sel_t = torch.tensor(sel, device=device, dtype=torch.long)
+        teacher_rows, W_S_aligned = teacher_rows[sel_t], W_S_aligned[sel_t]
+    # Edge pruning (--graph-edge-topk): each row keeps only the teacher's k
+    # strongest |edges|, and teacher and student are both compared on those
+    # columns (the distances below renormalise each row over what is left).
+    if edge_topk and edge_topk < teacher_rows.shape[1]:
+        cols = teacher_rows.detach().float().abs().topk(edge_topk, dim=1).indices
+        teacher_rows = teacher_rows.gather(1, cols)
+        W_S_aligned = W_S_aligned.gather(1, cols)
     return edge_similarity(teacher_rows, W_S_aligned, similarity, epsilon)
 
 
@@ -207,7 +223,10 @@ def compute_graph_loss(
     student_ids: list[int],
     epsilon: float = 1e-8,
     similarity: Literal["jsd", "kld", "mse", "mse-norm", "mse-scale", "rel-mse"] = "jsd",
+    keep_rows: set[int] | None = None,
+    edge_topk: int = 0,
 ) -> tuple[torch.Tensor, dict]:
     """Graph loss: edge-structure similarity between aligned supernode adjacency rows."""
-    loss = _compute_edge_loss(W_T, W_S, mapping, teacher_ids, student_ids, epsilon, similarity)
+    loss = _compute_edge_loss(W_T, W_S, mapping, teacher_ids, student_ids, epsilon, similarity,
+                              keep_rows=keep_rows, edge_topk=edge_topk)
     return loss, {"edge_loss": loss.item()}

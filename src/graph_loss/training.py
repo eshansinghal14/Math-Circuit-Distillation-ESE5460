@@ -94,6 +94,12 @@ class GraphAuxConfig:
     # Per-prompt cache of the teacher's target (see TeacherTargetCache); None
     # recomputes the teacher's graph for every prompt.
     teacher_target_cache: Any = None
+    # Which supernode rows the loss scores ('all' | 'answer': the DLA row and the
+    # rows of number tokens) and how many teacher edges per row (0 = all). Both
+    # act on the loss only; the teacher target is unchanged, so neither is in the
+    # teacher-target cache key.
+    graph_rows: str = "all"
+    graph_edge_topk: int = 0
 
     def __post_init__(self) -> None:
         # 'tokens' in graph_node_labels means token_source_columns, never an ANOVA
@@ -705,6 +711,29 @@ def _token_path_loss(
     return graph_loss, metrics
 
 
+def _answer_rows(supergraph: SuperGraph) -> set[int]:
+    """--graph-rows answer: the DLA supernode and every arg supernode of a number token.
+
+    On a long prompt the arg/DLA construction has one row per token, and ~99% of
+    the loss sits on rows for words, template and instruction tokens (see
+    experiments/graph_row_noise.py on svamp_cot); the DLA row, the one row about
+    the answer, was 0.9%. This keeps the rows that carry the problem's quantities
+    and the answer.
+    """
+    keep = set()
+    for i, labels in enumerate(supergraph.supernode_labels or []):
+        if not labels:
+            continue
+        lab = labels[0]
+        if lab == "dla":
+            keep.add(i)
+        elif lab.startswith("arg:"):
+            tok = lab[len("arg:"):].split("#")[0].strip()
+            if tok and tok.lstrip("-").replace(".", "", 1).isdigit():
+                keep.add(i)
+    return keep
+
+
 def compute_prompt_graph_loss(
     *,
     prompt: str | torch.Tensor,
@@ -871,14 +900,15 @@ def compute_prompt_graph_loss(
     W_T = teacher_supergraph.supernode_adjacency_matrix.detach().to(
         device=W_S.device, dtype=W_S.dtype,
     )
+    keep_rows = _answer_rows(teacher_supergraph) if config.graph_rows == "answer" else None
+    loss_kw = dict(similarity=config.graph_loss_type, keep_rows=keep_rows, edge_topk=config.graph_edge_topk)
     real_target_loss: torch.Tensor | None = None
     if config.scramble_teacher_graph:
         # Keep measuring the loss against the real target (no gradient) so a
         # scrambled run shows whether the student drifts from the teacher's routing.
         with torch.no_grad():
             real_target_loss, _ = compute_graph_loss(
-                W_T, W_S.detach(), mapping, teacher_ids, student_ids,
-                similarity=config.graph_loss_type,
+                W_T, W_S.detach(), mapping, teacher_ids, student_ids, **loss_kw,
             )
         W_T = scramble_teacher_rows(W_T, config)
 
@@ -888,7 +918,7 @@ def compute_prompt_graph_loss(
         mapping,
         teacher_ids,
         student_ids,
-        similarity=config.graph_loss_type,
+        **loss_kw,
     )
 
     metrics = {
@@ -896,6 +926,7 @@ def compute_prompt_graph_loss(
         "student_supernodes": len(student_ids),
         "student_graph_neurons": int(student_graph.n_neurons),
         "aligned_teacher_supernodes": sum(1 for tid in teacher_ids if mapping.get(tid)),
+        "scored_rows": len(keep_rows) if keep_rows is not None else len(teacher_ids),
         **loss_breakdown,
     }
     if real_target_loss is not None:

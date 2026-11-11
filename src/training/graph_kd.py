@@ -152,6 +152,9 @@ class GraphKDConfig:
     graph_warmup_steps: int = 0
     # Where the graph term attributes from; see --graph-position.
     graph_position: str = "prompt-end"
+    # Rows the graph loss scores and teacher edges kept per row; see --graph-rows.
+    graph_rows: str = "all"
+    graph_edge_topk: int = 0
 
 
 BOS_EMBEDDING_MODES = ("train", "freeze", "graph-only")
@@ -272,6 +275,8 @@ class GraphKDTrainer:
             dataset_name=config.dataset,
             scramble_teacher_graph=config.scramble_teacher_graph,
             scramble_seed=config.seed,
+            graph_rows=config.graph_rows,
+            graph_edge_topk=config.graph_edge_topk,
         )
 
         # The teacher's per-prompt target is a pure function of the teacher-side
@@ -1001,6 +1006,8 @@ class GraphKDTrainer:
             + (f" | graph-only for the first {cfg.graph_warmup_steps} steps (no KD backward)"
                if cfg.graph_warmup_steps > 0 else "")
             + (" | graph at the final answer token" if cfg.graph_position == "final-answer" else "")
+            + (f" | graph rows: {cfg.graph_rows}" if cfg.graph_rows != "all" else "")
+            + (f" | top-{cfg.graph_edge_topk} teacher edges per row" if cfg.graph_edge_topk else "")
         )
 
         while self._train_step < cfg.steps:
@@ -1263,6 +1270,18 @@ def build_parser() -> argparse.ArgumentParser:
              "still scores the whole response.",
     )
     group.add_argument(
+        "--graph-rows", type=str, nargs="+", default=["all"], choices=["all", "answer"], dest="graph_rows",
+        help="Which supernode rows the graph loss scores. 'all' (default): every aligned row. "
+             "'answer': the DLA row and the arg rows of number tokens only (arg/DLA construction); "
+             "on svamp_cot the other rows were ~99%% of the loss and about words and template.",
+    )
+    group.add_argument(
+        "--graph-edge-topk", type=int, nargs="+", default=[0], dest="graph_edge_topk",
+        help="Keep only each teacher row's k strongest edges (0 = all); teacher and student are "
+             "compared on those columns. On svamp_cot rows spread over ~70 sources and the top 10 "
+             "hold ~62%% of the mass.",
+    )
+    group.add_argument(
         "--graph-warmup-steps", type=int, nargs="+", default=[0], dest="graph_warmup_steps",
         help="Train on the graph term alone for the first N optimizer steps (KD is still "
              "computed and logged as step_kl_loss but gets no backward), then KD + graph as "
@@ -1334,6 +1353,8 @@ def config_from_args(args: argparse.Namespace, seed: int, save_dir: str) -> Grap
         kd_bos_fraction=args.kd_bos_fraction,
         graph_warmup_steps=args.graph_warmup_steps,
         graph_position=args.graph_position,
+        graph_rows=args.graph_rows,
+        graph_edge_topk=args.graph_edge_topk,
     )
 
 
