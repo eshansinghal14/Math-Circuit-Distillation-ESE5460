@@ -10,6 +10,10 @@ and the result lie in 0..999):
     mix3     a o b o c        two-digit operands, each o in {+, -}
     mix4     a o b o c o d    two-digit operands, each o in {+, -}
     muladd   a*b o c          a two-digit, b one-digit (2-9), c two-digit, o in {+, -}
+    bind     "q=47, f=12, x=85, b=30, m=66. f+x-q="   five two-digit variables under random
+             distinct letters in random order; the expression is mix3 over three of
+             them, so two are distractors. Which values feed the answer has to be
+             looked up (routing), not just read off the expression.
 
     python generate_multistep_dataset.py --family mix3 --train 5000 --test 1000
 """
@@ -45,12 +49,24 @@ def sample(family: str, rng: random.Random):
         if not 0 <= val <= 999:
             return None
         return f"{a}*{b}{o}{c}=", str(val)
+    if family == "bind":
+        names = rng.sample("abcdefghijklmnopqrstuvwxyz", 5)
+        vals = {v: rng.randint(10, 99) for v in names}
+        used = rng.sample(names, 3)
+        ops = [rng.choice("+-") for _ in range(2)]
+        val, expr = vals[used[0]], used[0]
+        for o, v in zip(ops, used[1:]):
+            val = val + vals[v] if o == "+" else val - vals[v]
+            if not 0 <= val <= 999:
+                return None
+            expr += o + v
+        return ", ".join(f"{v}={vals[v]}" for v in names) + f". {expr}=", str(val)
     raise ValueError(family)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--family", required=True, choices=["mix3", "mix4", "muladd"])
+    ap.add_argument("--family", required=True, choices=["mix3", "mix4", "muladd", "bind"])
     ap.add_argument("--train", type=int, default=5000)
     ap.add_argument("--test", type=int, default=1000)
     ap.add_argument("--seed", type=int, default=0)

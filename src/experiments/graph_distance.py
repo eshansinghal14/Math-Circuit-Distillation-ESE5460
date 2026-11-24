@@ -93,7 +93,7 @@ def main() -> None:
         model, _ = load_student(path, "bfloat16")
         model.train()
         ad = HFLlamaGraphAdapter(model, tok, dev)
-        losses, hits = [], []
+        losses, hits, preds = [], [], []
         t0 = time.perf_counter()
         for (prompt, answer), entry in zip(items, entries):
             t_sg, logit_ids, dla = GT._teacher_target_from_entry(entry, dev)
@@ -107,13 +107,16 @@ def main() -> None:
             ids = b["input_ids"].to(dev)
             first = int(b["response_mask"][0].nonzero()[0])
             with torch.no_grad(), student_autocast():
-                hits.append(int(model(ids).logits[0, first - 1].argmax()) == int(ids[0, first]))
+                top = int(model(ids).logits[0, first - 1].argmax())
+            hits.append(top == int(ids[0, first]))
+            preds.append(tok.decode([top]))
         right = [l for l, h in zip(losses, hits) if h]
         wrong = [l for l, h in zip(losses, hits) if not h]
         mean = lambda v: sum(v) / len(v) if v else float("nan")  # noqa: E731
         rec = {"path": path, "student_prop": float(prop), "accuracy": mean([float(h) for h in hits]),
                "graph_loss": mean(losses), "graph_loss_right": mean(right), "graph_loss_wrong": mean(wrong),
-               "auc_wrong": auc(wrong, right), "losses": losses, "hits": hits}
+               "auc_wrong": auc(wrong, right), "losses": losses, "hits": hits, "preds": preds,
+               "prompts": [p for p, _ in items], "answers": [str(a) for _, a in items]}
         out["models"][label] = rec
         print(f"{label:10s} acc {rec['accuracy']:.3f} | graph loss {rec['graph_loss']:.4f} | right {rec['graph_loss_right']:.4f} "
               f"| wrong {rec['graph_loss_wrong']:.4f} | AUC wrong {rec['auc_wrong']:.2f} | {time.perf_counter() - t0:.0f}s",
