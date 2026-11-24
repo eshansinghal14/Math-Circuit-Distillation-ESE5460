@@ -329,8 +329,13 @@ def build_shared_context(
         )
     else:
         # Still parse target_args so create_graph_at_position has them for DLA calls.
+        # They only feed the ANOVA arg labels, so a prompt with no number before its
+        # first "=" (bind: "a=11, y=27, ... t+l+a=") gets none instead of an error.
         decoded = adapter.tokenizer.decode(input_ids.detach().cpu().tolist())
-        target_args = parse_numeric_args(decoded)
+        try:
+            target_args = parse_numeric_args(decoded)
+        except ValueError:
+            target_args = ()
 
     # Select ANOVA supernodes (DLA excluded here; it is position-specific).
     if need_anova:
