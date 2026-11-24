@@ -40,6 +40,7 @@ from graph_loss.training import (
     _compute_teacher_target,
     _teacher_target_entry,
     backward_batch_graph_loss,
+    compute_teacher_targets,
     teacher_target_cache_key,
 )
 from training.utils import (
@@ -132,6 +133,9 @@ class GraphKDConfig:
     teacher_graph_batch_size: int = 512
     student_graph_batch_size: int = 1
     n_graph_prompts: Optional[int] = None
+    # Teacher in host RAM except while it runs (its graphs and KD logits come first
+    # in each step); same numbers, ~17 GiB less peak for a 9B bf16 teacher.
+    offload_teacher: bool = False
     graph_verbose: bool = False
     track_grad_metrics: bool = False
     track_flops: bool = False
@@ -491,6 +495,35 @@ class GraphKDTrainer:
             out_a.append(number)
         return out_p, out_a
 
+    def _graph_inputs(self, batch, seq_ids, seq_mask, micro_step: int) -> tuple[List[str], List[Any]]:
+        """The (prompt, answer) pairs the graph term attributes this micro-step:
+        rewritten for --graph-position, then subsampled to --n-graph-prompts."""
+        cfg = self.config
+        prompts: List[str] = batch["prompts"]
+        answers = batch["answers"]
+        if self._train_step == 0 and micro_step == 0:
+            self._check_sequence_consistency(batch, seq_ids, seq_mask)
+        if cfg.graph_position == "final-answer":
+            # The graph is built on prompt + response up to the final answer
+            # number and attributes the prediction of that number; the KD term
+            # still scores the whole response.
+            prompts, answers = self._final_answer_graph_inputs(prompts, answers)
+            if self._train_step == 0 and micro_step == 0:
+                self._check_final_answer_position(batch, seq_ids, seq_mask, prompts[0], answers[0])
+        elif cfg.graph_position == "answer-tokens":
+            # One graph per token of the answer, each built on the prompt plus the
+            # gold answer tokens before it; the graph losses are averaged.
+            prompts, answers = self._answer_token_graph_inputs(prompts, answers)
+        elif cfg.graph_position == "operator":
+            # The graph attributes the first operator of the gold equation
+            # (where the operation is chosen); the KD term scores the whole response.
+            prompts, answers = self._operator_graph_inputs(prompts, answers)
+        if cfg.n_graph_prompts is not None and cfg.n_graph_prompts < len(prompts):
+            sel = random.sample(range(len(prompts)), cfg.n_graph_prompts)
+            prompts = [prompts[i] for i in sel]
+            answers = [answers[i] for i in sel]
+        return prompts, answers
+
     def _answer_token_graph_inputs(self, prompts: List[str], responses: List[Any]) -> tuple[List[str], List[str]]:
         """--graph-position answer-tokens: one (prompt + answer[:k], answer token k) pair per answer token.
 
@@ -633,13 +666,27 @@ class GraphKDTrainer:
         return self._eval_on(self.model, self.config.dataset, self.test_dataset)
 
     def _eval_teacher(self) -> float:
+        self._teacher_to(_DEVICE)
         return self._eval_on(self.teacher, self.config.dataset, self.test_dataset)
 
     def _eval_all_extra(self) -> Dict[str, float]:
         return {ds: self._eval_on(self.model, ds, td) for ds, td in self.extra_test_datasets.items()}
 
     def _eval_teacher_all_extra(self) -> Dict[str, float]:
+        self._teacher_to(_DEVICE)
         return {ds: self._eval_on(self.teacher, ds, td) for ds, td in self.extra_test_datasets.items()}
+
+    def _teacher_to(self, device: torch.device) -> None:
+        """--offload-teacher: move the teacher (in place, so the adapter's parameter
+        references follow) between host RAM and the GPU; a no-op otherwise."""
+        if not self.config.offload_teacher:
+            return
+        dev = torch.device(device)
+        if next(self.teacher.parameters()).device.type == dev.type:
+            return
+        self.teacher.to(dev)
+        if dev.type == "cpu" and torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def train_epoch(self, *, max_steps: Optional[int] = None) -> Dict[str, float]:
         self.model.train()
@@ -710,6 +757,26 @@ class GraphKDTrainer:
                     for n, p in self.model.named_parameters() if p.grad is not None
                 }
 
+            # ── Graph inputs (chosen before the KD forward) ──────────────────
+            # Nothing in the KD forward/backward draws from `random`, so choosing
+            # here gives the same prompts as choosing after it. It lets
+            # --offload-teacher build the teacher's graph targets while the teacher
+            # is on the GPU and no student gradient exists yet.
+            prompts, answers = self._graph_inputs(batch, seq_ids, seq_mask, micro_step)
+            # --graph-stop-step: past step N the graph term is skipped (an empty
+            # prompt list returns a zero loss and no backward).
+            graph_active = cfg.graph_stop_step <= 0 or self._train_step < cfg.graph_stop_step
+            teacher_targets = None
+            pre_time_teacher, pre_cache_hits = 0.0, 0
+            if cfg.offload_teacher:
+                self._teacher_to(_DEVICE)
+                if graph_active and prompts:
+                    with flop_counter:
+                        teacher_targets, pre_time_teacher, pre_cache_hits = compute_teacher_targets(
+                            prompts=prompts, answers=answers, teacher_adapter=self.teacher_adapter,
+                            config=self.graph_config, device=_DEVICE,
+                        )
+
             # ── KL loss ───────────────────────────────────────────────────────
             with flop_counter:
                 with self._autocast():
@@ -719,6 +786,8 @@ class GraphKDTrainer:
 
                 with torch.no_grad():
                     teacher_logits = self.teacher(input_ids, attention_mask=attention_mask).logits
+                # --offload-teacher: done with the teacher for this step.
+                self._teacher_to("cpu")
 
                 if cfg.kd_target == "argmax":
                     kl = argmax_kd_loss(
@@ -745,29 +814,6 @@ class GraphKDTrainer:
                 del student_logits, teacher_logits
 
             # ── Graph loss ────────────────────────────────────────────────────
-            prompts: List[str] = batch["prompts"]
-            answers = batch["answers"]
-            if self._train_step == 0 and micro_step == 0:
-                self._check_sequence_consistency(batch, seq_ids, seq_mask)
-            if cfg.graph_position == "final-answer":
-                # The graph is built on prompt + response up to the final answer
-                # number and attributes the prediction of that number; the KD term
-                # still scores the whole response.
-                prompts, answers = self._final_answer_graph_inputs(prompts, answers)
-                if self._train_step == 0 and micro_step == 0:
-                    self._check_final_answer_position(batch, seq_ids, seq_mask, prompts[0], answers[0])
-            elif cfg.graph_position == "answer-tokens":
-                # One graph per token of the answer, each built on the prompt plus the
-                # gold answer tokens before it; the graph losses are averaged.
-                prompts, answers = self._answer_token_graph_inputs(prompts, answers)
-            elif cfg.graph_position == "operator":
-                # The graph attributes the first operator of the gold equation
-                # (where the operation is chosen); the KD term scores the whole response.
-                prompts, answers = self._operator_graph_inputs(prompts, answers)
-            if cfg.n_graph_prompts is not None and cfg.n_graph_prompts < len(prompts):
-                sel = random.sample(range(len(prompts)), cfg.n_graph_prompts)
-                prompts = [prompts[i] for i in sel]
-                answers = [answers[i] for i in sel]
             if cfg.track_grad_metrics:
                 # Held on the host: an fp32 copy of every gradient is 4.9 GB on
                 # the 1B student, and it would otherwise sit on the GPU through
@@ -797,9 +843,6 @@ class GraphKDTrainer:
             emb = self._bos_weight()
             bos_g_before = (emb.grad[self._bos_id].detach().float().clone()
                             if emb.grad is not None else torch.zeros_like(self._bos_row0, dtype=torch.float32))
-            # --graph-stop-step: past step N the graph term is skipped (an empty
-            # prompt list returns a zero loss and no backward).
-            graph_active = cfg.graph_stop_step <= 0 or self._train_step < cfg.graph_stop_step
             with flop_counter:
                 graph_loss_tensor, graph_metrics = backward_batch_graph_loss(
                     prompts=prompts if graph_active else [],
@@ -809,7 +852,11 @@ class GraphKDTrainer:
                     config=self.graph_config,
                     device=_DEVICE,
                     loss_scale=cfg.lambda_graph / grad_accum,
+                    teacher_targets=teacher_targets,
                 )
+            del teacher_targets
+            graph_metrics["graph_time_teacher"] = graph_metrics.get("graph_time_teacher", 0.0) + pre_time_teacher
+            graph_metrics["teacher_cache_hits"] = graph_metrics.get("teacher_cache_hits", 0.0) + pre_cache_hits
             bos_g_after = (emb.grad[self._bos_id].detach().float()
                            if emb.grad is not None else torch.zeros_like(bos_g_before))
             accum_bos_kl_gnorm += float(bos_g_before.norm())
@@ -1253,6 +1300,10 @@ def build_parser() -> argparse.ArgumentParser:
                        dest="student_graph_batch_size")
     group.add_argument("--n-graph-prompts", type=int, default=None, dest="n_graph_prompts",
                        help="Max prompts per batch to compute graph loss for (None = all).")
+    group.add_argument("--offload-teacher", action="store_true", dest="offload_teacher",
+                       help="Keep the teacher in host RAM except while computing its graph targets "
+                            "and KD logits at the start of each step (identical results, lower peak "
+                            "memory, two host<->GPU copies of the teacher per step).")
     group.add_argument("--graph-verbose", action="store_true", dest="graph_verbose")
     group.add_argument(
         "--constant-node-weighting", "--constant_node_weighting",
@@ -1481,6 +1532,7 @@ def config_from_args(args: argparse.Namespace, seed: int, save_dir: str) -> Grap
         teacher_graph_batch_size=args.teacher_graph_batch_size,
         student_graph_batch_size=args.student_graph_batch_size,
         n_graph_prompts=args.n_graph_prompts,
+        offload_teacher=args.offload_teacher,
         graph_verbose=args.graph_verbose,
         track_grad_metrics=args.track_grad_metrics,
         track_flops=args.track_flops,

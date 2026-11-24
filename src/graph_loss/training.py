@@ -1778,6 +1778,54 @@ def _attribute_batch(
     return out
 
 
+def _teacher_target_or_cached(
+    prompt: str,
+    answer: Any,
+    teacher_adapter: HFLlamaGraphAdapter,
+    config: GraphAuxConfig,
+    device: torch.device,
+) -> tuple[tuple, int]:
+    """The teacher target for one prompt, from ``config.teacher_target_cache`` when it
+    holds the prompt (second value 1) or computed and stored there (0)."""
+    cache = config.teacher_target_cache
+    entry = cache.get(prompt) if cache is not None else None
+    if entry is not None:
+        return _teacher_target_from_entry(entry, device), 1
+    target = _compute_teacher_target(prompt, answer, teacher_adapter, config, device)
+    if cache is not None:
+        cache.put(prompt, _teacher_target_entry(*target, answer=answer))
+    return target, 0
+
+
+def compute_teacher_targets(
+    *,
+    prompts: list[str],
+    answers: list[Any],
+    teacher_adapter: HFLlamaGraphAdapter,
+    config: GraphAuxConfig,
+    device: torch.device,
+) -> tuple[list[tuple], float, int]:
+    """Teacher targets for a batch, ahead of :func:`backward_batch_graph_loss`.
+
+    Lets a trainer finish with the teacher (and move it off the GPU) before the
+    student's backward passes. Returns the targets aligned with ``prompts``, the
+    wall-clock time and the cache hits.
+    """
+    import gc
+
+    t_start = time.perf_counter()
+    targets: list[tuple] = []
+    hits = 0
+    for prompt, answer in zip(prompts, answers):
+        target, hit = _teacher_target_or_cached(prompt, answer, teacher_adapter, config, device)
+        targets.append(target)
+        hits += hit
+        gc.collect()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+    return targets, time.perf_counter() - t_start, hits
+
+
 def backward_batch_graph_loss(
     *,
     prompts: list[str],
@@ -1788,11 +1836,15 @@ def backward_batch_graph_loss(
     teacher_adapter: HFLlamaGraphAdapter,
     answers: list[int],
     on_prompt_done: Callable[[int, int], None] | None = None,
+    teacher_targets: list[tuple] | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Compute and backprop graph loss one prompt at a time.
 
     Processes each prompt's attribution graph immediately and backprops before
     building the next, keeping peak memory bounded to a single prompt.
+    ``teacher_targets`` (from :func:`compute_teacher_targets`, aligned with
+    ``prompts``) supplies the teacher side already computed, so the teacher need
+    not be on the GPU here.
     """
     if not prompts:
         return torch.tensor(0.0, device=device), {}
@@ -1831,19 +1883,12 @@ def backward_batch_graph_loss(
             graph_backward_prompts += 1
         else:
             t_start = time.perf_counter()
-            cache = config.teacher_target_cache
-            entry = cache.get(prompt) if cache is not None else None
-            if entry is None:
-                teacher_supergraph, logit_token_ids, teacher_dla_logits = _compute_teacher_target(
-                    prompt, answers[i], teacher_adapter, config, device,
-                )
-                if cache is not None:
-                    cache.put(prompt, _teacher_target_entry(
-                        teacher_supergraph, logit_token_ids, teacher_dla_logits, answer=answers[i],
-                    ))
+            if teacher_targets is not None:
+                teacher_supergraph, logit_token_ids, teacher_dla_logits = teacher_targets[i]
             else:
-                teacher_supergraph, logit_token_ids, teacher_dla_logits = _teacher_target_from_entry(entry, device)
-                cache_hits += 1
+                (teacher_supergraph, logit_token_ids, teacher_dla_logits), hit = _teacher_target_or_cached(
+                    prompt, answers[i], teacher_adapter, config, device)
+                cache_hits += hit
             time_teacher += time.perf_counter() - t_start
             t_start = time.perf_counter()
             prompt_loss, prompt_metrics = compute_prompt_graph_loss(
