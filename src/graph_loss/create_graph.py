@@ -19,6 +19,7 @@ from graph_loss.graph import (
     select_arg_supernodes,
 )
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
+from graph_loss.graph import SUPERNODE_TYPES, select_position_supernodes
 from graph_loss.utils import normalize_node_labels
 from graph_loss.neuron_activation_heatmap import (
     ActivationWriteResult,
@@ -243,6 +244,10 @@ def build_shared_context(
     refresh_mlp_cache: bool = False,
     freeze_attention: bool = False,
     freeze_rms_norm: bool = False,
+    neuron_selection: str = "norm",
+    selection_kwargs: dict | None = None,
+    supernode_type: str = "arg",
+    position_bands: int = 1,
     logger: logging.Logger | None = None,
 ) -> GraphSharedContext:
     """Phase 1 of the graph pipeline: forward pass, ANOVA labeling, token supernodes.
@@ -263,7 +268,7 @@ def build_shared_context(
     _logger = logger or logging.getLogger(__name__)
     node_labels, _ = normalize_node_labels(node_labels)  # 'tokens' is not an ANOVA category
 
-    _logger.info("Running setup_attribution (neuron pre-selection by gradient norm)")
+    _logger.info("Running setup_attribution (neuron pre-selection by %s)", neuron_selection)
     ctx = setup_attribution(
         adapter,
         input_ids,
@@ -271,6 +276,8 @@ def build_shared_context(
         dtype,
         freeze_attention=freeze_attention,
         freeze_rms_norm=freeze_rms_norm,
+        neuron_selection=neuron_selection,
+        selection_kwargs=selection_kwargs,
     )
     _logger.info("  Pre-selected neurons: %d", ctx.n_neurons)
 
@@ -357,12 +364,23 @@ def build_shared_context(
 
     if not need_anova:
         _logger.info("Computing arg-token supernodes for %d token positions", ctx.n_tokens)
-        token_raw_supernodes, token_supernode_labels = select_arg_supernodes(
-            ctx,
-            adapter.tokenizer,
-            input_ids,
-            nodes_per_token=nodes_per_label,
-        )
+        if supernode_type not in SUPERNODE_TYPES:
+            raise ValueError(f"supernode_type must be one of {SUPERNODE_TYPES}, got {supernode_type!r}")
+        if supernode_type == "position":
+            token_raw_supernodes, token_supernode_labels = select_position_supernodes(
+                ctx,
+                adapter.tokenizer,
+                input_ids,
+                nodes_per_token=nodes_per_label,
+                bands=position_bands,
+            )
+        else:
+            token_raw_supernodes, token_supernode_labels = select_arg_supernodes(
+                ctx,
+                adapter.tokenizer,
+                input_ids,
+                nodes_per_token=nodes_per_label,
+            )
         for sn in token_raw_supernodes:
             all_selected.update(sn)
         for sn, label in zip(token_raw_supernodes, token_supernode_labels):
@@ -432,9 +450,16 @@ def create_graph_at_position(
     supergraph_aggregation: str = "normalised",
     token_source_columns: bool = False,
     verbose: bool = False,
+    target_rows: str = "all",
     logger: logging.Logger | None = None,
 ) -> GraphPipelineResult:
     """Phase 2: compute DLA supernode + attribution graph at a specific sequence position.
+
+    ``target_rows``: "all" attributes every kept neuron's inbound row; "last" or
+    "answer" attributes only the members of the supernodes that --graph-rows
+    choice scores (graph.scored_supernodes) and leaves the other rows zero.
+    "none" attributes no neuron row at all, for callers that read only the logit
+    rows (experiments/answer_row_check.py).
 
     Reuses the shared attribution context and pre-computed ANOVA + token supernodes
     from build_shared_context(). Only the DLA supernode and the attribution graph
@@ -498,6 +523,12 @@ def create_graph_at_position(
         + dla_supernode_labels
     )
     supernodes = [[old_to_new[idx] for idx in sn] for sn in all_raw_supernodes]
+    row_subset = None
+    if target_rows == "none":
+        row_subset = []        # logit rows only: no neuron's inbound edges are attributed
+    elif target_rows != "all":
+        from graph_loss.graph import scored_supernodes
+        row_subset = sorted({i for t in scored_supernodes(all_supernode_labels, target_rows) for i in supernodes[t]})
 
     # Map filtered_ctx indices back to activation_write_result indices.
     # activation_write_result was built from anova_token_selected_indices only,
@@ -561,6 +592,7 @@ def create_graph_at_position(
         skip_logit_attribution=skip_logit_attribution,
         verbose=verbose,
         target_position=target_position,
+        target_rows=row_subset,
     )
     _log_graph_summary(graph, logger=_logger, stage="Built (filtered)")
 
@@ -636,9 +668,25 @@ def create_graph(
     token_source_columns: bool = False,
     freeze_attention: bool = False,
     freeze_rms_norm: bool = False,
+    neuron_selection: str = "norm",
+    supernode_type: str = "arg",
+    position_bands: int = 1,
+    target_rows: str = "all",
     logger: logging.Logger | None = None,
 ) -> GraphPipelineResult:
     """Run the ANOVA-first graph creation pipeline.
+
+    ``neuron_selection="influence"`` pre-selects each layer's neurons by their
+    |gradient x activation| on the prediction at ``target_position`` (the salient
+    logits of ``dla_model_logits`` when given, else the model's own; restricted to
+    ``attribution_targets`` when that is a tensor of token ids) instead of by
+    write norm.
+
+    ``supernode_type`` (no ANOVA labels only): ``"arg"`` is one supernode per token
+    of the neurons whose read direction aligns with its embedding; ``"position"``
+    is one per token position of the neurons located there (``position_bands``
+    depth bands each), see select_position_supernodes. The DLA supernode is added
+    either way.
 
     New order: neuron pre-selection → ANOVA label all candidates →
     select top-K per label → build attribution graph for selected neurons →
@@ -722,6 +770,16 @@ def create_graph(
         refresh_mlp_cache=refresh_mlp_cache,
         freeze_attention=freeze_attention,
         freeze_rms_norm=freeze_rms_norm,
+        neuron_selection=neuron_selection,
+        supernode_type=supernode_type,
+        position_bands=position_bands,
+        selection_kwargs=dict(
+            target_position=target_position,
+            target_ids=attribution_targets if isinstance(attribution_targets, torch.Tensor) else None,
+            ref_logits=dla_model_logits,
+            top_k_logits=top_k_logits,
+            temperature=temperature,
+        ),
         logger=_logger,
     )
 
@@ -741,5 +799,6 @@ def create_graph(
         supergraph_aggregation=supergraph_aggregation,
         token_source_columns=token_source_columns,
         verbose=verbose,
+        target_rows=target_rows,
         logger=_logger,
     )

@@ -95,11 +95,25 @@ class GraphAuxConfig:
     # recomputes the teacher's graph for every prompt.
     teacher_target_cache: Any = None
     # Which supernode rows the loss scores ('all' | 'answer': the DLA row and the
-    # rows of number tokens) and how many teacher edges per row (0 = all). Both
+    # rows of number tokens | 'last': the DLA row and the final position's row)
+    # and how many teacher edges per row (0 = all). Both
     # act on the loss only; the teacher target is unchanged, so neither is in the
     # teacher-target cache key.
     graph_rows: str = "all"
+    # Attribute only the neurons whose rows graph_rows scores ("last" / "answer").
+    # The scored rows are unchanged; the other supernodes' rows come out zero.
+    restrict_target_rows: bool = False
     graph_edge_topk: int = 0
+    # How each layer's candidate neurons are pre-selected: 'norm' (write-vector
+    # norm) or 'influence' (|gradient x activation| on the attributed prediction).
+    # Changes the teacher's target, so it is in the cache key when not 'norm'.
+    neuron_selection: str = "norm"
+    # arg/DLA construction only: 'arg' (one supernode per token, members by
+    # alignment with the token embedding) or 'position' (one per token position,
+    # members located there, position_bands depth bands each). In the cache key
+    # when not the default.
+    supernode_type: str = "arg"
+    position_bands: int = 1
 
     def __post_init__(self) -> None:
         # 'tokens' in graph_node_labels means token_source_columns, never an ANOVA
@@ -308,6 +322,13 @@ def graph_code_digest() -> str:
     return h.hexdigest()[:12]
 
 
+def _target_rows(config: GraphAuxConfig) -> str:
+    """Which neurons' rows create_graph attributes for this config."""
+    if config.restrict_target_rows and config.graph_rows in ("last", "answer"):
+        return config.graph_rows
+    return "all"
+
+
 def teacher_target_cache_key(config: GraphAuxConfig, teacher_name: str) -> str:
     """Hash of everything the teacher's target depends on."""
     cache_meta = (config.teacher_mlp_input_cache or {}).get("meta", {})
@@ -333,12 +354,20 @@ def teacher_target_cache_key(config: GraphAuxConfig, teacher_name: str) -> str:
             "model_name": cache_meta.get("model_name"),
         },
     }
+    if _target_rows(config) != "all":
+        # A restricted target holds only the scored rows, so it is specific to them.
+        fields["target_rows"] = _target_rows(config)
     if not config.graph_node_labels:
         # arg/DLA construction: labels became occurrence-indexed (repeated tokens no
         # longer collide), and the teacher's DLA reference logits come from a forward
         # whose BOS depends on the mode. Older arg/DLA caches must not be reused.
         fields["arg_labels"] = "occurrence-indexed"
         fields["bos_mode"] = bos_mode()
+    if config.neuron_selection != "norm":
+        fields["neuron_selection"] = config.neuron_selection
+    if config.supernode_type != "arg":
+        fields["supernode_type"] = config.supernode_type
+        fields["position_bands"] = config.position_bands
     return hashlib.sha1(json.dumps(fields, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
 
@@ -551,6 +580,10 @@ def _compute_teacher_target(
             constant_node_weighting=config.constant_node_weighting,
             supergraph_aggregation=_inner_aggregation(config),
             token_source_columns=config.token_source_columns,
+            neuron_selection=config.neuron_selection,
+            supernode_type=config.supernode_type,
+            position_bands=config.position_bands,
+            target_rows=_target_rows(config),
         )
     # Same ids as the KD batch row (BOS + prompt, answer + EOS): the teacher's
     # DLA reference logits at the last prompt position must come from the same
@@ -720,18 +753,21 @@ def _answer_rows(supergraph: SuperGraph) -> set[int]:
     the answer, was 0.9%. This keeps the rows that carry the problem's quantities
     and the answer.
     """
-    keep = set()
-    for i, labels in enumerate(supergraph.supernode_labels or []):
-        if not labels:
-            continue
-        lab = labels[0]
-        if lab == "dla":
-            keep.add(i)
-        elif lab.startswith("arg:"):
-            tok = lab[len("arg:"):].split("#")[0].strip()
-            if tok and tok.lstrip("-").replace(".", "", 1).isdigit():
-                keep.add(i)
-    return keep
+    from graph_loss.graph import answer_row_supernodes
+    return answer_row_supernodes(supergraph.supernode_labels)
+
+
+def _last_rows(supergraph: SuperGraph) -> set[int]:
+    """--graph-rows last: the DLA supernode and the supernode(s) of the final token position.
+
+    Token supernodes are listed in position order, so the last one is the position
+    the graph attributes from (every depth band of it under position_bands > 1).
+    With position supernodes and influence selection these are the two rows whose
+    teacher-student distance tracked the SFT student's first-token errors on
+    svamp_eq (AUC 0.64 each, 0.67 summed; every other row type ~0.5).
+    """
+    from graph_loss.graph import last_row_supernodes
+    return last_row_supernodes(supergraph.supernode_labels)
 
 
 def compute_prompt_graph_loss(
@@ -787,6 +823,10 @@ def compute_prompt_graph_loss(
             constant_node_weighting=config.constant_node_weighting,
             supergraph_aggregation=config.supergraph_aggregation,
             token_source_columns=config.token_source_columns,
+            neuron_selection=config.neuron_selection,
+            supernode_type=config.supernode_type,
+            position_bands=config.position_bands,
+            target_rows=_target_rows(config),
         )
     except ValueError as e:
         raise RuntimeError(
@@ -900,7 +940,12 @@ def compute_prompt_graph_loss(
     W_T = teacher_supergraph.supernode_adjacency_matrix.detach().to(
         device=W_S.device, dtype=W_S.dtype,
     )
-    keep_rows = _answer_rows(teacher_supergraph) if config.graph_rows == "answer" else None
+    if config.graph_rows == "answer":
+        keep_rows = _answer_rows(teacher_supergraph)
+    elif config.graph_rows == "last":
+        keep_rows = _last_rows(teacher_supergraph)
+    else:
+        keep_rows = None
     loss_kw = dict(similarity=config.graph_loss_type, keep_rows=keep_rows, edge_topk=config.graph_edge_topk)
     real_target_loss: torch.Tensor | None = None
     if config.scramble_teacher_graph:

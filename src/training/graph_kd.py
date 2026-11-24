@@ -54,6 +54,8 @@ from training.utils import (
     kl_position_mask,
     first_answer_token_accuracy,
     kl_loss,
+    argmax_kd_loss,
+    KD_TARGETS,
     load_student,
     log_first_step_canary,
     make_optimizer,
@@ -150,15 +152,31 @@ class GraphKDConfig:
     # The first N optimizer steps train on the graph term alone (KD gets no
     # backward); see --graph-warmup-steps.
     graph_warmup_steps: int = 0
+    # 'soft': KL to the teacher's distribution. 'argmax': cross-entropy on the
+    # teacher's top-1 token at the same positions (hard teacher labels, no gold),
+    # the standard_kd --kd-target option; step_kl_loss then holds that loss.
+    kd_target: str = "soft"
+    # The graph term is computed for optimizer steps 1..N only and skipped after
+    # (0: every step). With --graph-warmup-steps N this is a graph phase followed
+    # by a KD phase; the skipped steps cost what a plain KD step costs.
+    graph_stop_step: int = 0
     # Where the graph term attributes from; see --graph-position.
     graph_position: str = "prompt-end"
     # Rows the graph loss scores and teacher edges kept per row; see --graph-rows.
     graph_rows: str = "all"
     graph_edge_topk: int = 0
+    # Attribute only the neurons whose rows graph_rows scores. Same loss, a
+    # fraction of the backward passes; what makes ~100 neurons per node affordable.
+    graph_restrict_rows: bool = False
+    # How candidate neurons are pre-selected and how they are grouped into
+    # supernodes; see --graph-neuron-selection / --graph-supernode-type.
+    graph_neuron_selection: str = "norm"
+    graph_supernode_type: str = "arg"
+    graph_position_bands: int = 1
 
 
 BOS_EMBEDDING_MODES = ("train", "freeze", "graph-only")
-GRAPH_POSITIONS = ("prompt-end", "final-answer")
+GRAPH_POSITIONS = ("prompt-end", "final-answer", "operator", "answer-tokens")
 GRAPH_GRAD_PROJECTIONS = ("none", "orthogonal")
 
 
@@ -277,6 +295,10 @@ class GraphKDTrainer:
             scramble_seed=config.seed,
             graph_rows=config.graph_rows,
             graph_edge_topk=config.graph_edge_topk,
+            restrict_target_rows=config.graph_restrict_rows,
+            neuron_selection=config.graph_neuron_selection,
+            supernode_type=config.graph_supernode_type,
+            position_bands=config.graph_position_bands,
         )
 
         # The teacher's per-prompt target is a pure function of the teacher-side
@@ -314,7 +336,11 @@ class GraphKDTrainer:
             raise ValueError(f"bos_embedding must be one of {BOS_EMBEDDING_MODES}, got {config.bos_embedding!r}")
         self._bos_id = self.tokenizer.bos_token_id
         if self._bos_id is None:
-            raise RuntimeError("tokenizer has no BOS token; --bos-embedding and the BOS-row log need one")
+            # Qwen has no BOS token. The per-step BOS-row log then follows the EOS
+            # row instead (a diagnostic only); options that act on BOS cannot run.
+            if config.bos_embedding != "train":
+                raise RuntimeError("tokenizer has no BOS token; --bos-embedding freeze / graph-only need one")
+            self._bos_id = self.tokenizer.eos_token_id
         self._bos_row0 = self._bos_weight()[self._bos_id].detach().clone()
         if config.graph_grad_projection not in GRAPH_GRAD_PROJECTIONS:
             raise ValueError(f"graph_grad_projection must be one of {GRAPH_GRAD_PROJECTIONS}, "
@@ -334,6 +360,10 @@ class GraphKDTrainer:
                              "(under on every KD row already leads with BOS)")
         if config.graph_position not in GRAPH_POSITIONS:
             raise ValueError(f"graph_position must be one of {GRAPH_POSITIONS}, got {config.graph_position!r}")
+        if config.graph_stop_step < 0:
+            raise ValueError(f"graph_stop_step must be >= 0, got {config.graph_stop_step}")
+        if config.kd_target not in KD_TARGETS:
+            raise ValueError(f"kd_target must be one of {KD_TARGETS}, got {config.kd_target!r}")
         if config.graph_warmup_steps < 0:
             raise ValueError(f"graph_warmup_steps must be >= 0, got {config.graph_warmup_steps}")
         if config.graph_warmup_steps > 0 and config.graph_grad_projection != "none":
@@ -459,6 +489,55 @@ class GraphKDTrainer:
             prefix, number = split_final_answer(str(r))
             out_p.append(p + prefix)
             out_a.append(number)
+        return out_p, out_a
+
+    def _answer_token_graph_inputs(self, prompts: List[str], responses: List[Any]) -> tuple[List[str], List[str]]:
+        """--graph-position answer-tokens: one (prompt + answer[:k], answer token k) pair per answer token.
+
+        Qwen and Gemma write a number one digit per token, so a single graph at the
+        prompt end explains only the leading digit, while the errors that survive
+        KD on mix3 are in the tens digit. Each cut is kept only if the prefix text
+        re-tokenises to exactly the gold tokens before it (otherwise the graph
+        would be built on a sequence the KD row never contains). For a model whose
+        answer is one token (Llama-3 on 0-999) this is the prompt-end graph.
+        """
+        tok = self.tokenizer
+        bos = tok.bos_token or ""
+        out_p, out_a = [], []
+        for p, r in zip(prompts, responses):
+            add = not (bos and p.startswith(bos))
+            p_ids = tok(p, add_special_tokens=add)["input_ids"]
+            a_ids = tok(str(r), add_special_tokens=False)["input_ids"]
+            for k in range(len(a_ids)):
+                prefix = tok.decode(a_ids[:k]) if k else ""
+                if k and tok(p + prefix, add_special_tokens=add)["input_ids"] != p_ids + a_ids[:k]:
+                    continue
+                out_p.append(p + prefix)
+                out_a.append(tok.decode(a_ids[k:]))
+        return out_p, out_a
+
+    @staticmethod
+    def _operator_graph_inputs(prompts: List[str], responses: List[Any]) -> tuple[List[str], List[str]]:
+        """--graph-position operator: (prompt + response before its first operator, " <op>").
+
+        On svamp_eq the response is "<expression> = N"; the operator token is
+        where the model chooses the operation, the one position whose graph
+        gradient pointed at the student's fix on fresh problems (2026-11-17).
+        In Llama-3 tokenisation " +" is one token, so the prefix drops the space.
+        A response with no operator after its first character keeps the
+        prompt-end graph.
+        """
+        out_p, out_a = [], []
+        for p, r in zip(prompts, responses):
+            r = str(r)
+            i = next((k for k, ch in enumerate(r) if ch in "+-*/" and k > 0), None)
+            if i is None:
+                out_p.append(p)
+                out_a.append(r)
+                continue
+            prefix = r[:i].rstrip(" ")
+            out_p.append(p + prefix)
+            out_a.append(r[len(prefix): i + 1])
         return out_p, out_a
 
     def _check_final_answer_position(self, batch, input_ids, attention_mask, graph_prompt: str, number: str) -> None:
@@ -641,10 +720,15 @@ class GraphKDTrainer:
                 with torch.no_grad():
                     teacher_logits = self.teacher(input_ids, attention_mask=attention_mask).logits
 
-                kl = kl_loss(
-                    student_logits, teacher_logits, kd_mask,
-                    cfg.temperature, cfg.kl_token_chunk_size,
-                ) / grad_accum
+                if cfg.kd_target == "argmax":
+                    kl = argmax_kd_loss(
+                        student_logits, teacher_logits, kd_mask, cfg.kl_token_chunk_size,
+                    ) / grad_accum
+                else:
+                    kl = kl_loss(
+                        student_logits, teacher_logits, kd_mask,
+                        cfg.temperature, cfg.kl_token_chunk_size,
+                    ) / grad_accum
 
                 kl_finite = torch.isfinite(kl)
                 # ``kl`` stays unscaled so step_kl_loss is comparable across
@@ -672,6 +756,14 @@ class GraphKDTrainer:
                 prompts, answers = self._final_answer_graph_inputs(prompts, answers)
                 if self._train_step == 0 and micro_step == 0:
                     self._check_final_answer_position(batch, seq_ids, seq_mask, prompts[0], answers[0])
+            elif cfg.graph_position == "answer-tokens":
+                # One graph per token of the answer, each built on the prompt plus the
+                # gold answer tokens before it; the graph losses are averaged.
+                prompts, answers = self._answer_token_graph_inputs(prompts, answers)
+            elif cfg.graph_position == "operator":
+                # The graph attributes the first operator of the gold equation
+                # (where the operation is chosen); the KD term scores the whole response.
+                prompts, answers = self._operator_graph_inputs(prompts, answers)
             if cfg.n_graph_prompts is not None and cfg.n_graph_prompts < len(prompts):
                 sel = random.sample(range(len(prompts)), cfg.n_graph_prompts)
                 prompts = [prompts[i] for i in sel]
@@ -705,10 +797,13 @@ class GraphKDTrainer:
             emb = self._bos_weight()
             bos_g_before = (emb.grad[self._bos_id].detach().float().clone()
                             if emb.grad is not None else torch.zeros_like(self._bos_row0, dtype=torch.float32))
+            # --graph-stop-step: past step N the graph term is skipped (an empty
+            # prompt list returns a zero loss and no backward).
+            graph_active = cfg.graph_stop_step <= 0 or self._train_step < cfg.graph_stop_step
             with flop_counter:
                 graph_loss_tensor, graph_metrics = backward_batch_graph_loss(
-                    prompts=prompts,
-                    answers=answers,
+                    prompts=prompts if graph_active else [],
+                    answers=answers if graph_active else [],
                     student_adapter=self.student_adapter,
                     teacher_adapter=self.teacher_adapter,
                     config=self.graph_config,
@@ -1006,7 +1101,12 @@ class GraphKDTrainer:
             + (f" | graph-only for the first {cfg.graph_warmup_steps} steps (no KD backward)"
                if cfg.graph_warmup_steps > 0 else "")
             + (" | graph at the final answer token" if cfg.graph_position == "final-answer" else "")
+            + (" | KD target: teacher argmax (hard labels, no gold)" if cfg.kd_target == "argmax" else "")
+            + (f" | graph term on steps 1-{cfg.graph_stop_step} only" if cfg.graph_stop_step > 0 else "")
             + (f" | graph rows: {cfg.graph_rows}" if cfg.graph_rows != "all" else "")
+            + (" (only those rows attributed)" if cfg.graph_restrict_rows and cfg.graph_rows != "all" else "")
+            + (f" | neurons by {cfg.graph_neuron_selection}" if cfg.graph_neuron_selection != "norm" else "")
+            + (f" | {cfg.graph_supernode_type} supernodes" if cfg.graph_supernode_type != "arg" else "")
             + (f" | top-{cfg.graph_edge_topk} teacher edges per row" if cfg.graph_edge_topk else "")
         )
 
@@ -1270,10 +1370,39 @@ def build_parser() -> argparse.ArgumentParser:
              "still scores the whole response.",
     )
     group.add_argument(
-        "--graph-rows", type=str, nargs="+", default=["all"], choices=["all", "answer"], dest="graph_rows",
+        "--graph-rows", type=str, nargs="+", default=["all"], choices=["all", "answer", "last"], dest="graph_rows",
         help="Which supernode rows the graph loss scores. 'all' (default): every aligned row. "
              "'answer': the DLA row and the arg rows of number tokens only (arg/DLA construction); "
-             "on svamp_cot the other rows were ~99%% of the loss and about words and template.",
+             "on svamp_cot the other rows were ~99%% of the loss and about words and template. "
+             "'last': the DLA row and the row of the final token position, the position the graph "
+             "attributes from.",
+    )
+    group.add_argument(
+        "--graph-neuron-selection", type=str, nargs="+", default=["norm"], choices=["norm", "influence"],
+        dest="graph_neuron_selection",
+        help="How each layer's candidate neurons are pre-selected. 'norm' (default): by write-vector "
+             "norm. 'influence': by |gradient x activation| on the attributed prediction (the "
+             "teacher's salient logits at the graph position, for both models).",
+    )
+    group.add_argument(
+        "--graph-supernode-type", type=str, nargs="+", default=["arg"], choices=["arg", "position"],
+        dest="graph_supernode_type",
+        help="Prompt-derived supernodes (no --graph-node-labels). 'arg' (default): one per token, "
+             "the neurons whose read direction aligns with its embedding. 'position': one per token "
+             "position, the top --nodes-per-label neurons located there by the pre-selection score; "
+             "the same object in teacher and student by construction.",
+    )
+    group.add_argument(
+        "--graph-position-bands", type=int, nargs="+", default=[1], dest="graph_position_bands",
+        help="With --graph-supernode-type position: split each position into this many depth bands "
+             "(by relative layer).",
+    )
+    group.add_argument(
+        "--graph-restrict-rows", action="store_true", dest="graph_restrict_rows",
+        help="With --graph-rows last or answer, attribute only the neurons of the scored supernodes "
+             "instead of every kept neuron. The loss is unchanged (checked against the full computation "
+             "at 10 and 30 neurons per node); the backward passes drop from every position's neurons to "
+             "the scored nodes', so --nodes-per-label 100 costs less than 10 did.",
     )
     group.add_argument(
         "--graph-edge-topk", type=int, nargs="+", default=[0], dest="graph_edge_topk",
@@ -1288,6 +1417,18 @@ def build_parser() -> argparse.ArgumentParser:
              "usual. Under the standard BOS convention this gives the graph term the period "
              "in which, under BOS-free training, it is the only signal on the evaluated format. "
              "The lr schedule is unchanged (steps 1-10 are its warmup).",
+    )
+    group.add_argument(
+        "--kd-target", type=str, nargs="+", default=["soft"], choices=list(KD_TARGETS), dest="kd_target",
+        help="'soft' (default): KL to the teacher's distribution. 'argmax': cross-entropy on the "
+             "teacher's top-1 token at the same --kl-tokens positions (hard teacher labels, no gold), "
+             "as in standard_kd. --temperature is ignored under argmax; step_kl_loss holds that loss.",
+    )
+    group.add_argument(
+        "--graph-stop-step", type=int, nargs="+", default=[0], dest="graph_stop_step",
+        help="Compute the graph term for optimizer steps 1..N only (0, the default: every step). "
+             "The steps after N are plain KD steps. With --graph-warmup-steps N the run is a graph "
+             "phase followed by a KD phase.",
     )
     return parser
 
@@ -1321,6 +1462,8 @@ def config_from_args(args: argparse.Namespace, seed: int, save_dir: str) -> Grap
         seed=seed,
         lambda_graph=args.lambda_graph,
         lambda_kl=args.lambda_kl,
+        kd_target=args.kd_target,
+        graph_stop_step=args.graph_stop_step,
         nodes_per_label=args.nodes_per_label,
         graph_loss_type=args.graph_loss_type,
         freeze_attention=args.freeze_attention,
@@ -1355,6 +1498,10 @@ def config_from_args(args: argparse.Namespace, seed: int, save_dir: str) -> Grap
         graph_position=args.graph_position,
         graph_rows=args.graph_rows,
         graph_edge_topk=args.graph_edge_topk,
+        graph_restrict_rows=args.graph_restrict_rows,
+        graph_neuron_selection=args.graph_neuron_selection,
+        graph_supernode_type=args.graph_supernode_type,
+        graph_position_bands=args.graph_position_bands,
     )
 
 

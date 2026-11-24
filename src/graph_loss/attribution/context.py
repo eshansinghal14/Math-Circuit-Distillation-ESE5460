@@ -35,6 +35,7 @@ class HFAttributionContext:
         dtype: torch.dtype | None = None,
         freeze_attention: bool = False,
         freeze_rms_norm: bool = False,
+        selection_scores: torch.Tensor | None = None,
     ):
         self.adapter = adapter
         self.input_ids = input_ids
@@ -51,6 +52,9 @@ class HFAttributionContext:
         # methodology. See graph_loss.freeze.
         self.freeze_attention = freeze_attention
         self.freeze_rms_norm = freeze_rms_norm
+        # [n_neurons] score each neuron was pre-selected by (write norm, or
+        # |gradient x activation| on the prediction); position supernodes rank by it.
+        self.selection_scores = selection_scores
 
     @property
     def n_neurons(self) -> int:
@@ -80,6 +84,7 @@ class HFAttributionContext:
             dtype=self.dtype,
             freeze_attention=self.freeze_attention,
             freeze_rms_norm=self.freeze_rms_norm,
+            selection_scores=None if self.selection_scores is None else self.selection_scores[keep_mask],
         )
 
     def _expanded_forward(self, batch_len: int):
@@ -204,10 +209,19 @@ class HFAttributionContext:
         Runs one expanded forward pass, then back-differentiates the
         target-encoder dot-product for each row to get edge scores.
         """
-        batch_len = end - start
+        return self.compute_neuron_rows(range(start, end), create_graph=create_graph)
+
+    def compute_neuron_rows(self, rows, *, create_graph: bool) -> torch.Tensor:
+        """``[len(rows), source_count]`` attribution rows for the listed neuron targets.
+
+        compute_neuron_batch for an arbitrary index list, so a caller that only
+        needs some neurons' inbound edges does not pay for the others.
+        """
+        rows = [int(r) for r in rows]
+        batch_len = len(rows)
         _, chunk_mlp_inputs, chunk_mlp_outputs, chunk_embed = self._expanded_forward(batch_len)
         terms = []
-        for batch_idx, row_idx in enumerate(range(start, end)):
+        for batch_idx, row_idx in enumerate(rows):
             layer_idx = int(self.neuron_locations[row_idx, 0].item())
             pos_idx = int(self.neuron_locations[row_idx, 1].item())
             terms.append(

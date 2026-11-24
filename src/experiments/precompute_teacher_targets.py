@@ -121,6 +121,18 @@ def build_parser() -> argparse.ArgumentParser:
                    dest="graph_position",
                    help="Must match graph_kd --graph-position. 'final-answer' builds each target on "
                         "prompt + response up to the final answer number, the string graph_kd looks up.")
+    p.add_argument("--graph-neuron-selection", choices=["norm", "influence"], default="norm",
+                   dest="graph_neuron_selection", help="Must match graph_kd --graph-neuron-selection.")
+    p.add_argument("--graph-supernode-type", choices=["arg", "position"], default="arg",
+                   dest="graph_supernode_type", help="Must match graph_kd --graph-supernode-type.")
+    p.add_argument("--graph-position-bands", type=int, default=1, dest="graph_position_bands",
+                   help="Must match graph_kd --graph-position-bands.")
+    p.add_argument("--graph-rows", choices=["all", "answer", "last"], default="all", dest="graph_rows",
+                   help="Must match graph_kd --graph-rows when --graph-restrict-rows is given.")
+    p.add_argument("--graph-restrict-rows", action="store_true", dest="graph_restrict_rows",
+                   help="Must match graph_kd --graph-restrict-rows: attribute only the neurons of the "
+                        "supernodes --graph-rows scores. The target then holds those rows alone and is "
+                        "cached under its own key.")
     p.add_argument("--flush-every", type=int, default=100, dest="flush_every")
     return p
 
@@ -175,6 +187,11 @@ def main() -> None:
         token_source_columns=token_source_columns,
         token_path_rows=args.token_path_rows,
         dataset_name=args.dataset,
+        neuron_selection=args.graph_neuron_selection,
+        supernode_type=args.graph_supernode_type,
+        position_bands=args.graph_position_bands,
+        graph_rows=args.graph_rows,
+        restrict_target_rows=args.graph_restrict_rows,
     )
     cache_dir = args.teacher_target_cache_dir
     if not os.path.isabs(cache_dir):

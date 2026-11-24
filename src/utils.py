@@ -80,13 +80,29 @@ def extract_cot_answer(text: str) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
+# Equation-only datasets (answer_type "eq", e.g. svamp_eq): the response is
+# "<expression> = N" and nothing else. The graded answer is the number after the
+# first "=" of the continuation, which is also the token the graph term
+# attributes from: there it is the arithmetic, not a copy of an earlier N.
+EQ_ANSWER_RE = re.compile(r"=\s*(-?\d+)")
+
+
+def extract_eq_answer(text: str) -> Optional[int]:
+    """The integer after the first "=" of a continuation, else None."""
+    m = EQ_ANSWER_RE.search(text or "")
+    return int(m.group(1)) if m else None
+
+
 def split_final_answer(response: str) -> Tuple[str, str]:
     """``(prefix, number)``: the response text before the final answer number, and
     the number. ``prefix`` keeps the space before the number, so in the Llama-3
-    tokenisation ``prompt + prefix`` ends exactly where the number's token starts."""
+    tokenisation ``prompt + prefix`` ends exactly where the number's token starts.
+    A response without "The answer is N" is cut at its last "= N" (answer_type eq)."""
     matches = list(FINAL_ANSWER_RE.finditer(response or ""))
     if not matches:
-        raise ValueError(f"no 'The answer is N' in response {response!r:.120}")
+        matches = list(EQ_ANSWER_RE.finditer(response or ""))
+    if not matches:
+        raise ValueError(f"no 'The answer is N' or '= N' in response {response!r:.120}")
     m = matches[-1]
     return response[: m.start(1)], m.group(1)
 
@@ -250,6 +266,8 @@ HF_EVAL_TOKENS = 256
 # A CoT response on svamp_cot is the equation plus "The answer is N." (~15-30
 # tokens); 64 leaves room for a longer derivation from a fine-tuned model.
 COT_EVAL_TOKENS = 64
+# "<expression> = N": SVAMP equations are 3-9 tokens before the result.
+EQ_EVAL_TOKENS = 24
 
 
 def default_eval_tokens(dataset_name: str) -> int:
@@ -257,6 +275,8 @@ def default_eval_tokens(dataset_name: str) -> int:
         return HF_EVAL_TOKENS
     if dataset_answer_type(dataset_name) == "cot":
         return COT_EVAL_TOKENS
+    if dataset_answer_type(dataset_name) == "eq":
+        return EQ_EVAL_TOKENS
     return LOCAL_EVAL_TOKENS
 
 
@@ -332,6 +352,9 @@ def eval_model(model, tokenizer, test_dataset, dataset_name: str, batch_size: in
                 elif answer_type == "cot":
                     pred = extract_cot_answer(text)
                     gold_parsed = gold if isinstance(gold, int) else extract_cot_answer(str(gold))
+                elif answer_type == "eq":
+                    pred = extract_eq_answer(text)
+                    gold_parsed = gold if isinstance(gold, int) else extract_eq_answer(str(gold))
                 elif answer_type == "text":
                     pred = extract_text_answer(text)
                     gold_parsed = normalize_answer_text(str(gold)) or None

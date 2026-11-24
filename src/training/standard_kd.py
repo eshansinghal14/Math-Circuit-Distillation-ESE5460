@@ -182,6 +182,14 @@ class StandardKDTrainer:
     def _eval_teacher_all_extra(self) -> Dict[str, float]:
         return {ds: self._eval_on(self.teacher, ds, td) for ds, td in self.extra_test_datasets.items()}
 
+    def _auxiliary_loss(self, batch, input_ids, attention_mask, kd_mask, student_logits, teacher_logits):
+        """An extra loss term on this batch, already weighted, or None. KD alone has none."""
+        return None
+
+    def _step_suffix(self) -> str:
+        """Text appended to the per-step log line by a subclass."""
+        return ""
+
     def train_epoch(self, *, max_steps: Optional[int] = None) -> Dict[str, float]:
         self.model.train()
         cfg = self.config
@@ -238,6 +246,14 @@ class StandardKDTrainer:
                         cfg.temperature, cfg.kl_token_chunk_size,
                     ) / grad_accum
 
+                # A subclass's auxiliary term on the same batch (None here). The
+                # logged KD loss stays the KD term alone.
+                kd_only = loss.detach()
+                extra = self._auxiliary_loss(
+                    batch, input_ids, attention_mask, kd_mask, student_logits, teacher_logits)
+                if extra is not None:
+                    loss = loss + extra / grad_accum
+
             if not torch.isfinite(loss):
                 micro_step += 1
                 if micro_step % grad_accum == 0:
@@ -246,7 +262,7 @@ class StandardKDTrainer:
 
             with flop_counter:
                 loss.backward()
-            accum_loss += float(loss.item())
+            accum_loss += float(kd_only.item())
             accum_flops += flop_counter.flops
             micro_step += 1
 
@@ -284,7 +300,7 @@ class StandardKDTrainer:
                           f" | soft KL={self._last_soft_kl:.4f}"
                           f" | teacher top-1 = gold {self._last_teacher_gold:.3f}{flops_str}")
                 else:
-                    print(f"  step {self._train_step} | KL={accum_loss:.4f}{flops_str}")
+                    print(f"  step {self._train_step} | KL={accum_loss:.4f}{flops_str}{self._step_suffix()}")
                 self._last_save_step = maybe_save_periodic_checkpoint(
                     self.model, self.tokenizer, self.config.save_dir,
                     self._train_step, self.config.save_every_n_steps,

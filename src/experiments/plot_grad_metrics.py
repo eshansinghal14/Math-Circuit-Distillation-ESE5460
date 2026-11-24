@@ -1,20 +1,11 @@
-"""Render the per-step gradient-metric figure and table for Appendix C.
+"""Render the per-step gradient-metric figure and tables for the gradient appendix.
 
-Reads the same arms as plot_freeze_ablation.py but plots what
-``--track-grad-metrics`` records: the KD and graph gradient norms, their ratio,
-the cosine between them and the fraction of parameter entries whose update sign
-the graph term decides. Writes ``figures/grad_metrics.pdf`` and
-``tables/freeze_dynamics.tex`` (run means over the whole run, plus the
-step-1 and step-100 values that the text quotes).
-
-The figure carries two messages: the KD gradient collapses by an order of
-magnitude over the run while the graph gradient stays within a factor of two,
-so their ratio climbs without anyone scheduling it; and the arms lie on top of
-one another on every panel, so nothing that separates them, if anything does,
-is visible in these aggregates.
-
-Encoding matches the accuracy figure: hue carries the RMSNorm freeze, line style
-the attention freeze, aqua the constant-weighting arm.
+Reads what ``--track-grad-metrics`` records for the main graph-distillation run,
+the scrambled control when it exists, and the lambda sweep: the KD and graph
+gradient norms, their ratio, the cosine between them and the pre-clip gradient
+norm. Writes ``figures/grad_metrics.pdf``, ``tables/grad_dynamics.tex`` (run
+means per arm) and ``tables/canaries.tex`` (the step-1 scale-invariant checks
+across lambda, which share weights and batch and so must agree).
 
 Usage (from the repository root):
     PYTHONPATH=src python -m experiments.plot_grad_metrics
@@ -31,8 +22,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
-from experiments._paper_plots import FIG_DIR, INK, INK_2, INK_3, RC, legend, save, style, write_table
-from experiments.plot_freeze_ablation import load_arms
+from experiments._paper_plots import (
+    BLUE, DOT, FIG_DIR, GRAPH_FIXED, GRAPH_MAIN, GRAPH_SWEEP, INK, INK_2, INK_3, KD_PROTOCOL, RC, SCRAMBLED_MAIN,
+    legend, save, select_runs, style, write_table,
+)
 
 
 def main() -> None:
@@ -40,88 +33,103 @@ def main() -> None:
     ap.add_argument("--out", default=f"{FIG_DIR}/grad_metrics.pdf")
     args = ap.parse_args()
 
-    arms = load_arms()
-    present = [(l, r, c, ls) for l, r, c, ls in arms if r is not None]
-    ref = present[0][1]
-    lam = ref.config["lambda_graph"]
-    last = int(ref.hists[0]["train_step"][-1])
+    graph = select_runs(*GRAPH_MAIN, label="BOS-free, $\\lambda = 3$")
+    scr = select_runs(*SCRAMBLED_MAIN, label="BOS-free, $\\lambda = 3$, scrambled", required=False)
+    bos_free = dict(KD_PROTOCOL, **GRAPH_FIXED, scramble_teacher_graph=False)
+    sweep = {lam: r for lam in (0.3, 1.0, 3.0, 6.0, 10.0)
+             if (r := select_runs(GRAPH_SWEEP, dict(bos_free, lambda_graph=lam), f"BOS-free, $\\lambda = {lam:g}$", required=False)) is not None}
+    on = {lam: r for lam in (1.0, 3.0, 10.0)
+          if (r := select_runs(GRAPH_SWEEP, dict(KD_PROTOCOL, **GRAPH_FIXED, bos_mode="on", kl_tokens="resp", lambda_graph=lam,
+                                                 scramble_teacher_graph=False), f"standard BOS, $\\lambda = {lam:g}$", required=False)) is not None}
+    last = int(graph.hists[0]["train_step"][-1])
+    lam = graph.config["lambda_graph"]
 
     plt.rcParams.update(RC)
     fig, axes = plt.subplots(2, 2, figsize=(5.5, 3.3))
     line = dict(linewidth=1.1, solid_capstyle="round", dash_capstyle="round", zorder=3)
+    thin = dict(linewidth=0.6, alpha=0.45, zorder=2)
 
     def prep(ax, title):
         style(ax, title)
         ax.set_xlim(0, last + 1)
         ax.set_xticks(range(0, last + 1, 25))
 
+    def draw(ax, key, log=False):
+        xs, ys = graph.step_series(key, seeds=True)
+        for y in ys:
+            ax.plot(xs, y, color=BLUE, **thin)
+        with np.errstate(all="ignore"):
+            ax.plot(xs, np.nanmean(ys, axis=0), color=BLUE, **line)
+        if scr is not None:
+            xs_s, y_s = scr.step_series(key)
+            ax.plot(xs_s, y_s, color=BLUE, linestyle=DOT, **line)
+        if log:
+            ax.set_yscale("log")
+
     ax = axes[0][0]
     prep(ax, "gradient norms (log)")
-    for _, r, c, ls in present:
-        xs, kd = r.step_series("step_kl_gnorm")
-        _, g = r.step_series("step_graph_gnorm")
-        ax.plot(xs, kd, color=c, linestyle=ls, **line)
-        ax.plot(xs, g, color=c, linestyle=ls, **line)
-    ax.set_yscale("log")
-    _, kd0 = ref.step_series("step_kl_gnorm")
-    _, g0 = ref.step_series("step_graph_gnorm")
-    x_lab = int(last * 0.75)
-    ax.annotate(r"$\|g_{\mathrm{KD}}\|$", (x_lab, kd0[x_lab - 1] * 2.4), color=INK, fontsize=6.5, ha="center")
-    ax.annotate(r"$\lambda\,\|g_{\mathrm{graph}}\|$", (x_lab, g0[x_lab - 1] * 2.6), color=INK, fontsize=6.5, ha="center")
+    draw(ax, "step_kl_gnorm", log=True)
+    draw(ax, "step_graph_gnorm", log=True)
+    _, kd0 = graph.step_series("step_kl_gnorm")
+    _, g0 = graph.step_series("step_graph_gnorm")
+    x_lab = int(last * 0.7)
+    ax.annotate(r"$\|g_{\mathrm{KD}}\|$", (x_lab, np.nanmedian(kd0[x_lab - 10:x_lab + 10]) * 2.2), color=INK, fontsize=6.5, ha="center")
+    ax.annotate(r"$\lambda\,\|g_{\mathrm{graph}}\|$", (x_lab, np.nanmedian(g0[x_lab - 10:x_lab + 10]) * 1.9), color=INK, fontsize=6.5, ha="center")
     ax.set_ylabel("norm", color=INK_2)
 
     ax = axes[0][1]
     prep(ax, r"$\lambda\|g_{\mathrm{graph}}\| / \|g_{\mathrm{KD}}\|$")
-    for _, r, c, ls in present:
-        xs, y = r.step_series("step_grad_ratio")
-        ax.plot(xs, y, color=c, linestyle=ls, **line)
+    draw(ax, "step_grad_ratio")
+    ax.set_ylim(0, 0.6)
 
     ax = axes[1][0]
     prep(ax, r"$\cos(g_{\mathrm{graph}},\, g_{\mathrm{KD}})$")
     ax.axhline(0, color=INK_3, linewidth=0.9, linestyle=(0, (2, 2)), zorder=1)
-    for _, r, c, ls in present:
-        xs, y = r.step_series("step_grad_cosine")
-        ax.plot(xs, y, color=c, linestyle=ls, **line)
-    ax.set_ylim(-0.12, 0.12)
+    draw(ax, "step_grad_cosine")
+    ax.set_ylim(-0.15, 0.15)
     ax.set_xlabel("training step", color=INK_2)
 
     ax = axes[1][1]
-    prep(ax, "fraction of update signs set by the graph term")
-    for _, r, c, ls in present:
-        xs, y = r.step_series("step_grad_signflip")
-        ax.plot(xs, y, color=c, linestyle=ls, **line)
+    prep(ax, "pre-clip gradient norm (log)")
+    draw(ax, "step_clip_norm", log=True)
+    ax.axhline(1.0, color=INK_3, linewidth=0.9, linestyle=(0, (2, 2)), zorder=1)
+    ax.annotate("clip threshold", (last * 0.98, 1.0), color=INK_3, fontsize=6.5, ha="right", va="bottom")
     ax.set_xlabel("training step", color=INK_2)
 
-    handles = [Line2D([], [], color=c, linestyle=ls, linewidth=1.1) for _, _, c, ls in arms]
-    labels = [l + ("" if r is not None else " (pending)") for l, r, _, _ in arms]
-    legend(fig, handles, labels, ncol=3, title=f"linearisation, $\\lambda = {lam:g}$", y=-0.04)
-    fig.tight_layout(rect=(0, 0.11, 1, 1), h_pad=1.0, w_pad=1.6)
+    handles = [Line2D([], [], color=BLUE, linewidth=1.1)]
+    labels = [f"graph distillation ($\\lambda = {lam:g}$, {graph.n} seed{'s' if graph.n > 1 else ''})"]
+    if graph.n > 1:
+        handles.append(Line2D([], [], color=BLUE, linewidth=0.6, alpha=0.45)); labels.append("individual seeds")
+    if scr is not None:
+        handles.append(Line2D([], [], color=BLUE, linestyle=DOT, linewidth=1.1)); labels.append("scrambled target")
+    legend(fig, handles, labels, ncol=3, y=-0.04)
+    fig.tight_layout(rect=(0, 0.08, 1, 1), h_pad=1.0, w_pad=1.6)
     save(fig, args.out)
 
-    # ---- table rows: run means ---------------------------------------------
+    # ---- run means per arm ----------------------------------------------------
     rows = []
-    stats = {}
-    for label, r, _, _ in arms:
-        if r is None:
-            rows.append(f"    {label} & " + " & ".join(["\\pending{}"] * 5) + " \\\\")
-            continue
+    arms = [graph] + ([scr] if scr is not None else []) + [r for l, r in sweep.items() if l != lam] + list(on.values())
+    for r in arms:
         kd = r.step_series("step_kl_gnorm")[1]; g = r.step_series("step_graph_gnorm")[1]
         ratio = r.step_series("step_grad_ratio")[1]; cos = r.step_series("step_grad_cosine")[1]
-        sf = r.step_series("step_grad_signflip")[1]
-        stats[label] = dict(kd=kd, g=g, ratio=ratio, cos=cos, sf=sf)
-        rows.append(f"    {label} & {kd.mean():.2f} & {g.mean():.3f} & {ratio.mean():.3f} & "
-                    f"{cos.mean():+.4f} ({np.abs(cos).mean():.3f}) & {sf.mean():.4f} \\\\")
-    if len(stats) > 1:
-        def spread(key):
-            v = np.array([s[key].mean() for s in stats.values()])
-            return (v.max() - v.min()) / v.mean() * 100
-        rows.append("    \\midrule")
-        rows.append(f"    spread across arms & {spread('kd'):.1f}\\% & {spread('g'):.1f}\\% & {spread('ratio'):.1f}\\% & --- & {spread('sf'):.1f}\\% \\\\")
-    write_table("freeze_dynamics", rows, "columns: |g_KD| & lambda|g_graph| & ratio & cos (mean |cos|) & sign flips; run means over all steps")
-    for label, s in stats.items():
-        print(f"{label}: |gKD| {s['kd'][0]:.2f}->{s['kd'][-1]:.2f} (x{s['kd'][0]/s['kd'][-1]:.1f}) | l|gg| {s['g'][0]:.3f}->{s['g'][-1]:.3f} "
-              f"| ratio {s['ratio'][0]:.4f}->{s['ratio'][-1]:.4f} max {s['ratio'].max():.3f} | cos@1 {s['cos'][0]:+.4f} mean {s['cos'].mean():+.4f} "
-              f"range [{s['cos'].min():+.3f},{s['cos'].max():+.3f}] | sf {s['sf'][0]:.4f}->{s['sf'][-1]:.4f}")
+        clip = r.step_series("step_clip_norm")[1]
+        _, cos_seeds = r.step_series("step_grad_cosine", seeds=True)
+        neg = np.nanmean(cos_seeds < 0)
+        rows.append(f"    {r.label} & {np.nanmean(kd):.1f} & {np.nanmean(g):.2f} & {np.nanmean(ratio):.3f} & "
+                    f"{np.nanmean(cos):+.4f} ({np.nanmean(np.abs(cos)):.3f}) & {neg:.2f} & "
+                    f"{np.nanmin(clip):.1f}--{np.nanmax(clip):.1f} \\\\")
+        print(f"{r.label}: |gKD| {kd[0]:.1f}->{np.nanmean(kd[-5:]):.1f} | l|gg| {g[0]:.2f}->{np.nanmean(g[-5:]):.2f} | ratio@1 {ratio[0]:.4f} mean {np.nanmean(ratio):.3f} "
+              f"max {np.nanmax(ratio):.3f} | cos mean {np.nanmean(cos):+.4f} neg {neg:.2f} | clip {np.nanmin(clip):.1f}-{np.nanmax(clip):.1f}")
+    if scr is None:
+        rows.insert(1, "    BOS-free, $\\lambda = 3$, scrambled & " + " & ".join(["\\pending{}"] * 6) + " \\\\")
+    write_table("grad_dynamics", rows,
+                "columns: arm & |g_KD| & lambda|g_graph| & ratio & cos (mean |cos|) & frac steps cos<0 & pre-clip norm range; run means")
+
+    # Step-1 accumulation loss across lambda (same weights and batch at step 1), printed
+    # for the Appendix A precision paragraph; no longer tabulated in the paper.
+    for lam_, r in sweep.items():
+        h = r.hists[0]
+        print(f"step 1 lambda={lam_:g}: |gKD| {h['step_kl_gnorm'][0]:.2f} |g|/lam {h['step_graph_gnorm'][0]/lam_:.4f} ratio/lam {h['step_grad_ratio'][0]/lam_:.5f} cos {h['step_grad_cosine'][0]:+.4f}")
 
 
 if __name__ == "__main__":

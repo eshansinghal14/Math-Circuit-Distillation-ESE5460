@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import math
 from typing import Any
 
 import torch
@@ -12,6 +13,38 @@ import torch.nn.functional as F
 
 from graph_loss.attribution.targets import AttributionTargets, TargetSpec
 from graph_loss.graph import Graph
+
+
+def _silu_d(x: torch.Tensor) -> torch.Tensor:
+    sigma = torch.sigmoid(x)
+    return sigma + x * sigma * (1 - sigma)
+
+
+_K = math.sqrt(2.0 / math.pi)
+
+
+def _gelu_tanh(x: torch.Tensor) -> torch.Tensor:
+    return F.gelu(x, approximate="tanh")
+
+
+def _gelu_tanh_d(x: torch.Tensor) -> torch.Tensor:
+    u = _K * (x + 0.044715 * x ** 3)
+    t = torch.tanh(u)
+    return 0.5 * (1 + t) + 0.5 * x * (1 - t * t) * _K * (1 + 3 * 0.044715 * x * x)
+
+
+def _gelu_d(x: torch.Tensor) -> torch.Tensor:
+    return 0.5 * (1 + torch.erf(x / math.sqrt(2.0))) + x * torch.exp(-0.5 * x * x) / math.sqrt(2 * math.pi)
+
+
+# name in the HF config -> (activation, its derivative); the gated MLP is act(gate) * up in every family here
+ACTIVATIONS = {
+    "silu": (F.silu, _silu_d),
+    "swish": (F.silu, _silu_d),
+    "gelu_pytorch_tanh": (_gelu_tanh, _gelu_tanh_d),
+    "gelu_new": (_gelu_tanh, _gelu_tanh_d),
+    "gelu": (F.gelu, _gelu_d),
+}
 
 
 class HFLlamaGraphAdapter:
@@ -152,10 +185,33 @@ class HFLlamaGraphAdapter:
             f"Unsupported weight shape {tuple(weight.shape)} for row shape {(rows, cols)}",
         )
 
-    @staticmethod
-    def _silu_derivative(x: torch.Tensor) -> torch.Tensor:
-        sigma = torch.sigmoid(x)
-        return sigma + x * sigma * (1 - sigma)
+    @property
+    def act_name(self) -> str:
+        """The gated MLP's activation, from the config (Llama / Qwen / Mistral: silu; Gemma: gelu_pytorch_tanh)."""
+        name = getattr(self.config, "hidden_activation", None) or getattr(self.config, "hidden_act", None) or "silu"
+        if name not in ACTIVATIONS:
+            raise NotImplementedError(f"MLP activation {name!r} is not supported by the graph adapter ({sorted(ACTIVATIONS)})")
+        return name
+
+    def _act(self, x: torch.Tensor) -> torch.Tensor:
+        return ACTIVATIONS[self.act_name][0](x)
+
+    def _act_derivative(self, x: torch.Tensor) -> torch.Tensor:
+        return ACTIVATIONS[self.act_name][1](x)
+
+    def _silu_derivative(self, x: torch.Tensor) -> torch.Tensor:
+        """Kept for callers of the old name: the derivative of whatever activation the model uses."""
+        return self._act_derivative(x)
+
+    @property
+    def mask_first_position(self) -> bool:
+        """Position 0 is excluded from neuron selection only when it is a BOS token.
+
+        Llama prepends one (an attention sink whose neurons are huge and
+        prompt-independent); Qwen has no BOS token, and there position 0 is the
+        first real token of the prompt.
+        """
+        return self.tokenizer.bos_token_id is not None and bos_in_eval()
 
     def _layer_weights(self, layer_idx: int, *, device, dtype):
         mlp = self.layers[layer_idx].mlp
@@ -198,9 +254,9 @@ class HFLlamaGraphAdapter:
         )
         gate_pre = mlp_input @ gate_rows.T + gate_bias
         up_pre = mlp_input @ up_rows.T + up_bias
-        gate_act = F.silu(gate_pre)
+        gate_act = self._act(gate_pre)
         neuron_activations = gate_act * up_pre
-        gate_grad = self._silu_derivative(gate_pre)
+        gate_grad = self._act_derivative(gate_pre)
         target_encoders = (
             gate_act.unsqueeze(-1) * up_rows.unsqueeze(0)
             + (up_pre * gate_grad).unsqueeze(-1) * gate_rows.unsqueeze(0)
@@ -210,7 +266,7 @@ class HFLlamaGraphAdapter:
         # the saved neuron_activations.unsqueeze(-1) view ([n_pos, d_mlp, 1]) that
         # autograd holds for the grad w.r.t. out_rows, triggering AsStridedBackward0 error.
         n_pos = neuron_activations.shape[0]
-        if n_pos > 0:
+        if n_pos > 0 and self.mask_first_position:
             bos_mask = torch.ones(n_pos, dtype=neuron_activations.dtype, device=neuron_activations.device)
             bos_mask[0] = 0.0
             neuron_activations = neuron_activations * bos_mask.view(-1, 1)
@@ -223,7 +279,9 @@ class HFLlamaGraphAdapter:
         layer_idx: int,
         mlp_input: torch.Tensor,  # [n_pos, d_model]
         prop_neurons_per_layer: float,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        influence_grad: torch.Tensor | None = None,  # [n_pos, d_model]
+        act_baseline: torch.Tensor | None = None,  # [d_mlp]
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Memory-efficient, grad-safe variant of ``_compute_layer_neuron_data``.
 
         Avoids the two ``[n_pos, d_mlp, d_model]`` intermediates (the
@@ -247,6 +305,7 @@ class HFLlamaGraphAdapter:
             acts:    [k] neuron activations (BOS-zeroed).
             te_kept: [k, d_model] target encoders for the selected neurons.
             sv_kept: [k, d_model] source vectors for the selected neurons.
+            scores:  [k] the selection score of each kept neuron (detached, float32).
         """
         gate_rows, up_rows, out_rows, gate_bias, up_bias = self._layer_weights(
             layer_idx,
@@ -257,9 +316,9 @@ class HFLlamaGraphAdapter:
         # the student gradient can flow back through them. Do NOT detach here.
         gate_pre = mlp_input @ gate_rows.T + gate_bias  # [n_pos, d_mlp]
         up_pre = mlp_input @ up_rows.T + up_bias  # [n_pos, d_mlp]
-        gate_act = F.silu(gate_pre)  # [n_pos, d_mlp]
+        gate_act = self._act(gate_pre)  # [n_pos, d_mlp]
         neuron_acts = gate_act * up_pre  # [n_pos, d_mlp]
-        gate_grad = self._silu_derivative(gate_pre)  # [n_pos, d_mlp]
+        gate_grad = self._act_derivative(gate_pre)  # [n_pos, d_mlp]
 
         # BOS masking (zero position 0) via out-of-place multiply so it is never
         # selected and to match _compute_layer_neuron_data exactly. Out-of-place
@@ -267,7 +326,7 @@ class HFLlamaGraphAdapter:
         # bos_mask is binary so masking the factors of a product is equivalent to
         # masking the product (0**2 == 0, 1**2 == 1).
         n_pos = neuron_acts.shape[0]
-        if n_pos > 0:
+        if n_pos > 0 and self.mask_first_position:
             bos_mask = torch.ones(n_pos, dtype=neuron_acts.dtype, device=neuron_acts.device)
             bos_mask[0] = 0.0
             bm = bos_mask.unsqueeze(-1)  # [n_pos, 1]
@@ -280,8 +339,25 @@ class HFLlamaGraphAdapter:
         # == |neuron_acts[i,j]| * norm(out_rows[j]), identical ranking to the old
         # layer_source_vectors.norm(dim=-1). top-k indices are non-differentiable,
         # so detach to avoid building a scoring grad graph.
-        out_norms = out_rows.norm(dim=-1)  # [d_mlp]
-        sv_norms = neuron_acts.detach().abs() * out_norms.unsqueeze(0)  # [n_pos, d_mlp]
+        if influence_grad is None:
+            out_norms = out_rows.norm(dim=-1)  # [d_mlp]
+            sv_norms = neuron_acts.detach().abs() * out_norms.unsqueeze(0)  # [n_pos, d_mlp]
+        else:
+            # neuron_selection="influence": |gradient x activation| of the prediction
+            # w.r.t. this neuron's write, |act[p, j] * (out_rows[j] . g[p])|, where g
+            # is d(target)/d(mlp_out) from logit_influence_grads. Ranks neurons by
+            # their linearised effect on the attributed prediction instead of by how
+            # much they write; same [n_pos, d_mlp] footprint as the norm score.
+            g = influence_grad.detach().to(device=out_rows.device, dtype=out_rows.dtype)
+            scored_acts = neuron_acts.detach()
+            if act_baseline is not None:
+                # neuron_selection="contrast": the activation relative to the neuron's mean
+                # over a reference set of prompts, so an always-on neuron scores nothing.
+                # BOS is masked again: its activations are zeroed above, and 0 - mean is not 0.
+                scored_acts = scored_acts - act_baseline.detach().to(device=scored_acts.device, dtype=scored_acts.dtype)
+                if n_pos > 0 and self.mask_first_position:
+                    scored_acts = scored_acts * bm
+            sv_norms = scored_acts.abs() * (g @ out_rows.detach().T).abs()  # [n_pos, d_mlp]
         flat_norms = sv_norms.reshape(-1)
         total = flat_norms.numel()
         k = min(max(1, int(total * prop_neurons_per_layer)), total)
@@ -303,7 +379,7 @@ class HFLlamaGraphAdapter:
         kept_out = out_rows[keep_neu]  # [k, d_model]
         sv_kept = kept_acts.unsqueeze(-1) * kept_out  # [k, d_model]
 
-        return keep, kept_acts, te_kept, sv_kept
+        return keep, kept_acts, te_kept, sv_kept, flat_norms[keep].detach().float()
 
     def build_graph(
         self,

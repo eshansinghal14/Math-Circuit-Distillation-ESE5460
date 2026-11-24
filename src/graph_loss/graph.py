@@ -749,6 +749,119 @@ def select_arg_supernodes(
     return raw_supernodes, supernode_labels_out
 
 
+SUPERNODE_TYPES = ("arg", "position")
+
+
+def occurrence_labels(tokenizer, token_ids: list[int], prefix: str) -> list[str | None]:
+    """One label per token position (``None`` for a leading BOS): ``<prefix>:<token>``,
+    and ``<prefix>:<token>#k`` for the k-th occurrence of a token (k >= 2).
+
+    The same scheme select_arg_supernodes writes inline. Teacher and student see
+    the same token sequence, so the labels line up position for position.
+    """
+    bos_id = getattr(tokenizer, "bos_token_id", None)
+    start = 1 if (bos_id is not None and token_ids and token_ids[0] == bos_id) else 0
+    seen: dict[str, int] = {}
+    labels: list[str | None] = [None] * start
+    for token_id in token_ids[start:]:
+        try:
+            token_str = tokenizer.decode([int(token_id)])
+        except Exception:
+            token_str = str(token_id)
+        seen[token_str] = seen.get(token_str, 0) + 1
+        labels.append(f"{prefix}:{token_str}" if seen[token_str] == 1 else f"{prefix}:{token_str}#{seen[token_str]}")
+    return labels
+
+
+def select_position_supernodes(
+    ctx: "HFAttributionContext",
+    tokenizer,
+    input_ids: torch.Tensor,
+    nodes_per_token: int = 10,
+    bands: int = 1,
+) -> tuple[list[list[int]], list[list[str]]]:
+    """One supernode per token position: the pre-selected neurons that sit *at* it.
+
+    Members are the ``nodes_per_token`` neurons located at the position with the
+    highest pre-selection score (``ctx.selection_scores``: write norm, or
+    |gradient x activation| on the attributed prediction under
+    ``neuron_selection="influence"``). Membership is defined by where a neuron is,
+    which is the same in teacher and student by construction, where
+    select_arg_supernodes defines it by alignment with the token's embedding and
+    so picks early token detectors in a model with untied embeddings and late
+    output-side neurons in one that ties them (measured 2026-11-12: 78% vs 26-38%
+    of members in the first third of layers, and 15-24% at the node's own token).
+
+    ``bands`` > 1 splits each position into that many equal depth bands (by
+    relative layer, so a 16- and a 32-layer model share the bands), labelled
+    ``pos:<token>/b<i>``. A position (or band) with no pre-selected neuron gets no
+    supernode; the trainer aligns teacher and student on the labels both have.
+
+    Returns the same ``(raw_supernodes, supernode_labels)`` as select_arg_supernodes.
+    """
+    if ctx.selection_scores is None:
+        raise ValueError("position supernodes need ctx.selection_scores (set by setup_attribution)")
+    loc = ctx.neuron_locations
+    scores = ctx.selection_scores.to(device=loc.device)
+    n_layers = int(ctx.adapter.n_layers)
+    bands = max(1, int(bands))
+    band_of = (loc[:, 0] * bands) // n_layers
+    labels = occurrence_labels(tokenizer, input_ids.detach().cpu().tolist(), "pos")
+
+    raw_supernodes: list[list[int]] = []
+    supernode_labels_out: list[list[str]] = []
+    for pos, label in enumerate(labels):
+        if label is None:
+            continue
+        at_pos = loc[:, 1] == pos
+        for b in range(bands):
+            idx = torch.where(at_pos & (band_of == b))[0] if bands > 1 else torch.where(at_pos)[0]
+            if idx.numel() == 0:
+                continue
+            k = min(int(nodes_per_token), int(idx.numel()))
+            top = idx[torch.topk(scores[idx], k).indices]
+            raw_supernodes.append([int(i) for i in top.tolist()])
+            supernode_labels_out.append([f"{label}/b{b}" if bands > 1 else label])
+    return raw_supernodes, supernode_labels_out
+
+
+def answer_row_supernodes(supernode_labels) -> set[int]:
+    """--graph-rows answer: the DLA supernode and every arg/position supernode of a number token."""
+    keep = set()
+    for i, labels in enumerate(supernode_labels or []):
+        if not labels:
+            continue
+        lab = labels[0]
+        if lab == "dla":
+            keep.add(i)
+        elif lab.startswith(("arg:", "pos:")):
+            tok = lab[4:].split("#")[0].split("/b")[0].strip()
+            if tok and tok.lstrip("-").replace(".", "", 1).isdigit():
+                keep.add(i)
+    return keep
+
+
+def last_row_supernodes(supernode_labels) -> set[int]:
+    """--graph-rows last: the DLA supernode and the supernode(s) of the final token position."""
+    import re
+    labels = [(l[0] if l else "") for l in (supernode_labels or [])]
+    keep = {i for i, lab in enumerate(labels) if lab == "dla"}
+    tok = [i for i, lab in enumerate(labels) if lab.startswith(("arg:", "pos:"))]
+    if tok:
+        base = re.sub(r"/b\d+$", "", labels[tok[-1]])
+        keep.update(i for i in tok if re.sub(r"/b\d+$", "", labels[i]) == base)
+    return keep
+
+
+def scored_supernodes(supernode_labels, graph_rows: str) -> set[int]:
+    """Indices of the supernodes whose rows a --graph-rows choice scores."""
+    if graph_rows == "answer":
+        return answer_row_supernodes(supernode_labels)
+    if graph_rows == "last":
+        return last_row_supernodes(supernode_labels)
+    raise ValueError(f"no row subset is defined for graph_rows={graph_rows!r}")
+
+
 SUPERGRAPH_AGGREGATIONS = ("normalised", "raw-signed", "token-path")
 SUPERNODE_MEMBERSHIP_TYPES = ("topk", "soft")
 
@@ -1062,10 +1175,19 @@ def aggregate_supernode_adjacency(
         rows = []
         for t in range(num_supernodes):
             target_members = supernodes[t]
+            # The members' inbound rows, taken once: indexing the full matrix again for
+            # every source supernode copied [members, all sources] K times per target,
+            # which at 100 neurons per node was most of a student graph's time.
+            block = adj_matrix_norm[target_members]
+            if not bool((block != 0).any()):
+                # No member has an attributed row (target rows restricted to the scored
+                # supernodes): every entry below would be 0 / epsilon = 0.
+                rows.append(block.new_zeros(num_supernodes + n_tokens))
+                continue
             # frac_external(n_t): fraction of the absolute-valued *input* weights to n_t
             # that originate outside the supernode -- a row sum over n_t's incoming edges.
-            total_input = torch.abs(adj_matrix_norm[target_members]).sum(dim=1)
-            internal_input = torch.abs(adj_matrix_norm[target_members][:, target_members]).sum(dim=1)
+            total_input = torch.abs(block).sum(dim=1)
+            internal_input = torch.abs(block[:, target_members]).sum(dim=1)
             if constant_node_weighting:
                 frac_external = torch.ones_like(total_input)
             else:
@@ -1073,10 +1195,10 @@ def aggregate_supernode_adjacency(
             weight_sum = frac_external.sum(dim=0).clamp(min=epsilon)
             entries = []
             for s in range(num_supernodes):
-                sum_A = adj_matrix_norm[target_members][:, supernodes[s]].sum(dim=1)
+                sum_A = block[:, supernodes[s]].sum(dim=1)
                 entries.append((frac_external * sum_A).sum(dim=0) / weight_sum)
             for p in range(n_tokens):
-                entries.append((frac_external * adj_matrix_norm[target_members, n_neurons + p]).sum(dim=0) / weight_sum)
+                entries.append((frac_external * block[:, n_neurons + p]).sum(dim=0) / weight_sum)
             rows.append(torch.stack(entries))
         return torch.stack(rows)
 

@@ -28,15 +28,23 @@ that the paper pulls in with `\tablerows{}`; never edit those by hand):
 
 | script | figure / table |
 | --- | --- |
-| `plot_main_results.py` | graph distillation vs SFT vs standard KD, all families; `tables/main_results.tex` |
-| `plot_lambda_sweep.py` | Appendix D: the λ sweep with both references; `tables/lambda.tex` |
-| `plot_freeze_ablation.py` | Appendix C: the linearisation arms; `tables/freeze_train.tex`. A missing arm becomes a `\pending{}` column. |
-| `plot_grad_metrics.py` | Appendix C: per-step gradient metrics; `tables/freeze_dynamics.tex` |
-| `plot_scramble.py` | Appendix D: real against scrambled routing target, accuracy and losses |
+| `plot_main_results.py` | Table 1 / Figure 3: standard KD, TinyBERT, CKA, SFT (3 seeds each), graph distillation with ANOVA supernodes at lambda 3, and the scrambled target (pending); `tables/main_results.tex` |
+| `plot_scramble.py` | Figure 4: real against scrambled routing target, accuracy and losses |
+| `plot_ablations.py` | Appendix B: lambda sweep, supernode-size x pre-selection grid, BOS-on ablation; `tables/{lambda_sweep,supernode_grid,bos_on}.tex`, `figures/ablations.pdf` |
+| `plot_kd_sweep.py` | Appendix B: the standard-KD protocol sweep and the TinyBERT/CKA weight sweeps; `tables/kd_sweep.tex`, `tables/rep_sweep.tex` |
+| `plot_compute.py` | Section 4.2 (Table 2) and Appendix D: FLOPs per step for KD vs graph distillation (warm and cold teacher cache), and each arm's accuracy at a matched FLOP budget -- the graph arm at steps 20 and 100 against KD with its schedule stretched to 280 and 1400; `tables/compute.tex` |
+| `plot_grad_metrics.py` | Appendix C: per-step gradient metrics, run means per arm and step-1 canaries; `tables/grad_dynamics.tex`, `tables/canaries.tex` |
+| `plot_second_student.py` | Section 4.3 and Appendix B: graph distillation vs standard KD on the Llama-3.2-3B student (3 seeds each, nothing retuned) and the 3B KD learning-rate sweep; `tables/second_student.tex`, `tables/second_student_sweep.tex`, `figures/second_student.pdf` |
 
-`_paper_plots.py` holds the shared loader (every seed in a history, mean ± sd),
-the summary statistics (values at a step, per-seed peaks, dip / recovery) and the
-palette.
+`_paper_plots.py` holds the shared loader and the run specs. Histories hold every
+run under `runs`, keyed `#<digest>|seed=<n>`; `select_runs(path, where, label)`
+picks the runs whose recorded config matches `where` (identity is the config
+content, so a run stored under two key spellings counts once) and NaN-pads a
+seed whose evaluation stopped early. Never read a file's top level, which is
+whichever run wrote last. Tables report each seed at its own best in-distribution
+step (`summary()["sel"]`), because every arm peaks and then eases back at a
+different step per seed. A spec whose history is missing (`required=False`)
+becomes a `\pending{}` column, so the paper builds before every run has landed.
 
 | `inspect_graphs.py` | Where does the student's supergraph differ from the teacher's when it is right vs wrong, and which construction of the graph target is worth training on? Scores a split under teacher forcing, buckets prompts (right-confident, right-unsure, wrong-with-carry, wrong-without), builds both models' graphs for a few per bucket and derives five constructions from the same attributions (`normalised`, `raw-signed`, `gold-signed` and `gold-path` — edges re-oriented by each target neuron's effect on the gold logit so member sums add coherently — and `composition`, the per-block split of inbound mass over arg blocks / sum blocks / tokens), each scored with rel-mse, cosine, row JSD and mass-weighted row JSD. `summary.json` carries per-bucket means and `controls`: same-prompt vs shuffled-prompt distance, teacher-vs-teacher and student-vs-student across prompts, right-vs-wrong gap, a membership noise floor (`--noise-drop-members`) and an optional pool noise floor (`--noise-pool-prop`). `--kd-checkpoint` graphs a standard-KD student as a third model (its distance to the teacher and to the untrained student, `kd_minus_student` in the controls). `--student-checkpoint` runs it on a trained student. `--dataset` takes any N-ary addition set (`222_add` works with `sum range`, `sum units`, `tokens`, `argN ...`). GPU. |
 

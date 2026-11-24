@@ -27,6 +27,115 @@ if TYPE_CHECKING:
     from graph_loss.hf_adapter import HFLlamaGraphAdapter
 
 
+NEURON_SELECTIONS = ("norm", "influence", "contrast")
+
+
+def logit_influence_grads(
+    adapter: "HFLlamaGraphAdapter",
+    input_ids: torch.Tensor,
+    dtype: torch.dtype | None,
+    *,
+    target_position: int = -1,
+    target_ids: torch.Tensor | None = None,
+    ref_logits: torch.Tensor | None = None,
+    top_k_logits: float | None = 0.95,
+    temperature: float = 1.0,
+) -> list[torch.Tensor]:
+    """``d(target) / d(mlp_out[l])`` for every layer, each ``[n_pos, d_model]``, detached.
+
+    The target is the prediction the graph attributes from: the probability-weighted
+    sum of the salient logits at ``target_position``, minus the mean logit (so a
+    direction that raises every logit alike scores nothing). ``ref_logits`` supplies
+    the probabilities and, when ``target_ids`` is None, the salient set (fewest top
+    logits reaching ``top_k_logits`` mass, capped at 10, as AttributionTargets does);
+    it defaults to the model's own logits. The trainer gives the student the
+    teacher's logit ids and reference logits, so both models are scored against the
+    same tokens with the same weights.
+
+    Runs its own forward on a detached embedding, so nothing here touches the
+    autograd graph the student's training gradient flows through.
+    """
+    input_batch = input_ids.unsqueeze(0)
+    outs: dict[int, torch.Tensor] = {}
+    handles = []
+
+    def embed_hook(_module, _inputs, output):
+        return output.detach().requires_grad_(True)
+
+    handles.append(adapter.embed_tokens.register_forward_hook(embed_hook))
+    for layer_idx, layer in enumerate(adapter.layers):
+        def _out(m, _inputs, output, *, idx=layer_idx):
+            outs[idx] = output
+
+        handles.append(layer.mlp.register_forward_hook(_out))
+    try:
+        with torch.enable_grad(), without_gradient_checkpointing(adapter.model), adapter.autocast_context(dtype):
+            logits = adapter.model(
+                input_ids=input_batch,
+                attention_mask=torch.ones_like(input_batch, device=adapter.device),
+                use_cache=False,
+            ).logits[0, target_position].float()
+            ref = (ref_logits if ref_logits is not None else logits).detach().float().to(logits.device)
+            probs = torch.softmax(ref / max(float(temperature), 1e-6), dim=-1)
+            if target_ids is None:
+                sorted_probs, sorted_idx = torch.sort(probs, descending=True)
+                if top_k_logits is None:
+                    k = 1
+                else:
+                    k = int((torch.cumsum(sorted_probs, dim=-1) < top_k_logits).sum().item()) + 1
+                ids = sorted_idx[: min(k, 10, probs.numel())]
+            else:
+                ids = target_ids.to(device=logits.device, dtype=torch.long).reshape(-1)
+            w = probs[ids]
+            w = w / w.sum().clamp(min=1e-12)
+            target = (w * logits[ids]).sum() - logits.mean()
+            grads = torch.autograd.grad(target, [outs[i] for i in range(adapter.n_layers)], allow_unused=True)
+    finally:
+        for h in handles:
+            h.remove()
+    return [
+        (g[0].detach() if g is not None else torch.zeros_like(outs[i][0]).detach())
+        for i, g in enumerate(grads)
+    ]
+
+
+def neuron_activation_means(
+    adapter: "HFLlamaGraphAdapter",
+    prompts: Sequence[torch.Tensor | str],
+    dtype: torch.dtype | None,
+) -> torch.Tensor:
+    """``[n_layers, d_mlp]`` mean activation of every MLP neuron over every non-BOS
+    position of ``prompts`` (the input of each ``mlp.down_proj``), detached, float32.
+
+    The baseline ``neuron_selection="contrast"`` subtracts. It is a property of the
+    weights, so a caller that trains the model should recompute it when they have
+    moved far; for a gradient check on fixed weights it is computed once.
+    """
+    total: torch.Tensor | None = None
+    count = 0
+    captured: dict[int, torch.Tensor] = {}
+    handles = []
+    for layer_idx, layer in enumerate(adapter.layers):
+        def _pre(m, inputs, *, idx=layer_idx):
+            captured[idx] = inputs[0]
+
+        handles.append(layer.mlp.down_proj.register_forward_pre_hook(_pre))
+    try:
+        with torch.no_grad(), without_gradient_checkpointing(adapter.model), adapter.autocast_context(dtype):
+            for prompt in prompts:
+                ids = adapter.ensure_tokenized(prompt).unsqueeze(0)
+                adapter.model(input_ids=ids, attention_mask=torch.ones_like(ids), use_cache=False)
+                sums = torch.stack([captured[i][0, 1:].float().sum(0) for i in range(adapter.n_layers)])
+                total = sums if total is None else total + sums
+                count += ids.shape[1] - 1
+    finally:
+        for h in handles:
+            h.remove()
+    if total is None or count == 0:
+        raise ValueError("neuron_activation_means needs at least one prompt with a token after BOS")
+    return (total / count).detach()
+
+
 def setup_attribution(
     adapter: "HFLlamaGraphAdapter",
     input_ids: torch.Tensor,
@@ -35,6 +144,8 @@ def setup_attribution(
     *,
     freeze_attention: bool = False,
     freeze_rms_norm: bool = False,
+    neuron_selection: str = "norm",
+    selection_kwargs: dict | None = None,
 ) -> HFAttributionContext:
     """Run the initial single forward pass and return an ``HFAttributionContext``.
 
@@ -49,7 +160,29 @@ def setup_attribution(
     alter any value produced here, so the resulting graph is identical either way,
     while the autograd graph attached to ``mlp_inputs`` -- the student's only
     gradient path from the graph loss back to the model weights -- stays intact.
+
+    ``neuron_selection``: ``"norm"`` keeps the top neurons per layer by
+    source-vector norm (how much they write); ``"influence"`` keeps the top by
+    |gradient x activation| on the attributed prediction (see
+    :func:`logit_influence_grads`, which ``selection_kwargs`` is passed to);
+    ``"contrast"`` is influence with each neuron's activation taken relative to
+    its mean over a reference set of prompts (``adapter.neuron_act_means``,
+    ``[n_layers, d_mlp]``, from :func:`neuron_activation_means`), so a neuron that
+    is equally active on every prompt scores nothing. Only which neurons are kept
+    changes; the edges are attributed exactly as before.
     """
+    if neuron_selection not in NEURON_SELECTIONS:
+        raise ValueError(f"neuron_selection must be one of {NEURON_SELECTIONS}, got {neuron_selection!r}")
+    influence = None
+    if neuron_selection in ("influence", "contrast"):
+        influence = logit_influence_grads(adapter, input_ids, dtype, **(selection_kwargs or {}))
+    act_means = None
+    if neuron_selection == "contrast":
+        act_means = getattr(adapter, "neuron_act_means", None)
+        if act_means is None:
+            raise ValueError(
+                "neuron_selection='contrast' needs adapter.neuron_act_means; set it with "
+                "graph_loss.attribution.attribute.neuron_activation_means(adapter, prompts, dtype)")
     input_batch = input_ids.unsqueeze(0)
     mlp_inputs: dict[int, torch.Tensor] = {}
     embed_out: torch.Tensor | None = None
@@ -106,6 +239,7 @@ def setup_attribution(
     target_encoders = []
     source_vectors = []
     source_layer_by_node: list[int] = []
+    selection_scores = []
 
     # NOTE: do NOT wrap this loop in torch.no_grad() and do NOT CPU-offload the
     # kept tensors. setup_attribution runs in two contexts: the TEACHER path is
@@ -117,9 +251,11 @@ def setup_attribution(
     # a no_grad wrapper + CPU offload here broke student gradients and was reverted.
     for layer_idx in range(adapter.n_layers):
         layer_input = mlp_inputs[layer_idx].squeeze(0)
-        keep, layer_acts_kept, layer_te_kept, layer_sv_kept = (
+        keep, layer_acts_kept, layer_te_kept, layer_sv_kept, layer_scores = (
             adapter._compute_layer_neuron_data_selective(
-                layer_idx, layer_input, prop_neurons_per_layer
+                layer_idx, layer_input, prop_neurons_per_layer,
+                influence_grad=None if influence is None else influence[layer_idx],
+                act_baseline=None if act_means is None else act_means[layer_idx],
             )
         )
 
@@ -135,6 +271,7 @@ def setup_attribution(
         neuron_activations.append(layer_acts_kept)
         target_encoders.append(layer_te_kept)
         source_vectors.append(layer_sv_kept)
+        selection_scores.append(layer_scores)
         source_layer_by_node.extend([layer_idx] * int(keep.numel()))
 
     return HFAttributionContext(
@@ -150,6 +287,7 @@ def setup_attribution(
         dtype=dtype,
         freeze_attention=freeze_attention,
         freeze_rms_norm=freeze_rms_norm,
+        selection_scores=torch.cat(selection_scores, dim=0),
     )
 
 
@@ -165,8 +303,15 @@ def _attribute_from_context(
     skip_logit_attribution: bool = False,
     verbose: bool = False,
     target_position: int = -1,
+    target_rows: Sequence[int] | None = None,
 ) -> Graph:
     """Build a Graph from a pre-built HFAttributionContext (edge attribution phase only).
+
+    ``target_rows``: neuron indices whose inbound rows are attributed; every other
+    neuron keeps a zero row (it is still a source column). The supernode rows the
+    loss scores depend only on their own members' rows, so when few supernodes
+    are scored this removes most of the backward passes: with --graph-rows last
+    the cost is 2 nodes' neurons instead of every position's.
 
     Always includes token embedding and logit target nodes in the adjacency matrix.
     Token and logit nodes are needed for the frac_external calculation in
@@ -201,16 +346,30 @@ def _attribute_from_context(
 
     # Gradient-based edge attribution.
     neuron_row_chunks = []
-    for start in range(0, n_neurons, max(1, batch_size)):
-        end = min(start + max(1, batch_size), n_neurons)
-        if verbose:
-            print(f"    [graph] neuron rows {start}:{end} / {n_neurons}")
-        neuron_row_chunks.append(ctx.compute_neuron_batch(start, end, create_graph=create_graph))
-    neuron_rows = (
-        torch.cat(neuron_row_chunks, dim=0)
-        if neuron_row_chunks
-        else torch.zeros(0, source_count, dtype=ctx.source_vectors.dtype, device=adapter.device)
-    )
+    if target_rows is None:
+        for start in range(0, n_neurons, max(1, batch_size)):
+            end = min(start + max(1, batch_size), n_neurons)
+            if verbose:
+                print(f"    [graph] neuron rows {start}:{end} / {n_neurons}")
+            neuron_row_chunks.append(ctx.compute_neuron_batch(start, end, create_graph=create_graph))
+        neuron_rows = (
+            torch.cat(neuron_row_chunks, dim=0)
+            if neuron_row_chunks
+            else torch.zeros(0, source_count, dtype=ctx.source_vectors.dtype, device=adapter.device)
+        )
+    else:
+        wanted = sorted({int(r) for r in target_rows})
+        step = max(1, batch_size)
+        for start in range(0, len(wanted), step):
+            if verbose:
+                print(f"    [graph] neuron rows {start}:{start + step} of {len(wanted)} scored ({n_neurons} kept)")
+            neuron_row_chunks.append(ctx.compute_neuron_rows(wanted[start:start + step], create_graph=create_graph))
+        neuron_rows = torch.zeros(n_neurons, source_count, dtype=ctx.source_vectors.dtype, device=adapter.device)
+        if neuron_row_chunks:
+            # index_copy (out of place) so the student's rows stay in the autograd graph
+            neuron_rows = neuron_rows.index_copy(
+                0, torch.tensor(wanted, device=adapter.device, dtype=torch.long),
+                torch.cat(neuron_row_chunks, dim=0).to(neuron_rows.dtype))
 
     # Logit attribution: compute rows for logit target nodes.
     # Token and logit nodes are always included in the adjacency matrix so that

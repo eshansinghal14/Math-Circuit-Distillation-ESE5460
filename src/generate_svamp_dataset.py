@@ -17,6 +17,13 @@ Two formats:
   ``--graph-position final-answer`` builds the graph term at the position that
   predicts that number. Every equation is evaluated and must reproduce the gold
   answer, or the problem is dropped.
+* ``--format eq`` (-> ``svamp_eq``): the equation and its result, nothing after::
+
+      290 / 2 = 145
+
+  ``answer_type: eq`` grades the number after the first "=" of the continuation,
+  and ``--graph-position final-answer`` lands on that number: the arithmetic
+  step, where the cot format's final number is only a copy of it.
 * ``--format direct`` (-> ``svamp_direct``): the bare number, graded by the
   leading integer, graph at the last prompt position.
 
@@ -50,7 +57,7 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from utils import DIR_ROOT, extract_cot_answer, split_final_answer  # noqa: E402
+from utils import DIR_ROOT, extract_cot_answer, extract_eq_answer, split_final_answer  # noqa: E402
 
 TEMPLATES = {
     "direct": (
@@ -61,6 +68,11 @@ TEMPLATES = {
     "cot": (
         "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n"
         "{question}\nWrite the equation, then the final answer as \"The answer is N.\"<|eot_id|>"
+        "<|start_header_id|>assistant<|end_header_id|>\n\n"
+    ),
+    "eq": (
+        "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n"
+        "{question}\nWrite the equation and its result.<|eot_id|>"
         "<|start_header_id|>assistant<|end_header_id|>\n\n"
     ),
 }
@@ -105,7 +117,7 @@ def _rows(split, fmt: str, max_answer: int, stats: dict) -> list[dict]:
         if ans < 0 or ans > max_answer:
             stats["out_of_range"] += 1
             continue
-        if fmt == "cot":
+        if fmt in ("cot", "eq"):
             eq = clean_equation(str(ex.get("Equation") or ""))
             if not eq or not _SAFE.match(eq):
                 stats["bad_equation"] += 1
@@ -118,8 +130,12 @@ def _rows(split, fmt: str, max_answer: int, stats: dict) -> list[dict]:
             if abs(val - ans) > 1e-6:
                 stats["equation_mismatch"] += 1
                 continue
-            response = f"{eq} = {ans}\nThe answer is {ans}."
-            assert extract_cot_answer(response) == ans and split_final_answer(response)[1] == str(ans)
+            if fmt == "eq":
+                response = f"{eq} = {ans}"
+                assert extract_eq_answer(response) == ans and split_final_answer(response) == (f"{eq} = ", str(ans))
+            else:
+                response = f"{eq} = {ans}\nThe answer is {ans}."
+                assert extract_cot_answer(response) == ans and split_final_answer(response)[1] == str(ans)
         else:
             response = str(ans)
         rows.append({"q_str": TEMPLATES[fmt].format(question=text), "a_str": response})
@@ -160,7 +176,7 @@ def main() -> None:
         with open(os.path.join(out_dir, fname), "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4)
     with open(os.path.join(out_dir, "meta.json"), "w", encoding="utf-8") as f:
-        json.dump({"answer_type": "cot" if args.format == "cot" else "int", "source": args.hub_id,
+        json.dump({"answer_type": {"cot": "cot", "eq": "eq"}.get(args.format, "int"), "source": args.hub_id,
                    "format": args.format}, f, indent=4)
     print(f"wrote {out_dir}: train {len(train)} | sft {len(sft)} | test {len(test)} | dropped {stats} | "
           f"train/test overlap removed {n_overlap}")
