@@ -19,6 +19,7 @@ and the result lie in 0..999):
              the answer is the number the queried chain ends in. No arithmetic: a
              wrong answer that is another chain's number is a routing error by
              construction.
+    chainlong  chain with four chains of 3 to 6 hops (chain is solved by a KD-trained 1B).
 
     python generate_multistep_dataset.py --family mix3 --train 5000 --test 1000
 """
@@ -66,11 +67,11 @@ def sample(family: str, rng: random.Random):
                 return None
             expr += o + v
         return ", ".join(f"{v}={vals[v]}" for v in names) + f". {expr}=", str(val)
-    if family == "chain":
-        hops = rng.choice((2, 3))
-        names = rng.sample("abcdefghijklmnopqrstuvwxyz", 3 * hops)
-        chains = [names[i * hops:(i + 1) * hops] for i in range(3)]
-        nums = rng.sample(range(10, 100), 3)
+    if family in ("chain", "chainlong"):
+        k, hops = (3, rng.choice((2, 3))) if family == "chain" else (4, rng.randint(3, 6))
+        names = rng.sample("abcdefghijklmnopqrstuvwxyz", k * hops)
+        chains = [names[i * hops:(i + 1) * hops] for i in range(k)]
+        nums = rng.sample(range(10, 100), k)
         defs = [f"{a}={b}" for c in chains for a, b in zip(c, c[1:])]
         defs += [f"{c[-1]}={n}" for c, n in zip(chains, nums)]
         rng.shuffle(defs)
@@ -80,7 +81,7 @@ def sample(family: str, rng: random.Random):
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--family", required=True, choices=["mix3", "mix4", "muladd", "bind", "chain"])
+    ap.add_argument("--family", required=True, choices=["mix3", "mix4", "muladd", "bind", "chain", "chainlong"])
     ap.add_argument("--train", type=int, default=5000)
     ap.add_argument("--test", type=int, default=1000)
     ap.add_argument("--seed", type=int, default=0)
