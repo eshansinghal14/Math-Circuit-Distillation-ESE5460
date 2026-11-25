@@ -6,6 +6,9 @@ gradients kept), and its greedy answer token is checked against the gold one.
 Reported per model: test accuracy on the scored problems, mean graph loss,
 mean graph loss on the problems it gets right and wrong, and the AUC of graph
 loss for "wrong" (0.5 = the graph distance says nothing about correctness).
+The KD loss at the answer position, KL(teacher || student), is recorded per
+problem next to it (and its AUC), so the graph's signal can be compared with
+the one KD already has.
 
 Questions it answers (mix3, 2026-11-18):
   - Does KD alone already bring the student's graph to the teacher's? Score
@@ -76,10 +79,17 @@ def main() -> None:
     for p_ in teacher.parameters():
         p_.requires_grad_(False)
     t_ad = HFLlamaGraphAdapter(teacher, tok, dev)
-    entries, t0 = [], time.perf_counter()
+    def answer_input(prompt, answer):
+        b = collate_fn([PromptAnswerDataset(args.dataset, {prompt: answer}, tok)[0]], pad_id=tok.eos_token_id)
+        return b["input_ids"].to(dev), int(b["response_mask"][0].nonzero()[0])
+
+    entries, t_logp, t0 = [], [], time.perf_counter()
     for prompt, answer in items:
         t_sg, logit_ids, dla = GT._compute_teacher_target(prompt, answer, t_ad, base, dev)
         entries.append(GT._teacher_target_entry(t_sg, logit_ids, dla, answer=answer))
+        ids, first = answer_input(prompt, answer)
+        with torch.no_grad():
+            t_logp.append(teacher(ids).logits[0, first - 1].float().log_softmax(-1).cpu())
     print(f"teacher targets for {len(entries)} problems in {time.perf_counter() - t0:.0f}s", flush=True)
     del t_ad, teacher
     gc.collect()
@@ -93,9 +103,9 @@ def main() -> None:
         model, _ = load_student(path, "bfloat16")
         model.train()
         ad = HFLlamaGraphAdapter(model, tok, dev)
-        losses, hits, preds = [], [], []
+        losses, hits, preds, kls = [], [], [], []
         t0 = time.perf_counter()
-        for (prompt, answer), entry in zip(items, entries):
+        for (prompt, answer), entry, tl in zip(items, entries, t_logp):
             t_sg, logit_ids, dla = GT._teacher_target_from_entry(entry, dev)
             loss, _ = GT.compute_prompt_graph_loss(
                 prompt=prompt, student_adapter=ad, config=cfg, teacher_supergraph=t_sg,
@@ -103,11 +113,12 @@ def main() -> None:
             losses.append(float(loss.detach()))
             model.zero_grad(set_to_none=True)
             del loss, t_sg
-            b = collate_fn([PromptAnswerDataset(args.dataset, {prompt: answer}, tok)[0]], pad_id=tok.eos_token_id)
-            ids = b["input_ids"].to(dev)
-            first = int(b["response_mask"][0].nonzero()[0])
+            ids, first = answer_input(prompt, answer)
             with torch.no_grad(), student_autocast():
-                top = int(model(ids).logits[0, first - 1].argmax())
+                logits = model(ids).logits[0, first - 1].float()
+            top = int(logits.argmax())
+            tl = tl.to(dev)
+            kls.append(float((tl.exp() * (tl - logits.log_softmax(-1))).sum()))
             hits.append(top == int(ids[0, first]))
             preds.append(tok.decode([top]))
         right = [l for l, h in zip(losses, hits) if h]
@@ -115,11 +126,14 @@ def main() -> None:
         mean = lambda v: sum(v) / len(v) if v else float("nan")  # noqa: E731
         rec = {"path": path, "student_prop": float(prop), "accuracy": mean([float(h) for h in hits]),
                "graph_loss": mean(losses), "graph_loss_right": mean(right), "graph_loss_wrong": mean(wrong),
-               "auc_wrong": auc(wrong, right), "losses": losses, "hits": hits, "preds": preds,
+               "auc_wrong": auc(wrong, right),
+               "auc_wrong_kl": auc([k for k, h in zip(kls, hits) if not h], [k for k, h in zip(kls, hits) if h]),
+               "kl": kls, "losses": losses, "hits": hits, "preds": preds,
                "prompts": [p for p, _ in items], "answers": [str(a) for _, a in items]}
         out["models"][label] = rec
         print(f"{label:10s} acc {rec['accuracy']:.3f} | graph loss {rec['graph_loss']:.4f} | right {rec['graph_loss_right']:.4f} "
-              f"| wrong {rec['graph_loss_wrong']:.4f} | AUC wrong {rec['auc_wrong']:.2f} | {time.perf_counter() - t0:.0f}s",
+              f"| wrong {rec['graph_loss_wrong']:.4f} | AUC wrong {rec['auc_wrong']:.2f} (KD loss: {rec['auc_wrong_kl']:.2f}) "
+              f"| {time.perf_counter() - t0:.0f}s",
               flush=True)
         del ad, model
         gc.collect()

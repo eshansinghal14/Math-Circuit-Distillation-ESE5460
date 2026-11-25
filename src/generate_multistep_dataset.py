@@ -14,6 +14,11 @@ and the result lie in 0..999):
              distinct letters in random order; the expression is mix3 over three of
              them, so two are distractors. Which values feed the answer has to be
              looked up (routing), not just read off the expression.
+    chain    "k=p, w=31, p=t, d=w, t=58, g=d. k="   three variable chains of equal length
+             (2 or 3 hops) ending in distinct two-digit numbers, definitions shuffled;
+             the answer is the number the queried chain ends in. No arithmetic: a
+             wrong answer that is another chain's number is a routing error by
+             construction.
 
     python generate_multistep_dataset.py --family mix3 --train 5000 --test 1000
 """
@@ -61,12 +66,21 @@ def sample(family: str, rng: random.Random):
                 return None
             expr += o + v
         return ", ".join(f"{v}={vals[v]}" for v in names) + f". {expr}=", str(val)
+    if family == "chain":
+        hops = rng.choice((2, 3))
+        names = rng.sample("abcdefghijklmnopqrstuvwxyz", 3 * hops)
+        chains = [names[i * hops:(i + 1) * hops] for i in range(3)]
+        nums = rng.sample(range(10, 100), 3)
+        defs = [f"{a}={b}" for c in chains for a, b in zip(c, c[1:])]
+        defs += [f"{c[-1]}={n}" for c, n in zip(chains, nums)]
+        rng.shuffle(defs)
+        return ", ".join(defs) + f". {chains[0][0]}=", str(nums[0])
     raise ValueError(family)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--family", required=True, choices=["mix3", "mix4", "muladd", "bind"])
+    ap.add_argument("--family", required=True, choices=["mix3", "mix4", "muladd", "bind", "chain"])
     ap.add_argument("--train", type=int, default=5000)
     ap.add_argument("--test", type=int, default=1000)
     ap.add_argument("--seed", type=int, default=0)
