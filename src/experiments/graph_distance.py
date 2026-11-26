@@ -10,6 +10,11 @@ The KD loss at the answer position, KL(teacher || student), is recorded per
 problem next to it (and its AUC), so the graph's signal can be compared with
 the one KD already has.
 
+--answer-tokens (Qwen, Gemma: one digit per token): the graph loss is the mean
+over one graph per answer token (the trainer's answer-tokens cuts), the KD loss
+the mean over the answer tokens, and "right" is the greedy answer's leading
+integer equal to the gold one (otherwise "right" is the first answer token).
+
 Questions it answers (mix3, 2026-11-18):
   - Does KD alone already bring the student's graph to the teacher's? Score
     KD students at several points of training next to a KD + graph student.
@@ -30,6 +35,7 @@ import dataclasses
 import gc
 import json
 import os
+import re
 import sys
 import time
 
@@ -40,6 +46,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils import DIR_ROOT, PromptAnswerDataset, collate_fn, load_data, load_model, set_bos_mode  # noqa: E402
 from training.utils import load_student, student_autocast  # noqa: E402
 import graph_loss.training as GT  # noqa: E402
+from training.graph_kd import answer_token_cuts  # noqa: E402
 from graph_loss.hf_adapter import HFLlamaGraphAdapter  # noqa: E402
 
 
@@ -58,6 +65,8 @@ def main() -> None:
     ap.add_argument("--teacher-prop", type=float, default=0.01)
     ap.add_argument("--model", action="append", required=True, help="label=path:student_prop; repeatable")
     ap.add_argument("--tag", default="default")
+    ap.add_argument("--answer-tokens", action="store_true",
+                    help="one graph per answer token, KD loss over all answer tokens, correctness by greedy decoding")
     args = ap.parse_args()
 
     set_bos_mode("on")
@@ -80,22 +89,30 @@ def main() -> None:
         p_.requires_grad_(False)
     t_ad = HFLlamaGraphAdapter(teacher, tok, dev)
     def answer_input(prompt, answer):
+        """Token ids of prompt + gold answer, the first answer position, and the number of answer tokens scored."""
         b = collate_fn([PromptAnswerDataset(args.dataset, {prompt: answer}, tok)[0]], pad_id=tok.eos_token_id)
-        return b["input_ids"].to(dev), int(b["response_mask"][0].nonzero()[0])
+        n = len(tok(str(answer), add_special_tokens=False)["input_ids"]) if args.answer_tokens else 1
+        return b["input_ids"].to(dev), int(b["response_mask"][0].nonzero()[0]), n
 
+    cuts = [answer_token_cuts(tok, [p], [a]) if args.answer_tokens else ([p], [a]) for p, a in items]
     entries, t_logp, t0 = [], [], time.perf_counter()
-    for prompt, answer in items:
-        t_sg, logit_ids, dla = GT._compute_teacher_target(prompt, answer, t_ad, base, dev)
-        entries.append(GT._teacher_target_entry(t_sg, logit_ids, dla, answer=answer))
-        ids, first = answer_input(prompt, answer)
+    for (prompt, answer), (cut_p, cut_a) in zip(items, cuts):
+        ent = []
+        for cp, ca in zip(cut_p, cut_a):
+            t_sg, logit_ids, dla = GT._compute_teacher_target(cp, ca, t_ad, base, dev)
+            ent.append(GT._teacher_target_entry(t_sg, logit_ids, dla, answer=ca))
+        entries.append(ent)
+        ids, first, n = answer_input(prompt, answer)
         with torch.no_grad():
-            t_logp.append(teacher(ids).logits[0, first - 1].float().log_softmax(-1).cpu())
-    print(f"teacher targets for {len(entries)} problems in {time.perf_counter() - t0:.0f}s", flush=True)
+            t_logp.append(teacher(ids).logits[0, first - 1:first - 1 + n].float().log_softmax(-1).cpu())
+    print(f"teacher targets for {len(entries)} problems ({sum(len(e) for e in entries)} graphs) "
+          f"in {time.perf_counter() - t0:.0f}s", flush=True)
     del t_ad, teacher
     gc.collect()
     torch.cuda.empty_cache()
 
-    out = {"teacher": args.teacher, "dataset": args.dataset, "n": len(items), "models": {}}
+    out = {"teacher": args.teacher, "dataset": args.dataset, "n": len(items), "answer_tokens": args.answer_tokens,
+           "models": {}}
     for spec in args.model:
         label, rest = spec.split("=", 1)
         path, prop = rest.rsplit(":", 1)
@@ -105,22 +122,34 @@ def main() -> None:
         ad = HFLlamaGraphAdapter(model, tok, dev)
         losses, hits, preds, kls = [], [], [], []
         t0 = time.perf_counter()
-        for (prompt, answer), entry, tl in zip(items, entries, t_logp):
-            t_sg, logit_ids, dla = GT._teacher_target_from_entry(entry, dev)
-            loss, _ = GT.compute_prompt_graph_loss(
-                prompt=prompt, student_adapter=ad, config=cfg, teacher_supergraph=t_sg,
-                logit_token_ids=logit_ids, teacher_dla_logits=dla, answer=answer)
-            losses.append(float(loss.detach()))
-            model.zero_grad(set_to_none=True)
-            del loss, t_sg
-            ids, first = answer_input(prompt, answer)
+        for (prompt, answer), ent, (cut_p, cut_a), tl in zip(items, entries, cuts, t_logp):
+            cut_losses = []
+            for entry, cp, ca in zip(ent, cut_p, cut_a):
+                t_sg, logit_ids, dla = GT._teacher_target_from_entry(entry, dev)
+                loss, _ = GT.compute_prompt_graph_loss(
+                    prompt=cp, student_adapter=ad, config=cfg, teacher_supergraph=t_sg,
+                    logit_token_ids=logit_ids, teacher_dla_logits=dla, answer=ca)
+                cut_losses.append(float(loss.detach()))
+                model.zero_grad(set_to_none=True)
+                del loss, t_sg
+            losses.append(sum(cut_losses) / len(cut_losses))
+            ids, first, n = answer_input(prompt, answer)
             with torch.no_grad(), student_autocast():
-                logits = model(ids).logits[0, first - 1].float()
-            top = int(logits.argmax())
+                logits = model(ids).logits[0, first - 1:first - 1 + n].float()
             tl = tl.to(dev)
-            kls.append(float((tl.exp() * (tl - logits.log_softmax(-1))).sum()))
-            hits.append(top == int(ids[0, first]))
-            preds.append(tok.decode([top]))
+            kls.append(float((tl.exp() * (tl - logits.log_softmax(-1))).sum(-1).mean()))
+            if args.answer_tokens:
+                with torch.no_grad(), student_autocast():
+                    gen = model.generate(ids[:, :first], max_new_tokens=n + 3, do_sample=False,
+                                         pad_token_id=tok.eos_token_id)
+                text = tok.decode(gen[0, first:], skip_special_tokens=True)
+                m_ = re.match(r"\s*(-?\d+)", text)
+                preds.append(m_.group(1) if m_ else text)
+                hits.append(preds[-1] == str(answer).strip())
+            else:
+                top = int(logits[0].argmax())
+                hits.append(top == int(ids[0, first]))
+                preds.append(tok.decode([top]))
         right = [l for l, h in zip(losses, hits) if h]
         wrong = [l for l, h in zip(losses, hits) if not h]
         mean = lambda v: sum(v) / len(v) if v else float("nan")  # noqa: E731

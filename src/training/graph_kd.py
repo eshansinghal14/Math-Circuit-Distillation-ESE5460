@@ -88,6 +88,23 @@ _SEED = DEFAULT_SEED
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def answer_token_cuts(tok, prompts: List[str], responses: List[Any]) -> tuple[List[str], List[str]]:
+    """One (prompt + answer[:k], answer[k:]) pair per answer token k; see GraphKDTrainer._answer_token_graph_inputs."""
+    bos = tok.bos_token or ""
+    out_p, out_a = [], []
+    for p, r in zip(prompts, responses):
+        add = not (bos and p.startswith(bos))
+        p_ids = tok(p, add_special_tokens=add)["input_ids"]
+        a_ids = tok(str(r), add_special_tokens=False)["input_ids"]
+        for k in range(len(a_ids)):
+            prefix = tok.decode(a_ids[:k]) if k else ""
+            if k and tok(p + prefix, add_special_tokens=add)["input_ids"] != p_ids + a_ids[:k]:
+                continue
+            out_p.append(p + prefix)
+            out_a.append(tok.decode(a_ids[k:]))
+    return out_p, out_a
+
+
 @dataclass
 class GraphKDConfig:
     model: str
@@ -534,20 +551,7 @@ class GraphKDTrainer:
         would be built on a sequence the KD row never contains). For a model whose
         answer is one token (Llama-3 on 0-999) this is the prompt-end graph.
         """
-        tok = self.tokenizer
-        bos = tok.bos_token or ""
-        out_p, out_a = [], []
-        for p, r in zip(prompts, responses):
-            add = not (bos and p.startswith(bos))
-            p_ids = tok(p, add_special_tokens=add)["input_ids"]
-            a_ids = tok(str(r), add_special_tokens=False)["input_ids"]
-            for k in range(len(a_ids)):
-                prefix = tok.decode(a_ids[:k]) if k else ""
-                if k and tok(p + prefix, add_special_tokens=add)["input_ids"] != p_ids + a_ids[:k]:
-                    continue
-                out_p.append(p + prefix)
-                out_a.append(tok.decode(a_ids[k:]))
-        return out_p, out_a
+        return answer_token_cuts(self.tokenizer, prompts, responses)
 
     @staticmethod
     def _operator_graph_inputs(prompts: List[str], responses: List[Any]) -> tuple[List[str], List[str]]:
