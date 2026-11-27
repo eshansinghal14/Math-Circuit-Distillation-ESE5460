@@ -281,6 +281,7 @@ class HFLlamaGraphAdapter:
         prop_neurons_per_layer: float,
         influence_grad: torch.Tensor | None = None,  # [n_pos, d_model]
         act_baseline: torch.Tensor | None = None,  # [d_mlp]
+        forced_keep: torch.Tensor | None = None,  # [k] flat pos * d_mlp indices (pinned membership)
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Memory-efficient, grad-safe variant of ``_compute_layer_neuron_data``.
 
@@ -339,7 +340,11 @@ class HFLlamaGraphAdapter:
         # == |neuron_acts[i,j]| * norm(out_rows[j]), identical ranking to the old
         # layer_source_vectors.norm(dim=-1). top-k indices are non-differentiable,
         # so detach to avoid building a scoring grad graph.
-        if influence_grad is None:
+        if forced_keep is not None:
+            # Pinned membership: the caller fixes which (position, neuron) cells are kept,
+            # so no score is computed (the returned scores are zeros).
+            sv_norms = torch.zeros_like(neuron_acts, dtype=torch.float32)
+        elif influence_grad is None:
             out_norms = out_rows.norm(dim=-1)  # [d_mlp]
             sv_norms = neuron_acts.detach().abs() * out_norms.unsqueeze(0)  # [n_pos, d_mlp]
         else:
@@ -359,9 +364,12 @@ class HFLlamaGraphAdapter:
                     scored_acts = scored_acts * bm
             sv_norms = scored_acts.abs() * (g @ out_rows.detach().T).abs()  # [n_pos, d_mlp]
         flat_norms = sv_norms.reshape(-1)
-        total = flat_norms.numel()
-        k = min(max(1, int(total * prop_neurons_per_layer)), total)
-        keep = torch.topk(flat_norms, k, dim=0).indices  # [k]
+        if forced_keep is not None:
+            keep = forced_keep.to(device=flat_norms.device, dtype=torch.long)
+        else:
+            total = flat_norms.numel()
+            k = min(max(1, int(total * prop_neurons_per_layer)), total)
+            keep = torch.topk(flat_norms, k, dim=0).indices  # [k]
         keep_neu = keep % self.d_mlp  # [k] neuron ids
 
         # Materialise vectors only for the kept neurons, WITH ambient grad

@@ -114,6 +114,14 @@ class GraphAuxConfig:
     # when not the default.
     supernode_type: str = "arg"
     position_bands: int = 1
+    # Pinned student membership (graph_kd --pin-student-membership): each prompt's
+    # student supernodes are chosen once on a frozen reference copy of the student
+    # (membership_adapter, labelled on membership_mlp_cache) and stored in
+    # membership_cache, so the graph loss is a smooth function of the current
+    # weights instead of re-selecting its nodes every step. Student side only.
+    membership_adapter: Any = None
+    membership_mlp_cache: dict | None = None
+    membership_cache: dict | None = None
 
     def __post_init__(self) -> None:
         # 'tokens' in graph_node_labels means token_source_columns, never an ANOVA
@@ -770,6 +778,36 @@ def _last_rows(supergraph: SuperGraph) -> set[int]:
     return last_row_supernodes(supergraph.supernode_labels)
 
 
+def _pinned_membership(prompt, config: "GraphAuxConfig", logit_token_ids, teacher_dla_logits) -> list:
+    """The student's supernode membership for ``prompt``, chosen once on the frozen reference
+    student (``config.membership_adapter``, labelled on ``config.membership_mlp_cache``) and
+    reused on every later visit."""
+    key = prompt if isinstance(prompt, str) else tuple(torch.as_tensor(prompt).reshape(-1).tolist())
+    cache = config.membership_cache
+    if key not in cache:
+        cache[key] = create_graph(
+            config.membership_adapter,
+            prompt,
+            attribution_targets=logit_token_ids.cpu() if logit_token_ids is not None else None,
+            prop_neurons_per_layer=config.student_prop_neurons_per_layer,
+            top_k_logits=config.top_k_logits,
+            temperature=config.temperature,
+            batch_size=config.student_graph_batch_size,
+            dtype=config.graph_dtype,
+            mlp_input_cache=config.membership_mlp_cache,
+            node_labels=config.graph_node_labels or [],
+            anova_range_radius=config.student_anova_range_radius,
+            anova_neuron_chunk=config.anova_neuron_chunk,
+            nodes_per_label=config.student_nodes_per_label,
+            dla_model_logits=teacher_dla_logits,
+            neuron_selection=config.neuron_selection,
+            supernode_type=config.supernode_type,
+            position_bands=config.position_bands,
+            membership_only=True,
+        )
+    return cache[key]
+
+
 def compute_prompt_graph_loss(
     *,
     prompt: str | torch.Tensor,
@@ -797,10 +835,15 @@ def compute_prompt_graph_loss(
 
     supergraph_start = time.perf_counter()
 
+    pinned = None
+    if config.membership_adapter is not None:
+        pinned = _pinned_membership(prompt, config, logit_token_ids, teacher_dla_logits)
+
     try:
         student_result = create_graph(
             student_adapter,
             prompt,
+            pinned_membership=pinned,
             attribution_targets=logit_token_ids.cpu() if logit_token_ids is not None else None,
             prop_neurons_per_layer=config.student_prop_neurons_per_layer,
             top_k_logits=config.top_k_logits,

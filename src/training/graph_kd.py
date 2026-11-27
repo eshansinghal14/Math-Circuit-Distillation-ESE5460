@@ -167,6 +167,9 @@ class GraphKDConfig:
     # (0: built once from the untrained student). The ANOVA labels of the student's
     # neurons are scored on these cached residual inputs, which go stale as it trains.
     student_mlp_cache_refresh: int = 0
+    # Fix each prompt's student supernode membership on a frozen copy of the untrained
+    # student (labelled on its MLP-input cache) and reuse it at every later visit.
+    pin_student_membership: bool = False
     anova_neuron_chunk: int | None = None
     # Performance only; neither changes any number a run produces.
     anova_cache_device: str = "auto"
@@ -301,6 +304,20 @@ class GraphKDTrainer:
                     shared["mlp_caches"] = (
                         None if config.student_mlp_cache_refresh else student_mlp_cache, teacher_mlp_cache)
             self._mlp_cache_data = train_data
+        membership_adapter = None
+        membership_cache: dict | None = None
+        if config.pin_student_membership:
+            if not config.graph_node_labels or config.student_mlp_cache_refresh:
+                raise ValueError("--pin-student-membership needs --graph-node-labels and no --student-mlp-cache-refresh")
+            if shared is not None and "membership" in shared:
+                membership_adapter, membership_cache = shared["membership"]
+            else:
+                import copy
+                reference = copy.deepcopy(self.model).eval().requires_grad_(False)
+                membership_adapter = HFLlamaGraphAdapter(reference, self.tokenizer, _DEVICE)
+                membership_cache = {}
+                if shared is not None:  # the reference is the untrained student: the same for every seed
+                    shared["membership"] = (membership_adapter, membership_cache)
 
         self.graph_config = GraphAuxConfig(
             lambda_graph=config.lambda_graph,
@@ -338,6 +355,9 @@ class GraphKDTrainer:
             neuron_selection=config.graph_neuron_selection,
             supernode_type=config.graph_supernode_type,
             position_bands=config.graph_position_bands,
+            membership_adapter=membership_adapter,
+            membership_mlp_cache=student_mlp_cache if membership_adapter is not None else None,
+            membership_cache=membership_cache,
         )
 
         # The teacher's per-prompt target is a pure function of the teacher-side
@@ -1386,6 +1406,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Neurons processed per ANOVA batch (reduce to avoid GPU OOM on large grids; default: all at once).",
     )
     group.add_argument(
+        "--pin-student-membership", action="store_true", dest="pin_student_membership",
+        help="Choose each prompt's student supernodes once, on a frozen copy of the untrained student, and "
+             "reuse them at every later visit (the graph loss is then smooth in the current weights).",
+    )
+    group.add_argument(
         "--student-mlp-cache-refresh", type=int, default=0, dest="student_mlp_cache_refresh",
         help="Rebuild the student's MLP-input cache (ANOVA / factor labels) from its current weights every N "
              "steps; 0 (default) builds it once from the untrained student.",
@@ -1586,6 +1611,7 @@ def config_from_args(args: argparse.Namespace, seed: int, save_dir: str) -> Grap
         anova_range_radius=args.anova_range_radius,
         mlp_cache_batch_size=args.cache_batch_size,
         student_mlp_cache_refresh=args.student_mlp_cache_refresh,
+        pin_student_membership=args.pin_student_membership,
         anova_neuron_chunk=args.anova_neuron_chunk,
         anova_cache_device=args.anova_cache_device,
         teacher_target_cache_dir=args.teacher_target_cache_dir,

@@ -248,9 +248,14 @@ def build_shared_context(
     selection_kwargs: dict | None = None,
     supernode_type: str = "arg",
     position_bands: int = 1,
+    pinned_membership: list | None = None,
     logger: logging.Logger | None = None,
 ) -> GraphSharedContext:
     """Phase 1 of the graph pipeline: forward pass, ANOVA labeling, token supernodes.
+
+    ``pinned_membership`` (from :func:`shared_membership`): ``[(label, [m, 3] locations)]``.
+    The supernodes are exactly these neurons; neuron selection and ANOVA labeling are
+    skipped (no MLP-input cache is needed).
 
     Does NOT include DLA supernodes (position-specific). Call
     create_graph_at_position() to add DLA and build the attribution graph at a
@@ -268,7 +273,11 @@ def build_shared_context(
     _logger = logger or logging.getLogger(__name__)
     node_labels, _ = normalize_node_labels(node_labels)  # 'tokens' is not an ANOVA category
 
-    _logger.info("Running setup_attribution (neuron pre-selection by %s)", neuron_selection)
+    forced_locations = None
+    if pinned_membership is not None:
+        forced_locations = torch.unique(torch.cat([loc for _, loc in pinned_membership]), dim=0)
+    _logger.info("Running setup_attribution (neuron pre-selection by %s)",
+                 "pinned membership" if pinned_membership is not None else neuron_selection)
     ctx = setup_attribution(
         adapter,
         input_ids,
@@ -278,8 +287,12 @@ def build_shared_context(
         freeze_rms_norm=freeze_rms_norm,
         neuron_selection=neuron_selection,
         selection_kwargs=selection_kwargs,
+        forced_locations=forced_locations,
     )
     _logger.info("  Pre-selected neurons: %d", ctx.n_neurons)
+    if pinned_membership is not None:
+        return _pinned_shared_context(ctx, pinned_membership, adapter, input_ids, nodes_per_label,
+                                      supernode_heatmap_output_dir)
 
     # An empty list means "no labels requested" => no ANOVA. Only a non-empty
     # list of labels (or "all") should trigger ANOVA labeling. Using bool()
@@ -445,6 +458,48 @@ def build_shared_context(
         nodes_per_label=nodes_per_label,
         activation_write_result=activation_write_result,
         supernode_heatmap_output_dir=supernode_heatmap_output_dir,
+    )
+
+
+def shared_membership(shared: GraphSharedContext) -> list:
+    """The ANOVA supernodes of ``shared`` as ``[(label, [m, 3] (layer, position, neuron) cpu tensor)]``,
+    the form ``pinned_membership`` takes."""
+    locs = shared.ctx.neuron_locations
+    return [
+        (labels[0], locs[torch.as_tensor(sn, dtype=torch.long, device=locs.device)].detach().cpu())
+        for sn, labels in zip(shared.anova_raw_supernodes, shared.anova_supernode_labels)
+        if labels
+    ]
+
+
+def _pinned_shared_context(ctx, membership, adapter, input_ids, nodes_per_label, heatmap_dir) -> GraphSharedContext:
+    index = {tuple(loc): i for i, loc in enumerate(ctx.neuron_locations.tolist())}
+    supernodes, labels, raw_node_labels = [], [], {}
+    for label, locs in membership:
+        sn = [index[tuple(loc)] for loc in locs.tolist()]
+        supernodes.append(sn)
+        labels.append([label])
+        for i in sn:
+            raw_node_labels.setdefault(i, []).append(label)
+    decoded = adapter.tokenizer.decode(input_ids.detach().cpu().tolist())
+    try:
+        target_args = parse_numeric_args(decoded)
+    except ValueError:
+        target_args = ()
+    return GraphSharedContext(
+        ctx=ctx,
+        anova_raw_supernodes=supernodes,
+        anova_supernode_labels=labels,
+        token_raw_supernodes=[],
+        token_supernode_labels=[],
+        anova_token_selected_indices=sorted(raw_node_labels),
+        raw_node_labels=raw_node_labels,
+        label_results={},
+        raw_sum_member_scores={},
+        target_args=target_args,
+        nodes_per_label=nodes_per_label,
+        activation_write_result=None,
+        supernode_heatmap_output_dir=heatmap_dir,
     )
 
 
@@ -687,9 +742,15 @@ def create_graph(
     supernode_type: str = "arg",
     position_bands: int = 1,
     target_rows: str = "all",
+    pinned_membership: list | None = None,
+    membership_only: bool = False,
     logger: logging.Logger | None = None,
 ) -> GraphPipelineResult:
     """Run the ANOVA-first graph creation pipeline.
+
+    ``membership_only``: stop after selecting the ANOVA supernodes and return their
+    membership (:func:`shared_membership`) instead of a graph. ``pinned_membership``:
+    build the graph on exactly that membership (see :func:`build_shared_context`).
 
     ``neuron_selection="influence"`` pre-selects each layer's neurons by their
     |gradient x activation| on the prediction at ``target_position`` (the salient
@@ -795,8 +856,11 @@ def create_graph(
             top_k_logits=top_k_logits,
             temperature=temperature,
         ),
+        pinned_membership=pinned_membership,
         logger=_logger,
     )
+    if membership_only:
+        return shared_membership(shared)
 
     return create_graph_at_position(
         shared,

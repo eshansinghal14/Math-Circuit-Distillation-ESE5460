@@ -146,6 +146,7 @@ def setup_attribution(
     freeze_rms_norm: bool = False,
     neuron_selection: str = "norm",
     selection_kwargs: dict | None = None,
+    forced_locations: torch.Tensor | None = None,
 ) -> HFAttributionContext:
     """Run the initial single forward pass and return an ``HFAttributionContext``.
 
@@ -170,14 +171,20 @@ def setup_attribution(
     ``[n_layers, d_mlp]``, from :func:`neuron_activation_means`), so a neuron that
     is equally active on every prompt scores nothing. Only which neurons are kept
     changes; the edges are attributed exactly as before.
+
+    ``forced_locations`` (``[k, 3]`` rows of (layer, position, neuron)) replaces the
+    selection: exactly these neurons are kept, whatever their scores (pinned
+    membership, see ``create_graph(pinned_membership=...)``).
     """
     if neuron_selection not in NEURON_SELECTIONS:
         raise ValueError(f"neuron_selection must be one of {NEURON_SELECTIONS}, got {neuron_selection!r}")
     influence = None
-    if neuron_selection in ("influence", "contrast"):
+    if forced_locations is not None:
+        forced_locations = forced_locations.to(device=adapter.device, dtype=torch.long)
+    elif neuron_selection in ("influence", "contrast"):
         influence = logit_influence_grads(adapter, input_ids, dtype, **(selection_kwargs or {}))
     act_means = None
-    if neuron_selection == "contrast":
+    if neuron_selection == "contrast" and forced_locations is None:
         act_means = getattr(adapter, "neuron_act_means", None)
         if act_means is None:
             raise ValueError(
@@ -251,11 +258,16 @@ def setup_attribution(
     # a no_grad wrapper + CPU offload here broke student gradients and was reverted.
     for layer_idx in range(adapter.n_layers):
         layer_input = mlp_inputs[layer_idx].squeeze(0)
+        forced_keep = None
+        if forced_locations is not None:
+            fl = forced_locations[forced_locations[:, 0] == layer_idx]
+            forced_keep = fl[:, 1] * adapter.d_mlp + fl[:, 2]
         keep, layer_acts_kept, layer_te_kept, layer_sv_kept, layer_scores = (
             adapter._compute_layer_neuron_data_selective(
                 layer_idx, layer_input, prop_neurons_per_layer,
                 influence_grad=None if influence is None else influence[layer_idx],
                 act_baseline=None if act_means is None else act_means[layer_idx],
+                forced_keep=forced_keep,
             )
         )
 
