@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import os
 import random
 import sys
@@ -270,6 +271,13 @@ class GraphKDTrainer:
             if shared is not None and "mlp_caches" in shared:
                 print("MLP-input caches reused from the previous seed.")
                 student_mlp_cache, teacher_mlp_cache = shared["mlp_caches"]
+                if student_mlp_cache is None:  # --student-mlp-cache-refresh: never kept across seeds
+                    from graph_loss.precompute_mlp_inputs import build_mlp_input_cache as _build_mlp_cache
+                    student_mlp_cache = _build_mlp_cache(
+                        self.student_adapter, f"{config.dataset}_live", config.model,
+                        data_dict=train_data, batch_size=config.mlp_cache_batch_size, refresh=True,
+                        cache_device=_anova_cache_devices(config.anova_cache_device)[0],
+                    )
             else:
                 from graph_loss.precompute_mlp_inputs import build_mlp_input_cache as _build_mlp_cache
                 student_dev, teacher_dev = _anova_cache_devices(config.anova_cache_device)
@@ -288,7 +296,10 @@ class GraphKDTrainer:
                     f"teacher {_cache_gb(teacher_mlp_cache):.2f} GB on {teacher_dev}"
                 )
                 if shared is not None:
-                    shared["mlp_caches"] = (student_mlp_cache, teacher_mlp_cache)
+                    # A refreshed student cache replaces this one mid-run; keeping it for the
+                    # next seed would hold a second copy on the GPU (OOM on a 24 GB card).
+                    shared["mlp_caches"] = (
+                        None if config.student_mlp_cache_refresh else student_mlp_cache, teacher_mlp_cache)
             self._mlp_cache_data = train_data
 
         self.graph_config = GraphAuxConfig(
@@ -707,6 +718,7 @@ class GraphKDTrainer:
         from graph_loss.precompute_mlp_inputs import build_mlp_input_cache
         t0 = time.perf_counter()
         self.graph_config.mlp_input_cache = None
+        gc.collect()
         torch.cuda.empty_cache()
         self.graph_config.mlp_input_cache = build_mlp_input_cache(
             self.student_adapter, f"{self.config.dataset}_live", self.config.model,
