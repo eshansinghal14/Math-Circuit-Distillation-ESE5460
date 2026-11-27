@@ -28,6 +28,7 @@ from utils import (
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from training.utils import (
+    cycle_loader,
     eval_batch_size_for,
     DEFAULT_SEED,
     ParamChangeCanary,
@@ -184,7 +185,7 @@ class SFTTrainer:
         micro_step = 0
 
         self.optimizer.zero_grad()
-        for batch in self.loader:
+        for batch in cycle_loader(self.loader, max_steps):
             if max_steps is not None and n_steps >= max_steps:
                 break
             input_ids = batch["input_ids"].to(_DEVICE)

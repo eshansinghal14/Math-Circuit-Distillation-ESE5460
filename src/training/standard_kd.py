@@ -27,6 +27,7 @@ from utils import (
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from training.utils import (
+    cycle_loader,
     eval_batch_size_for,
     ParamStepTracker,
     DEFAULT_SEED,
@@ -205,7 +206,7 @@ class StandardKDTrainer:
         flop_counter = step_flop_counter(cfg.track_flops)
 
         self.optimizer.zero_grad()
-        for batch in self.loader:
+        for batch in cycle_loader(self.loader, max_steps):
             if max_steps is not None and n_steps >= max_steps:
                 break
             flop_counter.reset()

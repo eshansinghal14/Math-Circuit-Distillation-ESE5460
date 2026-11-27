@@ -117,6 +117,22 @@ def eval_batch_size_for(value, is_teacher: bool = False) -> int:
     return int(value)
 
 
+def cycle_loader(loader, max_steps):
+    """``loader``'s batches; with a step budget, start a new (reshuffled) pass whenever one ends.
+
+    A training set smaller than one eval interval (the low-data runs) used to end
+    train_epoch early, so the run evaluated after every pass. With the full
+    datasets an interval never exhausts a pass, so nothing changes there.
+    """
+    if max_steps is None:
+        yield from loader
+        return
+    if len(loader) == 0:
+        raise ValueError("empty training loader")
+    while True:
+        yield from loader
+
+
 def make_optimizer(model, lr: float):
     """torch AdamW with fp32 moments. See the precision note at the top of this file."""
     from torch.optim import AdamW

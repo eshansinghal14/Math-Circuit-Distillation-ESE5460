@@ -44,6 +44,7 @@ from graph_loss.training import (
     teacher_target_cache_key,
 )
 from training.utils import (
+    cycle_loader,
     eval_batch_size_for,
     DEFAULT_SEED,
     ParamChangeCanary,
@@ -727,7 +728,7 @@ class GraphKDTrainer:
         self.optimizer.zero_grad()
         if _DEVICE.type == "cuda":
             torch.cuda.reset_peak_memory_stats(_DEVICE)
-        for batch in self.loader:
+        for batch in cycle_loader(self.loader, max_steps):
             if max_steps is not None and n_steps >= max_steps:
                 break
             flop_counter.reset()
