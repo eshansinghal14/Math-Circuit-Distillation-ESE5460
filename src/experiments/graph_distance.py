@@ -15,6 +15,10 @@ over one graph per answer token (the trainer's answer-tokens cuts), the KD loss
 the mean over the answer tokens, and "right" is the greedy answer's leading
 integer equal to the gold one (otherwise "right" is the first answer token).
 
+--node-labels (e.g. the mix3 factor categories "x1 tens" ... "result units"
+"carry1"): ANOVA supernodes instead of position supernodes, labelled from MLP
+input caches over the first --anova-prompts training problems (one per model).
+
 Questions it answers (mix3, 2026-11-18):
   - Does KD alone already bring the student's graph to the teacher's? Score
     KD students at several points of training next to a KD + graph student.
@@ -48,6 +52,7 @@ from training.utils import load_student, student_autocast  # noqa: E402
 import graph_loss.training as GT  # noqa: E402
 from training.graph_kd import answer_token_cuts  # noqa: E402
 from graph_loss.hf_adapter import HFLlamaGraphAdapter  # noqa: E402
+from graph_loss.precompute_mlp_inputs import build_mlp_input_cache  # noqa: E402
 
 
 def auc(pos: list[float], neg: list[float]) -> float:
@@ -67,27 +72,38 @@ def main() -> None:
     ap.add_argument("--tag", default="default")
     ap.add_argument("--answer-tokens", action="store_true",
                     help="one graph per answer token, KD loss over all answer tokens, correctness by greedy decoding")
+    ap.add_argument("--node-labels", nargs="+", default=None, help="ANOVA / factor supernode categories")
+    ap.add_argument("--graph-rows", default=None, help="default: last (position nodes), all (labelled nodes)")
+    ap.add_argument("--anova-prompts", type=int, default=3000, help="training problems in each MLP-input cache")
     args = ap.parse_args()
 
     set_bos_mode("on")
     dev = torch.device("cuda")
-    _, test = load_data(args.dataset)
+    train, test = load_data(args.dataset)
     every = sorted(test.items())
+    labelled = bool(args.node_labels)
+    rows = args.graph_rows or ("all" if labelled else "last")
+    cache_data = dict(list(train.items())[: args.anova_prompts])
+    cache_key = f"{args.dataset}_gd{args.anova_prompts}"
     items = every[::max(1, len(every) // args.n)][: args.n]
     K = args.nodes_per_label
     base = GT.GraphAuxConfig(
         graph_dtype=torch.bfloat16, teacher_prop_neurons_per_layer=args.teacher_prop,
         student_prop_neurons_per_layer=0.03, top_k_logits=0.95, temperature=1.0,
         teacher_graph_batch_size=16, student_graph_batch_size=32, student_nodes_per_label=K,
-        teacher_nodes_per_label=K, graph_loss_type="jsd", graph_node_labels=None, token_path_rows="weighted",
-        dataset_name=args.dataset, graph_rows="last", graph_edge_topk=0, neuron_selection="influence",
-        supernode_type="position", position_bands=1, restrict_target_rows=True)
+        teacher_nodes_per_label=K, graph_loss_type="jsd", graph_node_labels=args.node_labels,
+        token_path_rows="weighted", dataset_name=args.dataset, graph_rows=rows, graph_edge_topk=0,
+        neuron_selection="influence", supernode_type="position", position_bands=1,
+        restrict_target_rows=rows in ("last", "answer"))
 
     teacher, tok = load_model(args.teacher)
     teacher.eval()
     for p_ in teacher.parameters():
         p_.requires_grad_(False)
     t_ad = HFLlamaGraphAdapter(teacher, tok, dev)
+    if labelled:
+        base = dataclasses.replace(base, teacher_mlp_input_cache=build_mlp_input_cache(
+            t_ad, cache_key, args.teacher, data_dict=cache_data, batch_size=64))
     def answer_input(prompt, answer):
         """Token ids of prompt + gold answer, the first answer position, and the number of answer tokens scored."""
         b = collate_fn([PromptAnswerDataset(args.dataset, {prompt: answer}, tok)[0]], pad_id=tok.eos_token_id)
@@ -108,11 +124,12 @@ def main() -> None:
     print(f"teacher targets for {len(entries)} problems ({sum(len(e) for e in entries)} graphs) "
           f"in {time.perf_counter() - t0:.0f}s", flush=True)
     del t_ad, teacher
+    base = dataclasses.replace(base, teacher_mlp_input_cache=None)
     gc.collect()
     torch.cuda.empty_cache()
 
     out = {"teacher": args.teacher, "dataset": args.dataset, "n": len(items), "answer_tokens": args.answer_tokens,
-           "models": {}}
+           "node_labels": args.node_labels, "graph_rows": rows, "models": {}}
     for spec in args.model:
         label, rest = spec.split("=", 1)
         path, prop = rest.rsplit(":", 1)
@@ -120,6 +137,9 @@ def main() -> None:
         model, _ = load_student(path, "bfloat16")
         model.train()
         ad = HFLlamaGraphAdapter(model, tok, dev)
+        if labelled:
+            cfg = dataclasses.replace(cfg, mlp_input_cache=build_mlp_input_cache(
+                ad, cache_key, path, data_dict=cache_data, batch_size=64))
         losses, hits, preds, kls = [], [], [], []
         t0 = time.perf_counter()
         for (prompt, answer), ent, (cut_p, cut_a), tl in zip(items, entries, cuts, t_logp):

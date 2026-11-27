@@ -224,6 +224,7 @@ def build_mlp_input_cache(
         "n_positions": n_positions,
         "arg_values": arg_values,
         "numeric_args_by_prompt": numeric_args_by_prompt,
+        "prompts": prompts,
         "model_name": model_name,
         "dataset_key": dataset_key,
     }

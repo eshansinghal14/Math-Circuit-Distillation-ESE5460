@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 import torch
 
-from graph_loss.anova_node_labels import LabelTable, parse_numeric_args
+from graph_loss.anova_node_labels import LabelTable, expression_factors, is_factor_label, parse_numeric_args
 from graph_loss.attribution.attribute import _attribute_from_context, setup_attribution
 from graph_loss.attribution.context import HFAttributionContext
 from graph_loss.graph import (
@@ -318,6 +318,14 @@ def build_shared_context(
                     _cache_n_dims, len(target_args), _cache_n_dims + 1, len(target_args),
                 )
 
+        factor_categories = [l for l in node_labels if is_factor_label(l)]
+        factor_target = None
+        if factor_categories:
+            if len(factor_categories) != len([l for l in node_labels if l != "all"]):
+                raise ValueError(f"factor labels cannot be mixed with grid ANOVA labels: {node_labels}")
+            factor_target = expression_factors(decoded)
+            if factor_target is None:
+                raise ValueError(f"factor labels need a +/- expression prompt, got {decoded!r}")
         _logger.info("ANOVA-labeling %d pre-selected neurons (layer-by-layer)", ctx.n_neurons)
         label_results = label_neurons_layer_by_layer(
             adapter,
@@ -326,6 +334,8 @@ def build_shared_context(
             target_args=target_args,
             anova_range_radius=anova_range_radius,
             anova_neuron_chunk=anova_neuron_chunk,
+            factor_target=factor_target,
+            factor_categories=factor_categories,
         )
     else:
         # Still parse target_args so create_graph_at_position has them for DLA calls.

@@ -89,6 +89,76 @@ def parse_numeric_args(prompt: str) -> tuple[int, ...]:
     return tuple(int(v) for v in values)
 
 
+_EXPR_RE = re.compile(r"(\d+)((?:[+-]\d+)+)=")
+FACTOR_LABEL_RE = re.compile(r"^(x\d+ (tens|units)|op\d+|p\d+ (tens|units)|result (hundreds|tens|units)|carry\d+)$")
+_DIGIT = {"units": 1, "tens": 10, "hundreds": 100}
+
+
+def is_factor_label(label: str) -> bool:
+    """Whether ``label`` names an expression-factor category (see expression_factors)."""
+    return bool(FACTOR_LABEL_RE.match(label))
+
+
+def expression_factors(prompt: str) -> dict[str, int] | None:
+    """Digit-level variables of a +/- expression prompt (mix3 "47+38-25=", mix4), or None.
+
+    Operands x1..xn, operators op1.. (1 '+', 0 '-'), running partial results
+    p1..p(n-2) (p1 = x1 o1 x2, ...), the result, and the carry (+1) or borrow
+    (-1) out of the units digit at each step (carry1..carry(n-1)). The first
+    expression followed by '=' is used, so a BOS string or an answer prefix
+    after the '=' does not change it.
+    """
+    m = _EXPR_RE.search(prompt)
+    if m is None:
+        return None
+    terms = re.findall(r"([+-])(\d+)", m.group(2))
+    xs = [int(m.group(1))] + [int(d) for _, d in terms]
+    f = {f"x{i}": x for i, x in enumerate(xs, 1)}
+    val = xs[0]
+    for i, ((o, _), x) in enumerate(zip(terms, xs[1:]), 1):
+        f[f"op{i}"] = int(o == "+")
+        if o == "+":
+            f[f"carry{i}"] = int(val % 10 + x % 10 >= 10)
+            val += x
+        else:
+            f[f"carry{i}"] = -int(val % 10 < x % 10)
+            val -= x
+        if i < len(terms):
+            f[f"p{i}"] = val
+    f["result"] = val
+    return f
+
+
+def build_factor_rules(
+    factors_by_prompt: list[dict[str, int]],
+    target: dict[str, int],
+    categories: list[str],
+) -> list[BasisRule]:
+    """One flat basis mask per factor category: the cache prompts whose factor (digit) equals the target prompt's.
+
+    "x1 tens" -> prompts with the same tens digit of the first operand as the
+    target; "carry2" -> the same carry/borrow at step 2. The masks are vectors
+    over the cache prompts (no grid), so any sample of a dataset works.
+    """
+    rules: list[BasisRule] = []
+    for cat in categories:
+        name, _, kind = cat.partition(" ")
+        if name not in target or any(name not in f for f in factors_by_prompt):
+            continue
+        vals = torch.tensor([f[name] for f in factors_by_prompt])
+        tv = int(target[name])
+        if kind:
+            d = _DIGIT[kind]
+            mask = torch.div(vals, d, rounding_mode="floor") % 10 == (tv // d) % 10
+            label = f"{cat} {(tv // d) % 10}"
+        else:
+            mask = vals == tv
+            label = f"{cat} {tv}"
+        if bool(mask.any()) and bool((~mask).any()):
+            rules.append(BasisRule(label, mask, category=cat))
+    return rules
+
+
 def build_anova_basis_rules(
     arg_values: list[list[int]],
     *,

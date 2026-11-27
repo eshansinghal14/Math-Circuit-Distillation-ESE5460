@@ -161,6 +161,8 @@ def label_neurons_layer_by_layer(
     target_args: tuple[int, ...] | None = None,
     anova_range_radius: int = 0,
     anova_neuron_chunk: int | None = None,
+    factor_target: dict | None = None,
+    factor_categories: list[str] | None = None,
 ) -> "LabelTable":
     """ANOVA-score N neurons across all model layers; returns a LabelTable.
 
@@ -170,37 +172,54 @@ def label_neurons_layer_by_layer(
     scores are written straight into the table's tensors; nothing per neuron
     happens in Python, which is what made labelling the teacher's ~230k
     pre-selected neuron-positions cost seconds per prompt.
+
+    With ``factor_target`` (expression-factor labels, see
+    anova_node_labels.expression_factors) the activations are scored as one
+    vector over the cache prompts against build_factor_rules masks instead of
+    an operand grid.
     """
     from graph_loss.anova_node_labels import (
         LabelTable,
         build_anova_basis_rules,
+        build_factor_rules,
         build_gpu_anova_state,
+        expression_factors,
         gpu_score_activation_heatmaps,
     )
 
     meta = mlp_input_cache.get("meta", {})
     layer_inputs = mlp_input_cache.get("layer_inputs", {})
-    numeric_args_list = meta.get("numeric_args_by_prompt", [])
-    if not numeric_args_list:
-        raise ValueError("MLP input cache missing numeric_args_by_prompt")
+    if factor_target is not None:
+        cache_prompts = meta.get("prompts")
+        if cache_prompts is None:
+            raise ValueError("MLP input cache has no 'prompts' (built before factor labels); rebuild it (refresh)")
+        factors_by_prompt = [expression_factors(p) for p in cache_prompts]
+        if any(f is None for f in factors_by_prompt):
+            raise ValueError("factor labels need every cache prompt to be a +/- expression")
+        n_prompts = grid_cells = len(cache_prompts)
+        flat_indices = torch.arange(n_prompts, dtype=torch.long)
+    else:
+        numeric_args_list = meta.get("numeric_args_by_prompt", [])
+        if not numeric_args_list:
+            raise ValueError("MLP input cache missing numeric_args_by_prompt")
 
-    n_prompts = len(numeric_args_list)
-    n_dims = len(numeric_args_list[0])
-    arg_values = [sorted({args[dim] for args in numeric_args_list}) for dim in range(n_dims)]
-    arg_to_idx = [{v: i for i, v in enumerate(vals)} for vals in arg_values]
-    grid_shape = tuple(len(vals) for vals in arg_values)
-    grid_cells = 1
-    for s in grid_shape:
-        grid_cells *= s
+        n_prompts = len(numeric_args_list)
+        n_dims = len(numeric_args_list[0])
+        arg_values = [sorted({args[dim] for args in numeric_args_list}) for dim in range(n_dims)]
+        arg_to_idx = [{v: i for i, v in enumerate(vals)} for vals in arg_values]
+        grid_shape = tuple(len(vals) for vals in arg_values)
+        grid_cells = 1
+        for s in grid_shape:
+            grid_cells *= s
 
-    flat_indices = torch.zeros(n_prompts, dtype=torch.long)
-    stride = 1
-    for dim in range(n_dims - 1, -1, -1):
-        dim_indices = torch.tensor(
-            [arg_to_idx[dim][args[dim]] for args in numeric_args_list], dtype=torch.long
-        )
-        flat_indices = flat_indices + dim_indices * stride
-        stride *= grid_shape[dim]
+        flat_indices = torch.zeros(n_prompts, dtype=torch.long)
+        stride = 1
+        for dim in range(n_dims - 1, -1, -1):
+            dim_indices = torch.tensor(
+                [arg_to_idx[dim][args[dim]] for args in numeric_args_list], dtype=torch.long
+            )
+            flat_indices = flat_indices + dim_indices * stride
+            stride *= grid_shape[dim]
 
     n_kept = int(neuron_locations.shape[0])
     device = model.cfg.device
@@ -211,11 +230,14 @@ def label_neurons_layer_by_layer(
     sorted_layers = sorted(layer_to_neurons.keys())
 
     # Build ANOVA rules + GPU state once; masks and indicator matrices are reused every batch.
-    anova_rules = build_anova_basis_rules(
-        arg_values,
-        target_args=target_args,
-        anova_range_radius=anova_range_radius,
-    )
+    if factor_target is not None:
+        anova_rules = build_factor_rules(factors_by_prompt, factor_target, factor_categories or [])
+    else:
+        anova_rules = build_anova_basis_rules(
+            arg_values,
+            target_args=target_args,
+            anova_range_radius=anova_range_radius,
+        )
     if not anova_rules:
         return LabelTable.zeros(n_kept, None, device)
     gpu_anova_state = build_gpu_anova_state(anova_rules, device)
@@ -280,7 +302,7 @@ def label_neurons_layer_by_layer(
         up_out   = torch.bmm(X_batch, W_up.permute(0, 2, 1))   + b_up.unsqueeze(1)
         del X_batch, W_gate, W_up, b_gate, b_up
 
-        neuron_acts_batch = F.silu(gate_out) * up_out  # [n_groups, P, N_max]
+        neuron_acts_batch = getattr(model, "_act", F.silu)(gate_out) * up_out  # [n_groups, P, N_max]
         del gate_out, up_out
 
         n_labeled_layer = 0
