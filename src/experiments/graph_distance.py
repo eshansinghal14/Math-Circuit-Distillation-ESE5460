@@ -139,9 +139,13 @@ def main() -> None:
             tl = tl.to(dev)
             kls.append(float((tl.exp() * (tl - logits.log_softmax(-1))).sum(-1).mean()))
             if args.answer_tokens:
+                # eval mode: in train mode generate() keeps no KV cache under gradient checkpointing and
+                # decodes every token after the first from that token alone (Qwen: "50" became "5、")
+                model.eval()
                 with torch.no_grad(), student_autocast():
                     gen = model.generate(ids[:, :first], max_new_tokens=n + 3, do_sample=False,
                                          pad_token_id=tok.eos_token_id)
+                model.train()
                 text = tok.decode(gen[0, first:], skip_special_tokens=True)
                 m_ = re.match(r"\s*(-?\d+)", text)
                 preds.append(m_.group(1) if m_ else text)
