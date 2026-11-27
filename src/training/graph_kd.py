@@ -6,6 +6,7 @@ import argparse
 import os
 import random
 import sys
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from functools import partial
@@ -161,6 +162,10 @@ class GraphKDConfig:
     graph_node_labels: List[str] = field(default_factory=list)
     anova_range_radius: int = 0
     mlp_cache_batch_size: int = 32
+    # Rebuild the student's MLP-input cache from its current weights every N steps
+    # (0: built once from the untrained student). The ANOVA labels of the student's
+    # neurons are scored on these cached residual inputs, which go stale as it trains.
+    student_mlp_cache_refresh: int = 0
     anova_neuron_chunk: int | None = None
     # Performance only; neither changes any number a run produces.
     anova_cache_device: str = "auto"
@@ -284,6 +289,7 @@ class GraphKDTrainer:
                 )
                 if shared is not None:
                     shared["mlp_caches"] = (student_mlp_cache, teacher_mlp_cache)
+            self._mlp_cache_data = train_data
 
         self.graph_config = GraphAuxConfig(
             lambda_graph=config.lambda_graph,
@@ -693,6 +699,22 @@ class GraphKDTrainer:
         if dev.type == "cpu" and torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+    def _maybe_refresh_student_mlp_cache(self) -> None:
+        """--student-mlp-cache-refresh: re-capture the student's MLP inputs from its current weights."""
+        n = self.config.student_mlp_cache_refresh
+        if not n or self._train_step % n or self.graph_config.mlp_input_cache is None:
+            return
+        from graph_loss.precompute_mlp_inputs import build_mlp_input_cache
+        t0 = time.perf_counter()
+        self.graph_config.mlp_input_cache = None
+        torch.cuda.empty_cache()
+        self.graph_config.mlp_input_cache = build_mlp_input_cache(
+            self.student_adapter, f"{self.config.dataset}_live", self.config.model,
+            data_dict=self._mlp_cache_data, batch_size=self.config.mlp_cache_batch_size, refresh=True,
+            cache_device=_anova_cache_devices(self.config.anova_cache_device)[0],
+        )
+        print(f"  step {self._train_step} | student MLP-input cache rebuilt in {time.perf_counter() - t0:.0f}s")
+
     def train_epoch(self, *, max_steps: Optional[int] = None) -> Dict[str, float]:
         self.model.train()
         cfg = self.config
@@ -1006,6 +1028,7 @@ class GraphKDTrainer:
                 self.optimizer.zero_grad()
 
                 self._train_step += 1
+                self._maybe_refresh_student_mlp_cache()
                 self.history["train_step"].append(self._train_step)
                 self.history["step_kl_loss"].append(accum_kl)
                 self.history["step_tf_acc"].append(self._last_tf_acc)
@@ -1351,6 +1374,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Neurons processed per ANOVA batch (reduce to avoid GPU OOM on large grids; default: all at once).",
     )
     group.add_argument(
+        "--student-mlp-cache-refresh", type=int, default=0, dest="student_mlp_cache_refresh",
+        help="Rebuild the student's MLP-input cache (ANOVA / factor labels) from its current weights every N "
+             "steps; 0 (default) builds it once from the untrained student.",
+    )
+    group.add_argument(
         "--anova-cache-device", "--anova_cache_device",
         choices=["auto", "cpu", "pinned", "cuda"], default="auto", dest="anova_cache_device",
         help="Where the MLP-input caches the ANOVA labeler reads live. The labeler copies "
@@ -1545,6 +1573,7 @@ def config_from_args(args: argparse.Namespace, seed: int, save_dir: str) -> Grap
         graph_node_labels=graph_node_labels,
         anova_range_radius=args.anova_range_radius,
         mlp_cache_batch_size=args.cache_batch_size,
+        student_mlp_cache_refresh=args.student_mlp_cache_refresh,
         anova_neuron_chunk=args.anova_neuron_chunk,
         anova_cache_device=args.anova_cache_device,
         teacher_target_cache_dir=args.teacher_target_cache_dir,
