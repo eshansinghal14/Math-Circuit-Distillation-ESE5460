@@ -4,9 +4,21 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import contextlib
+
 import torch
 
 from graph_loss.freeze import frozen_graph_edges, without_gradient_checkpointing
+
+
+def _math_attention():
+    """Route scaled_dot_product_attention to the math kernel: flash / memory-efficient
+    attention have no double backward, which create_graph=True needs."""
+    try:
+        from torch.nn.attention import SDPBackend, sdpa_kernel
+        return sdpa_kernel(SDPBackend.MATH)
+    except ImportError:  # torch < 2.3
+        return torch.backends.cuda.sdp_kernel(enable_flash=False, enable_mem_efficient=False, enable_math=True)
 
 if TYPE_CHECKING:
     from graph_loss.hf_adapter import HFLlamaGraphAdapter
@@ -87,7 +99,7 @@ class HFAttributionContext:
             selection_scores=None if self.selection_scores is None else self.selection_scores[keep_mask],
         )
 
-    def _expanded_forward(self, batch_len: int):
+    def _expanded_forward(self, batch_len: int, math_attention: bool = False):
         """Run a batch-expanded forward pass for gradient-based attribution.
 
         Returns ``(chunk_out, chunk_mlp_inputs, chunk_mlp_outputs, chunk_embed)``
@@ -127,7 +139,7 @@ class HFAttributionContext:
                 adapter.model,
                 freeze_attention=self.freeze_attention,
                 freeze_rms_norm=self.freeze_rms_norm,
-            ):
+            ), (_math_attention() if math_attention else contextlib.nullcontext()):
                 chunk_out = adapter.model(
                     input_ids=self.input_ids.expand(batch_len, -1),
                     attention_mask=torch.ones(
@@ -219,7 +231,7 @@ class HFAttributionContext:
         """
         rows = [int(r) for r in rows]
         batch_len = len(rows)
-        _, chunk_mlp_inputs, chunk_mlp_outputs, chunk_embed = self._expanded_forward(batch_len)
+        _, chunk_mlp_inputs, chunk_mlp_outputs, chunk_embed = self._expanded_forward(batch_len, math_attention=create_graph)
         terms = []
         for batch_idx, row_idx in enumerate(rows):
             layer_idx = int(self.neuron_locations[row_idx, 0].item())
@@ -383,7 +395,7 @@ class HFAttributionContext:
         Defaults to -1 (last position, existing behavior).
         """
         batch_len = end - start
-        chunk_out, _chunk_mlp_inputs, chunk_mlp_outputs, chunk_embed = self._expanded_forward(batch_len)
+        chunk_out, _chunk_mlp_inputs, chunk_mlp_outputs, chunk_embed = self._expanded_forward(batch_len, math_attention=create_graph)
         lv = logit_vectors[start:end].to(
             device=self.adapter.device,
             dtype=chunk_out.hidden_states[-1].dtype,
