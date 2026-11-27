@@ -122,6 +122,12 @@ class GraphAuxConfig:
     membership_adapter: Any = None
     membership_mlp_cache: dict | None = None
     membership_cache: dict | None = None
+    # Differentiate through the edge attribution itself (create_graph=True on its
+    # backward passes). By default the Jacobian between two neurons is a constant
+    # and the graph gradient reaches the weights only through the source neurons'
+    # write vectors (activation x W_out row); with this, the residual/attention
+    # path that carries the edge is trained too. Costs a double backward.
+    full_graph_gradient: bool = False
 
     def __post_init__(self) -> None:
         # 'tokens' in graph_node_labels means token_source_columns, never an ANOVA
@@ -851,7 +857,7 @@ def compute_prompt_graph_loss(
             batch_size=config.student_graph_batch_size,
             dtype=config.graph_dtype,
             verbose=config.verbose,
-            build_create_graph=False,
+            build_create_graph=config.full_graph_gradient,
             detach_result=False,
             skip_logit_attribution=False,
             mlp_input_cache=config.mlp_input_cache,

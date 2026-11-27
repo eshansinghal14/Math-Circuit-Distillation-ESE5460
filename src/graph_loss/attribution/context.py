@@ -234,7 +234,7 @@ class HFAttributionContext:
         grads = torch.autograd.grad(
             torch.stack(terms).sum(),
             source_tensors,
-            retain_graph=False,
+            retain_graph=create_graph,
             create_graph=create_graph,
             allow_unused=True,
         )
@@ -393,7 +393,7 @@ class HFAttributionContext:
         grads = torch.autograd.grad(
             terms.sum(),
             source_tensors,
-            retain_graph=False,
+            retain_graph=create_graph,
             create_graph=create_graph,
             allow_unused=True,
         )

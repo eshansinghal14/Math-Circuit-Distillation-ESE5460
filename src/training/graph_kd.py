@@ -170,6 +170,8 @@ class GraphKDConfig:
     # Fix each prompt's student supernode membership on a frozen copy of the untrained
     # student (labelled on its MLP-input cache) and reuse it at every later visit.
     pin_student_membership: bool = False
+    # Differentiate through the edge attribution (create_graph=True); see GraphAuxConfig.
+    full_graph_gradient: bool = False
     anova_neuron_chunk: int | None = None
     # Performance only; neither changes any number a run produces.
     anova_cache_device: str = "auto"
@@ -358,6 +360,7 @@ class GraphKDTrainer:
             membership_adapter=membership_adapter,
             membership_mlp_cache=student_mlp_cache if membership_adapter is not None else None,
             membership_cache=membership_cache,
+            full_graph_gradient=config.full_graph_gradient,
         )
 
         # The teacher's per-prompt target is a pure function of the teacher-side
@@ -1406,6 +1409,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Neurons processed per ANOVA batch (reduce to avoid GPU OOM on large grids; default: all at once).",
     )
     group.add_argument(
+        "--full-graph-gradient", action="store_true", dest="full_graph_gradient",
+        help="Backpropagate the graph loss through the edge attribution itself (double backward), so the "
+             "path between two neurons is trained, not only the source neuron's write vector.",
+    )
+    group.add_argument(
         "--pin-student-membership", action="store_true", dest="pin_student_membership",
         help="Choose each prompt's student supernodes once, on a frozen copy of the untrained student, and "
              "reuse them at every later visit (the graph loss is then smooth in the current weights).",
@@ -1612,6 +1620,7 @@ def config_from_args(args: argparse.Namespace, seed: int, save_dir: str) -> Grap
         mlp_cache_batch_size=args.cache_batch_size,
         student_mlp_cache_refresh=args.student_mlp_cache_refresh,
         pin_student_membership=args.pin_student_membership,
+        full_graph_gradient=args.full_graph_gradient,
         anova_neuron_chunk=args.anova_neuron_chunk,
         anova_cache_device=args.anova_cache_device,
         teacher_target_cache_dir=args.teacher_target_cache_dir,
