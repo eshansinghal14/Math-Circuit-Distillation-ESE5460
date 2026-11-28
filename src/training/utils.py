@@ -935,7 +935,7 @@ SWEEP_PARAMS = (
     "token_path_top_tokens", "bos_embedding", "graph_grad_projection", "kd_bos_fraction",
     "graph_warmup_steps", "kd_target", "graph_position", "graph_rows", "graph_edge_topk",
     "graph_neuron_selection", "graph_supernode_type", "graph_position_bands",
-    "graph_stop_step",
+    "graph_stop_step", "graph_grad_cap", "graph_share_floor",
 )
 
 # Parameters added after runs were already keyed. At these values (or absent, on
@@ -943,7 +943,7 @@ SWEEP_PARAMS = (
 # recorded before they existed keeps its key; any other value is in the digest.
 _SIGNATURE_OMIT_AT = {"bos_embedding": "train", "graph_grad_projection": "none", "kd_bos_fraction": 0.0, "graph_warmup_steps": 0, "kd_target": "soft", "graph_position": "prompt-end", "graph_rows": "all", "graph_edge_topk": 0,
                       "graph_neuron_selection": "norm", "graph_supernode_type": "arg", "graph_position_bands": 1,
-                      "graph_stop_step": 0,
+                      "graph_stop_step": 0, "graph_grad_cap": 0.0, "graph_share_floor": 0.0,
                       "rep_format": "train"}
 
 
