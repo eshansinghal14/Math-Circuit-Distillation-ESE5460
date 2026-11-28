@@ -36,6 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from graph_loss.hf_adapter import HFLlamaGraphAdapter
 from graph_loss.utils import normalize_node_labels
+from graph_loss.graph import set_share_floor
 from graph_loss.training import (
     GraphAuxConfig,
     TeacherTargetCache,
@@ -217,6 +218,10 @@ class GraphKDConfig:
     bos_embedding: str = "train"
     # Remove the KD direction from the graph gradient; see --graph-grad-projection.
     graph_grad_projection: str = "none"
+    # Cap |g_graph| at this multiple of |g_KD| each step (0: off); see --graph-grad-cap.
+    graph_grad_cap: float = 0.0
+    # Floor on the normalised aggregation's per-neuron share denominators; see --graph-share-floor.
+    graph_share_floor: float = 0.0
     # Under --bos-mode legacy: the fraction of each KD batch given a leading BOS.
     kd_bos_fraction: float = 0.0
     # The first N optimizer steps train on the graph term alone (KD gets no
@@ -360,6 +365,12 @@ class GraphKDTrainer:
                 if shared is not None:  # the reference is the untrained student: the same for every seed
                     shared["membership"] = (membership_adapter, membership_cache)
 
+        # --graph-share-floor is module state (graph.set_share_floor): set before the
+        # teacher-target cache key is taken, and never changed under a shared cache.
+        if shared is not None and shared.setdefault("share_floor", config.graph_share_floor) \
+                != config.graph_share_floor:
+            raise ValueError("--graph-share-floor cannot vary across runs that share a teacher cache")
+        set_share_floor(config.graph_share_floor)
         self.graph_config = GraphAuxConfig(
             lambda_graph=config.lambda_graph,
             graph_dtype=torch.bfloat16,
@@ -454,6 +465,18 @@ class GraphKDTrainer:
                 raise ValueError("--graph-grad-projection needs --grad-accum-steps 1")
             if config.bos_embedding == "graph-only":
                 raise ValueError("--graph-grad-projection cannot be combined with --bos-embedding graph-only")
+        if config.graph_grad_cap < 0:
+            raise ValueError(f"graph_grad_cap must be >= 0, got {config.graph_grad_cap}")
+        if config.graph_grad_cap > 0:
+            # Same snapshot requirement as the projection; one rewrite of .grad per step.
+            if config.grad_accum_steps != 1:
+                raise ValueError("--graph-grad-cap needs --grad-accum-steps 1")
+            if config.bos_embedding == "graph-only" or config.graph_grad_projection != "none":
+                raise ValueError("--graph-grad-cap cannot be combined with --bos-embedding graph-only "
+                                 "or --graph-grad-projection")
+            if config.graph_warmup_steps > 0:
+                raise ValueError("--graph-grad-cap is relative to |g_KD|, which is zero during "
+                                 "--graph-warmup-steps")
         if not 0.0 <= config.kd_bos_fraction <= 1.0:
             raise ValueError(f"kd_bos_fraction must be in [0, 1], got {config.kd_bos_fraction}")
         if config.kd_bos_fraction > 0.0 and config.bos_mode != "legacy":
@@ -472,6 +495,7 @@ class GraphKDTrainer:
             raise ValueError("--graph-warmup-steps cannot be combined with --graph-grad-projection")
 
         self.history: Dict[str, List] = defaultdict(list)
+        self._cap_scale = 1.0
         self._train_step = 0
         self._last_save_step = 0
         if config.resume:
@@ -548,6 +572,33 @@ class GraphKDTrainer:
                 p.grad.copy_(p.grad.float() - c * kd)
         # |g_graph - c g_KD|^2 = |g_graph|^2 - dot^2 / |g_KD|^2
         return cos, max(gr_sq - dot * dot / kd_sq, 0.0) ** 0.5
+
+    def _cap_graph_grad(self, kd_grads: Dict[str, Optional[torch.Tensor]], cap: float) -> float:
+        """--graph-grad-cap c: g <- g_KD + s * g_graph with s = min(1, c |g_KD| / |g_graph|).
+
+        ``kd_grads`` is .grad before the graph backward (host copies), so the graph
+        gradient is the delta; norms over the whole model in fp32. Returns s (1.0 when
+        the cap does not bind). The global clip that follows still sets the update's
+        size; the cap only keeps the graph term from owning its direction.
+        """
+        params = [(n, p) for n, p in self.model.named_parameters() if p.grad is not None]
+        kd_sq = gr_sq = 0.0
+        for n, p in params:
+            kd = kd_grads.get(n)
+            kd = torch.zeros_like(p.grad, dtype=torch.float32) if kd is None else kd.to(p.grad.device).float()
+            g = p.grad.float() - kd
+            kd_sq += float((kd * kd).sum())
+            gr_sq += float((g * g).sum())
+        if gr_sq == 0.0 or gr_sq ** 0.5 <= cap * kd_sq ** 0.5:
+            return 1.0
+        s = cap * kd_sq ** 0.5 / gr_sq ** 0.5
+        with torch.no_grad():
+            for n, p in params:
+                kd = kd_grads.get(n)
+                kd = torch.zeros_like(p.grad, dtype=torch.float32) if kd is None else kd.to(p.grad.device).float()
+                # g_KD + s * (g - g_KD), written back once (one rounding).
+                p.grad.copy_(kd + s * (p.grad.float() - kd))
+        return s
 
     def _keep_graph_grad_on_bos_row_only(self, kd_grads: Dict[str, Optional[torch.Tensor]]) -> None:
         """--bos-embedding graph-only: drop the graph gradient everywhere but the BOS row.
@@ -939,7 +990,7 @@ class GraphKDTrainer:
             # Projection: a host copy of the KD gradient (~2.5 GB in bf16); the graph
             # backward is the run's memory peak, so it stays off the GPU.
             proj_kd_grads = None
-            if cfg.graph_grad_projection != "none":
+            if cfg.graph_grad_projection != "none" or cfg.graph_grad_cap > 0:
                 proj_kd_grads = {
                     n: p.grad.detach().to("cpu", copy=True) if p.grad is not None else None
                     for n, p in self.model.named_parameters()
@@ -1032,7 +1083,11 @@ class GraphKDTrainer:
             # gradient and compare with every other run; the projection's own
             # numbers are logged as step_proj_*.
             if proj_kd_grads is not None:
-                self._proj_cos, self._proj_gnorm = self._project_graph_grad_off_kd(proj_kd_grads)
+                if cfg.graph_grad_cap > 0:
+                    # Logged as step_graph_cap_scale; step_grad_ratio above stays the raw ratio.
+                    self._cap_scale = self._cap_graph_grad(proj_kd_grads, cfg.graph_grad_cap)
+                else:
+                    self._proj_cos, self._proj_gnorm = self._project_graph_grad_off_kd(proj_kd_grads)
                 del proj_kd_grads
 
             micro_step += 1
@@ -1096,6 +1151,9 @@ class GraphKDTrainer:
                 self.history["step_bos_row_graph_gnorm"].append(accum_bos_graph_gnorm)
                 bos_str = (f" | BOS row: |g_KL|={accum_bos_kl_gnorm:.2e} |g_graph|={accum_bos_graph_gnorm:.2e}"
                            f" moved={bos_changed:.2f} drift={bos_drift_rel:.2e}")
+                if cfg.graph_grad_cap > 0:
+                    self.history["step_graph_cap_scale"].append(self._cap_scale)
+                    bos_str += f" | cap scale={self._cap_scale:.3f}"
                 if cfg.graph_grad_projection != "none":
                     self.history["step_proj_cos"].append(self._proj_cos)
                     self.history["step_proj_graph_gnorm"].append(self._proj_gnorm)
@@ -1250,6 +1308,8 @@ class GraphKDTrainer:
             + (f" | BOS embedding row: {cfg.bos_embedding}" if cfg.bos_embedding != "train" else "")
             + (f" | graph grad projection: {cfg.graph_grad_projection}"
                if cfg.graph_grad_projection != "none" else "")
+            + (f" | graph grad cap {cfg.graph_grad_cap:g} x |g_KD|" if cfg.graph_grad_cap > 0 else "")
+            + (f" | share floor {cfg.graph_share_floor:g}" if cfg.graph_share_floor > 0 else "")
             + (f" | KD rows with BOS: {cfg.kd_bos_fraction:g}" if cfg.kd_bos_fraction > 0 else "")
             + (f" | graph-only for the first {cfg.graph_warmup_steps} steps (no KD backward)"
                if cfg.graph_warmup_steps > 0 else "")
@@ -1524,6 +1584,21 @@ def build_parser() -> argparse.ArgumentParser:
              "Needs --grad-accum-steps 1.",
     )
     group.add_argument(
+        "--graph-grad-cap", type=float, nargs="+", default=[0.0], dest="graph_grad_cap",
+        help="Each step, scale the graph gradient down so |g_graph| <= c |g_KD| (whole-model "
+             "norms, fp32), so a graph-gradient spike cannot take over the update's direction; "
+             "0 (default) is off. step_grad_ratio logs the raw ratio, step_graph_cap_scale the "
+             "factor applied. Needs --grad-accum-steps 1.",
+    )
+    group.add_argument(
+        "--graph-share-floor", type=float, nargs="+", default=[0.0], dest="graph_share_floor",
+        help="normalised aggregation: divide each neuron's |inbound| row by sum + delta * (mean "
+             "neuron-row sum) instead of its sum, and weight members by their floored external "
+             "mass, so a nearly silent neuron cannot make the shares' gradient blow up "
+             "(graph.set_share_floor). Teacher and student alike; keys the teacher cache. 0 "
+             "(default) is the original construction.",
+    )
+    group.add_argument(
         "--kd-bos-fraction", type=float, nargs="+", default=[0.0], dest="kd_bos_fraction",
         help="--bos-mode legacy only: give this fraction of each KD batch a leading BOS (the "
              "last round(p*B) rows of the shuffled batch); the rest stay BOS-free. The BOS "
@@ -1669,6 +1744,8 @@ def config_from_args(args: argparse.Namespace, seed: int, save_dir: str) -> Grap
         teacher_target_cache_dir=args.teacher_target_cache_dir,
         bos_embedding=args.bos_embedding,
         graph_grad_projection=args.graph_grad_projection,
+        graph_grad_cap=args.graph_grad_cap,
+        graph_share_floor=args.graph_share_floor,
         kd_bos_fraction=args.kd_bos_fraction,
         graph_warmup_steps=args.graph_warmup_steps,
         graph_position=args.graph_position,

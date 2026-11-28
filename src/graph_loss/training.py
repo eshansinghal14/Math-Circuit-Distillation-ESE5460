@@ -382,6 +382,9 @@ def teacher_target_cache_key(config: GraphAuxConfig, teacher_name: str) -> str:
     if config.supernode_type != "arg":
         fields["supernode_type"] = config.supernode_type
         fields["position_bands"] = config.position_bands
+    from graph_loss.graph import share_floor
+    if share_floor() > 0:
+        fields["share_floor"] = share_floor()
     return hashlib.sha1(json.dumps(fields, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
 

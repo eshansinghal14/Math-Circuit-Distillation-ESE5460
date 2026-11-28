@@ -146,14 +146,55 @@ class Graph:
         )
 
 
-def normalize_matrix(matrix: torch.Tensor) -> torch.Tensor:
+# --graph-share-floor; see set_share_floor. 0 is the original construction.
+_SHARE_FLOOR = 0.0
+
+
+def set_share_floor(floor: float) -> None:
+    """--graph-share-floor delta for the ``normalised`` aggregation (0, the default: unchanged).
+
+    normalize_matrix divides each neuron's |inbound| row by its own sum, so a neuron
+    whose inbound attribution is nearly zero still contributes a full unit of share
+    mass, and the gradient of those shares grows like 1 / sum: a pinned member that
+    falls quiet makes the loss arbitrarily sharp (tool calls, 2026-11-28: |g_graph|
+    1.5 -> 49 in four steps, then KD 0.05 -> 4.0). With delta > 0 each neuron row is
+    divided by (sum + delta * mean neuron-row sum of the graph, detached), so a quiet
+    neuron's shares shrink smoothly to zero and their gradient is bounded by about
+    1 / (delta * mean); frac_external becomes the floored external mass
+    (total - internal) instead of the ratio (total - internal) / total, whose
+    denominator would cancel the floor. A row with sum >> delta * mean changes by
+    O(delta). Module-level like utils.set_bos_mode, so the teacher's target and the
+    student's graph go through the same arithmetic; the teacher-target cache key
+    records it.
+    """
+    global _SHARE_FLOOR
+    if floor < 0:
+        raise ValueError(f"share floor must be >= 0, got {floor}")
+    _SHARE_FLOOR = float(floor)
+
+
+def share_floor() -> float:
+    """The active floor; see :func:`set_share_floor`."""
+    return _SHARE_FLOOR
+
+
+def normalize_matrix(matrix: torch.Tensor, n_neurons: int | None = None) -> torch.Tensor:
+    """|matrix| with each row divided by its sum. Under --graph-share-floor (and given
+    ``n_neurons``, the rows the floor's scale is taken over) each row is divided by
+    sum + floor * (mean nonzero neuron-row sum) instead; see set_share_floor."""
     math_dtype = (
         torch.float32
         if matrix.dtype in (torch.float16, torch.bfloat16)
         else matrix.dtype
     )
     normalized = matrix.to(dtype=math_dtype).abs()
-    return normalized / normalized.sum(dim=1, keepdim=True).clamp(min=1e-10)
+    sums = normalized.sum(dim=1, keepdim=True)
+    if _SHARE_FLOOR > 0 and n_neurons is not None:
+        neuron_sums = sums[:n_neurons].detach()
+        nonzero = neuron_sums[neuron_sums > 0]
+        if nonzero.numel():
+            return normalized / (sums + _SHARE_FLOOR * nonzero.mean()).clamp(min=1e-10)
+    return normalized / sums.clamp(min=1e-10)
 
 
 def compute_neuron_logit_influence(graph: Graph) -> torch.Tensor:
@@ -943,7 +984,7 @@ def _aggregate_soft(
     hard path's, term for term.
     """
     if aggregation == "normalised":
-        E = normalize_matrix(adjacency)                 # already non-negative
+        E = normalize_matrix(adjacency, n_neurons)      # already non-negative
         En = E[:n_neurons, :n_neurons]
         total = E[:n_neurons].sum(dim=1)                # over every source column
         source = [En @ w for w in weights]
@@ -951,6 +992,8 @@ def _aggregate_soft(
         for t, u in enumerate(weights):
             if constant_node_weighting:
                 frac_external = torch.ones_like(total)
+            elif _SHARE_FLOOR > 0:
+                frac_external = total - En @ u          # floored external mass (set_share_floor)
             else:
                 internal = En @ u
                 frac_external = (total - internal) / total.clamp(min=epsilon)
@@ -1171,7 +1214,7 @@ def aggregate_supernode_adjacency(
         )
 
     if aggregation == "normalised":
-        adj_matrix_norm = normalize_matrix(adjacency)
+        adj_matrix_norm = normalize_matrix(adjacency, n_neurons)
         rows = []
         for t in range(num_supernodes):
             target_members = supernodes[t]
@@ -1190,6 +1233,9 @@ def aggregate_supernode_adjacency(
             internal_input = torch.abs(block[:, target_members]).sum(dim=1)
             if constant_node_weighting:
                 frac_external = torch.ones_like(total_input)
+            elif _SHARE_FLOOR > 0:
+                # floored external mass: a quiet member weighs ~0 (set_share_floor)
+                frac_external = total_input - internal_input
             else:
                 frac_external = (total_input - internal_input) / total_input.clamp(min=epsilon)
             weight_sum = frac_external.sum(dim=0).clamp(min=epsilon)
