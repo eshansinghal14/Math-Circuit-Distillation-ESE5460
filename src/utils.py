@@ -127,7 +127,7 @@ _ANSWER_TYPE_CACHE: Dict[str, str] = {}
 
 
 def dataset_answer_type(dataset: str) -> str:
-    """``"text"`` or ``"int"`` for a local dataset, from ``datasets/<name>/meta.json``.
+    """``"int"``, ``"text"``, ``"cot"``, ``"eq"`` or ``"call"`` for a local dataset, from ``datasets/<name>/meta.json``.
 
     Explicit rather than inferred from the gold's Python type: load_split already
     coerces an all-digit answer to int, so a context-grounded dataset whose answer
@@ -268,6 +268,9 @@ HF_EVAL_TOKENS = 256
 COT_EVAL_TOKENS = 64
 # "<expression> = N": SVAMP equations are 3-9 tokens before the result.
 EQ_EVAL_TOKENS = 24
+# Tool calls (answer_type "call", generate_tool_dataset.py): the longest gold call,
+# three arguments, is ~20 Qwen tokens.
+CALL_EVAL_TOKENS = 40
 
 
 def default_eval_tokens(dataset_name: str) -> int:
@@ -277,6 +280,8 @@ def default_eval_tokens(dataset_name: str) -> int:
         return COT_EVAL_TOKENS
     if dataset_answer_type(dataset_name) == "eq":
         return EQ_EVAL_TOKENS
+    if dataset_answer_type(dataset_name) == "call":
+        return CALL_EVAL_TOKENS
     return LOCAL_EVAL_TOKENS
 
 
@@ -355,7 +360,7 @@ def eval_model(model, tokenizer, test_dataset, dataset_name: str, batch_size: in
                 elif answer_type == "eq":
                     pred = extract_eq_answer(text)
                     gold_parsed = gold if isinstance(gold, int) else extract_eq_answer(str(gold))
-                elif answer_type == "text":
+                elif answer_type in ("text", "call"):
                     pred = extract_text_answer(text)
                     gold_parsed = normalize_answer_text(str(gold)) or None
                 else:

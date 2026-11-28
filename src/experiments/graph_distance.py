@@ -15,6 +15,11 @@ over one graph per answer token (the trainer's answer-tokens cuts), the KD loss
 the mean over the answer tokens, and "right" is the greedy answer's leading
 integer equal to the gold one (otherwise "right" is the first answer token).
 
+--decision-tokens (tool calls, answer_type "call"): like --answer-tokens, but graphs and the KD loss only at
+the answer tokens that carry a choice: every token of the tool name and the first token of each argument
+value (after "name: "). The rest of a call is copied from the listed signature. "Right" is the normalised
+exact match of the whole greedy call (as eval_model grades it).
+
 --node-labels (e.g. the mix3 factor categories "x1 tens" ... "result units"
 "carry1"): ANOVA supernodes instead of position supernodes, labelled from MLP
 input caches over the first --anova-prompts training problems (one per model).
@@ -47,7 +52,8 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils import DIR_ROOT, PromptAnswerDataset, collate_fn, load_data, load_model, set_bos_mode  # noqa: E402
+from utils import (DIR_ROOT, PromptAnswerDataset, collate_fn, dataset_answer_type, extract_text_answer,  # noqa: E402
+                   load_data, load_model, normalize_answer_text, set_bos_mode)
 from training.utils import load_student, student_autocast  # noqa: E402
 import graph_loss.training as GT  # noqa: E402
 from training.graph_kd import answer_token_cuts  # noqa: E402
@@ -72,6 +78,8 @@ def main() -> None:
     ap.add_argument("--tag", default="default")
     ap.add_argument("--answer-tokens", action="store_true",
                     help="one graph per answer token, KD loss over all answer tokens, correctness by greedy decoding")
+    ap.add_argument("--decision-tokens", action="store_true",
+                    help="tool calls: graphs and KD loss only at the tool-name and argument-value tokens")
     ap.add_argument("--node-labels", nargs="+", default=None, help="ANOVA / factor supernode categories")
     ap.add_argument("--graph-rows", default=None, help="default: last (position nodes), all (labelled nodes)")
     ap.add_argument("--anova-prompts", type=int, default=3000, help="training problems in each MLP-input cache")
@@ -104,23 +112,60 @@ def main() -> None:
     if labelled:
         base = dataclasses.replace(base, teacher_mlp_input_cache=build_mlp_input_cache(
             t_ad, cache_key, args.teacher, data_dict=cache_data, batch_size=64))
+    generate = args.answer_tokens or args.decision_tokens
+    text_answers = dataset_answer_type(args.dataset) in ("text", "call")
+
     def answer_input(prompt, answer):
-        """Token ids of prompt + gold answer, the first answer position, and the number of answer tokens scored."""
+        """Token ids of prompt + gold answer, the first answer position, and the number of answer tokens."""
         b = collate_fn([PromptAnswerDataset(args.dataset, {prompt: answer}, tok)[0]], pad_id=tok.eos_token_id)
-        n = len(tok(str(answer), add_special_tokens=False)["input_ids"]) if args.answer_tokens else 1
+        n = len(tok(str(answer), add_special_tokens=False)["input_ids"])
         return b["input_ids"].to(dev), int(b["response_mask"][0].nonzero()[0]), n
 
-    cuts = [answer_token_cuts(tok, [p], [a]) if args.answer_tokens else ([p], [a]) for p, a in items]
+    def decision_cuts(prompt, answer):
+        """(prompt + answer[:k], answer[k:]) at the tokens of a call that carry a choice, and those k: every
+        token before the one holding "(" (the tool name), and the first non-space token after each ":"."""
+        bos = tok.bos_token or ""
+        add = not (bos and prompt.startswith(bos))
+        p_ids = tok(prompt, add_special_tokens=add)["input_ids"]
+        a_ids = tok(str(answer), add_special_tokens=False)["input_ids"]
+        ks, in_name, after_colon = [], True, False
+        for k, piece in enumerate(tok.decode([t]) for t in a_ids):
+            if in_name and "(" not in piece:
+                ks.append(k)
+                continue
+            in_name = False
+            if after_colon and piece.strip():
+                ks.append(k)
+                after_colon = False
+            if piece.rstrip().endswith(":"):
+                after_colon = True
+        out = ([], [], [])
+        for k in ks:
+            prefix = tok.decode(a_ids[:k]) if k else ""
+            if k and tok(prompt + prefix, add_special_tokens=add)["input_ids"] != p_ids + a_ids[:k]:
+                continue
+            for o, v in zip(out, (prompt + prefix, tok.decode(a_ids[k:]), k)):
+                o.append(v)
+        return out
+
+    if args.decision_tokens:
+        cuts = [decision_cuts(p, a) for p, a in items]
+    else:
+        cuts = []
+        for p, a in items:
+            cp, ca = answer_token_cuts(tok, [p], [a]) if args.answer_tokens else ([p], [a])
+            n = len(tok(str(a), add_special_tokens=False)["input_ids"]) if args.answer_tokens else 1
+            cuts.append((cp, ca, list(range(n))))
     entries, t_logp, t0 = [], [], time.perf_counter()
-    for (prompt, answer), (cut_p, cut_a) in zip(items, cuts):
+    for (prompt, answer), (cut_p, cut_a, ks) in zip(items, cuts):
         ent = []
         for cp, ca in zip(cut_p, cut_a):
             t_sg, logit_ids, dla = GT._compute_teacher_target(cp, ca, t_ad, base, dev)
             ent.append(GT._teacher_target_entry(t_sg, logit_ids, dla, answer=ca))
         entries.append(ent)
-        ids, first, n = answer_input(prompt, answer)
+        ids, first, _ = answer_input(prompt, answer)
         with torch.no_grad():
-            t_logp.append(teacher(ids).logits[0, first - 1:first - 1 + n].float().log_softmax(-1).cpu())
+            t_logp.append(teacher(ids).logits[0, [first - 1 + k for k in ks]].float().log_softmax(-1).cpu())
     print(f"teacher targets for {len(entries)} problems ({sum(len(e) for e in entries)} graphs) "
           f"in {time.perf_counter() - t0:.0f}s", flush=True)
     del t_ad, teacher
@@ -129,6 +174,7 @@ def main() -> None:
     torch.cuda.empty_cache()
 
     out = {"teacher": args.teacher, "dataset": args.dataset, "n": len(items), "answer_tokens": args.answer_tokens,
+           "decision_tokens": args.decision_tokens, "graphs": sum(len(c[0]) for c in cuts),
            "node_labels": args.node_labels, "graph_rows": rows, "models": {}}
     for spec in args.model:
         label, rest = spec.split("=", 1)
@@ -142,7 +188,7 @@ def main() -> None:
                 ad, cache_key, path, data_dict=cache_data, batch_size=64))
         losses, hits, preds, kls = [], [], [], []
         t0 = time.perf_counter()
-        for (prompt, answer), ent, (cut_p, cut_a), tl in zip(items, entries, cuts, t_logp):
+        for (prompt, answer), ent, (cut_p, cut_a, ks), tl in zip(items, entries, cuts, t_logp):
             cut_losses = []
             for entry, cp, ca in zip(ent, cut_p, cut_a):
                 t_sg, logit_ids, dla = GT._teacher_target_from_entry(entry, dev)
@@ -155,10 +201,10 @@ def main() -> None:
             losses.append(sum(cut_losses) / len(cut_losses))
             ids, first, n = answer_input(prompt, answer)
             with torch.no_grad(), student_autocast():
-                logits = model(ids).logits[0, first - 1:first - 1 + n].float()
+                logits = model(ids).logits[0, [first - 1 + k for k in ks]].float()
             tl = tl.to(dev)
             kls.append(float((tl.exp() * (tl - logits.log_softmax(-1))).sum(-1).mean()))
-            if args.answer_tokens:
+            if generate:
                 # eval mode: in train mode generate() keeps no KV cache under gradient checkpointing and
                 # decodes every token after the first from that token alone (Qwen: "50" became "5、")
                 model.eval()
@@ -167,9 +213,13 @@ def main() -> None:
                                          pad_token_id=tok.eos_token_id)
                 model.train()
                 text = tok.decode(gen[0, first:], skip_special_tokens=True)
-                m_ = re.match(r"\s*(-?\d+)", text)
-                preds.append(m_.group(1) if m_ else text)
-                hits.append(preds[-1] == str(answer).strip())
+                if text_answers:
+                    preds.append(text.strip().split("\n")[0])
+                    hits.append(extract_text_answer(text) == normalize_answer_text(str(answer)))
+                else:
+                    m_ = re.match(r"\s*(-?\d+)", text)
+                    preds.append(m_.group(1) if m_ else text)
+                    hits.append(preds[-1] == str(answer).strip())
             else:
                 top = int(logits[0].argmax())
                 hits.append(top == int(ids[0, first]))
