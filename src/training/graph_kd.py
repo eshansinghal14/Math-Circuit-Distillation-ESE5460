@@ -108,6 +108,43 @@ def answer_token_cuts(tok, prompts: List[str], responses: List[Any]) -> tuple[Li
     return out_p, out_a
 
 
+def decision_token_cuts(tok, prompts: List[str], responses: List[Any]) -> tuple[List[str], List[str], List[int]]:
+    """Tool calls (answer_type "call"): answer_token_cuts restricted to the tokens that carry a choice.
+
+    Those are every token of the tool name (before the token holding "(") and the
+    first non-space token after each ":" (an argument value); the parameter names
+    and punctuation in between are copied from the listed signature. Returns
+    (prompts, answers, ks), ks the answer-token index of each cut. A cut whose
+    prefix does not re-tokenise to the gold tokens before it is dropped, as in
+    answer_token_cuts.
+    """
+    bos = tok.bos_token or ""
+    out_p, out_a, out_k = [], [], []
+    for p, r in zip(prompts, responses):
+        add = not (bos and p.startswith(bos))
+        p_ids = tok(p, add_special_tokens=add)["input_ids"]
+        a_ids = tok(str(r), add_special_tokens=False)["input_ids"]
+        ks, in_name, after_colon = [], True, False
+        for k, piece in enumerate(tok.decode([t]) for t in a_ids):
+            if in_name and "(" not in piece:
+                ks.append(k)
+                continue
+            in_name = False
+            if after_colon and piece.strip():
+                ks.append(k)
+                after_colon = False
+            if piece.rstrip().endswith(":"):
+                after_colon = True
+        for k in ks:
+            prefix = tok.decode(a_ids[:k]) if k else ""
+            if k and tok(p + prefix, add_special_tokens=add)["input_ids"] != p_ids + a_ids[:k]:
+                continue
+            out_p.append(p + prefix)
+            out_a.append(tok.decode(a_ids[k:]))
+            out_k.append(k)
+    return out_p, out_a, out_k
+
+
 @dataclass
 class GraphKDConfig:
     model: str
@@ -209,7 +246,7 @@ class GraphKDConfig:
 
 
 BOS_EMBEDDING_MODES = ("train", "freeze", "graph-only")
-GRAPH_POSITIONS = ("prompt-end", "final-answer", "operator", "answer-tokens")
+GRAPH_POSITIONS = ("prompt-end", "final-answer", "operator", "answer-tokens", "decision-tokens")
 GRAPH_GRAD_PROJECTIONS = ("none", "orthogonal")
 
 
@@ -572,6 +609,10 @@ class GraphKDTrainer:
             # One graph per token of the answer, each built on the prompt plus the
             # gold answer tokens before it; the graph losses are averaged.
             prompts, answers = self._answer_token_graph_inputs(prompts, answers)
+        elif cfg.graph_position == "decision-tokens":
+            # Tool calls: one graph per tool-name token and per argument value's
+            # first token (decision_token_cuts); --n-graph-prompts subsamples the cuts.
+            prompts, answers, _ = decision_token_cuts(self.tokenizer, prompts, answers)
         elif cfg.graph_position == "operator":
             # The graph attributes the first operator of the gold equation
             # (where the operation is chosen); the KD term scores the whole response.

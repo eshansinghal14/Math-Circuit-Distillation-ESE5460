@@ -169,12 +169,70 @@ UNSEEN_TOOLS = {
 
 N_LISTED = 4
 
+# --context: argument values are looked up in a list of facts instead of read off the
+# request. kind -> (fact, reference to the fact's value). "num" is left literal
+# ("Ava's lucky number minutes" stops being English).
+FACTS = {
+    "city": ("{o} lives in {v}.", "{o}'s city"),
+    "day": ("{o} is free on {v}.", "the day {o} is free"),
+    "time": ("{o} wakes up at {v}.", "{o}'s wake-up time"),
+    "currency": ("{o} is paid in {v}.", "{o}'s currency"),
+    "item": ("{o}'s favourite food is {v}.", "{o}'s favourite food"),
+    "color": ("{o}'s favourite color is {v}.", "{o}'s favourite color"),
+    "artist": ("{o}'s favourite artist is {v}.", "{o}'s favourite artist"),
+    "language": ("{o} speaks {v}.", "{o}'s language"),
+    "ticker": ("{o} owns {v} stock.", "{o}'s stock"),
+    "person": ("{o}'s manager is {v}.", "{o}'s manager"),
+}
+# Owners of facts; disjoint from the "person" pool so a fact's subject is never a call value.
+OWNERS = "Ava Ben Cleo Dev Eli Fay Gus Hal Ivy Jon Kim Lou Mei Ned Ola Pia Raj Sol Ted Val Wes Xan Yan Zed".split()
+
 
 def signature(name: str, tools: dict) -> str:
     return f"{name}({', '.join(p for p, _ in tools[name][0])})"
 
 
-def sample(rng: random.Random, targets: dict, pool: dict):
+def context_facts(rng: random.Random, params, values: dict, fill: dict, p_ref: float, p_two: float) -> list[str]:
+    """Rewrite ``fill`` so referable values are named through facts, and return the shuffled facts.
+
+    One hop: "Ava lives in Oslo." + request "... Ava's city ..."; a distractor fact of
+    the same kind about another owner. Two hops (non-person kinds): "Ava's manager is
+    Ben. Ben lives in Oslo." + "... Ava's manager's city ...", plus Ava's own city
+    (the one-hop shortcut, wrong) and another owner's manager chain. Every value in a
+    fact is distinct from the call's values and from the request's literal distractors.
+    """
+    owners = rng.sample(OWNERS, len(OWNERS))
+    taken = {kind: {v for p, k in params for v in (values[p], fill["_" + p]) if k == kind} for _, kind in params}
+
+    def draw(kind):
+        v = rng.choice([x for x in POOLS[kind] if x not in taken.setdefault(kind, set())])
+        taken[kind].add(v)
+        return v
+
+    manager = FACTS["person"][0]
+    facts = []
+    for p, kind in params:
+        if kind not in FACTS or rng.random() >= p_ref:
+            continue
+        fact, ref = FACTS[kind]
+        o = owners.pop()
+        if kind != "person" and rng.random() < p_two:
+            m, o2, m2 = owners.pop(), owners.pop(), owners.pop()
+            facts += [manager.format(o=o, v=m), fact.format(o=m, v=values[p]), fact.format(o=o, v=draw(kind)),
+                      manager.format(o=o2, v=m2), fact.format(o=m2, v=draw(kind))]
+            fill[p] = ref.format(o=f"{o}'s manager")
+        else:
+            facts += [fact.format(o=o, v=values[p]), fact.format(o=owners.pop(), v=draw(kind))]
+            fill[p] = ref.format(o=o)
+    while len(facts) < 2:  # every prompt has a context line
+        kind = rng.choice(sorted(FACTS))
+        facts.append(FACTS[kind][0].format(o=owners.pop(), v=draw(kind)))
+    rng.shuffle(facts)
+    return facts
+
+
+def sample(rng: random.Random, targets: dict, pool: dict, context: bool = False, p_ref: float = 0.8,
+           p_two: float = 0.3):
     """One (prompt, call) with the target drawn from ``targets`` and the other listed tools from ``pool``."""
     name = rng.choice(sorted(targets))
     params, templates = targets[name]
@@ -196,16 +254,17 @@ def sample(rng: random.Random, targets: dict, pool: dict):
     listed = others + [name]
     rng.shuffle(listed)
     every = {**TRAIN_TOOLS, **UNSEEN_TOOLS}
+    ctx = f"Context: {' '.join(context_facts(rng, params, values, fill, p_ref, p_two))}\n" if context else ""
     prompt = (f"Tools: {'; '.join(signature(t, every) for t in listed)}\n"
-              f"Request: {template.format(**fill)}\nCall:")
+              f"{ctx}Request: {template.format(**fill)}\nCall:")
     call = f" {name}({', '.join(f'{p}: {values[p]}' for p, _ in params)})"
     return prompt, call
 
 
-def build(rng: random.Random, targets: dict, pool: dict, n: int, seen: set) -> list[dict]:
+def build(rng: random.Random, targets: dict, pool: dict, n: int, seen: set, **kw) -> list[dict]:
     rows = []
     while len(rows) < n:
-        q, a = sample(rng, targets, pool)
+        q, a = sample(rng, targets, pool, **kw)
         if q not in seen:
             seen.add(q)
             rows.append({"q_str": q, "a_str": a})
@@ -229,15 +288,21 @@ def main() -> None:
     ap.add_argument("--train", type=int, default=5000)
     ap.add_argument("--test", type=int, default=1000)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--context", action="store_true",
+                    help="argument values named through a context of facts (one or two hops) instead of literally")
+    ap.add_argument("--p-ref", type=float, default=0.8, help="--context: chance a referable value is looked up")
+    ap.add_argument("--p-two-hop", type=float, default=0.3, help="--context: chance a lookup takes two hops")
     args = ap.parse_args()
     rng = random.Random(args.seed)
     seen: set = set()
-    train = build(rng, TRAIN_TOOLS, TRAIN_TOOLS, args.train, seen)
-    test = build(rng, TRAIN_TOOLS, TRAIN_TOOLS, args.test, seen)
+    kw = dict(context=args.context, p_ref=args.p_ref, p_two=args.p_two_hop)
+    train = build(rng, TRAIN_TOOLS, TRAIN_TOOLS, args.train, seen, **kw)
+    test = build(rng, TRAIN_TOOLS, TRAIN_TOOLS, args.test, seen, **kw)
     every = {**TRAIN_TOOLS, **UNSEEN_TOOLS}
-    u_train = build(rng, UNSEEN_TOOLS, every, args.test, seen)  # never trained on; load_data needs a train split
-    u_test = build(rng, UNSEEN_TOOLS, every, args.test, seen)
-    meta = {"answer_type": "call", "train_tools": sorted(TRAIN_TOOLS), "unseen_tools": sorted(UNSEEN_TOOLS)}
+    u_train = build(rng, UNSEEN_TOOLS, every, args.test, seen, **kw)  # never trained on; load_data needs a train split
+    u_test = build(rng, UNSEEN_TOOLS, every, args.test, seen, **kw)
+    meta = {"answer_type": "call", "train_tools": sorted(TRAIN_TOOLS), "unseen_tools": sorted(UNSEEN_TOOLS),
+            **({"context": True, "p_ref": args.p_ref, "p_two_hop": args.p_two_hop} if args.context else {})}
     a = write(args.name, {"train": train, "test": test, "all": train + test}, {**meta, "split": "seen tools"})
     b = write(args.name + "_unseen", {"train": u_train, "test": u_test, "all": u_train + u_test},
               {**meta, "split": "held-out tools only (targets); distractors from all tools"})

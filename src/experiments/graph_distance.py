@@ -56,7 +56,7 @@ from utils import (DIR_ROOT, PromptAnswerDataset, collate_fn, dataset_answer_typ
                    load_data, load_model, normalize_answer_text, set_bos_mode)
 from training.utils import load_student, student_autocast  # noqa: E402
 import graph_loss.training as GT  # noqa: E402
-from training.graph_kd import answer_token_cuts  # noqa: E402
+from training.graph_kd import answer_token_cuts, decision_token_cuts  # noqa: E402
 from graph_loss.hf_adapter import HFLlamaGraphAdapter  # noqa: E402
 from graph_loss.precompute_mlp_inputs import build_mlp_input_cache  # noqa: E402
 
@@ -121,35 +121,8 @@ def main() -> None:
         n = len(tok(str(answer), add_special_tokens=False)["input_ids"])
         return b["input_ids"].to(dev), int(b["response_mask"][0].nonzero()[0]), n
 
-    def decision_cuts(prompt, answer):
-        """(prompt + answer[:k], answer[k:]) at the tokens of a call that carry a choice, and those k: every
-        token before the one holding "(" (the tool name), and the first non-space token after each ":"."""
-        bos = tok.bos_token or ""
-        add = not (bos and prompt.startswith(bos))
-        p_ids = tok(prompt, add_special_tokens=add)["input_ids"]
-        a_ids = tok(str(answer), add_special_tokens=False)["input_ids"]
-        ks, in_name, after_colon = [], True, False
-        for k, piece in enumerate(tok.decode([t]) for t in a_ids):
-            if in_name and "(" not in piece:
-                ks.append(k)
-                continue
-            in_name = False
-            if after_colon and piece.strip():
-                ks.append(k)
-                after_colon = False
-            if piece.rstrip().endswith(":"):
-                after_colon = True
-        out = ([], [], [])
-        for k in ks:
-            prefix = tok.decode(a_ids[:k]) if k else ""
-            if k and tok(prompt + prefix, add_special_tokens=add)["input_ids"] != p_ids + a_ids[:k]:
-                continue
-            for o, v in zip(out, (prompt + prefix, tok.decode(a_ids[k:]), k)):
-                o.append(v)
-        return out
-
     if args.decision_tokens:
-        cuts = [decision_cuts(p, a) for p, a in items]
+        cuts = [decision_token_cuts(tok, [p], [a]) for p, a in items]
     else:
         cuts = []
         for p, a in items:
