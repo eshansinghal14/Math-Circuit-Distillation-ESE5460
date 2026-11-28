@@ -461,13 +461,43 @@ def build_shared_context(
     )
 
 
-def shared_membership(shared: GraphSharedContext) -> list:
-    """The ANOVA supernodes of ``shared`` as ``[(label, [m, 3] (layer, position, neuron) cpu tensor)]``,
-    the form ``pinned_membership`` takes."""
+def _dla_supernode(shared: GraphSharedContext, dla_model_logits, target_position: int, logger) -> tuple:
+    """The DLA supernode create_graph_at_position adds when there are no ANOVA supernodes:
+    (selected, raw_supernodes, labels, raw_node_labels), in ctx-space indices."""
+    ctx = shared.ctx
+    ref_logits = dla_model_logits if dla_model_logits is not None else ctx.logits[0, target_position].detach()
+    logger.info("Selecting DLA supernode at position %d", target_position)
+    selected, raw, labels, raw_node_labels, _ = select_anova_supernodes(
+        shared.label_results,
+        nodes_per_label=shared.nodes_per_label,
+        strict=True,
+        source_vectors=ctx.source_vectors,
+        W_U=ctx.adapter.W_U,
+        tokenizer=ctx.adapter.tokenizer,
+        target_args=shared.target_args,
+        allowed_labels=set(),
+        include_dla_node=True,
+        model_logits=ref_logits,
+    )
+    return selected, raw, labels, raw_node_labels
+
+
+def shared_membership(shared: GraphSharedContext, dla_model_logits=None, target_position: int = -1,
+                      logger: logging.Logger | None = None) -> list:
+    """The supernodes of ``shared`` as ``[(label, [m, 3] (layer, position, neuron) cpu tensor)]``,
+    the form ``pinned_membership`` takes: the ANOVA supernodes, the token (arg / position)
+    supernodes, and, when there are no ANOVA supernodes, the DLA supernode that
+    create_graph_at_position would add (so a pinned graph has the same supernodes)."""
     locs = shared.ctx.neuron_locations
+    raw = shared.anova_raw_supernodes + shared.token_raw_supernodes
+    labs = shared.anova_supernode_labels + shared.token_supernode_labels
+    if not shared.anova_raw_supernodes:
+        _, dla_raw, dla_labs, _ = _dla_supernode(shared, dla_model_logits, target_position,
+                                                 logger or logging.getLogger(__name__))
+        raw, labs = raw + dla_raw, labs + dla_labs
     return [
         (labels[0], locs[torch.as_tensor(sn, dtype=torch.long, device=locs.device)].detach().cpu())
-        for sn, labels in zip(shared.anova_raw_supernodes, shared.anova_supernode_labels)
+        for sn, labels in zip(raw, labs)
         if labels
     ]
 
@@ -475,12 +505,15 @@ def shared_membership(shared: GraphSharedContext) -> list:
 def _pinned_shared_context(ctx, membership, adapter, input_ids, nodes_per_label, heatmap_dir) -> GraphSharedContext:
     index = {tuple(loc): i for i, loc in enumerate(ctx.neuron_locations.tolist())}
     supernodes, labels, raw_node_labels = [], [], {}
+    token_supernodes, token_labels = [], []
     for label, locs in membership:
         sn = [index[tuple(loc)] for loc in locs.tolist()]
-        supernodes.append(sn)
-        labels.append([label])
+        is_token = label.startswith(("arg:", "pos:"))
+        (token_supernodes if is_token else supernodes).append(sn)
+        (token_labels if is_token else labels).append([label])
         for i in sn:
-            raw_node_labels.setdefault(i, []).append(label)
+            if label not in raw_node_labels.setdefault(i, []):
+                raw_node_labels[i].append(label)
     decoded = adapter.tokenizer.decode(input_ids.detach().cpu().tolist())
     try:
         target_args = parse_numeric_args(decoded)
@@ -490,8 +523,8 @@ def _pinned_shared_context(ctx, membership, adapter, input_ids, nodes_per_label,
         ctx=ctx,
         anova_raw_supernodes=supernodes,
         anova_supernode_labels=labels,
-        token_raw_supernodes=[],
-        token_supernode_labels=[],
+        token_raw_supernodes=token_supernodes,
+        token_supernode_labels=token_labels,
         anova_token_selected_indices=sorted(raw_node_labels),
         raw_node_labels=raw_node_labels,
         label_results={},
@@ -554,26 +587,8 @@ def create_graph_at_position(
     dla_selected: list = []
 
     if not shared.anova_raw_supernodes:
-        ref_logits = (
-            dla_model_logits
-            if dla_model_logits is not None
-            else ctx.logits[0, target_position].detach()
-        )
-        _logger.info("Selecting DLA supernode at position %d", target_position)
-        dla_selected, dla_raw_supernodes, dla_supernode_labels, dla_raw_node_labels, _ = (
-            select_anova_supernodes(
-                shared.label_results,
-                nodes_per_label=shared.nodes_per_label,
-                strict=True,
-                source_vectors=ctx.source_vectors,
-                W_U=adapter.W_U,
-                tokenizer=adapter.tokenizer,
-                target_args=shared.target_args,
-                allowed_labels=set(),
-                include_dla_node=True,
-                model_logits=ref_logits,
-            )
-        )
+        dla_selected, dla_raw_supernodes, dla_supernode_labels, dla_raw_node_labels = _dla_supernode(
+            shared, dla_model_logits, target_position, _logger)
         _logger.info("  DLA selected %d neurons", len(dla_selected))
 
     # --- Merge all neuron sets and remap to filtered-ctx indices ---
@@ -748,8 +763,8 @@ def create_graph(
 ) -> GraphPipelineResult:
     """Run the ANOVA-first graph creation pipeline.
 
-    ``membership_only``: stop after selecting the ANOVA supernodes and return their
-    membership (:func:`shared_membership`) instead of a graph. ``pinned_membership``:
+    ``membership_only``: stop after selecting the supernodes (ANOVA, or token supernodes plus
+    the DLA one) and return their membership (:func:`shared_membership`) instead of a graph. ``pinned_membership``:
     build the graph on exactly that membership (see :func:`build_shared_context`).
 
     ``neuron_selection="influence"`` pre-selects each layer's neurons by their
@@ -860,7 +875,7 @@ def create_graph(
         logger=_logger,
     )
     if membership_only:
-        return shared_membership(shared)
+        return shared_membership(shared, dla_model_logits, target_position, _logger)
 
     return create_graph_at_position(
         shared,

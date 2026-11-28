@@ -346,8 +346,10 @@ class GraphKDTrainer:
         membership_adapter = None
         membership_cache: dict | None = None
         if config.pin_student_membership:
-            if not config.graph_node_labels or config.student_mlp_cache_refresh:
-                raise ValueError("--pin-student-membership needs --graph-node-labels and no --student-mlp-cache-refresh")
+            if not (config.graph_node_labels or config.graph_supernode_type == "position") \
+                    or config.student_mlp_cache_refresh:
+                raise ValueError("--pin-student-membership needs --graph-node-labels or --graph-supernode-type "
+                                 "position, and no --student-mlp-cache-refresh")
             if shared is not None and "membership" in shared:
                 membership_adapter, membership_cache = shared["membership"]
             else:
